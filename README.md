@@ -5,14 +5,16 @@ A bidirectional phone voice-mode extension for the [Pi coding agent](https://git
 - **Desktop → phone:** Pi runs Kokoro-82M locally and streams assistant speech through an SSH reverse tunnel to `mpv` in Termux.
 - **Phone → desktop:** The configured shortcut streams Ogg/Opus from the Termux microphone through a second reverse tunnel. Desktop-side voice activity detection stops on natural silence, Whisper transcribes locally, and Pi places the result in the prompt editor for review.
 
-Both tunnel endpoints bind only to loopback, and phone audio stays inside the encrypted SSH connection. Kokoro synthesis and Whisper transcription run locally on the desktop. Final ASR hypotheses are resolved against a bounded excerpt of the current session by Pi's configured editing model in both `append` and `smart` modes. If that model is remote, the hypotheses, existing draft, and recent session text are sent to its provider. Pin `editModel` to a local Pi-registered model to keep dictation resolution local.
+Both tunnel endpoints bind only to loopback, and phone audio stays inside the encrypted SSH connection. Kokoro synthesis and Whisper transcription run locally on the desktop. Final ASR hypotheses are resolved against a bounded excerpt of the current session by Pi's configured editing model in both `append` and `smart` modes. The same model describes fenced code and patches for speech. If that model is remote, ASR hypotheses, existing drafts, recent session text, and fenced code being described are sent to its provider. Pin `editModel` to a local Pi-registered model to keep these requests local.
 
 ## Features
 
 - Speaks assistant output while it streams.
 - Runs `onnx-community/Kokoro-82M-v1.0-ONNX` locally with q8 weights.
 - Keeps ONNX inference in a child process so Pi's TUI remains responsive.
-- Omits fenced code, tables, and most Markdown noise from speech.
+- Speaks `text`-like fenced blocks directly and narrates concise model-generated descriptions of code and patches instead of silently skipping them.
+- Starts each code-description request as soon as its closing fence streams, using already queued speech as lead time while preserving spoken order; falls back to a local structural description if the request fails.
+- Omits tables and most other Markdown noise from speech.
 - Starts with a short first segment, then synthesizes bounded sentence/clause segments.
 - Cancels queued speech when you send another prompt.
 - Supports server-local playback or raw PCM over TCP/SSH.
@@ -106,6 +108,7 @@ If SSH reports that remote forwarding failed, ensure `AllowTcpForwarding yes` is
 - In the default `review` submit mode, correct or extend the final prompt and press Enter yourself.
 - Final transcription requests up to `sttCandidates` hypotheses from the same ASR model. The configured editing model resolves them using the existing draft and a bounded, text-only excerpt of recent session context. This isolated request does not enter conversation history.
 - With `editMode: "smart"`, text that is already in the editor when recording starts becomes the existing draft. Another dictation can continue or revise it naturally: “Actually replace port 8000 with 8080,” “scratch the last sentence,” or “make the second paragraph shorter.” Start recording only after placing the text to revise in the editor. With an empty editor there is nothing to revise, so Pi resolves the new utterance as fresh dictation. In `append`, the model still resolves ASR ambiguity but preserves correction phrases literally instead of executing them.
+- Fences tagged `text`, `txt`, `plain`, `plaintext`, `md`, `markdown`, or `mdown` are read as prose. Other fenced blocks are sent to `editModel` for a short semantic description. Descriptions remain at the block's position in the spoken response, while requests begin early enough to overlap preceding queued TTS whenever possible.
 - Assistant speech automatically plays through the phone.
 - `Ctrl+Shift+V` toggles spoken output.
 
@@ -140,7 +143,7 @@ Shortcut names use Pi's key format, such as `alt+m`, `ctrl+shift+m`, or `f8`. Ru
 - `ttsModel` must be a `kokoro-js`-compatible Kokoro ONNX repository. Kokoro is a speech-synthesis model only; it cannot perform speech-to-text.
 - `sttModel` must be a Transformers.js-compatible automatic-speech-recognition repository. Tested defaults use Whisper ONNX models from `onnx-community`.
 - `sttCandidates` defaults to 3. Live previews remain single-pass; only final Whisper transcription generates alternatives. Candidate 1 is deterministic and additional candidates are low-temperature samples because Transformers.js 3.x does not expose multiple beam-search outputs. Duplicate hypotheses are removed, so fewer than the requested count may be returned. Other ASR architectures may return only one candidate.
-- `editModel: "current"` follows whichever model is active in Pi, without assuming a particular model family. Set `provider/model-id` to pin candidate resolution and smart editing to another model registered and authenticated in Pi.
+- `editModel: "current"` follows whichever model is active in Pi, without assuming a particular model family. Set `provider/model-id` to pin candidate resolution, smart editing, and fenced-code descriptions to another model registered and authenticated in Pi.
 - Model and precision changes apply on the next synthesis or transcription. Missing weights download lazily into the configured cache.
 - A repository must actually provide the selected `fp32`, `q8`, or `q4` ONNX variant. If loading fails, choose a precision shipped by that repository.
 

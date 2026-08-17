@@ -1,25 +1,57 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { SpeakableStream } from "../src/speakable.js";
+import { SpeakableStream, type SpeakableItem } from "../src/speakable.js";
 
-test("streams prose while omitting fenced code and markdown markers", () => {
+function speech(items: SpeakableItem[]): string[] {
+	return items.filter((item): item is Extract<SpeakableItem, { kind: "speech" }> => item.kind === "speech").map(item => item.text);
+}
+
+test("emits fenced code for description while preserving its spoken position", () => {
 	const stream = new SpeakableStream();
-	const segments = [
+	const items = [
 		...stream.push("# Result\nThe build passed.\n```ts\nconst hidden = true;\n```\nDone."),
 		...stream.flush(),
 	];
-	assert.deepEqual(segments, ["Result", "The build passed.", "Done."]);
+	assert.deepEqual(items, [
+		{ kind: "speech", text: "Result" },
+		{ kind: "speech", text: "The build passed." },
+		{ kind: "code", block: { language: "ts", code: "const hidden = true;" } },
+		{ kind: "speech", text: "Done." },
+	]);
+});
+
+test("speaks text-like fenced blocks instead of describing them", () => {
+	const stream = new SpeakableStream();
+	const items = [
+		...stream.push("Before.\n```text\nRead this exactly.\nSecond line.\n```\nAfter."),
+		...stream.flush(),
+	];
+	assert.deepEqual(speech(items), ["Before.", "Read this exactly.", "Second line.", "After."]);
+	assert.equal(items.some(item => item.kind === "code"), false);
+});
+
+test("recognizes fenced blocks split across streaming deltas", () => {
+	const stream = new SpeakableStream();
+	const items = [
+		...stream.push("``"),
+		...stream.push("`diff\n-old\n"),
+		...stream.push("+new\n```"),
+		...stream.push("\n"),
+		...stream.flush(),
+	];
+	assert.deepEqual(items, [{ kind: "code", block: { language: "diff", code: "-old\n+new" } }]);
 });
 
 test("speaks link labels and URL hosts instead of full URLs", () => {
 	const stream = new SpeakableStream();
-	const segments = [...stream.push("Read [the guide](https://example.com/long/path). Visit https://pi.dev/docs next."), ...stream.flush()];
-	assert.deepEqual(segments, ["Read the guide.", "Visit pi.dev next."]);
+	const items = [...stream.push("Read [the guide](https://example.com/long/path). Visit https://pi.dev/docs next."), ...stream.flush()];
+	assert.deepEqual(speech(items), ["Read the guide.", "Visit pi.dev next."]);
 });
 
-test("keeps every emitted segment below Kokoro's input budget", () => {
+test("keeps every emitted speech segment below Kokoro's input budget", () => {
 	const stream = new SpeakableStream();
-	const segments = [...stream.push("word ".repeat(300)), ...stream.flush()];
+	const items = [...stream.push("word ".repeat(300)), ...stream.flush()];
+	const segments = speech(items);
 	assert.ok(segments.length > 1);
 	assert.ok(segments.every(segment => segment.length <= 280));
 });

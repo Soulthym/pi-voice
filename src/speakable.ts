@@ -9,9 +9,10 @@
  * deciding both *what* is worth speaking and *when* a piece of text is ready
  * to synthesize. Three passes:
  *
- * 1. Block pass (per character, stateful): drops fenced code blocks and table
- *    rows, strips heading/bullet/blockquote markers (numbered-list markers are
- *    spoken as "1, …"), and turns newlines into hard segment breaks.
+ * 1. Block pass (per character, stateful): emits fenced code blocks as
+ *    description jobs, reads text-like fences as prose, drops table rows,
+ *    strips heading/bullet/blockquote markers (numbered-list markers are spoken
+ *    as "1, …"), and turns newlines into hard segment breaks.
  * 2. Segmentation (stateful): emits a segment the moment a sentence boundary
  *    appears — no next-sentence confirmation, which is what made the previous
  *    engine-side splitter stall a full sentence behind generation. The first
@@ -73,6 +74,14 @@ const HTML_TAG_RE = /<\/?[a-zA-Z][^<>]*>/g;
 const HR_INLINE_RE = /(^|\s)[-*_]{3,}(?=\s|$)/g;
 const PATH_RE = /(^|[\s("'`])((?:~|\.{1,2})?\/?[\w.@+-]+(?:\/[\w.@+-]+){2,}\/?)/g;
 const HAS_SPEAKABLE_RE = /[\p{L}\p{N}]/u;
+const TEXT_FENCE_LANGUAGES = new Set(["text", "txt", "plain", "plaintext", "md", "markdown", "mdown"]);
+
+export interface FencedCodeBlock {
+	language: string;
+	code: string;
+}
+
+export type SpeakableItem = { kind: "speech"; text: string } | { kind: "code"; block: FencedCodeBlock };
 
 /** "https://github.com/foo/bar?x#y" → "github.com". */
 function speakableUrl(url: string): string {
@@ -180,7 +189,7 @@ function classifyPrefix(prefix: string): PrefixDecision {
 }
 
 /** Block-pass state: where the current character lands. */
-type BlockMode = "linestart" | "prose" | "swallow" | "code";
+type BlockMode = "linestart" | "prose" | "swallow" | "fence-open" | "fence-body";
 
 /**
  * One per utterance. Feed raw assistant deltas through {@link push}; each call
@@ -192,11 +201,14 @@ export class SpeakableStream {
 	#mode: BlockMode = "linestart";
 	/** Pending line-start characters while the block marker is still ambiguous. */
 	#prefix = "";
-	/** Opening fence of the code block being swallowed (``` or ~~~). */
+	/** Opening fence marker (``` or ~~~), info string, and streamed body state. */
 	#fence = "";
-	/** First characters of the current line inside a code block (fence-close probe). */
-	#codeLine = "";
-	/** Mode to enter after the current swallowed line ends (code for an opening fence). */
+	#fenceInfo = "";
+	#fenceLanguage = "";
+	#fenceLine = "";
+	#fenceBody = "";
+	#textFence = false;
+	/** Mode to enter after a swallowed table/closing-fence line. */
 	#afterSwallow: BlockMode = "linestart";
 	/** Prose accumulator the segmenter cuts from. */
 	#buf = "";
@@ -204,18 +216,24 @@ export class SpeakableStream {
 	#spoke = false;
 
 	/** Consume a raw delta; returns segments now ready to speak, in order. */
-	push(delta: string): string[] {
-		const out: string[] = [];
+	push(delta: string): SpeakableItem[] {
+		const out: SpeakableItem[] = [];
 		for (const ch of delta) this.#consume(ch, out);
 		this.#extract(out);
 		return out;
 	}
 
 	/** Message end: drain everything left, including a trailing partial sentence. */
-	flush(): string[] {
-		const out: string[] = [];
+	flush(): SpeakableItem[] {
+		const out: SpeakableItem[] = [];
 		if (this.#mode === "linestart" && this.#prefix.length > 0 && !HR_LINE_RE.test(this.#prefix)) {
 			this.#buf += this.#prefix;
+		} else if (this.#mode === "fence-body") {
+			if (this.#isClosingFence(this.#fenceLine)) this.#finishFence(out);
+			else {
+				this.#consumeFenceLine(this.#fenceLine, false, out);
+				if (!this.#textFence) this.#finishFence(out);
+			}
 		}
 		this.#prefix = "";
 		this.#mode = "linestart";
@@ -231,8 +249,8 @@ export class SpeakableStream {
 	 * {@link MIN_SEGMENT} long, so a stall right after "The" stays silent
 	 * instead of turning into choppy one-word speech.
 	 */
-	flushIdle(): string[] {
-		const out: string[] = [];
+	flushIdle(): SpeakableItem[] {
+		const out: SpeakableItem[] = [];
 		const pending = this.#buf.trimEnd();
 		const completeThought = /[.!?…][)\]"'»”’]*$/.test(pending);
 		if (!completeThought && pending.length < MIN_SEGMENT) return out;
@@ -240,7 +258,7 @@ export class SpeakableStream {
 		return out;
 	}
 
-	#consume(ch: string, out: string[]): void {
+	#consume(ch: string, out: SpeakableItem[]): void {
 		switch (this.#mode) {
 			case "linestart":
 				this.#consumeLineStart(ch, out);
@@ -252,13 +270,17 @@ export class SpeakableStream {
 			case "swallow":
 				if (ch === "\n") this.#mode = this.#afterSwallow;
 				return;
-			case "code":
-				this.#consumeCode(ch);
+			case "fence-open":
+				if (ch === "\n") this.#openFenceBody();
+				else this.#fenceInfo += ch;
+				return;
+			case "fence-body":
+				this.#consumeFenceBody(ch, out);
 				return;
 		}
 	}
 
-	#consumeLineStart(ch: string, out: string[]): void {
+	#consumeLineStart(ch: string, out: SpeakableItem[]): void {
 		if (ch === "\n") {
 			// The whole line fit in the prefix: an hr/blank line is silence; a
 			// short undecided prefix ("Hi.", "OK") was prose all along.
@@ -294,30 +316,60 @@ export class SpeakableStream {
 				return;
 			case "fence":
 				this.#fence = decision.fence;
-				this.#codeLine = "";
-				this.#mode = "swallow";
-				this.#afterSwallow = "code";
+				this.#fenceInfo = "";
+				this.#mode = "fence-open";
 				return;
 		}
 	}
 
-	#consumeCode(ch: string): void {
-		if (ch === "\n") {
-			this.#codeLine = "";
+	#openFenceBody(): void {
+		this.#fenceLanguage = this.#fenceInfo.trim().toLowerCase().split(/[\s,{]/, 1)[0] ?? "";
+		this.#textFence = TEXT_FENCE_LANGUAGES.has(this.#fenceLanguage);
+		this.#fenceLine = "";
+		this.#fenceBody = "";
+		this.#mode = "fence-body";
+	}
+
+	#consumeFenceBody(ch: string, out: SpeakableItem[]): void {
+		if (ch !== "\n") {
+			this.#fenceLine += ch;
 			return;
 		}
-		if (this.#codeLine.length < 3) {
-			this.#codeLine += ch;
-			if (this.#codeLine === this.#fence) {
-				// Closing fence: swallow the rest of its line, then resume prose.
-				this.#mode = "swallow";
-				this.#afterSwallow = "linestart";
-			}
+		if (this.#isClosingFence(this.#fenceLine)) this.#finishFence(out);
+		else this.#consumeFenceLine(this.#fenceLine, true, out);
+		this.#fenceLine = "";
+	}
+
+	#consumeFenceLine(line: string, newline: boolean, out: SpeakableItem[]): void {
+		if (this.#textFence) {
+			this.#buf += line;
+			if (newline) this.#drain(out);
+		} else {
+			this.#fenceBody += line + (newline ? "\n" : "");
 		}
 	}
 
+	#isClosingFence(line: string): boolean {
+		const trimmed = line.trim();
+		return trimmed.length >= 3 && [...trimmed].every(character => character === this.#fence[0]);
+	}
+
+	#finishFence(out: SpeakableItem[]): void {
+		if (!this.#textFence) {
+			const code = this.#fenceBody.replace(/\n$/, "");
+			if (code.trim()) out.push({ kind: "code", block: { language: this.#fenceLanguage, code } });
+		}
+		this.#fence = "";
+		this.#fenceInfo = "";
+		this.#fenceLanguage = "";
+		this.#fenceLine = "";
+		this.#fenceBody = "";
+		this.#textFence = false;
+		this.#mode = "linestart";
+	}
+
 	/** Newline in prose: everything buffered is a complete unit — emit it now. */
-	#hardBreak(out: string[]): void {
+	#hardBreak(out: SpeakableItem[]): void {
 		this.#mode = "linestart";
 		this.#drain(out);
 	}
@@ -332,7 +384,7 @@ export class SpeakableStream {
 	 * {@link #extract} leaves at most MAX_SEGMENT behind, emitted as the
 	 * trailing segment.
 	 */
-	#drain(out: string[]): void {
+	#drain(out: SpeakableItem[]): void {
 		this.#extract(out);
 		const text = this.#buf;
 		this.#buf = "";
@@ -340,7 +392,7 @@ export class SpeakableStream {
 	}
 
 	/** Cut ready segments off the front of the buffer (streaming path). */
-	#extract(out: string[]): void {
+	#extract(out: SpeakableItem[]): void {
 		for (;;) {
 			const buf = this.#buf;
 			const min = this.#spoke ? MIN_SEGMENT : FIRST_SEGMENT_MIN;
@@ -381,16 +433,16 @@ export class SpeakableStream {
 		}
 	}
 
-	#cut(at: number, out: string[]): void {
+	#cut(at: number, out: SpeakableItem[]): void {
 		const head = this.#buf.slice(0, at);
 		this.#buf = this.#buf.slice(at);
 		this.#emit(head, out);
 	}
 
-	#emit(raw: string, out: string[]): void {
+	#emit(raw: string, out: SpeakableItem[]): void {
 		const spoken = normalizeSpeakable(raw);
 		if (!spoken) return;
-		out.push(spoken);
+		out.push({ kind: "speech", text: spoken });
 		this.#spoke = true;
 	}
 }

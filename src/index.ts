@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { describeCodeBlock } from "./code-describer.js";
 import {
 	loadVoiceConfig,
 	normalizeEditModel,
@@ -184,7 +185,14 @@ export default async function (pi: ExtensionAPI) {
 		refreshStatus();
 	};
 
-	const vocalizer = new Vocalizer(() => config, handleWorkerEvent);
+	const vocalizer = new Vocalizer(
+		() => config,
+		handleWorkerEvent,
+		(block, signal) => {
+			if (!activeContext) return Promise.reject(new Error("No active Pi context for code description"));
+			return describeCodeBlock(activeContext, block, config.editModel, signal);
+		},
+	);
 	const phoneInput = new PhoneInputClient();
 
 	const updateConfig = async (next: VoiceConfig): Promise<void> => {
