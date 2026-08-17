@@ -5,6 +5,7 @@ import type { KeyId } from "@earendil-works/pi-tui";
 
 export type VoiceMode = "all" | "assistant" | "yield";
 export type VoiceSubmitMode = "auto" | "review";
+export type VoiceEditMode = "append" | "smart";
 
 export interface VoiceConfig {
 	enabled: boolean;
@@ -19,6 +20,8 @@ export interface VoiceConfig {
 	talkShortcut: KeyId | "disabled";
 	/** Submit recognized speech immediately, or leave it in the editor for review. */
 	submitMode: VoiceSubmitMode;
+	/** Append each dictation literally, or let Pi's current model apply spoken edits. */
+	editMode: VoiceEditMode;
 }
 
 export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
@@ -30,6 +33,7 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
 	input: "disabled",
 	talkShortcut: "alt+m",
 	submitMode: "review",
+	editMode: "smart",
 };
 
 export function getVoiceConfigPath(): string {
@@ -42,6 +46,10 @@ function isMode(value: unknown): value is VoiceMode {
 
 function isSubmitMode(value: unknown): value is VoiceSubmitMode {
 	return value === "auto" || value === "review";
+}
+
+function isEditMode(value: unknown): value is VoiceEditMode {
+	return value === "append" || value === "smart";
 }
 
 export function normalizeTcpEndpoint(value: unknown): string | undefined {
@@ -137,6 +145,7 @@ export async function loadVoiceConfig(): Promise<VoiceConfig> {
 			input: normalizeVoiceInput(parsed.input) ?? DEFAULT_VOICE_CONFIG.input,
 			talkShortcut: normalizeTalkShortcut(parsed.talkShortcut) ?? DEFAULT_VOICE_CONFIG.talkShortcut,
 			submitMode: isSubmitMode(parsed.submitMode) ? parsed.submitMode : DEFAULT_VOICE_CONFIG.submitMode,
+			editMode: isEditMode(parsed.editMode) ? parsed.editMode : DEFAULT_VOICE_CONFIG.editMode,
 		};
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return { ...DEFAULT_VOICE_CONFIG };

@@ -20,6 +20,7 @@ Both tunnel endpoints bind only to loopback. Audio and transcripts remain inside
 - Shows a revisable Whisper preview directly in Pi's editor while you speak.
 - Supports a second `Alt+M` as a manual stop for long pauses or noisy environments.
 - Leaves reviewed dictation in the editor by default; press Enter after correcting or extending it.
+- Uses Pi's currently selected model for isolated spoken edits to an existing draft; switching Pi to a local model automatically makes editing local.
 
 Kokoro setup downloads approximately 100 MB from Hugging Face. The first microphone transcription downloads approximately 150 MB of Whisper weights. Later synthesis and transcription are local.
 
@@ -42,7 +43,8 @@ Configuration is stored in `~/.pi/agent/pi-voice.json`. For the bundled Termux b
   "output": "tcp://127.0.0.1:8765",
   "input": "tcp://127.0.0.1:8766",
   "talkShortcut": "alt+m",
-  "submitMode": "review"
+  "submitMode": "review",
+  "editMode": "smart"
 }
 ```
 
@@ -85,7 +87,8 @@ If SSH reports that remote forwarding failed, ensure `AllowTcpForwarding yes` is
 
 - Press the configured microphone shortcut (**Alt+M** by default) and speak for as long as needed. Recording stops automatically after about 1.35 seconds of silence.
 - Press the shortcut again to stop manually. Pi displays a live, revisable transcript in the prompt editor.
-- In the default `review` submit mode, correct or extend the final prompt and press Enter yourself. Starting another dictation appends to the existing editor text.
+- In the default `review` submit mode, correct or extend the final prompt and press Enter yourself.
+- With `editMode: "smart"`, another dictation can continue the draft or revise it naturally: “Actually replace port 8000 with 8080,” “scratch the last sentence,” or “make the second paragraph shorter.” The edit uses Pi's current model in a separate request and does not enter conversation history.
 - Assistant speech automatically plays through the phone.
 - `Ctrl+Shift+V` toggles spoken output.
 
@@ -104,9 +107,10 @@ Commands:
 /voice input disabled|tcp://host:port
 /voice shortcut <key|disabled>
 /voice submit review|auto
+/voice edit smart|append
 ```
 
-Shortcut names use Pi's key format, such as `alt+m`, `ctrl+shift+m`, or `f8`. Run `/reload` after changing the shortcut. `review` leaves dictation in the editor for confirmation; `auto` immediately submits it.
+Shortcut names use Pi's key format, such as `alt+m`, `ctrl+shift+m`, or `f8`. Run `/reload` after changing the shortcut. `review` leaves dictation in the editor for confirmation; `auto` immediately submits it. `smart` applies subsequent dictation to the existing draft with Pi's current model; `append` disables model-assisted edits.
 
 Modes:
 

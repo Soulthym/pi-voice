@@ -6,11 +6,13 @@ import {
 	normalizeVoiceOutput,
 	saveVoiceConfig,
 	type VoiceConfig,
+	type VoiceEditMode,
 	type VoiceMode,
 	type VoiceSubmitMode,
 } from "./config.js";
 import { LiveTranscriptionSession } from "./live-transcription.js";
 import { PhoneInputClient } from "./phone-input.js";
+import { applySpokenEdit } from "./prompt-editor.js";
 import { Vocalizer } from "./vocalizer.js";
 import { isVoice, VOICES } from "./voices.js";
 import type { WorkerEvent } from "./worker-client.js";
@@ -47,6 +49,10 @@ function parseMode(value: string): VoiceMode | undefined {
 
 function parseSubmitMode(value: string): VoiceSubmitMode | undefined {
 	return value === "auto" || value === "review" ? value : undefined;
+}
+
+function parseEditMode(value: string): VoiceEditMode | undefined {
+	return value === "append" || value === "smart" ? value : undefined;
 }
 
 function appendDictation(base: string, speech: string): string {
@@ -269,7 +275,21 @@ export default async function (pi: ExtensionAPI) {
 				ctx.ui.notify("No speech recognized", "warning");
 				return;
 			}
-			const prompt = appendDictation(editorBase, transcript);
+			let prompt = appendDictation(editorBase, transcript);
+			if (config.editMode === "smart" && editorBase.trim()) {
+				setInputProgress(`✎ Applying spoken edit with ${ctx.model?.id ?? "the current model"}…`);
+				try {
+					prompt = await applySpokenEdit(ctx, editorBase, transcript);
+				} catch (error) {
+					ctx.ui.notify(
+						`Smart voice edit failed; appended dictation instead: ${error instanceof Error ? error.message : String(error)}`,
+						"warning",
+					);
+				} finally {
+					setInputProgress(undefined);
+				}
+			}
+			if (talkEpoch !== contextEpoch || !activeContext) return;
 			if (config.submitMode === "review") {
 				ctx.ui.setEditorText(prompt);
 				ctx.ui.notify("Dictation ready to review — press Enter to submit", "info");
@@ -372,6 +392,7 @@ export default async function (pi: ExtensionAPI) {
 				"input",
 				"shortcut",
 				"submit",
+				"edit",
 			];
 			const parts = prefix.trimStart().split(/\s+/);
 			if (parts.length <= 1) {
@@ -398,6 +419,11 @@ export default async function (pi: ExtensionAPI) {
 						description: "Stream raw audio through an SSH reverse tunnel",
 					},
 				];
+			}
+			if (parts[0] === "edit") {
+				return ["smart", "append"]
+					.filter(value => value.startsWith(parts[1] ?? ""))
+					.map(value => ({ value: `edit ${value}`, label: value }));
 			}
 			if (parts[0] === "submit") {
 				return ["review", "auto"]
@@ -509,6 +535,16 @@ export default async function (pi: ExtensionAPI) {
 					ctx.ui.notify(`Voice output set to ${output}`, "info");
 					return;
 				}
+				case "edit": {
+					const editMode = parseEditMode(value.toLowerCase());
+					if (!editMode) {
+						ctx.ui.notify("Usage: /voice edit smart|append", "error");
+						return;
+					}
+					await updateConfig({ ...config, editMode });
+					ctx.ui.notify(`Spoken prompt editing set to ${editMode}`, "info");
+					return;
+				}
 				case "submit": {
 					const submitMode = parseSubmitMode(value.toLowerCase());
 					if (!submitMode) {
@@ -556,13 +592,13 @@ export default async function (pi: ExtensionAPI) {
 				case "status":
 				case "":
 					ctx.ui.notify(
-						`Voice ${config.enabled ? "on" : "off"}; mode=${config.mode}; voice=${config.voice}; speed=${config.speed}; output=${config.output}; input=${config.input}; shortcut=${config.talkShortcut}; submit=${config.submitMode}`,
+						`Voice ${config.enabled ? "on" : "off"}; mode=${config.mode}; voice=${config.voice}; speed=${config.speed}; output=${config.output}; input=${config.input}; shortcut=${config.talkShortcut}; submit=${config.submitMode}; edit=${config.editMode}`,
 						"info",
 					);
 					return;
 				default:
 					ctx.ui.notify(
-						"Usage: /voice [on|off|toggle|status|stop|setup|test|talk|mode|voice|speed|output|input|shortcut|submit]",
+						"Usage: /voice [on|off|toggle|status|stop|setup|test|talk|mode|voice|speed|output|input|shortcut|submit|edit]",
 						"error",
 					);
 			}

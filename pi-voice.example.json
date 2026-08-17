@@ -6,5 +6,6 @@
   "output": "tcp://127.0.0.1:8765",
   "input": "tcp://127.0.0.1:8766",
   "talkShortcut": "alt+m",
-  "submitMode": "review"
+  "submitMode": "review",
+  "editMode": "smart"
 }
