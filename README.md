@@ -27,9 +27,10 @@ Kokoro setup downloads approximately 100 MB from Hugging Face. The first microph
 ## Server installation
 
 ```bash
-cd ~/code/pi/pi-voice
+git clone https://github.com/Soulthym/pi-voice.git
+cd pi-voice
 npm install
-pi install ~/code/pi/pi-voice
+pi install .
 ```
 
 Configuration is stored in `~/.pi/agent/pi-voice.json`. For the bundled Termux bridge:
@@ -54,10 +55,10 @@ Install Termux and the **Termux:API Android app from the same source** (normally
 
 ```bash
 pkg update
-pkg install openssh mpv socat termux-api
-mkdir -p ~/bin/pi-voice
-scp YOUR_DESKTOP:~/code/pi/pi-voice/termux/pi-voice-* ~/bin/pi-voice/
-chmod +x ~/bin/pi-voice/pi-voice-*
+pkg install git openssh mpv socat termux-api
+git clone https://github.com/Soulthym/pi-voice.git
+cd pi-voice
+install -m755 termux/pi-voice-* "$PREFIX/bin/"
 ```
 
 Grant microphone permission with a short test recording:
@@ -71,7 +72,7 @@ Speak for five seconds. Some Android 15 builds leave the API client waiting even
 Connect using the wrapper instead of plain `ssh`:
 
 ```bash
-~/bin/pi-voice/pi-voice-ssh YOUR_DESKTOP
+pi-voice-ssh YOUR_DESKTOP
 ```
 
 Then start `pi` in the remote shell. The wrapper starts the phone bridge and creates:
