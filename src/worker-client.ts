@@ -9,7 +9,7 @@ export type WorkerEvent =
 	| { type: "ready"; requestId?: string }
 	| { type: "speaking" }
 	| { type: "transcribing" }
-	| { type: "transcript"; text: string; requestId: string; preview?: boolean }
+	| { type: "transcript"; text: string; candidates?: string[]; requestId: string; preview?: boolean }
 	| { type: "idle" }
 	| { type: "error"; message: string; requestId?: string; preview?: boolean };
 
@@ -20,7 +20,7 @@ type PendingPreload = {
 };
 
 type PendingTranscription = {
-	resolve: (text: string) => void;
+	resolve: (candidates: string[]) => void;
 	reject: (error: Error) => void;
 	timer: NodeJS.Timeout;
 };
@@ -58,23 +58,26 @@ export class VoiceWorkerClient {
 		this.#send({ type: "cancel" });
 	}
 
-	transcribe(audio: Buffer, config: VoiceConfig): Promise<string> {
+	transcribe(audio: Buffer, config: VoiceConfig): Promise<string[]> {
 		return this.#requestTranscription({
 			type: "transcribe",
 			audio: audio.toString("base64"),
 			model: config.sttModel,
 			dtype: config.sttDtype,
+			candidateCount: config.sttCandidates,
 		});
 	}
 
-	transcribePcm(audio: Float32Array, config: VoiceConfig): Promise<string> {
+	async transcribePcm(audio: Float32Array, config: VoiceConfig): Promise<string> {
 		const bytes = Buffer.from(audio.buffer, audio.byteOffset, audio.byteLength);
-		return this.#requestTranscription({
+		const candidates = await this.#requestTranscription({
 			type: "transcribe-pcm",
 			audio: bytes.toString("base64"),
 			model: config.sttModel,
 			dtype: config.sttDtype,
+			candidateCount: 1,
 		});
+		return candidates[0] ?? "";
 	}
 
 	#requestTranscription(message: {
@@ -82,9 +85,10 @@ export class VoiceWorkerClient {
 		audio: string;
 		model: string;
 		dtype: string;
-	}): Promise<string> {
+		candidateCount: number;
+	}): Promise<string[]> {
 		const requestId = String(++this.#nextRequestId);
-		const { promise, resolve, reject } = Promise.withResolvers<string>();
+		const { promise, resolve, reject } = Promise.withResolvers<string[]>();
 		const timer = setTimeout(() => {
 			this.#pendingTranscriptions.delete(requestId);
 			reject(new Error("Local speech transcription timed out after 10 minutes"));
@@ -205,7 +209,9 @@ export class VoiceWorkerClient {
 			if (pending) {
 				this.#pendingTranscriptions.delete(event.requestId);
 				clearTimeout(pending.timer);
-				if (event.type === "transcript") pending.resolve(event.text);
+				if (event.type === "transcript") {
+					pending.resolve(event.candidates?.length ? event.candidates : event.text ? [event.text] : []);
+				}
 				else pending.reject(new Error(event.message));
 			}
 		}

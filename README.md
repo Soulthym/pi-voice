@@ -5,7 +5,7 @@ A bidirectional phone voice-mode extension for the [Pi coding agent](https://git
 - **Desktop → phone:** Pi runs Kokoro-82M locally and streams assistant speech through an SSH reverse tunnel to `mpv` in Termux.
 - **Phone → desktop:** The configured shortcut streams Ogg/Opus from the Termux microphone through a second reverse tunnel. Desktop-side voice activity detection stops on natural silence, Whisper transcribes locally, and Pi places the result in the prompt editor for review.
 
-Both tunnel endpoints bind only to loopback, and phone audio stays inside the encrypted SSH connection. Kokoro synthesis and Whisper transcription run locally on the desktop. In `smart` edit mode, revisions use Pi's currently selected model: if that model is remote, the existing draft and new dictation are sent to its provider. Use `/voice edit append` to keep prompt editing entirely local.
+Both tunnel endpoints bind only to loopback, and phone audio stays inside the encrypted SSH connection. Kokoro synthesis and Whisper transcription run locally on the desktop. Final ASR hypotheses are resolved against a bounded excerpt of the current session by Pi's configured editing model in both `append` and `smart` modes. If that model is remote, the hypotheses, existing draft, and recent session text are sent to its provider. Pin `editModel` to a local Pi-registered model to keep dictation resolution local.
 
 ## Features
 
@@ -20,7 +20,8 @@ Both tunnel endpoints bind only to loopback, and phone audio stays inside the en
 - Shows a revisable Whisper preview directly in Pi's editor while you speak.
 - Supports a second `Alt+M` as a manual stop for long pauses or noisy environments.
 - Leaves reviewed dictation in the editor by default; press Enter after correcting or extending it.
-- Uses Pi's currently selected model for isolated spoken edits to an existing draft; switching Pi to a local model automatically makes editing local.
+- Generates multiple final hypotheses with the same ASR model and lets any configured Pi model resolve technical ambiguities from recent context.
+- Resolves candidates in both edit modes; `smart` additionally applies spoken corrections to the existing draft.
 
 Kokoro setup downloads approximately 100 MB from Hugging Face. The first microphone transcription downloads approximately 150 MB of Whisper weights. Later synthesis and transcription are local.
 
@@ -45,6 +46,7 @@ Configuration is stored in `~/.pi/agent/pi-voice.json`. For the bundled Termux b
   "ttsDtype": "q8",
   "sttModel": "onnx-community/whisper-tiny.en",
   "sttDtype": "fp32",
+  "sttCandidates": 3,
   "editModel": "current",
   "output": "tcp://127.0.0.1:8765",
   "input": "tcp://127.0.0.1:8766",
@@ -102,7 +104,8 @@ If SSH reports that remote forwarding failed, ensure `AllowTcpForwarding yes` is
 - Press the configured microphone shortcut (**Alt+M** by default) and speak for as long as needed. Recording stops automatically after about 1.35 seconds of silence.
 - Press the shortcut again to stop manually. Pi displays a live, revisable transcript in the prompt editor.
 - In the default `review` submit mode, correct or extend the final prompt and press Enter yourself.
-- With `editMode: "smart"`, another dictation can continue the draft or revise it naturally: “Actually replace port 8000 with 8080,” “scratch the last sentence,” or “make the second paragraph shorter.” The edit uses Pi's current model in an isolated request and does not enter conversation history. Switching Pi's active model changes the editing model automatically.
+- Final transcription requests up to `sttCandidates` hypotheses from the same ASR model. The configured editing model resolves them using the existing draft and a bounded, text-only excerpt of recent session context. This isolated request does not enter conversation history.
+- With `editMode: "smart"`, another dictation can continue the draft or revise it naturally: “Actually replace port 8000 with 8080,” “scratch the last sentence,” or “make the second paragraph shorter.” In `append`, the model still resolves ASR ambiguity but preserves correction phrases literally instead of executing them.
 - Assistant speech automatically plays through the phone.
 - `Ctrl+Shift+V` toggles spoken output.
 
@@ -121,6 +124,7 @@ Commands:
 /voice tts-dtype fp32|q8|q4
 /voice stt-model <huggingface-repo>
 /voice stt-dtype fp32|q8|q4
+/voice stt-candidates <1..8>
 /voice edit-model current|provider/model-id
 /voice output local|tcp://host:port
 /voice input disabled|tcp://host:port
@@ -129,13 +133,14 @@ Commands:
 /voice edit smart|append
 ```
 
-Shortcut names use Pi's key format, such as `alt+m`, `ctrl+shift+m`, or `f8`. Run `/reload` after changing the shortcut. `review` leaves dictation in the editor for confirmation; `auto` immediately submits it. `smart` applies subsequent dictation to the existing draft; `append` disables model-assisted edits.
+Shortcut names use Pi's key format, such as `alt+m`, `ctrl+shift+m`, or `f8`. Run `/reload` after changing the shortcut. `review` leaves dictation in the editor for confirmation; `auto` immediately submits it. `smart` applies subsequent dictation to the existing draft; `append` only appends the model-resolved utterance and does not execute spoken corrections.
 
 ## Models
 
 - `ttsModel` must be a `kokoro-js`-compatible Kokoro ONNX repository. Kokoro is a speech-synthesis model only; it cannot perform speech-to-text.
 - `sttModel` must be a Transformers.js-compatible automatic-speech-recognition repository. Tested defaults use Whisper ONNX models from `onnx-community`.
-- `editModel: "current"` follows whichever model is active in Pi. Set `provider/model-id` to pin editing to another model registered and authenticated in Pi.
+- `sttCandidates` defaults to 3. Live previews remain single-pass; only final Whisper transcription generates alternatives. Candidate 1 is deterministic and additional candidates are low-temperature samples because Transformers.js 3.x does not expose multiple beam-search outputs. Duplicate hypotheses are removed, so fewer than the requested count may be returned. Other ASR architectures may return only one candidate.
+- `editModel: "current"` follows whichever model is active in Pi, without assuming a particular model family. Set `provider/model-id` to pin candidate resolution and smart editing to another model registered and authenticated in Pi.
 - Model and precision changes apply on the next synthesis or transcription. Missing weights download lazily into the configured cache.
 - A repository must actually provide the selected `fp32`, `q8`, or `q4` ONNX variant. If loading fails, choose a precision shipped by that repository.
 

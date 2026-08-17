@@ -52,7 +52,7 @@ export class Vocalizer {
 		this.#worker.cancel();
 	}
 
-	transcribe(audio: Buffer): Promise<string> {
+	transcribe(audio: Buffer): Promise<string[]> {
 		return this.#worker.transcribe(audio, this.#getConfig());
 	}
 

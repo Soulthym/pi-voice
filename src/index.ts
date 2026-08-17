@@ -4,6 +4,7 @@ import {
 	normalizeEditModel,
 	normalizeModelDtype,
 	normalizeModelId,
+	normalizeSttCandidates,
 	normalizeTalkShortcut,
 	normalizeVoiceInput,
 	normalizeVoiceOutput,
@@ -15,7 +16,7 @@ import {
 } from "./config.js";
 import { LiveTranscriptionSession } from "./live-transcription.js";
 import { PhoneInputClient } from "./phone-input.js";
-import { applySpokenEdit } from "./prompt-editor.js";
+import { applySpokenEdit, resolveDictationCandidates } from "./prompt-editor.js";
 import { Vocalizer } from "./vocalizer.js";
 import { isVoice, VOICES } from "./voices.js";
 import type { WorkerEvent } from "./worker-client.js";
@@ -267,31 +268,41 @@ export default async function (pi: ExtensionAPI) {
 			} catch {
 				// The final whole-utterance pass below remains available as a fallback.
 			}
-			const transcript =
-				capture.type === "audio" ? (await vocalizer.transcribe(capture.data)).trim() || liveTranscript : capture.data.trim();
+			let candidates =
+				capture.type === "audio" ? await vocalizer.transcribe(capture.data) : [capture.data.trim()];
+			candidates = [...new Set(candidates.map(candidate => candidate.replace(/\s+/g, " ").trim()).filter(Boolean))];
+			if (candidates.length === 0 && liveTranscript) candidates = [liveTranscript];
 			if (talkEpoch !== contextEpoch || !activeContext) return;
 			clearInputProgress();
 			state = "idle";
 			refreshStatus();
-			if (!transcript) {
+			if (candidates.length === 0) {
 				ctx.ui.setEditorText(editorBase);
 				ctx.ui.notify("No speech recognized", "warning");
 				return;
 			}
-			let prompt = appendDictation(editorBase, transcript);
-			if (config.editMode === "smart" && editorBase.trim()) {
-				const editingModel = config.editModel === "current" ? (ctx.model?.id ?? "the current model") : config.editModel;
-				setInputProgress(`✎ Applying spoken edit with ${editingModel}…`);
-				try {
-					prompt = await applySpokenEdit(ctx, editorBase, transcript, config.editModel);
-				} catch (error) {
-					ctx.ui.notify(
-						`Smart voice edit failed; appended dictation instead: ${error instanceof Error ? error.message : String(error)}`,
-						"warning",
-					);
-				} finally {
-					setInputProgress(undefined);
+			const editingModel = config.editModel === "current" ? (ctx.model?.id ?? "the current model") : config.editModel;
+			const candidateLabel = `${candidates.length} ASR candidate${candidates.length === 1 ? "" : "s"}`;
+			setInputProgress(
+				config.editMode === "smart" && editorBase.trim()
+					? `✎ Resolving ${candidateLabel} and applying spoken edits with ${editingModel}…`
+					: `✎ Resolving ${candidateLabel} with ${editingModel}…`,
+			);
+			let prompt = appendDictation(editorBase, candidates[0]);
+			try {
+				if (config.editMode === "smart" && editorBase.trim()) {
+					prompt = await applySpokenEdit(ctx, editorBase, candidates, config.editModel);
+				} else {
+					const resolved = await resolveDictationCandidates(ctx, editorBase, candidates, config.editModel);
+					prompt = appendDictation(editorBase, resolved);
 				}
+			} catch (error) {
+				ctx.ui.notify(
+					`Voice dictation resolution failed; used the primary ASR candidate: ${error instanceof Error ? error.message : String(error)}`,
+					"warning",
+				);
+			} finally {
+				setInputProgress(undefined);
 			}
 			if (talkEpoch !== contextEpoch || !activeContext) return;
 			if (config.submitMode === "review") {
@@ -401,6 +412,7 @@ export default async function (pi: ExtensionAPI) {
 				"tts-dtype",
 				"stt-model",
 				"stt-dtype",
+				"stt-candidates",
 				"edit-model",
 			];
 			const parts = prefix.trimStart().split(/\s+/);
@@ -423,6 +435,11 @@ export default async function (pi: ExtensionAPI) {
 				]
 					.filter(value => value.startsWith(parts[1] ?? ""))
 					.map(value => ({ value: `stt-model ${value}`, label: value }));
+			}
+			if (parts[0] === "stt-candidates") {
+				return ["1", "2", "3", "4", "5", "6", "7", "8"]
+					.filter(value => value.startsWith(parts[1] ?? ""))
+					.map(value => ({ value: `stt-candidates ${value}`, label: value }));
 			}
 			if (parts[0] === "tts-dtype" || parts[0] === "stt-dtype") {
 				return ["fp32", "q8", "q4"]
@@ -547,6 +564,16 @@ export default async function (pi: ExtensionAPI) {
 					ctx.ui.notify(`${action.toUpperCase()} set to ${dtype}`, "info");
 					return;
 				}
+				case "stt-candidates": {
+					const count = normalizeSttCandidates(Number(value));
+					if (!count) {
+						ctx.ui.notify("Usage: /voice stt-candidates <1..8>", "error");
+						return;
+					}
+					await updateConfig({ ...config, sttCandidates: count });
+					ctx.ui.notify(`Final ASR candidate count set to ${count}`, "info");
+					return;
+				}
 				case "edit-model": {
 					const model = normalizeEditModel(value);
 					if (!model) {
@@ -561,7 +588,7 @@ export default async function (pi: ExtensionAPI) {
 						}
 					}
 					await updateConfig({ ...config, editModel: model });
-					ctx.ui.notify(`Smart editing model set to ${model}`, "info");
+					ctx.ui.notify(`Dictation resolution model set to ${model}`, "info");
 					return;
 				}
 				case "mode": {
@@ -621,7 +648,12 @@ export default async function (pi: ExtensionAPI) {
 						return;
 					}
 					await updateConfig({ ...config, editMode });
-					ctx.ui.notify(`Spoken prompt editing set to ${editMode}`, "info");
+					ctx.ui.notify(
+						editMode === "smart"
+							? "Spoken corrections enabled after ASR candidate resolution"
+							: "Resolved dictation will be appended without executing spoken corrections",
+						"info",
+					);
 					return;
 				}
 				case "submit": {
@@ -671,13 +703,13 @@ export default async function (pi: ExtensionAPI) {
 				case "status":
 				case "":
 					ctx.ui.notify(
-						`Voice ${config.enabled ? "on" : "off"}; mode=${config.mode}; voice=${config.voice}; speed=${config.speed}; tts=${config.ttsModel}@${config.ttsDtype}; stt=${config.sttModel}@${config.sttDtype}; editModel=${config.editModel}; output=${config.output}; input=${config.input}; shortcut=${config.talkShortcut}; submit=${config.submitMode}; edit=${config.editMode}`,
+						`Voice ${config.enabled ? "on" : "off"}; mode=${config.mode}; voice=${config.voice}; speed=${config.speed}; tts=${config.ttsModel}@${config.ttsDtype}; stt=${config.sttModel}@${config.sttDtype}; sttCandidates=${config.sttCandidates}; editModel=${config.editModel}; output=${config.output}; input=${config.input}; shortcut=${config.talkShortcut}; submit=${config.submitMode}; edit=${config.editMode}`,
 						"info",
 					);
 					return;
 				default:
 					ctx.ui.notify(
-						"Usage: /voice [on|off|toggle|status|stop|setup|test|talk|mode|voice|speed|tts-model|tts-dtype|stt-model|stt-dtype|edit-model|output|input|shortcut|submit|edit]",
+						"Usage: /voice [on|off|toggle|status|stop|setup|test|talk|mode|voice|speed|tts-model|tts-dtype|stt-model|stt-dtype|stt-candidates|edit-model|output|input|shortcut|submit|edit]",
 						"error",
 					);
 			}

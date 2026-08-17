@@ -4,6 +4,7 @@ import {
 	normalizeEditModel,
 	normalizeModelDtype,
 	normalizeModelId,
+	normalizeSttCandidates,
 	normalizeTalkShortcut,
 	normalizeVoiceInput,
 	normalizeVoiceOutput,
@@ -30,6 +31,10 @@ test("normalizes configurable model selections", () => {
 	assert.equal(normalizeEditModel("current"), "current");
 	assert.equal(normalizeEditModel("openai-codex/gpt-5.6-sol"), "openai-codex/gpt-5.6-sol");
 	assert.equal(normalizeEditModel("missing-provider"), undefined);
+	assert.equal(normalizeSttCandidates(3), 3);
+	assert.equal(normalizeSttCandidates(0), undefined);
+	assert.equal(normalizeSttCandidates(9), undefined);
+	assert.equal(normalizeSttCandidates(2.5), undefined);
 });
 
 test("normalizes configurable microphone shortcuts", () => {

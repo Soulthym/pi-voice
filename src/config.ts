@@ -19,6 +19,8 @@ export interface VoiceConfig {
 	/** Hugging Face repository for Transformers.js automatic speech recognition. */
 	sttModel: string;
 	sttDtype: VoiceModelDtype;
+	/** Final hypotheses requested from the configured ASR model. */
+	sttCandidates: number;
 	/** `local` for server speakers, or a TCP endpoint reached through an SSH reverse tunnel. */
 	output: string;
 	/** `disabled`, or the phone speech-to-text control endpoint reached through a second reverse tunnel. */
@@ -27,7 +29,7 @@ export interface VoiceConfig {
 	talkShortcut: KeyId | "disabled";
 	/** Submit recognized speech immediately, or leave it in the editor for review. */
 	submitMode: VoiceSubmitMode;
-	/** Append each dictation literally, or let a language model apply spoken edits. */
+	/** Append resolved dictation, or let the resolver also apply spoken edits. */
 	editMode: VoiceEditMode;
 	/** `current`, or a `provider/model-id` resolved through Pi's model registry. */
 	editModel: string;
@@ -42,6 +44,7 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
 	ttsDtype: "q8",
 	sttModel: "onnx-community/whisper-tiny.en",
 	sttDtype: "fp32",
+	sttCandidates: 3,
 	output: "local",
 	input: "disabled",
 	talkShortcut: "alt+m",
@@ -68,6 +71,10 @@ function isEditMode(value: unknown): value is VoiceEditMode {
 
 export function normalizeModelDtype(value: unknown): VoiceModelDtype | undefined {
 	return value === "fp32" || value === "q8" || value === "q4" ? value : undefined;
+}
+
+export function normalizeSttCandidates(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 8 ? value : undefined;
 }
 
 export function normalizeModelId(value: unknown): string | undefined {
@@ -177,6 +184,7 @@ export async function loadVoiceConfig(): Promise<VoiceConfig> {
 			ttsDtype: normalizeModelDtype(parsed.ttsDtype) ?? DEFAULT_VOICE_CONFIG.ttsDtype,
 			sttModel: normalizeModelId(parsed.sttModel) ?? DEFAULT_VOICE_CONFIG.sttModel,
 			sttDtype: normalizeModelDtype(parsed.sttDtype) ?? DEFAULT_VOICE_CONFIG.sttDtype,
+			sttCandidates: normalizeSttCandidates(parsed.sttCandidates) ?? DEFAULT_VOICE_CONFIG.sttCandidates,
 			output: normalizeVoiceOutput(parsed.output) ?? DEFAULT_VOICE_CONFIG.output,
 			input: normalizeVoiceInput(parsed.input) ?? DEFAULT_VOICE_CONFIG.input,
 			talkShortcut: normalizeTalkShortcut(parsed.talkShortcut) ?? DEFAULT_VOICE_CONFIG.talkShortcut,

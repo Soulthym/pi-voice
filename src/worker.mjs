@@ -126,21 +126,45 @@ function decodePhoneAudio(encoded) {
 	});
 }
 
-async function runTranscriber(audio, modelId, dtype) {
+function transcriptText(result) {
+	const first = Array.isArray(result) ? result[0] : result;
+	return typeof first?.text === "string" ? first.text.replace(/\s+/g, " ").trim() : "";
+}
+
+async function runTranscriber(audio, modelId, dtype, candidateCount = 1) {
 	const transcriber = await getTranscriber(modelId, dtype);
-	const result = await transcriber(audio, {
+	const commonOptions = {
 		chunk_length_s: 30,
 		stride_length_s: 5,
 		return_timestamps: false,
-	});
-	const first = Array.isArray(result) ? result[0] : result;
-	return typeof first?.text === "string" ? first.text.trim() : "";
+	};
+	const primary = transcriptText(await transcriber(audio, commonOptions));
+	const candidates = primary ? [primary] : [];
+	const modelType = transcriber.model?.config?.model_type;
+	if ((modelType !== "whisper" && modelType !== "lite-whisper") || candidateCount <= 1) return candidates;
+
+	// Transformers.js 3.x does not retain multiple beam-search sequences. Generate
+	// low-temperature alternatives with the same model and let the configured
+	// editing model resolve them against the current session context.
+	for (let attempt = 1; candidates.length < candidateCount && attempt < candidateCount; attempt += 1) {
+		const temperature = Math.min(0.2 + (attempt - 1) * 0.1, 0.8);
+		const alternative = transcriptText(
+			await transcriber(audio, {
+				...commonOptions,
+				do_sample: true,
+				temperature,
+				top_k: 50,
+			}),
+		);
+		if (alternative && !candidates.includes(alternative)) candidates.push(alternative);
+	}
+	return candidates;
 }
 
-async function transcribePhoneAudio(encoded, modelId, dtype) {
+async function transcribePhoneAudio(encoded, modelId, dtype, candidateCount) {
 	send({ type: "transcribing" });
 	const audio = await decodePhoneAudio(encoded);
-	return runTranscriber(audio, modelId, dtype);
+	return runTranscriber(audio, modelId, dtype, candidateCount);
 }
 
 async function transcribePcmAudio(encoded, modelId, dtype) {
@@ -149,7 +173,7 @@ async function transcribePcmAudio(encoded, modelId, dtype) {
 	for (let index = 0; index < audio.length; index += 1) {
 		audio[index] = bytes.readFloatLE(index * Float32Array.BYTES_PER_ELEMENT);
 	}
-	return runTranscriber(audio, modelId, dtype);
+	return runTranscriber(audio, modelId, dtype, 1);
 }
 
 function executable(name) {
@@ -320,8 +344,8 @@ async function closePlayer(utterance) {
 async function runOperation(operation) {
 	if (operation.type === "transcribe-pcm") {
 		try {
-			const text = await transcribePcmAudio(operation.audio, operation.model, operation.dtype);
-			send({ type: "transcript", requestId: operation.requestId, text, preview: true });
+			const candidates = await transcribePcmAudio(operation.audio, operation.model, operation.dtype);
+			send({ type: "transcript", requestId: operation.requestId, text: candidates[0] ?? "", candidates, preview: true });
 		} catch (error) {
 			send({
 				type: "error",
@@ -334,8 +358,13 @@ async function runOperation(operation) {
 	}
 	if (operation.type === "transcribe") {
 		try {
-			const text = await transcribePhoneAudio(operation.audio, operation.model, operation.dtype);
-			send({ type: "transcript", requestId: operation.requestId, text });
+			const candidates = await transcribePhoneAudio(
+				operation.audio,
+				operation.model,
+				operation.dtype,
+				operation.candidateCount,
+			);
+			send({ type: "transcript", requestId: operation.requestId, text: candidates[0] ?? "", candidates });
 		} catch (error) {
 			send({
 				type: "error",
@@ -442,6 +471,10 @@ lines.on("line", line => {
 				audio: message.audio,
 				model: message.model ?? DEFAULT_STT_MODEL,
 				dtype: message.dtype ?? DEFAULT_STT_DTYPE,
+				candidateCount:
+					Number.isInteger(message.candidateCount) && message.candidateCount >= 1 && message.candidateCount <= 8
+						? message.candidateCount
+						: 1,
 			});
 			break;
 		case "transcribe-pcm":
