@@ -53,15 +53,15 @@ export class Vocalizer {
 	}
 
 	transcribe(audio: Buffer): Promise<string> {
-		return this.#worker.transcribe(audio);
+		return this.#worker.transcribe(audio, this.#getConfig());
 	}
 
 	transcribePcm(audio: Float32Array): Promise<string> {
-		return this.#worker.transcribePcm(audio);
+		return this.#worker.transcribePcm(audio, this.#getConfig());
 	}
 
 	preload(): Promise<void> {
-		return this.#worker.preload();
+		return this.#worker.preload(this.#getConfig());
 	}
 
 	async shutdown(): Promise<void> {

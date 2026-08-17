@@ -6,12 +6,19 @@ import type { KeyId } from "@earendil-works/pi-tui";
 export type VoiceMode = "all" | "assistant" | "yield";
 export type VoiceSubmitMode = "auto" | "review";
 export type VoiceEditMode = "append" | "smart";
+export type VoiceModelDtype = "fp32" | "q8" | "q4";
 
 export interface VoiceConfig {
 	enabled: boolean;
 	mode: VoiceMode;
 	voice: string;
 	speed: number;
+	/** Hugging Face repository for kokoro-js synthesis. */
+	ttsModel: string;
+	ttsDtype: VoiceModelDtype;
+	/** Hugging Face repository for Transformers.js automatic speech recognition. */
+	sttModel: string;
+	sttDtype: VoiceModelDtype;
 	/** `local` for server speakers, or a TCP endpoint reached through an SSH reverse tunnel. */
 	output: string;
 	/** `disabled`, or the phone speech-to-text control endpoint reached through a second reverse tunnel. */
@@ -20,8 +27,10 @@ export interface VoiceConfig {
 	talkShortcut: KeyId | "disabled";
 	/** Submit recognized speech immediately, or leave it in the editor for review. */
 	submitMode: VoiceSubmitMode;
-	/** Append each dictation literally, or let Pi's current model apply spoken edits. */
+	/** Append each dictation literally, or let a language model apply spoken edits. */
 	editMode: VoiceEditMode;
+	/** `current`, or a `provider/model-id` resolved through Pi's model registry. */
+	editModel: string;
 }
 
 export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
@@ -29,11 +38,16 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
 	mode: "assistant",
 	voice: "af_heart",
 	speed: 1,
+	ttsModel: "onnx-community/Kokoro-82M-v1.0-ONNX",
+	ttsDtype: "q8",
+	sttModel: "onnx-community/whisper-tiny.en",
+	sttDtype: "fp32",
 	output: "local",
 	input: "disabled",
 	talkShortcut: "alt+m",
 	submitMode: "review",
 	editMode: "smart",
+	editModel: "current",
 };
 
 export function getVoiceConfigPath(): string {
@@ -50,6 +64,24 @@ function isSubmitMode(value: unknown): value is VoiceSubmitMode {
 
 function isEditMode(value: unknown): value is VoiceEditMode {
 	return value === "append" || value === "smart";
+}
+
+export function normalizeModelDtype(value: unknown): VoiceModelDtype | undefined {
+	return value === "fp32" || value === "q8" || value === "q4" ? value : undefined;
+}
+
+export function normalizeModelId(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const trimmed = value.trim();
+	return trimmed.length > 0 && trimmed.length <= 256 && !/\s/.test(trimmed) ? trimmed : undefined;
+}
+
+export function normalizeEditModel(value: unknown): string | undefined {
+	const model = normalizeModelId(value);
+	if (!model) return undefined;
+	if (model.toLowerCase() === "current") return "current";
+	const separator = model.indexOf("/");
+	return separator > 0 && separator < model.length - 1 ? model : undefined;
 }
 
 export function normalizeTcpEndpoint(value: unknown): string | undefined {
@@ -141,11 +173,16 @@ export async function loadVoiceConfig(): Promise<VoiceConfig> {
 				typeof parsed.speed === "number" && Number.isFinite(parsed.speed) && parsed.speed >= 0.5 && parsed.speed <= 2
 					? parsed.speed
 					: DEFAULT_VOICE_CONFIG.speed,
+			ttsModel: normalizeModelId(parsed.ttsModel) ?? DEFAULT_VOICE_CONFIG.ttsModel,
+			ttsDtype: normalizeModelDtype(parsed.ttsDtype) ?? DEFAULT_VOICE_CONFIG.ttsDtype,
+			sttModel: normalizeModelId(parsed.sttModel) ?? DEFAULT_VOICE_CONFIG.sttModel,
+			sttDtype: normalizeModelDtype(parsed.sttDtype) ?? DEFAULT_VOICE_CONFIG.sttDtype,
 			output: normalizeVoiceOutput(parsed.output) ?? DEFAULT_VOICE_CONFIG.output,
 			input: normalizeVoiceInput(parsed.input) ?? DEFAULT_VOICE_CONFIG.input,
 			talkShortcut: normalizeTalkShortcut(parsed.talkShortcut) ?? DEFAULT_VOICE_CONFIG.talkShortcut,
 			submitMode: isSubmitMode(parsed.submitMode) ? parsed.submitMode : DEFAULT_VOICE_CONFIG.submitMode,
 			editMode: isEditMode(parsed.editMode) ? parsed.editMode : DEFAULT_VOICE_CONFIG.editMode,
+			editModel: normalizeEditModel(parsed.editModel) ?? DEFAULT_VOICE_CONFIG.editModel,
 		};
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return { ...DEFAULT_VOICE_CONFIG };

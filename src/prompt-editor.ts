@@ -17,6 +17,13 @@ export function buildSpokenEditRequest(draft: string, utterance: string): string
 	return `<existing_draft>\n${draft}\n</existing_draft>\n\n<new_dictation>\n${utterance}\n</new_dictation>`;
 }
 
+export function parseEditModelSelector(selector: string): { provider: string; modelId: string } | undefined {
+	if (selector === "current") return undefined;
+	const separator = selector.indexOf("/");
+	if (separator <= 0 || separator === selector.length - 1) throw new Error(`Invalid editing model: ${selector}`);
+	return { provider: selector.slice(0, separator), modelId: selector.slice(separator + 1) };
+}
+
 export function cleanRevisedPrompt(text: string): string {
 	const trimmed = text.trim();
 	const fenced = trimmed.match(/^```(?:\w+)?\s*\n([\s\S]*?)\n```$/);
@@ -24,8 +31,15 @@ export function cleanRevisedPrompt(text: string): string {
 }
 
 /** Uses Pi's currently selected model in an isolated, non-conversation request. */
-export async function applySpokenEdit(ctx: ExtensionContext, draft: string, utterance: string): Promise<string> {
-	if (!ctx.model) throw new Error("No model is selected for smart voice editing");
+export async function applySpokenEdit(
+	ctx: ExtensionContext,
+	draft: string,
+	utterance: string,
+	modelSelector = "current",
+): Promise<string> {
+	const selected = parseEditModelSelector(modelSelector);
+	const model = selected ? ctx.modelRegistry.find(selected.provider, selected.modelId) : ctx.model;
+	if (!model) throw new Error(`Voice editing model is unavailable: ${modelSelector}`);
 	const message: Message = {
 		role: "user",
 		content: [{ type: "text", text: buildSpokenEditRequest(draft, utterance) }],
@@ -36,7 +50,7 @@ export async function applySpokenEdit(ctx: ExtensionContext, draft: string, utte
 	timer.unref?.();
 	try {
 		const response = await ctx.modelRegistry.complete(
-			ctx.model,
+			model,
 			{ systemPrompt: SYSTEM_PROMPT, messages: [message] },
 			{
 				signal: controller.signal,

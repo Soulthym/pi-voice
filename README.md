@@ -41,6 +41,11 @@ Configuration is stored in `~/.pi/agent/pi-voice.json`. For the bundled Termux b
   "mode": "assistant",
   "voice": "af_heart",
   "speed": 1,
+  "ttsModel": "onnx-community/Kokoro-82M-v1.0-ONNX",
+  "ttsDtype": "q8",
+  "sttModel": "onnx-community/whisper-tiny.en",
+  "sttDtype": "fp32",
+  "editModel": "current",
   "output": "tcp://127.0.0.1:8765",
   "input": "tcp://127.0.0.1:8766",
   "talkShortcut": "alt+m",
@@ -112,6 +117,11 @@ Commands:
 /voice mode assistant|all|yield
 /voice voice [voice id]
 /voice speed <0.5..2>
+/voice tts-model <huggingface-repo>
+/voice tts-dtype fp32|q8|q4
+/voice stt-model <huggingface-repo>
+/voice stt-dtype fp32|q8|q4
+/voice edit-model current|provider/model-id
 /voice output local|tcp://host:port
 /voice input disabled|tcp://host:port
 /voice shortcut <key|disabled>
@@ -119,7 +129,17 @@ Commands:
 /voice edit smart|append
 ```
 
-Shortcut names use Pi's key format, such as `alt+m`, `ctrl+shift+m`, or `f8`. Run `/reload` after changing the shortcut. `review` leaves dictation in the editor for confirmation; `auto` immediately submits it. `smart` applies subsequent dictation to the existing draft with Pi's current model; `append` disables model-assisted edits.
+Shortcut names use Pi's key format, such as `alt+m`, `ctrl+shift+m`, or `f8`. Run `/reload` after changing the shortcut. `review` leaves dictation in the editor for confirmation; `auto` immediately submits it. `smart` applies subsequent dictation to the existing draft; `append` disables model-assisted edits.
+
+## Models
+
+- `ttsModel` must be a `kokoro-js`-compatible Kokoro ONNX repository. Kokoro is a speech-synthesis model only; it cannot perform speech-to-text.
+- `sttModel` must be a Transformers.js-compatible automatic-speech-recognition repository. Tested defaults use Whisper ONNX models from `onnx-community`.
+- `editModel: "current"` follows whichever model is active in Pi. Set `provider/model-id` to pin editing to another model registered and authenticated in Pi.
+- Model and precision changes apply on the next synthesis or transcription. Missing weights download lazily into the configured cache.
+- A repository must actually provide the selected `fp32`, `q8`, or `q4` ONNX variant. If loading fails, choose a precision shipped by that repository.
+
+Suggested STT repositories, from lighter to heavier, include `onnx-community/whisper-tiny.en`, `onnx-community/whisper-base.en`, and `onnx-community/whisper-small.en`. Remove `.en` for multilingual recognition.
 
 Modes:
 

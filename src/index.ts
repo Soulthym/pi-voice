@@ -1,6 +1,9 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
 	loadVoiceConfig,
+	normalizeEditModel,
+	normalizeModelDtype,
+	normalizeModelId,
 	normalizeTalkShortcut,
 	normalizeVoiceInput,
 	normalizeVoiceOutput,
@@ -277,9 +280,10 @@ export default async function (pi: ExtensionAPI) {
 			}
 			let prompt = appendDictation(editorBase, transcript);
 			if (config.editMode === "smart" && editorBase.trim()) {
-				setInputProgress(`✎ Applying spoken edit with ${ctx.model?.id ?? "the current model"}…`);
+				const editingModel = config.editModel === "current" ? (ctx.model?.id ?? "the current model") : config.editModel;
+				setInputProgress(`✎ Applying spoken edit with ${editingModel}…`);
 				try {
-					prompt = await applySpokenEdit(ctx, editorBase, transcript);
+					prompt = await applySpokenEdit(ctx, editorBase, transcript, config.editModel);
 				} catch (error) {
 					ctx.ui.notify(
 						`Smart voice edit failed; appended dictation instead: ${error instanceof Error ? error.message : String(error)}`,
@@ -393,10 +397,42 @@ export default async function (pi: ExtensionAPI) {
 				"shortcut",
 				"submit",
 				"edit",
+				"tts-model",
+				"tts-dtype",
+				"stt-model",
+				"stt-dtype",
+				"edit-model",
 			];
 			const parts = prefix.trimStart().split(/\s+/);
 			if (parts.length <= 1) {
 				return values.filter(value => value.startsWith(parts[0] ?? "")).map(value => ({ value, label: value }));
+			}
+			if (parts[0] === "tts-model") {
+				return ["onnx-community/Kokoro-82M-v1.0-ONNX"]
+					.filter(value => value.startsWith(parts[1] ?? ""))
+					.map(value => ({ value: `tts-model ${value}`, label: value }));
+			}
+			if (parts[0] === "stt-model") {
+				return [
+					"onnx-community/whisper-tiny.en",
+					"onnx-community/whisper-base.en",
+					"onnx-community/whisper-small.en",
+					"onnx-community/whisper-tiny",
+					"onnx-community/whisper-base",
+					"onnx-community/whisper-small",
+				]
+					.filter(value => value.startsWith(parts[1] ?? ""))
+					.map(value => ({ value: `stt-model ${value}`, label: value }));
+			}
+			if (parts[0] === "tts-dtype" || parts[0] === "stt-dtype") {
+				return ["fp32", "q8", "q4"]
+					.filter(value => value.startsWith(parts[1] ?? ""))
+					.map(value => ({ value: `${parts[0]} ${value}`, label: value }));
+			}
+			if (parts[0] === "edit-model") {
+				return ["current"]
+					.filter(value => value.startsWith(parts[1] ?? ""))
+					.map(value => ({ value: `edit-model ${value}`, label: value }));
 			}
 			if (parts[0] === "mode") {
 				return ["assistant", "all", "yield"]
@@ -477,14 +513,57 @@ export default async function (pi: ExtensionAPI) {
 					void talk(ctx);
 					return;
 				case "setup":
-					ctx.ui.notify("Preparing Kokoro-82M (the first run downloads about 100 MB)…", "info");
+					ctx.ui.notify(`Preparing ${config.ttsModel} (${config.ttsDtype})…`, "info");
 					try {
 						await vocalizer.preload();
-						ctx.ui.notify("Kokoro voice model is ready", "info");
+						ctx.ui.notify("Text-to-speech model is ready", "info");
 					} catch (error) {
 						ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 					}
 					return;
+				case "tts-model":
+				case "stt-model": {
+					const model = normalizeModelId(value);
+					if (!model) {
+						ctx.ui.notify(`Usage: /voice ${action} <huggingface-repo>`, "error");
+						return;
+					}
+					vocalizer.clear();
+					if (action.toLowerCase() === "tts-model") await updateConfig({ ...config, ttsModel: model });
+					else await updateConfig({ ...config, sttModel: model });
+					ctx.ui.notify(`${action.toUpperCase()} set to ${model}; it will download on first use`, "info");
+					return;
+				}
+				case "tts-dtype":
+				case "stt-dtype": {
+					const dtype = normalizeModelDtype(value.toLowerCase());
+					if (!dtype) {
+						ctx.ui.notify(`Usage: /voice ${action} fp32|q8|q4`, "error");
+						return;
+					}
+					vocalizer.clear();
+					if (action.toLowerCase() === "tts-dtype") await updateConfig({ ...config, ttsDtype: dtype });
+					else await updateConfig({ ...config, sttDtype: dtype });
+					ctx.ui.notify(`${action.toUpperCase()} set to ${dtype}`, "info");
+					return;
+				}
+				case "edit-model": {
+					const model = normalizeEditModel(value);
+					if (!model) {
+						ctx.ui.notify("Usage: /voice edit-model current|provider/model-id", "error");
+						return;
+					}
+					if (model !== "current") {
+						const separator = model.indexOf("/");
+						if (!ctx.modelRegistry.find(model.slice(0, separator), model.slice(separator + 1))) {
+							ctx.ui.notify(`Editing model is not available in Pi: ${model}`, "error");
+							return;
+						}
+					}
+					await updateConfig({ ...config, editModel: model });
+					ctx.ui.notify(`Smart editing model set to ${model}`, "info");
+					return;
+				}
 				case "mode": {
 					const mode = parseMode(value.toLowerCase());
 					if (!mode) {
@@ -592,13 +671,13 @@ export default async function (pi: ExtensionAPI) {
 				case "status":
 				case "":
 					ctx.ui.notify(
-						`Voice ${config.enabled ? "on" : "off"}; mode=${config.mode}; voice=${config.voice}; speed=${config.speed}; output=${config.output}; input=${config.input}; shortcut=${config.talkShortcut}; submit=${config.submitMode}; edit=${config.editMode}`,
+						`Voice ${config.enabled ? "on" : "off"}; mode=${config.mode}; voice=${config.voice}; speed=${config.speed}; tts=${config.ttsModel}@${config.ttsDtype}; stt=${config.sttModel}@${config.sttDtype}; editModel=${config.editModel}; output=${config.output}; input=${config.input}; shortcut=${config.talkShortcut}; submit=${config.submitMode}; edit=${config.editMode}`,
 						"info",
 					);
 					return;
 				default:
 					ctx.ui.notify(
-						"Usage: /voice [on|off|toggle|status|stop|setup|test|talk|mode|voice|speed|output|input|shortcut|submit|edit]",
+						"Usage: /voice [on|off|toggle|status|stop|setup|test|talk|mode|voice|speed|tts-model|tts-dtype|stt-model|stt-dtype|edit-model|output|input|shortcut|submit|edit]",
 						"error",
 					);
 			}

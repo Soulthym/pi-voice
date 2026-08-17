@@ -7,9 +7,10 @@ import * as readline from "node:readline";
 import { env as transformersEnv, pipeline } from "@huggingface/transformers";
 import { KokoroTTS } from "kokoro-js";
 
-const MODEL_ID = "onnx-community/Kokoro-82M-v1.0-ONNX";
-const MODEL_DTYPE = "q8";
-const STT_MODEL_ID = "onnx-community/whisper-tiny.en";
+const DEFAULT_TTS_MODEL = "onnx-community/Kokoro-82M-v1.0-ONNX";
+const DEFAULT_TTS_DTYPE = "q8";
+const DEFAULT_STT_MODEL = "onnx-community/whisper-tiny.en";
+const DEFAULT_STT_DTYPE = "fp32";
 const DEFAULT_SAMPLE_RATE = 24_000;
 const cacheDir = process.env.PI_VOICE_CACHE_DIR ?? path.join(os.homedir(), ".cache", "pi-voice", "models");
 fs.mkdirSync(cacheDir, { recursive: true });
@@ -20,8 +21,8 @@ transformersEnv.useBrowserCache = false;
 transformersEnv.logLevel = "error";
 if (transformersEnv.backends?.onnx) transformersEnv.backends.onnx.logLevel = "error";
 
-let modelPromise = null;
-let transcriberPromise = null;
+const ttsModels = new Map();
+const sttModels = new Map();
 let epoch = 0;
 let queue = [];
 let pumping = false;
@@ -42,11 +43,13 @@ function progressPercent(info) {
 	return undefined;
 }
 
-async function getModel() {
-	if (modelPromise) return modelPromise;
+async function getModel(modelId = DEFAULT_TTS_MODEL, dtype = DEFAULT_TTS_DTYPE) {
+	const key = `${modelId}\0${dtype}`;
+	const cached = ttsModels.get(key);
+	if (cached) return cached;
 	send({ type: "loading" });
-	modelPromise = KokoroTTS.from_pretrained(MODEL_ID, {
-		dtype: MODEL_DTYPE,
+	const loading = KokoroTTS.from_pretrained(modelId, {
+		dtype,
 		device: "cpu",
 		progress_callback: info => {
 			const percent = progressPercent(info);
@@ -54,18 +57,21 @@ async function getModel() {
 			send({ type: "progress", ...(percent === undefined ? {} : { percent }), ...(file ? { file } : {}) });
 		},
 	}).catch(error => {
-		modelPromise = null;
+		ttsModels.delete(key);
 		throw error;
 	});
-	const model = await modelPromise;
+	ttsModels.set(key, loading);
+	const model = await loading;
 	send({ type: "ready" });
 	return model;
 }
 
-async function getTranscriber() {
-	if (transcriberPromise) return transcriberPromise;
-	transcriberPromise = pipeline("automatic-speech-recognition", STT_MODEL_ID, {
-		dtype: "fp32",
+async function getTranscriber(modelId = DEFAULT_STT_MODEL, dtype = DEFAULT_STT_DTYPE) {
+	const key = `${modelId}\0${dtype}`;
+	const cached = sttModels.get(key);
+	if (cached) return cached;
+	const loading = pipeline("automatic-speech-recognition", modelId, {
+		dtype,
 		device: "cpu",
 		progress_callback: info => {
 			const percent = progressPercent(info);
@@ -73,10 +79,11 @@ async function getTranscriber() {
 			send({ type: "progress", ...(percent === undefined ? {} : { percent }), ...(file ? { file } : {}) });
 		},
 	}).catch(error => {
-		transcriberPromise = null;
+		sttModels.delete(key);
 		throw error;
 	});
-	return transcriberPromise;
+	sttModels.set(key, loading);
+	return loading;
 }
 
 function decodePhoneAudio(encoded) {
@@ -119,8 +126,8 @@ function decodePhoneAudio(encoded) {
 	});
 }
 
-async function runTranscriber(audio) {
-	const transcriber = await getTranscriber();
+async function runTranscriber(audio, modelId, dtype) {
+	const transcriber = await getTranscriber(modelId, dtype);
 	const result = await transcriber(audio, {
 		chunk_length_s: 30,
 		stride_length_s: 5,
@@ -130,19 +137,19 @@ async function runTranscriber(audio) {
 	return typeof first?.text === "string" ? first.text.trim() : "";
 }
 
-async function transcribePhoneAudio(encoded) {
+async function transcribePhoneAudio(encoded, modelId, dtype) {
 	send({ type: "transcribing" });
 	const audio = await decodePhoneAudio(encoded);
-	return runTranscriber(audio);
+	return runTranscriber(audio, modelId, dtype);
 }
 
-async function transcribePcmAudio(encoded) {
+async function transcribePcmAudio(encoded, modelId, dtype) {
 	const bytes = Buffer.from(encoded, "base64");
 	const audio = new Float32Array(Math.floor(bytes.length / Float32Array.BYTES_PER_ELEMENT));
 	for (let index = 0; index < audio.length; index += 1) {
 		audio[index] = bytes.readFloatLE(index * Float32Array.BYTES_PER_ELEMENT);
 	}
-	return runTranscriber(audio);
+	return runTranscriber(audio, modelId, dtype);
 }
 
 function executable(name) {
@@ -313,7 +320,7 @@ async function closePlayer(utterance) {
 async function runOperation(operation) {
 	if (operation.type === "transcribe-pcm") {
 		try {
-			const text = await transcribePcmAudio(operation.audio);
+			const text = await transcribePcmAudio(operation.audio, operation.model, operation.dtype);
 			send({ type: "transcript", requestId: operation.requestId, text, preview: true });
 		} catch (error) {
 			send({
@@ -327,7 +334,7 @@ async function runOperation(operation) {
 	}
 	if (operation.type === "transcribe") {
 		try {
-			const text = await transcribePhoneAudio(operation.audio);
+			const text = await transcribePhoneAudio(operation.audio, operation.model, operation.dtype);
 			send({ type: "transcript", requestId: operation.requestId, text });
 		} catch (error) {
 			send({
@@ -340,7 +347,7 @@ async function runOperation(operation) {
 	}
 	if (operation.type === "preload") {
 		try {
-			await getModel();
+			await getModel(operation.model, operation.dtype);
 			send({ type: "ready", requestId: operation.requestId });
 		} catch (error) {
 			send({ type: "error", requestId: operation.requestId, message: error instanceof Error ? error.message : String(error) });
@@ -351,7 +358,7 @@ async function runOperation(operation) {
 		await closePlayer(operation.utterance);
 		return;
 	}
-	const model = await getModel();
+	const model = await getModel(operation.model, operation.dtype);
 	if (operation.epoch !== epoch) return;
 	const output = await model.generate(operation.text, { voice: operation.voice, speed: operation.speed });
 	if (operation.epoch !== epoch) return;
@@ -413,19 +420,38 @@ lines.on("line", line => {
 				voice: message.voice,
 				speed: message.speed,
 				output: message.output ?? "local",
+				model: message.model ?? DEFAULT_TTS_MODEL,
+				dtype: message.dtype ?? DEFAULT_TTS_DTYPE,
 			});
 			break;
 		case "end":
 			enqueue({ type: "end", utterance: message.utterance });
 			break;
 		case "preload":
-			enqueue({ type: "preload", requestId: message.requestId });
+			enqueue({
+				type: "preload",
+				requestId: message.requestId,
+				model: message.model ?? DEFAULT_TTS_MODEL,
+				dtype: message.dtype ?? DEFAULT_TTS_DTYPE,
+			});
 			break;
 		case "transcribe":
-			enqueue({ type: "transcribe", requestId: message.requestId, audio: message.audio });
+			enqueue({
+				type: "transcribe",
+				requestId: message.requestId,
+				audio: message.audio,
+				model: message.model ?? DEFAULT_STT_MODEL,
+				dtype: message.dtype ?? DEFAULT_STT_DTYPE,
+			});
 			break;
 		case "transcribe-pcm":
-			enqueue({ type: "transcribe-pcm", requestId: message.requestId, audio: message.audio });
+			enqueue({
+				type: "transcribe-pcm",
+				requestId: message.requestId,
+				audio: message.audio,
+				model: message.model ?? DEFAULT_STT_MODEL,
+				dtype: message.dtype ?? DEFAULT_STT_DTYPE,
+			});
 			break;
 		case "cancel":
 			cancel();

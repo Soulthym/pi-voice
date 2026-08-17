@@ -1,6 +1,6 @@
 {
   "name": "pi-voice",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
   "type": "module",
   "description": "Bidirectional Kokoro and Whisper phone voice mode for the Pi coding agent",

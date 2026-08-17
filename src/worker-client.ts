@@ -43,6 +43,8 @@ export class VoiceWorkerClient {
 			text,
 			voice: config.voice,
 			speed: config.speed,
+			model: config.ttsModel,
+			dtype: config.ttsDtype,
 			output: config.output,
 		});
 	}
@@ -56,16 +58,31 @@ export class VoiceWorkerClient {
 		this.#send({ type: "cancel" });
 	}
 
-	transcribe(audio: Buffer): Promise<string> {
-		return this.#requestTranscription({ type: "transcribe", audio: audio.toString("base64") });
+	transcribe(audio: Buffer, config: VoiceConfig): Promise<string> {
+		return this.#requestTranscription({
+			type: "transcribe",
+			audio: audio.toString("base64"),
+			model: config.sttModel,
+			dtype: config.sttDtype,
+		});
 	}
 
-	transcribePcm(audio: Float32Array): Promise<string> {
+	transcribePcm(audio: Float32Array, config: VoiceConfig): Promise<string> {
 		const bytes = Buffer.from(audio.buffer, audio.byteOffset, audio.byteLength);
-		return this.#requestTranscription({ type: "transcribe-pcm", audio: bytes.toString("base64") });
+		return this.#requestTranscription({
+			type: "transcribe-pcm",
+			audio: bytes.toString("base64"),
+			model: config.sttModel,
+			dtype: config.sttDtype,
+		});
 	}
 
-	#requestTranscription(message: { type: "transcribe" | "transcribe-pcm"; audio: string }): Promise<string> {
+	#requestTranscription(message: {
+		type: "transcribe" | "transcribe-pcm";
+		audio: string;
+		model: string;
+		dtype: string;
+	}): Promise<string> {
 		const requestId = String(++this.#nextRequestId);
 		const { promise, resolve, reject } = Promise.withResolvers<string>();
 		const timer = setTimeout(() => {
@@ -78,7 +95,7 @@ export class VoiceWorkerClient {
 		return promise;
 	}
 
-	preload(): Promise<void> {
+	preload(config: VoiceConfig): Promise<void> {
 		const requestId = String(++this.#nextRequestId);
 		const { promise, resolve, reject } = Promise.withResolvers<void>();
 		const timer = setTimeout(() => {
@@ -87,7 +104,12 @@ export class VoiceWorkerClient {
 		}, 10 * 60_000);
 		timer.unref?.();
 		this.#pendingPreloads.set(requestId, { resolve, reject, timer });
-		this.#send({ type: "preload", requestId });
+		this.#send({
+			type: "preload",
+			requestId,
+			model: config.ttsModel,
+			dtype: config.ttsDtype,
+		});
 		return promise;
 	}
 
