@@ -17,8 +17,9 @@ Both tunnel endpoints bind only to loopback. Audio and transcripts remain inside
 - Cancels queued speech when you send another prompt.
 - Supports server-local playback or raw PCM over TCP/SSH.
 - Streams phone microphone audio in near real time and stops automatically after natural silence.
+- Shows a revisable Whisper preview directly in Pi's editor while you speak.
 - Supports a second `Alt+M` as a manual stop for long pauses or noisy environments.
-- Shows phone recording and local transcription progress in Pi.
+- Leaves reviewed dictation in the editor by default; press Enter after correcting or extending it.
 
 Kokoro setup downloads approximately 100 MB from Hugging Face. The first microphone transcription downloads approximately 150 MB of Whisper weights. Later synthesis and transcription are local.
 
@@ -40,7 +41,8 @@ Configuration is stored in `~/.pi/agent/pi-voice.json`. For the bundled Termux b
   "speed": 1,
   "output": "tcp://127.0.0.1:8765",
   "input": "tcp://127.0.0.1:8766",
-  "talkShortcut": "alt+m"
+  "talkShortcut": "alt+m",
+  "submitMode": "review"
 }
 ```
 
@@ -82,7 +84,8 @@ If SSH reports that remote forwarding failed, ensure `AllowTcpForwarding yes` is
 ## Usage
 
 - Press the configured microphone shortcut (**Alt+M** by default) and speak for as long as needed. Recording stops automatically after about 1.35 seconds of silence.
-- Press the shortcut again to stop manually. Pi displays streaming/transcription progress and submits the locally recognized text.
+- Press the shortcut again to stop manually. Pi displays a live, revisable transcript in the prompt editor.
+- In the default `review` submit mode, correct or extend the final prompt and press Enter yourself. Starting another dictation appends to the existing editor text.
 - Assistant speech automatically plays through the phone.
 - `Ctrl+Shift+V` toggles spoken output.
 
@@ -100,9 +103,10 @@ Commands:
 /voice output local|tcp://host:port
 /voice input disabled|tcp://host:port
 /voice shortcut <key|disabled>
+/voice submit review|auto
 ```
 
-Shortcut names use Pi's key format, such as `alt+m`, `ctrl+shift+m`, or `f8`. Run `/reload` after changing the shortcut.
+Shortcut names use Pi's key format, such as `alt+m`, `ctrl+shift+m`, or `f8`. Run `/reload` after changing the shortcut. `review` leaves dictation in the editor for confirmation; `auto` immediately submits it.
 
 Modes:
 

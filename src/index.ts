@@ -7,7 +7,9 @@ import {
 	saveVoiceConfig,
 	type VoiceConfig,
 	type VoiceMode,
+	type VoiceSubmitMode,
 } from "./config.js";
+import { LiveTranscriptionSession } from "./live-transcription.js";
 import { PhoneInputClient } from "./phone-input.js";
 import { Vocalizer } from "./vocalizer.js";
 import { isVoice, VOICES } from "./voices.js";
@@ -41,6 +43,16 @@ function assistantStopReason(message: unknown): string | undefined {
 
 function parseMode(value: string): VoiceMode | undefined {
 	return value === "all" || value === "assistant" || value === "yield" ? value : undefined;
+}
+
+function parseSubmitMode(value: string): VoiceSubmitMode | undefined {
+	return value === "auto" || value === "review" ? value : undefined;
+}
+
+function appendDictation(base: string, speech: string): string {
+	if (!speech) return base;
+	if (!base) return speech;
+	return `${base}${/\s$/.test(base) ? "" : " "}${speech}`;
 }
 
 export default async function (pi: ExtensionAPI) {
@@ -145,10 +157,13 @@ export default async function (pi: ExtensionAPI) {
 				setInputProgress("♬ Transcribing locally…");
 				break;
 			case "transcript":
-				clearInputProgress();
-				state = "idle";
+				if (!event.preview) {
+					clearInputProgress();
+					state = "idle";
+				}
 				break;
 			case "error":
+				if (event.preview) break;
 				state = "error";
 				if (event.message !== lastError) {
 					lastError = event.message;
@@ -199,33 +214,72 @@ export default async function (pi: ExtensionAPI) {
 		vocalizer.clear();
 		state = "listening";
 		refreshStatus();
+		const editorBase = ctx.ui.getEditorText();
+		let committedSpeech = "";
+		let partialSpeech = "";
+		const renderPreview = (): void => {
+			const speech = [committedSpeech, partialSpeech].filter(Boolean).join(" ");
+			ctx.ui.setEditorText(appendDictation(editorBase, speech));
+		};
+		const live = new LiveTranscriptionSession(audio => vocalizer.transcribePcm(audio), {
+			onPartial: text => {
+				partialSpeech = text;
+				renderPreview();
+			},
+			onSegment: text => {
+				committedSpeech = [committedSpeech, text].filter(Boolean).join(" ");
+				partialSpeech = "";
+				renderPreview();
+			},
+		});
 		try {
-			const capture = await phoneInput.capture(config.input, progress => {
-				const elapsed = progress.elapsedSeconds.toFixed(1);
-				setInputProgress(
-					progress.speechDetected
-						? `🎙 Listening: ${elapsed}s — stops after silence; Alt+M to finish`
-						: `🎙 Waiting for speech: ${elapsed}s — Alt+M to finish`,
-				);
+			const capture = await phoneInput.capture(config.input, {
+				onProgress: progress => {
+					const elapsed = progress.elapsedSeconds.toFixed(1);
+					setInputProgress(
+						progress.speechDetected
+							? `🎙 Live dictation: ${elapsed}s — stops after silence; Alt+M to finish`
+							: `🎙 Waiting for speech: ${elapsed}s — Alt+M to finish`,
+					);
+				},
+				onAudio: audio => live.push(audio),
 			});
 			inputPhase = "transcribing";
 			if (inputProgressTimer) clearInterval(inputProgressTimer);
 			inputProgressTimer = null;
-			setInputProgress(capture.type === "audio" ? "♬ Phone audio received; transcribing locally…" : "♬ Speech received…");
-			if (talkEpoch !== contextEpoch || !activeContext) return;
+			setInputProgress("♬ Finalizing transcript…");
+			if (talkEpoch !== contextEpoch || !activeContext) {
+				live.cancel();
+				return;
+			}
+			let liveTranscript = "";
+			try {
+				liveTranscript = (await live.finish()).trim();
+			} catch {
+				// The final whole-utterance pass below remains available as a fallback.
+			}
 			const transcript =
-				capture.type === "audio" ? (await vocalizer.transcribe(capture.data)).trim() : capture.data.trim();
+				capture.type === "audio" ? (await vocalizer.transcribe(capture.data)).trim() || liveTranscript : capture.data.trim();
 			if (talkEpoch !== contextEpoch || !activeContext) return;
 			clearInputProgress();
 			state = "idle";
 			refreshStatus();
 			if (!transcript) {
+				ctx.ui.setEditorText(editorBase);
 				ctx.ui.notify("No speech recognized", "warning");
 				return;
 			}
-			if (ctx.isIdle()) pi.sendUserMessage(transcript);
-			else pi.sendUserMessage(transcript, { deliverAs: "steer" });
+			const prompt = appendDictation(editorBase, transcript);
+			if (config.submitMode === "review") {
+				ctx.ui.setEditorText(prompt);
+				ctx.ui.notify("Dictation ready to review — press Enter to submit", "info");
+				return;
+			}
+			ctx.ui.setEditorText("");
+			if (ctx.isIdle()) pi.sendUserMessage(prompt);
+			else pi.sendUserMessage(prompt, { deliverAs: "steer" });
 		} catch (error) {
+			live.cancel();
 			if (talkEpoch !== contextEpoch || !activeContext) return;
 			clearInputProgress();
 			state = "error";
@@ -317,6 +371,7 @@ export default async function (pi: ExtensionAPI) {
 				"output",
 				"input",
 				"shortcut",
+				"submit",
 			];
 			const parts = prefix.trimStart().split(/\s+/);
 			if (parts.length <= 1) {
@@ -343,6 +398,11 @@ export default async function (pi: ExtensionAPI) {
 						description: "Stream raw audio through an SSH reverse tunnel",
 					},
 				];
+			}
+			if (parts[0] === "submit") {
+				return ["review", "auto"]
+					.filter(value => value.startsWith(parts[1] ?? ""))
+					.map(value => ({ value: `submit ${value}`, label: value }));
 			}
 			if (parts[0] === "shortcut") {
 				return ["alt+m", "ctrl+shift+m", "f8", "disabled"]
@@ -449,6 +509,16 @@ export default async function (pi: ExtensionAPI) {
 					ctx.ui.notify(`Voice output set to ${output}`, "info");
 					return;
 				}
+				case "submit": {
+					const submitMode = parseSubmitMode(value.toLowerCase());
+					if (!submitMode) {
+						ctx.ui.notify("Usage: /voice submit review|auto", "error");
+						return;
+					}
+					await updateConfig({ ...config, submitMode });
+					ctx.ui.notify(`Voice dictation submit mode set to ${submitMode}`, "info");
+					return;
+				}
 				case "shortcut": {
 					const shortcut = normalizeTalkShortcut(value);
 					if (!shortcut) {
@@ -486,13 +556,13 @@ export default async function (pi: ExtensionAPI) {
 				case "status":
 				case "":
 					ctx.ui.notify(
-						`Voice ${config.enabled ? "on" : "off"}; mode=${config.mode}; voice=${config.voice}; speed=${config.speed}; output=${config.output}; input=${config.input}; shortcut=${config.talkShortcut}`,
+						`Voice ${config.enabled ? "on" : "off"}; mode=${config.mode}; voice=${config.voice}; speed=${config.speed}; output=${config.output}; input=${config.input}; shortcut=${config.talkShortcut}; submit=${config.submitMode}`,
 						"info",
 					);
 					return;
 				default:
 					ctx.ui.notify(
-						"Usage: /voice [on|off|toggle|status|stop|setup|test|talk|mode|voice|speed|output|input|shortcut]",
+						"Usage: /voice [on|off|toggle|status|stop|setup|test|talk|mode|voice|speed|output|input|shortcut|submit]",
 						"error",
 					);
 			}

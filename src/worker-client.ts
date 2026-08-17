@@ -9,9 +9,9 @@ export type WorkerEvent =
 	| { type: "ready"; requestId?: string }
 	| { type: "speaking" }
 	| { type: "transcribing" }
-	| { type: "transcript"; text: string; requestId: string }
+	| { type: "transcript"; text: string; requestId: string; preview?: boolean }
 	| { type: "idle" }
-	| { type: "error"; message: string; requestId?: string };
+	| { type: "error"; message: string; requestId?: string; preview?: boolean };
 
 type PendingPreload = {
 	resolve: () => void;
@@ -57,6 +57,15 @@ export class VoiceWorkerClient {
 	}
 
 	transcribe(audio: Buffer): Promise<string> {
+		return this.#requestTranscription({ type: "transcribe", audio: audio.toString("base64") });
+	}
+
+	transcribePcm(audio: Float32Array): Promise<string> {
+		const bytes = Buffer.from(audio.buffer, audio.byteOffset, audio.byteLength);
+		return this.#requestTranscription({ type: "transcribe-pcm", audio: bytes.toString("base64") });
+	}
+
+	#requestTranscription(message: { type: "transcribe" | "transcribe-pcm"; audio: string }): Promise<string> {
 		const requestId = String(++this.#nextRequestId);
 		const { promise, resolve, reject } = Promise.withResolvers<string>();
 		const timer = setTimeout(() => {
@@ -65,7 +74,7 @@ export class VoiceWorkerClient {
 		}, 10 * 60_000);
 		timer.unref?.();
 		this.#pendingTranscriptions.set(requestId, { resolve, reject, timer });
-		this.#send({ type: "transcribe", requestId, audio: audio.toString("base64") });
+		this.#send({ ...message, requestId });
 		return promise;
 	}
 

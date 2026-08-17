@@ -22,6 +22,11 @@ export type PhoneCaptureProgress = {
 	speechDetected: boolean;
 };
 
+export interface PhoneCaptureOptions {
+	onProgress?(progress: PhoneCaptureProgress): void;
+	onAudio?(audio: Float32Array): void;
+}
+
 class LiveVoiceDetector {
 	#child: ChildProcessWithoutNullStreams;
 	#carry = Buffer.alloc(0);
@@ -34,7 +39,7 @@ class LiveVoiceDetector {
 	#stopRequested = false;
 	#lastProgressAt = 0;
 
-	constructor(onStop: () => void, onProgress?: (progress: PhoneCaptureProgress) => void) {
+	constructor(onStop: () => void, options: PhoneCaptureOptions = {}) {
 		this.#child = spawn(
 			"ffmpeg",
 			["-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-f", "f32le", "-ac", "1", "-ar", String(SAMPLE_RATE), "pipe:1"],
@@ -43,8 +48,10 @@ class LiveVoiceDetector {
 		this.#child.stdout.on("data", chunk => {
 			const bytes = this.#carry.length === 0 ? chunk : Buffer.concat([this.#carry, chunk]);
 			const completeBytes = bytes.length - (bytes.length % Float32Array.BYTES_PER_ELEMENT);
+			const samples = new Float32Array(completeBytes / Float32Array.BYTES_PER_ELEMENT);
 			for (let offset = 0; offset < completeBytes; offset += Float32Array.BYTES_PER_ELEMENT) {
 				const sample = bytes.readFloatLE(offset);
+				samples[offset / Float32Array.BYTES_PER_ELEMENT] = sample;
 				this.#sumSquares += sample * sample;
 				this.#frameSamples += 1;
 				this.#totalSamples += 1;
@@ -61,9 +68,9 @@ class LiveVoiceDetector {
 				const elapsedSeconds = this.#totalSamples / SAMPLE_RATE;
 				const silenceSeconds = (this.#totalSamples - this.#lastSpeechSample) / SAMPLE_RATE;
 				const now = Date.now();
-				if (onProgress && now - this.#lastProgressAt >= 250) {
+				if (options.onProgress && now - this.#lastProgressAt >= 250) {
 					this.#lastProgressAt = now;
-					onProgress({ elapsedSeconds, level, speechDetected: this.#speechDetected });
+					options.onProgress({ elapsedSeconds, level, speechDetected: this.#speechDetected });
 				}
 				if (
 					!this.#stopRequested &&
@@ -76,6 +83,7 @@ class LiveVoiceDetector {
 				this.#sumSquares = 0;
 				this.#frameSamples = 0;
 			}
+			if (samples.length > 0) options.onAudio?.(samples);
 			this.#carry = bytes.subarray(completeBytes);
 		});
 		// Avoid unhandled EPIPE when the decoder exits during cancellation.
@@ -138,7 +146,7 @@ export class PhoneInputClient {
 		});
 	}
 
-	capture(endpoint: string, onProgress?: (progress: PhoneCaptureProgress) => void): Promise<PhoneCapture> {
+	capture(endpoint: string, options: PhoneCaptureOptions = {}): Promise<PhoneCapture> {
 		this.cancel();
 		const { host, port } = parseEndpoint(endpoint);
 		const socket = net.createConnection({ host, port });
@@ -203,7 +211,7 @@ export class PhoneInputClient {
 					streamMode = true;
 					detector = new LiveVoiceDetector(
 						() => void this.stop(endpoint).catch(error => finish(error)),
-						onProgress,
+						options,
 					);
 					acceptAudio(remainder);
 					return;

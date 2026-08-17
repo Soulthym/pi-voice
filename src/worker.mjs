@@ -119,12 +119,30 @@ function decodePhoneAudio(encoded) {
 	});
 }
 
-async function transcribePhoneAudio(encoded) {
-	send({ type: "transcribing" });
-	const [audio, transcriber] = await Promise.all([decodePhoneAudio(encoded), getTranscriber()]);
-	const result = await transcriber(audio);
+async function runTranscriber(audio) {
+	const transcriber = await getTranscriber();
+	const result = await transcriber(audio, {
+		chunk_length_s: 30,
+		stride_length_s: 5,
+		return_timestamps: false,
+	});
 	const first = Array.isArray(result) ? result[0] : result;
 	return typeof first?.text === "string" ? first.text.trim() : "";
+}
+
+async function transcribePhoneAudio(encoded) {
+	send({ type: "transcribing" });
+	const audio = await decodePhoneAudio(encoded);
+	return runTranscriber(audio);
+}
+
+async function transcribePcmAudio(encoded) {
+	const bytes = Buffer.from(encoded, "base64");
+	const audio = new Float32Array(Math.floor(bytes.length / Float32Array.BYTES_PER_ELEMENT));
+	for (let index = 0; index < audio.length; index += 1) {
+		audio[index] = bytes.readFloatLE(index * Float32Array.BYTES_PER_ELEMENT);
+	}
+	return runTranscriber(audio);
 }
 
 function executable(name) {
@@ -293,6 +311,20 @@ async function closePlayer(utterance) {
 }
 
 async function runOperation(operation) {
+	if (operation.type === "transcribe-pcm") {
+		try {
+			const text = await transcribePcmAudio(operation.audio);
+			send({ type: "transcript", requestId: operation.requestId, text, preview: true });
+		} catch (error) {
+			send({
+				type: "error",
+				requestId: operation.requestId,
+				message: error instanceof Error ? error.message : String(error),
+				preview: true,
+			});
+		}
+		return;
+	}
 	if (operation.type === "transcribe") {
 		try {
 			const text = await transcribePhoneAudio(operation.audio);
@@ -355,7 +387,10 @@ function enqueue(operation) {
 function cancel() {
 	epoch += 1;
 	queue = queue
-		.filter(operation => operation.type === "preload" || operation.type === "transcribe")
+		.filter(
+			operation =>
+				operation.type === "preload" || operation.type === "transcribe" || operation.type === "transcribe-pcm",
+		)
 		.map(operation => ({ ...operation, epoch }));
 	stopPlayer();
 	send({ type: "idle" });
@@ -388,6 +423,9 @@ lines.on("line", line => {
 			break;
 		case "transcribe":
 			enqueue({ type: "transcribe", requestId: message.requestId, audio: message.audio });
+			break;
+		case "transcribe-pcm":
+			enqueue({ type: "transcribe-pcm", requestId: message.requestId, audio: message.audio });
 			break;
 		case "cancel":
 			cancel();
