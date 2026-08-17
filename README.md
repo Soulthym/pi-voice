@@ -58,7 +58,15 @@ pkg update
 pkg install git openssh mpv socat termux-api
 git clone https://github.com/Soulthym/pi-voice.git
 cd pi-voice
-install -m755 termux/pi-voice-* "$PREFIX/bin/"
+mkdir -p "$HOME/.local/bin"
+install -m755 termux/pi-voice-* "$HOME/.local/bin/"
+```
+
+Ensure `~/.local/bin` is included in Termux's `PATH`. For Bash:
+
+```bash
+grep -qxF 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.bashrc" || echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
 Grant microphone permission with a short test recording:
