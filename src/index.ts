@@ -13,6 +13,7 @@ import { isVoice, VOICES } from "./voices.js";
 import type { WorkerEvent } from "./worker-client.js";
 
 type VoiceState = "downloading" | "error" | "idle" | "listening" | "loading" | "speaking";
+type InputPhase = "idle" | "recording" | "transcribing";
 
 function assistantText(message: unknown): string {
 	if (!message || typeof message !== "object" || !("role" in message) || message.role !== "assistant") return "";
@@ -48,6 +49,7 @@ export default async function (pi: ExtensionAPI) {
 	let downloadPercent: number | undefined;
 	let lastError = "";
 	let inputInProgress = false;
+	let inputPhase: InputPhase = "idle";
 	let inputProgressTimer: NodeJS.Timeout | null = null;
 	let inputStartedAt = 0;
 	let contextEpoch = 0;
@@ -58,6 +60,7 @@ export default async function (pi: ExtensionAPI) {
 
 	const clearInputProgress = (): void => {
 		inputInProgress = false;
+		inputPhase = "idle";
 		if (inputProgressTimer) clearInterval(inputProgressTimer);
 		inputProgressTimer = null;
 		setInputProgress(undefined);
@@ -65,12 +68,11 @@ export default async function (pi: ExtensionAPI) {
 
 	const beginInputProgress = (): void => {
 		inputInProgress = true;
+		inputPhase = "recording";
 		inputStartedAt = Date.now();
 		const update = (): void => {
 			const elapsed = Math.floor((Date.now() - inputStartedAt) / 1000);
-			setInputProgress(
-				elapsed < 8 ? `🎙 Phone recording: ${elapsed + 1}/8 seconds` : "🎙 Finalizing phone recording…",
-			);
+			setInputProgress(`🎙 Listening: ${elapsed}s — stops on silence; Alt+M to finish`);
 		};
 		update();
 		inputProgressTimer = setInterval(update, 1_000);
@@ -135,6 +137,7 @@ export default async function (pi: ExtensionAPI) {
 				state = "speaking";
 				break;
 			case "transcribing":
+				inputPhase = "transcribing";
 				state = "listening";
 				if (inputProgressTimer) clearInterval(inputProgressTimer);
 				inputProgressTimer = null;
@@ -178,12 +181,33 @@ export default async function (pi: ExtensionAPI) {
 			ctx.ui.notify("Phone microphone is disabled. Configure /voice input tcp://127.0.0.1:8766", "warning");
 			return;
 		}
+		if (inputPhase === "recording") {
+			setInputProgress("🎙 Stopping phone recording…");
+			try {
+				await phoneInput.stop(config.input);
+			} catch (error) {
+				ctx.ui.notify(`Phone microphone: ${error instanceof Error ? error.message : String(error)}`, "error");
+			}
+			return;
+		}
+		if (inputPhase === "transcribing") {
+			ctx.ui.notify("The previous phone recording is still being transcribed", "info");
+			return;
+		}
 		beginInputProgress();
 		vocalizer.clear();
 		state = "listening";
 		refreshStatus();
 		try {
-			const capture = await phoneInput.capture(config.input);
+			const capture = await phoneInput.capture(config.input, progress => {
+				const elapsed = progress.elapsedSeconds.toFixed(1);
+				setInputProgress(
+					progress.speechDetected
+						? `🎙 Listening: ${elapsed}s — stops after silence; Alt+M to finish`
+						: `🎙 Waiting for speech: ${elapsed}s — Alt+M to finish`,
+				);
+			});
+			inputPhase = "transcribing";
 			if (inputProgressTimer) clearInterval(inputProgressTimer);
 			inputProgressTimer = null;
 			setInputProgress(capture.type === "audio" ? "♬ Phone audio received; transcribing locally…" : "♬ Speech received…");
@@ -266,8 +290,10 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	pi.registerShortcut("alt+m", {
-		description: "Record a prompt with the phone microphone",
-		handler: async ctx => talk(ctx),
+		description: "Start or stop a prompt with the phone microphone",
+		handler: ctx => {
+			void talk(ctx);
+		},
 	});
 
 	pi.registerCommand("voice", {
@@ -343,12 +369,17 @@ export default async function (pi: ExtensionAPI) {
 					return;
 				case "stop":
 					vocalizer.clear();
-					phoneInput.cancel();
-					state = "idle";
+					if (inputPhase === "recording") {
+						setInputProgress("🎙 Stopping phone recording…");
+						void phoneInput.stop(config.input).catch(error =>
+							ctx.ui.notify(`Phone microphone: ${error instanceof Error ? error.message : String(error)}`, "error"),
+						);
+					}
+					state = inputInProgress ? "listening" : "idle";
 					refreshStatus();
 					return;
 				case "talk":
-					await talk(ctx);
+					void talk(ctx);
 					return;
 				case "setup":
 					ctx.ui.notify("Preparing Kokoro-82M (the first run downloads about 100 MB)…", "info");

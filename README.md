@@ -3,7 +3,7 @@
 A bidirectional phone voice-mode extension for the [Pi coding agent](https://github.com/earendil-works/pi), modeled after Oh My Pi's Kokoro vocalizer.
 
 - **Desktop → phone:** Pi runs Kokoro-82M locally and streams assistant speech through an SSH reverse tunnel to `mpv` in Termux.
-- **Phone → desktop:** `Alt+M` records eight seconds from the Termux microphone, sends the audio through a second reverse tunnel, transcribes it locally with Whisper, and submits the result to Pi.
+- **Phone → desktop:** `Alt+M` streams Ogg/Opus from the Termux microphone through a second reverse tunnel. Desktop-side voice activity detection stops on natural silence, Whisper transcribes locally, and Pi submits the result.
 
 Both tunnel endpoints bind only to loopback. Audio and transcripts remain inside the encrypted SSH connection.
 
@@ -16,6 +16,8 @@ Both tunnel endpoints bind only to loopback. Audio and transcripts remain inside
 - Starts with a short first segment, then synthesizes bounded sentence/clause segments.
 - Cancels queued speech when you send another prompt.
 - Supports server-local playback or raw PCM over TCP/SSH.
+- Streams phone microphone audio in near real time and stops automatically after natural silence.
+- Supports a second `Alt+M` as a manual stop for long pauses or noisy environments.
 - Shows phone recording and local transcription progress in Pi.
 
 Kokoro setup downloads approximately 100 MB from Hugging Face. The first microphone transcription downloads approximately 150 MB of Whisper weights. Later synthesis and transcription are local.
@@ -78,7 +80,8 @@ If SSH reports that remote forwarding failed, ensure `AllowTcpForwarding yes` is
 
 ## Usage
 
-- Press **Alt+M** in Pi to record an eight-second prompt on the phone. Pi displays recording/transcription progress and submits the locally recognized text.
+- Press **Alt+M** in Pi and speak for as long as needed. Recording stops automatically after about 1.35 seconds of silence.
+- Press **Alt+M** again to stop manually. Pi displays streaming/transcription progress and submits the locally recognized text.
 - Assistant speech automatically plays through the phone.
 - `Ctrl+Shift+V` toggles spoken output.
 
@@ -110,6 +113,6 @@ Modes:
 - `PI_VOICE_PLAYER`: alternate `pw-play`-compatible local player executable
 - `PI_VOICE_AUDIO_PORT`: phone audio-listener port (default `8765`)
 - `PI_VOICE_CONTROL_PORT`: phone microphone-control port (default `8766`)
-- `PI_VOICE_RECORD_SECONDS`: phone recording duration (default `8`)
+- `PI_VOICE_MAX_RECORD_SECONDS`: safety limit for one phone recording (default `120`)
 
 See `THIRD_PARTY_NOTICES.md` for attribution and model/runtime licensing.

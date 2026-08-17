@@ -1,7 +1,13 @@
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import * as net from "node:net";
 
 const RECORDING_TIMEOUT_MS = 2 * 60_000;
-const MAX_RESPONSE_CHARS = 12_000_000;
+const MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
+const SAMPLE_RATE = 16_000;
+const FRAME_SAMPLES = 320;
+const SPEECH_THRESHOLD = 0.012;
+const SILENCE_SECONDS = 1.35;
+const NO_SPEECH_TIMEOUT_SECONDS = 12;
 
 function parseEndpoint(endpoint: string): { host: string; port: number } {
 	const url = new URL(endpoint);
@@ -10,52 +16,201 @@ function parseEndpoint(endpoint: string): { host: string; port: number } {
 }
 
 export type PhoneCapture = { type: "audio"; data: Buffer } | { type: "text"; data: string };
+export type PhoneCaptureProgress = {
+	elapsedSeconds: number;
+	level: number;
+	speechDetected: boolean;
+};
+
+class LiveVoiceDetector {
+	#child: ChildProcessWithoutNullStreams;
+	#carry = Buffer.alloc(0);
+	#sumSquares = 0;
+	#frameSamples = 0;
+	#totalSamples = 0;
+	#lastSpeechSample = 0;
+	#consecutiveSpeechFrames = 0;
+	#speechDetected = false;
+	#stopRequested = false;
+	#lastProgressAt = 0;
+
+	constructor(onStop: () => void, onProgress?: (progress: PhoneCaptureProgress) => void) {
+		this.#child = spawn(
+			"ffmpeg",
+			["-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-f", "f32le", "-ac", "1", "-ar", String(SAMPLE_RATE), "pipe:1"],
+			{ stdio: ["pipe", "pipe", "pipe"] },
+		);
+		this.#child.stdout.on("data", chunk => {
+			const bytes = this.#carry.length === 0 ? chunk : Buffer.concat([this.#carry, chunk]);
+			const completeBytes = bytes.length - (bytes.length % Float32Array.BYTES_PER_ELEMENT);
+			for (let offset = 0; offset < completeBytes; offset += Float32Array.BYTES_PER_ELEMENT) {
+				const sample = bytes.readFloatLE(offset);
+				this.#sumSquares += sample * sample;
+				this.#frameSamples += 1;
+				this.#totalSamples += 1;
+				if (this.#frameSamples !== FRAME_SAMPLES) continue;
+
+				const level = Math.sqrt(this.#sumSquares / this.#frameSamples);
+				if (level >= SPEECH_THRESHOLD) {
+					this.#consecutiveSpeechFrames += 1;
+					this.#lastSpeechSample = this.#totalSamples;
+					if (this.#consecutiveSpeechFrames >= 3) this.#speechDetected = true;
+				} else {
+					this.#consecutiveSpeechFrames = 0;
+				}
+				const elapsedSeconds = this.#totalSamples / SAMPLE_RATE;
+				const silenceSeconds = (this.#totalSamples - this.#lastSpeechSample) / SAMPLE_RATE;
+				const now = Date.now();
+				if (onProgress && now - this.#lastProgressAt >= 250) {
+					this.#lastProgressAt = now;
+					onProgress({ elapsedSeconds, level, speechDetected: this.#speechDetected });
+				}
+				if (
+					!this.#stopRequested &&
+					((this.#speechDetected && silenceSeconds >= SILENCE_SECONDS) ||
+						(!this.#speechDetected && elapsedSeconds >= NO_SPEECH_TIMEOUT_SECONDS))
+				) {
+					this.#stopRequested = true;
+					onStop();
+				}
+				this.#sumSquares = 0;
+				this.#frameSamples = 0;
+			}
+			this.#carry = bytes.subarray(completeBytes);
+		});
+		// Avoid unhandled EPIPE when the decoder exits during cancellation.
+		this.#child.stdin.on("error", () => {});
+	}
+
+	write(chunk: Buffer): void {
+		if (!this.#child.stdin.destroyed) this.#child.stdin.write(chunk);
+	}
+
+	close(): void {
+		if (!this.#child.stdin.destroyed) this.#child.stdin.end();
+		const timer = setTimeout(() => this.#child.kill("SIGKILL"), 1_000);
+		timer.unref?.();
+		this.#child.once("exit", () => clearTimeout(timer));
+	}
+}
 
 export class PhoneInputClient {
 	#socket: net.Socket | null = null;
+	#activeEndpoint: string | null = null;
 
 	cancel(): void {
 		this.#socket?.destroy();
 		this.#socket = null;
+		if (this.#activeEndpoint) void this.stop(this.#activeEndpoint).catch(() => {});
 	}
 
-	capture(endpoint: string): Promise<PhoneCapture> {
+	stop(endpoint: string): Promise<void> {
+		const { host, port } = parseEndpoint(endpoint);
+		return new Promise<void>((resolve, reject) => {
+			const socket = net.createConnection({ host, port });
+			let response = "";
+			let settled = false;
+			const finish = (error?: Error): void => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				socket.destroy();
+				if (error) reject(error);
+				else resolve();
+			};
+			const timer = setTimeout(() => finish(new Error("Phone microphone stop timed out")), 10_000);
+			timer.unref?.();
+			socket.setEncoding("utf8");
+			socket.on("connect", () => socket.write("stop\n"));
+			socket.on("data", chunk => {
+				response += chunk;
+				const newline = response.indexOf("\n");
+				if (newline === -1) return;
+				const line = response.slice(0, newline).trim();
+				const [status, payload = ""] = line.split(" ", 2);
+				if (status === "ok") finish();
+				else finish(new Error(Buffer.from(payload, "base64").toString("utf8") || "Unable to stop phone microphone"));
+			});
+			socket.on("error", finish);
+			socket.on("close", () => {
+				if (!settled) finish(new Error("Phone microphone stop connection closed"));
+			});
+		});
+	}
+
+	capture(endpoint: string, onProgress?: (progress: PhoneCaptureProgress) => void): Promise<PhoneCapture> {
 		this.cancel();
 		const { host, port } = parseEndpoint(endpoint);
 		const socket = net.createConnection({ host, port });
 		this.#socket = socket;
-		socket.setEncoding("utf8");
+		this.#activeEndpoint = endpoint;
 		socket.setNoDelay(true);
 
 		return new Promise<PhoneCapture>((resolve, reject) => {
 			let settled = false;
-			let buffer = "";
+			let headerBuffer = Buffer.alloc(0);
+			let streamMode = false;
+			let streamBytes = 0;
+			const audioChunks: Buffer[] = [];
+			let detector: LiveVoiceDetector | null = null;
+
 			const finish = (error?: Error, capture?: PhoneCapture): void => {
 				if (settled) return;
 				settled = true;
 				clearTimeout(timer);
+				detector?.close();
 				if (this.#socket === socket) this.#socket = null;
+				if (this.#activeEndpoint === endpoint) this.#activeEndpoint = null;
 				socket.destroy();
 				if (error) reject(error);
 				else if (capture) resolve(capture);
 				else reject(new Error("Phone returned no capture"));
 			};
-			const timer = setTimeout(() => finish(new Error("Phone microphone timed out")), RECORDING_TIMEOUT_MS);
+			const timer = setTimeout(() => {
+				void this.stop(endpoint).catch(() => {});
+				finish(new Error("Phone microphone timed out"));
+			}, RECORDING_TIMEOUT_MS);
 			timer.unref?.();
 
+			const acceptAudio = (chunk: Buffer): void => {
+				if (chunk.length === 0) return;
+				streamBytes += chunk.length;
+				if (streamBytes > MAX_RESPONSE_BYTES) {
+					void this.stop(endpoint).catch(() => {});
+					finish(new Error("Phone microphone stream exceeded 32 MB"));
+					return;
+				}
+				audioChunks.push(chunk);
+				detector?.write(chunk);
+			};
+
 			socket.on("connect", () => socket.write("record\n"));
-			socket.on("data", chunk => {
-				buffer += chunk;
-				if (buffer.length > MAX_RESPONSE_CHARS) {
+			socket.on("data", (raw: Buffer) => {
+				if (streamMode) {
+					acceptAudio(raw);
+					return;
+				}
+				headerBuffer = Buffer.concat([headerBuffer, raw]);
+				if (headerBuffer.length > MAX_RESPONSE_BYTES) {
 					finish(new Error("Phone microphone response was too large"));
 					return;
 				}
-				const newline = buffer.indexOf("\n");
+				const newline = headerBuffer.indexOf(0x0a);
 				if (newline === -1) return;
-				const response = buffer.slice(0, newline).trim();
-				const separator = response.indexOf(" ");
-				const status = separator === -1 ? response : response.slice(0, separator);
-				const payload = separator === -1 ? "" : response.slice(separator + 1);
+				const header = headerBuffer.subarray(0, newline).toString("utf8").trim();
+				const remainder = headerBuffer.subarray(newline + 1);
+				if (header === "stream") {
+					streamMode = true;
+					detector = new LiveVoiceDetector(
+						() => void this.stop(endpoint).catch(error => finish(error)),
+						onProgress,
+					);
+					acceptAudio(remainder);
+					return;
+				}
+				const separator = header.indexOf(" ");
+				const status = separator === -1 ? header : header.slice(0, separator);
+				const payload = separator === -1 ? "" : header.slice(separator + 1);
 				if (status === "audio") {
 					const audio = Buffer.from(payload, "base64");
 					if (audio.length === 0) finish(new Error("Phone returned an empty recording"));
@@ -68,7 +223,12 @@ export class PhoneInputClient {
 			});
 			socket.on("error", error => finish(error));
 			socket.on("close", () => {
-				if (!settled) finish(new Error("Phone microphone connection closed before returning audio"));
+				if (settled) return;
+				if (streamMode && streamBytes > 0) {
+					finish(undefined, { type: "audio", data: Buffer.concat(audioChunks, streamBytes) });
+				} else {
+					finish(new Error("Phone microphone connection closed before returning audio"));
+				}
 			});
 		});
 	}
