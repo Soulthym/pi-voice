@@ -1,0 +1,42 @@
+{
+  "name": "pi-voice",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Bidirectional Kokoro and Whisper phone voice mode for the Pi coding agent",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi-coding-agent",
+    "kokoro",
+    "text-to-speech",
+    "speech-to-text",
+    "termux",
+    "voice"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --import tsx --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "3.8.1",
+    "kokoro-js": "1.2.1"
+  },
+  "overrides": {
+    "onnxruntime-node": "1.26.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.2",
+    "@types/node": "26.0.0",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3"
+  }
+}

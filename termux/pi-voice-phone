@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+AUDIO_PORT=${PI_VOICE_AUDIO_PORT:-8765}
+CONTROL_PORT=${PI_VOICE_CONTROL_PORT:-8766}
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+
+for command in socat mpv; do
+  if ! command -v "$command" >/dev/null 2>&1; then
+    printf 'Missing %s. Run: pkg install socat mpv termux-api\n' "$command" >&2
+    exit 1
+  fi
+done
+
+cleanup() {
+  trap - EXIT INT TERM
+  kill "${audio_pid:-}" "${control_pid:-}" 2>/dev/null || true
+  wait "${audio_pid:-}" "${control_pid:-}" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+# Kokoro emits mono float32 PCM at 24 kHz. Each connection is one utterance;
+# mpv starts immediately and exits after the server closes the stream.
+socat -u \
+  "TCP4-LISTEN:${AUDIO_PORT},bind=127.0.0.1,reuseaddr,fork" \
+  EXEC:"mpv --really-quiet --no-video --cache=no --demuxer=rawaudio --demuxer-rawaudio-format=floatle --demuxer-rawaudio-rate=24000 --demuxer-rawaudio-channels=mono -" &
+audio_pid=$!
+
+# A server-side Alt+M or /voice talk opens this control channel. The session
+# invokes Android speech recognition and returns the transcript as base64.
+socat \
+  "TCP4-LISTEN:${CONTROL_PORT},bind=127.0.0.1,reuseaddr,fork" \
+  EXEC:"${SCRIPT_DIR}/pi-voice-stt-session" &
+control_pid=$!
+
+printf 'Phone voice bridge ready: audio=%s microphone=%s\n' "$AUDIO_PORT" "$CONTROL_PORT" >&2
+wait -n "$audio_pid" "$control_pid"

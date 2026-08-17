@@ -1,0 +1,8 @@
+{
+  "enabled": true,
+  "mode": "assistant",
+  "voice": "af_heart",
+  "speed": 1,
+  "output": "tcp://127.0.0.1:8765",
+  "input": "tcp://127.0.0.1:8766"
+}

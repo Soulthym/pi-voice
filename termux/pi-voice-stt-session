@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+set -u
+
+IFS= read -r command || exit 1
+if [[ "$command" != "record" ]]; then
+  message="Unsupported phone voice command: $command"
+  printf 'error %s\n' "$(printf '%s' "$message" | base64 | tr -d '\n')"
+  exit 0
+fi
+
+if ! command -v termux-microphone-record >/dev/null 2>&1; then
+  message="termux-microphone-record is unavailable; install the Termux:API app and run pkg install termux-api"
+  printf 'error %s\n' "$(printf '%s' "$message" | base64 | tr -d '\n')"
+  exit 0
+fi
+
+record_seconds=${PI_VOICE_RECORD_SECONDS:-8}
+recording="${TMPDIR:-/data/data/com.termux/files/usr/tmp}/pi-voice-recording-${BASHPID}.m4a"
+rm -f "$recording"
+
+# On some Android 15 builds the Termux:API callback socket fails even though
+# recording starts correctly. Stop waiting for that callback after two seconds;
+# the Android recorder service continues until its own requested time limit.
+timeout 2s termux-microphone-record \
+  -f "$recording" \
+  -l "$record_seconds" \
+  -e aac \
+  -r 16000 \
+  -c 1 >/dev/null 2>&1
+start_status=$?
+if (( start_status != 0 && start_status != 124 )); then
+  message="Unable to start the phone microphone (exit $start_status)"
+  printf 'error %s\n' "$(printf '%s' "$message" | base64 | tr -d '\n')"
+  exit 0
+fi
+
+sleep "$record_seconds"
+if [[ ! -s "$recording" ]]; then
+  message="Phone microphone produced no audio file"
+  printf 'error %s\n' "$(printf '%s' "$message" | base64 | tr -d '\n')"
+  rm -f "$recording"
+  exit 0
+fi
+
+# MediaRecorder marks itself stopped before Android has necessarily written the
+# MP4/M4A index. Wait until ffmpeg can read the complete file before sending it.
+recording_ready=false
+for _ in {1..10}; do
+  if ffmpeg -v error -i "$recording" -f null - </dev/null >/dev/null 2>&1; then
+    recording_ready=true
+    break
+  fi
+  sleep 1
+done
+if [[ "$recording_ready" != true ]]; then
+  message="Android did not finish the phone recording in time"
+  printf 'error %s\n' "$(printf '%s' "$message" | base64 | tr -d '\n')"
+  rm -f "$recording"
+  exit 0
+fi
+
+printf 'audio '
+base64 < "$recording" | tr -d '\n'
+printf '\n'
+rm -f "$recording"

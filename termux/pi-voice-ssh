@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if (( $# == 0 )); then
+  printf 'Usage: pi-voice-ssh [ssh options] user@desktop [remote command]\n' >&2
+  exit 2
+fi
+
+AUDIO_PORT=${PI_VOICE_AUDIO_PORT:-8765}
+CONTROL_PORT=${PI_VOICE_CONTROL_PORT:-8766}
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+LOG_FILE=${TMPDIR:-/data/data/com.termux/files/usr/tmp}/pi-voice-phone.log
+
+"${SCRIPT_DIR}/pi-voice-phone" >"$LOG_FILE" 2>&1 &
+bridge_pid=$!
+cleanup() {
+  trap - EXIT INT TERM
+  kill "$bridge_pid" 2>/dev/null || true
+  wait "$bridge_pid" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+sleep 0.4
+if ! kill -0 "$bridge_pid" 2>/dev/null; then
+  cat "$LOG_FILE" >&2
+  exit 1
+fi
+
+ssh \
+  -o ExitOnForwardFailure=yes \
+  -o ServerAliveInterval=30 \
+  -R "127.0.0.1:${AUDIO_PORT}:127.0.0.1:${AUDIO_PORT}" \
+  -R "127.0.0.1:${CONTROL_PORT}:127.0.0.1:${CONTROL_PORT}" \
+  "$@"
