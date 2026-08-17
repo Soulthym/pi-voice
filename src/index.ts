@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
 	loadVoiceConfig,
+	normalizeTalkShortcut,
 	normalizeVoiceInput,
 	normalizeVoiceOutput,
 	saveVoiceConfig,
@@ -289,12 +290,14 @@ export default async function (pi: ExtensionAPI) {
 		handler: async ctx => toggle(ctx),
 	});
 
-	pi.registerShortcut("alt+m", {
-		description: "Start or stop a prompt with the phone microphone",
-		handler: ctx => {
-			void talk(ctx);
-		},
-	});
+	if (config.talkShortcut !== "disabled") {
+		pi.registerShortcut(config.talkShortcut, {
+			description: "Start or stop a prompt with the phone microphone",
+			handler: ctx => {
+				void talk(ctx);
+			},
+		});
+	}
 
 	pi.registerCommand("voice", {
 		description: "Control local Kokoro voice mode",
@@ -313,6 +316,7 @@ export default async function (pi: ExtensionAPI) {
 				"speed",
 				"output",
 				"input",
+				"shortcut",
 			];
 			const parts = prefix.trimStart().split(/\s+/);
 			if (parts.length <= 1) {
@@ -339,6 +343,11 @@ export default async function (pi: ExtensionAPI) {
 						description: "Stream raw audio through an SSH reverse tunnel",
 					},
 				];
+			}
+			if (parts[0] === "shortcut") {
+				return ["alt+m", "ctrl+shift+m", "f8", "disabled"]
+					.filter(value => value.startsWith(parts[1] ?? ""))
+					.map(value => ({ value: `shortcut ${value}`, label: value }));
 			}
 			if (parts[0] === "input") {
 				return [
@@ -440,6 +449,19 @@ export default async function (pi: ExtensionAPI) {
 					ctx.ui.notify(`Voice output set to ${output}`, "info");
 					return;
 				}
+				case "shortcut": {
+					const shortcut = normalizeTalkShortcut(value);
+					if (!shortcut) {
+						ctx.ui.notify("Usage: /voice shortcut <key|disabled> (for example alt+m, ctrl+shift+m, or f8)", "error");
+						return;
+					}
+					await updateConfig({ ...config, talkShortcut: shortcut });
+					ctx.ui.notify(
+						`Phone microphone shortcut set to ${shortcut}. Run /reload to apply it.`,
+						"info",
+					);
+					return;
+				}
 				case "input": {
 					const input = normalizeVoiceInput(value);
 					if (!input) {
@@ -464,13 +486,13 @@ export default async function (pi: ExtensionAPI) {
 				case "status":
 				case "":
 					ctx.ui.notify(
-						`Voice ${config.enabled ? "on" : "off"}; mode=${config.mode}; voice=${config.voice}; speed=${config.speed}; output=${config.output}; input=${config.input}`,
+						`Voice ${config.enabled ? "on" : "off"}; mode=${config.mode}; voice=${config.voice}; speed=${config.speed}; output=${config.output}; input=${config.input}; shortcut=${config.talkShortcut}`,
 						"info",
 					);
 					return;
 				default:
 					ctx.ui.notify(
-						"Usage: /voice [on|off|toggle|status|stop|setup|test|talk|mode|voice|speed|output|input]",
+						"Usage: /voice [on|off|toggle|status|stop|setup|test|talk|mode|voice|speed|output|input|shortcut]",
 						"error",
 					);
 			}

@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { KeyId } from "@earendil-works/pi-tui";
 
 export type VoiceMode = "all" | "assistant" | "yield";
 
@@ -13,6 +14,8 @@ export interface VoiceConfig {
 	output: string;
 	/** `disabled`, or the phone speech-to-text control endpoint reached through a second reverse tunnel. */
 	input: string;
+	/** Pi key identifier used to start/stop phone recording, or `disabled`. */
+	talkShortcut: KeyId | "disabled";
 }
 
 export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
@@ -22,6 +25,7 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
 	speed: 1,
 	output: "local",
 	input: "disabled",
+	talkShortcut: "alt+m",
 };
 
 export function getVoiceConfigPath(): string {
@@ -56,6 +60,60 @@ export function normalizeVoiceInput(value: unknown): string | undefined {
 	return value === "disabled" ? "disabled" : normalizeTcpEndpoint(value);
 }
 
+const MODIFIERS = new Set(["alt", "ctrl", "shift", "super"]);
+const BASE_KEYS = new Set([
+	..."abcdefghijklmnopqrstuvwxyz0123456789",
+	"escape",
+	"esc",
+	"enter",
+	"return",
+	"tab",
+	"space",
+	"backspace",
+	"delete",
+	"insert",
+	"clear",
+	"home",
+	"end",
+	"pageUp",
+	"pageDown",
+	"up",
+	"down",
+	"left",
+	"right",
+	...Array.from({ length: 12 }, (_, index) => `f${index + 1}`),
+	..."`-=[]\\;',./!@#$%^&*()_+|~{}:<>?",
+]);
+
+export function normalizeTalkShortcut(value: unknown): KeyId | "disabled" | undefined {
+	if (typeof value !== "string") return undefined;
+	const trimmed = value.trim();
+	if (trimmed.toLowerCase() === "disabled") return "disabled";
+	if (!trimmed) return undefined;
+
+	let parts: string[];
+	let base: string;
+	if (trimmed === "+") {
+		parts = [];
+		base = "+";
+	} else if (trimmed.endsWith("++")) {
+		parts = trimmed.slice(0, -2).split("+");
+		base = "+";
+	} else {
+		parts = trimmed.split("+");
+		base = parts.pop() ?? "";
+	}
+	parts = parts.map(part => part.toLowerCase());
+	const baseLower = base.toLowerCase();
+	if (baseLower === "pageup") base = "pageUp";
+	else if (baseLower === "pagedown") base = "pageDown";
+	else base = baseLower;
+	if (!BASE_KEYS.has(base) || parts.some(part => !MODIFIERS.has(part)) || new Set(parts).size !== parts.length) {
+		return undefined;
+	}
+	return [...parts, base].join("+") as KeyId;
+}
+
 export async function loadVoiceConfig(): Promise<VoiceConfig> {
 	try {
 		const parsed = JSON.parse(await fs.readFile(getVoiceConfigPath(), "utf8")) as Partial<VoiceConfig>;
@@ -69,6 +127,7 @@ export async function loadVoiceConfig(): Promise<VoiceConfig> {
 					: DEFAULT_VOICE_CONFIG.speed,
 			output: normalizeVoiceOutput(parsed.output) ?? DEFAULT_VOICE_CONFIG.output,
 			input: normalizeVoiceInput(parsed.input) ?? DEFAULT_VOICE_CONFIG.input,
+			talkShortcut: normalizeTalkShortcut(parsed.talkShortcut) ?? DEFAULT_VOICE_CONFIG.talkShortcut,
 		};
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return { ...DEFAULT_VOICE_CONFIG };

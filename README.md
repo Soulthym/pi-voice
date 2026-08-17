@@ -39,7 +39,8 @@ Configuration is stored in `~/.pi/agent/pi-voice.json`. For the bundled Termux b
   "voice": "af_heart",
   "speed": 1,
   "output": "tcp://127.0.0.1:8765",
-  "input": "tcp://127.0.0.1:8766"
+  "input": "tcp://127.0.0.1:8766",
+  "talkShortcut": "alt+m"
 }
 ```
 
@@ -80,8 +81,8 @@ If SSH reports that remote forwarding failed, ensure `AllowTcpForwarding yes` is
 
 ## Usage
 
-- Press **Alt+M** in Pi and speak for as long as needed. Recording stops automatically after about 1.35 seconds of silence.
-- Press **Alt+M** again to stop manually. Pi displays streaming/transcription progress and submits the locally recognized text.
+- Press the configured microphone shortcut (**Alt+M** by default) and speak for as long as needed. Recording stops automatically after about 1.35 seconds of silence.
+- Press the shortcut again to stop manually. Pi displays streaming/transcription progress and submits the locally recognized text.
 - Assistant speech automatically plays through the phone.
 - `Ctrl+Shift+V` toggles spoken output.
 
@@ -98,7 +99,10 @@ Commands:
 /voice speed <0.5..2>
 /voice output local|tcp://host:port
 /voice input disabled|tcp://host:port
+/voice shortcut <key|disabled>
 ```
+
+Shortcut names use Pi's key format, such as `alt+m`, `ctrl+shift+m`, or `f8`. Run `/reload` after changing the shortcut.
 
 Modes:
 
