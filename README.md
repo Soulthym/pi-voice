@@ -3,9 +3,9 @@
 A bidirectional phone voice-mode extension for the [Pi coding agent](https://github.com/earendil-works/pi), modeled after Oh My Pi's Kokoro vocalizer.
 
 - **Desktop → phone:** Pi runs Kokoro-82M locally and streams assistant speech through an SSH reverse tunnel to `mpv` in Termux.
-- **Phone → desktop:** `Alt+M` streams Ogg/Opus from the Termux microphone through a second reverse tunnel. Desktop-side voice activity detection stops on natural silence, Whisper transcribes locally, and Pi submits the result.
+- **Phone → desktop:** The configured shortcut streams Ogg/Opus from the Termux microphone through a second reverse tunnel. Desktop-side voice activity detection stops on natural silence, Whisper transcribes locally, and Pi places the result in the prompt editor for review.
 
-Both tunnel endpoints bind only to loopback. Audio and transcripts remain inside the encrypted SSH connection.
+Both tunnel endpoints bind only to loopback, and phone audio stays inside the encrypted SSH connection. Kokoro synthesis and Whisper transcription run locally on the desktop. In `smart` edit mode, revisions use Pi's currently selected model: if that model is remote, the existing draft and new dictation are sent to its provider. Use `/voice edit append` to keep prompt editing entirely local.
 
 ## Features
 
@@ -63,10 +63,10 @@ chmod +x ~/bin/pi-voice/pi-voice-*
 Grant microphone permission with a short test recording:
 
 ```bash
-timeout 2s termux-microphone-record -f "$HOME/pi-voice-test.m4a" -l 5
+rm -f "$HOME/pi-voice-test.ogg"; timeout 2s termux-microphone-record -f "$HOME/pi-voice-test.ogg" -l 5 -e opus
 ```
 
-Speak for five seconds. Some Android 15 builds leave the API client waiting even though recording works; the timeout is intentional.
+Speak for five seconds. Some Android 15 builds leave the API client waiting even though recording works; the timeout is intentional and Android continues recording to its five-second limit.
 
 Connect using the wrapper instead of plain `ssh`:
 
@@ -88,7 +88,7 @@ If SSH reports that remote forwarding failed, ensure `AllowTcpForwarding yes` is
 - Press the configured microphone shortcut (**Alt+M** by default) and speak for as long as needed. Recording stops automatically after about 1.35 seconds of silence.
 - Press the shortcut again to stop manually. Pi displays a live, revisable transcript in the prompt editor.
 - In the default `review` submit mode, correct or extend the final prompt and press Enter yourself.
-- With `editMode: "smart"`, another dictation can continue the draft or revise it naturally: “Actually replace port 8000 with 8080,” “scratch the last sentence,” or “make the second paragraph shorter.” The edit uses Pi's current model in a separate request and does not enter conversation history.
+- With `editMode: "smart"`, another dictation can continue the draft or revise it naturally: “Actually replace port 8000 with 8080,” “scratch the last sentence,” or “make the second paragraph shorter.” The edit uses Pi's current model in an isolated request and does not enter conversation history. Switching Pi's active model changes the editing model automatically.
 - Assistant speech automatically plays through the phone.
 - `Ctrl+Shift+V` toggles spoken output.
 
@@ -125,6 +125,6 @@ Modes:
 - `PI_VOICE_PLAYER`: alternate `pw-play`-compatible local player executable
 - `PI_VOICE_AUDIO_PORT`: phone audio-listener port (default `8765`)
 - `PI_VOICE_CONTROL_PORT`: phone microphone-control port (default `8766`)
-- `PI_VOICE_MAX_RECORD_SECONDS`: safety limit for one phone recording (default `120`)
+- `PI_VOICE_MAX_RECORD_SECONDS`: safety limit for one phone recording (default `120`; export it in Termux before running `pi-voice-ssh`)
 
 See `THIRD_PARTY_NOTICES.md` for attribution and model/runtime licensing.
