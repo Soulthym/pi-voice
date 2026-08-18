@@ -1,3 +1,5 @@
+import type { CodeNarrationTarget } from "./code-targets.js";
+
 export interface CodeLineRange {
 	startLine: number;
 	endLine: number;
@@ -76,10 +78,25 @@ function spanRange(value: string, lines: string[]): CodeSpanRange | undefined {
 	return { startLine, startColumn, endLine, endColumn };
 }
 
-function operation(value: string, lines: string[]): CodeNarrationOperation | undefined {
+function operation(
+	value: string,
+	lines: string[],
+	targets: ReadonlyMap<string, CodeNarrationTarget>,
+): CodeNarrationOperation | undefined {
 	const trimmed = value.trim();
 	if (!trimmed || trimmed === "-") return undefined;
-	let match = /^L\+([A-Za-z][A-Za-z0-9_-]{0,15}):(\d+(?:-\d+)?)$/.exec(trimmed);
+	let match = /^L\+([A-Za-z][A-Za-z0-9_-]{0,15}):@([a-z]\d+)$/.exec(trimmed);
+	if (match) {
+		const target = targets.get(match[2]);
+		return target?.kind === "line" ? { kind: "line-add", id: match[1], range: target.range } : undefined;
+	}
+	match = /^B\+([A-Za-z][A-Za-z0-9_-]{0,15}):@([a-z]\d+)$/.exec(trimmed);
+	if (match) {
+		const target = targets.get(match[2]);
+		return target?.kind === "span" ? { kind: "bold-add", id: match[1], range: target.range } : undefined;
+	}
+	if (targets.size > 0 && (trimmed.startsWith("L+") || trimmed.startsWith("B+"))) return undefined;
+	match = /^L\+([A-Za-z][A-Za-z0-9_-]{0,15}):(\d+(?:-\d+)?)$/.exec(trimmed);
 	if (match && ID_RE.test(match[1])) {
 		const range = lineRange(match[2], lines.length);
 		return range ? { kind: "line-add", id: match[1], range } : undefined;
@@ -96,7 +113,11 @@ function operation(value: string, lines: string[]): CodeNarrationOperation | und
 	return undefined;
 }
 
-export function parseCodeNarration(text: string, code: string): CodeNarrationPlan | undefined {
+export function parseCodeNarration(
+	text: string,
+	code: string,
+	availableTargets: readonly CodeNarrationTarget[] = [],
+): CodeNarrationPlan | undefined {
 	const cleaned = text
 		.trim()
 		.replace(/^```(?:text)?\s*\n?/i, "")
@@ -104,6 +125,7 @@ export function parseCodeNarration(text: string, code: string): CodeNarrationPla
 		.trim();
 	if (!cleaned) return undefined;
 	const sourceLines = code.split(/\r?\n/);
+	const targets = new Map(availableTargets.map(target => [target.id, target]));
 	const rows = cleaned.split(/\r?\n/).filter(row => row.trim().length > 0);
 	if (rows.length === 0 || rows.length > MAX_RECORDS) return undefined;
 	const records: CodeNarrationRecord[] = [];
@@ -119,7 +141,7 @@ export function parseCodeNarration(text: string, code: string): CodeNarrationPla
 		if (controls.length > MAX_OPERATIONS) return undefined;
 		const operations: CodeNarrationOperation[] = [];
 		for (const item of controls) {
-			const parsed = operation(item, sourceLines);
+			const parsed = operation(item, sourceLines, targets);
 			if (!parsed) return undefined;
 			operations.push(parsed);
 			if (parsed.kind === "line-add" || parsed.kind === "bold-add") hasHighlight = true;

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { chunkCodeNarration, parseCodeNarration } from "../src/code-narration.js";
+import { buildCodeTargetCatalog } from "../src/code-targets.js";
 import { NarrationProgress } from "../src/narration-progress.js";
 
 const code = "const total = price + tax;\nreturn total;";
@@ -28,6 +29,41 @@ test("parses compact control-and-speech records", () => {
 	const chunks = chunkCodeNarration(plan!);
 	assert.equal(chunks.map(chunk => chunk.text).join(" "), "We first calculate the total then return it");
 	assert.ok(chunks.at(-1)?.cues.some(cue => cue.operations.some(operation => operation.kind === "reset")));
+});
+
+test("resolves Tree-sitter handles to exact source ranges", async () => {
+	const targetCode = "const total = items.reduce((sum, item) => sum + item.price, 0);";
+	const catalog = await buildCodeTargetCatalog("ts", targetCode);
+	assert.ok(catalog);
+	const declaration = catalog.targets.find(target => target.kind === "line" && target.preview.startsWith("const total"));
+	const call = catalog.targets.find(target => target.kind === "span" && target.nodeType === "call_expression");
+	assert.ok(declaration && call);
+	const plan = parseCodeNarration(
+		`L+calc:@${declaration.id}|We first\nB+sum:@${call.id}|sum all items`,
+		targetCode,
+		catalog.targets,
+	);
+	assert.deepEqual(plan?.records[0]?.operations[0], {
+		kind: "line-add",
+		id: "calc",
+		range: { startLine: 1, endLine: 1 },
+	});
+	assert.deepEqual(plan?.records[1]?.operations[0], {
+		kind: "bold-add",
+		id: "sum",
+		range: { startLine: 1, startColumn: 15, endLine: 1, endColumn: 62 },
+	});
+	assert.equal(parseCodeNarration("B+sum:1:15-62|sum all items", targetCode, catalog.targets), undefined);
+});
+
+test("converts Tree-sitter byte columns for Unicode source", async () => {
+	const unicodeCode = 'const café = "😀" + total;';
+	const catalog = await buildCodeTargetCatalog("typescript", unicodeCode);
+	const total = catalog?.targets.find(
+		target => target.kind === "span" && target.nodeType === "identifier" && target.preview === "total",
+	);
+	assert.ok(total?.kind === "span");
+	assert.equal(unicodeCode.slice(total.range.startColumn - 1, total.range.endColumn), "total");
 });
 
 test("rejects malformed controls and out-of-range locations", () => {

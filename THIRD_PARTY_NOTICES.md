@@ -17,3 +17,8 @@ Kokoro model and runtime dependencies are distributed under their respective lic
 - `openai/whisper-tiny.en` and `onnx-community/whisper-tiny.en`: Apache-2.0
 - `facebook/wav2vec2-base-960h` and `onnx-community/wav2vec2-base-960h-ONNX`: Apache-2.0
 - `@huggingface/transformers`: Apache-2.0
+
+Guided JavaScript and TypeScript narration uses Tree-sitter WebAssembly components:
+
+- `web-tree-sitter`: official Tree-sitter project, MIT
+- `@vscode/tree-sitter-wasm`: prebuilt grammars maintained by Microsoft for VS Code, MIT
