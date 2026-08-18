@@ -10,6 +10,15 @@ export interface PlaybackTarget extends PlaybackMessage {
 	sourceOffset: number;
 }
 
+export interface PlaybackStatus {
+	messageId: string;
+	position: number;
+	duration: number;
+	messageIndex: number;
+	messageCount: number;
+	hasTimings: boolean;
+}
+
 export interface PlaybackTimingSnapshot {
 	version: 1;
 	messageId: string;
@@ -156,6 +165,13 @@ export class PlaybackHistory {
 		};
 	}
 
+	finishUtterance(utterance: number | undefined): void {
+		if (utterance === undefined || utterance !== this.#activeUtterance) return;
+		const capture = this.#utterances.get(utterance);
+		if (!capture || capture.record.duration <= 0) return;
+		capture.record.position = capture.record.duration;
+	}
+
 	setPlayback(utterance: number, position: number): void {
 		const capture = this.#utterances.get(utterance);
 		if (!capture || utterance !== this.#activeUtterance || !Number.isFinite(position)) return;
@@ -165,6 +181,20 @@ export class PlaybackHistory {
 	selected(): PlaybackMessage | undefined {
 		const record = this.#selectedId ? this.#records.get(this.#selectedId) : undefined;
 		return record ? { id: record.id, text: record.text } : undefined;
+	}
+
+	status(): PlaybackStatus | undefined {
+		const record = this.#selectedId ? this.#records.get(this.#selectedId) : undefined;
+		if (!record) return undefined;
+		const index = this.#order.indexOf(record.id);
+		return {
+			messageId: record.id,
+			position: Math.max(0, Math.min(record.duration || record.position, record.position)),
+			duration: record.duration,
+			messageIndex: index,
+			messageCount: this.#order.length,
+			hasTimings: record.checkpoints.length > 0,
+		};
 	}
 
 	move(delta: -1 | 1): PlaybackMessage | undefined {

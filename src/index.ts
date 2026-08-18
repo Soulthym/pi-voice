@@ -109,6 +109,18 @@ function appendDictation(base: string, speech: string): string {
 	return `${base}${/\s$/.test(base) ? "" : " "}${speech}`;
 }
 
+function formatPlaybackTime(seconds: number): string {
+	const whole = Math.max(0, Math.floor(Number.isFinite(seconds) ? seconds : 0));
+	const minutes = Math.floor(whole / 60);
+	return `${minutes}:${String(whole % 60).padStart(2, "0")}`;
+}
+
+function playbackBar(position: number, duration: number, width = 24): string {
+	const ratio = duration > 0 ? Math.max(0, Math.min(1, position / duration)) : 0;
+	const cursor = Math.min(width - 1, Math.round(ratio * (width - 1)));
+	return `[${Array.from({ length: width }, (_value, index) => (index === cursor ? "●" : "━")).join("")}]`;
+}
+
 export default async function (pi: ExtensionAPI) {
 	let config = await loadVoiceConfig();
 	let activeContext: ExtensionContext | null = null;
@@ -125,6 +137,8 @@ export default async function (pi: ExtensionAPI) {
 	let livePlaybackId: string | undefined;
 	let nextLivePlaybackId = 0;
 	let playbackPaused = false;
+	let playbackPositionEstimated = false;
+	let playbackTimelineTimer: NodeJS.Timeout | null = null;
 	const playbackHistory = new PlaybackHistory();
 
 	const requestNarrationRender = (): void => {
@@ -147,6 +161,44 @@ export default async function (pi: ExtensionAPI) {
 			text => activeContext?.ui.theme.bg("selectedBg", text) ?? text,
 		);
 	});
+
+	const refreshPlaybackTimeline = (): void => {
+		const ctx = activeContext;
+		if (!ctx || !config.enabled) {
+			ctx?.ui.setWidget("pi-voice-playback", undefined);
+			return;
+		}
+		const playback = playbackHistory.status();
+		if (!playback) {
+			ctx.ui.setWidget("pi-voice-playback", undefined);
+			return;
+		}
+		const messageLabel =
+			playback.messageIndex >= 0 ? ` · message ${playback.messageIndex + 1}/${playback.messageCount}` : "";
+		if (!playback.hasTimings || playback.duration <= 0) {
+			ctx.ui.setWidget(
+				"pi-voice-playback",
+				[ctx.ui.theme.fg("dim", `○ timing preprocessing${messageLabel}`)],
+				{ placement: "belowEditor" },
+			);
+			return;
+		}
+		const icon = playbackPaused ? "⏸" : state === "speaking" ? "▶" : "■";
+		const estimate = playbackPositionEstimated ? "~" : "";
+		const timeline = `${icon} ${playbackBar(playback.position, playback.duration)} ${estimate}${formatPlaybackTime(playback.position)} / ${formatPlaybackTime(playback.duration)}${messageLabel}`;
+		ctx.ui.setWidget("pi-voice-playback", [ctx.ui.theme.fg(state === "speaking" ? "accent" : "dim", timeline)], {
+			placement: "belowEditor",
+		});
+	};
+
+	const requestPlaybackTimeline = (): void => {
+		if (playbackTimelineTimer) return;
+		playbackTimelineTimer = setTimeout(() => {
+			playbackTimelineTimer = null;
+			refreshPlaybackTimeline();
+		}, 80);
+		playbackTimelineTimer.unref?.();
+	};
 
 	const setInputProgress = (message: string | undefined): void => {
 		activeContext?.ui.setWidget("pi-voice-input", message ? [message] : undefined, { placement: "belowEditor" });
@@ -229,6 +281,8 @@ export default async function (pi: ExtensionAPI) {
 			case "idle":
 				if (!inputInProgress) state = "idle";
 				downloadPercent = undefined;
+				playbackHistory.finishUtterance(event.utterance);
+				playbackPositionEstimated = false;
 				if (event.utterance !== undefined) {
 					const snapshot = playbackHistory.snapshotForUtterance(event.utterance);
 					if (snapshot) pi.appendEntry(PLAYBACK_TIMING_ENTRY, snapshot);
@@ -237,10 +291,12 @@ export default async function (pi: ExtensionAPI) {
 				break;
 			case "speaking":
 				state = "speaking";
+				playbackPaused = false;
 				break;
 			case "segment-audio":
 				narration.setSegmentAudio(event.segmentId, event.start, event.duration);
 				playbackHistory.setSegmentAudio(event.segmentId, event.start, event.duration);
+				requestPlaybackTimeline();
 				return;
 			case "alignment":
 				narration.setAlignment(event.segmentId, event.words);
@@ -248,6 +304,8 @@ export default async function (pi: ExtensionAPI) {
 			case "playback":
 				narration.setPlayback(event.utterance, event.position);
 				playbackHistory.setPlayback(event.utterance, event.position);
+				playbackPositionEstimated = event.estimated === true;
+				requestPlaybackTimeline();
 				return;
 			case "alignment-error":
 				// Duration-weighted word timing remains active as a fallback.
@@ -275,6 +333,7 @@ export default async function (pi: ExtensionAPI) {
 				break;
 		}
 		refreshStatus();
+		requestPlaybackTimeline();
 	};
 
 	const vocalizer = new Vocalizer(
@@ -301,6 +360,8 @@ export default async function (pi: ExtensionAPI) {
 		narration.setCompletedText(target.text);
 		playbackHistory.beginCapture(target.id, target.text, target.time, recordTimings);
 		playbackPaused = false;
+		playbackPositionEstimated = false;
+		refreshPlaybackTimeline();
 		vocalizer.speakFrom(suffix, sourceOffset);
 	};
 
@@ -368,6 +429,7 @@ export default async function (pi: ExtensionAPI) {
 					checkpoints,
 				};
 				playbackHistory.restore([snapshot]);
+				requestPlaybackTimeline();
 				pi.appendEntry(PLAYBACK_TIMING_ENTRY, snapshot);
 			}
 		})().finally(() => {
@@ -390,6 +452,7 @@ export default async function (pi: ExtensionAPI) {
 		}
 		state = "idle";
 		refreshStatus();
+		refreshPlaybackTimeline();
 		if (
 			config.enabled &&
 			(!wasEnabled ||
@@ -536,6 +599,7 @@ export default async function (pi: ExtensionAPI) {
 		activeContext = ctx;
 		syncPlaybackMessages(ctx, true);
 		playbackHistory.restore(playbackTimingSnapshots(ctx));
+		refreshPlaybackTimeline();
 		if (config.enabled) {
 			scheduleMissingTimings(ctx);
 			void warmModels().catch(error =>
@@ -561,9 +625,12 @@ export default async function (pi: ExtensionAPI) {
 		contextEpoch += 1;
 		ctx.ui.setStatus("pi-voice", undefined);
 		ctx.ui.setWidget("pi-voice-render-driver", undefined);
+		ctx.ui.setWidget("pi-voice-playback", undefined);
 		clearInputProgress();
 		if (narrationRenderTimer) clearTimeout(narrationRenderTimer);
 		narrationRenderTimer = null;
+		if (playbackTimelineTimer) clearTimeout(playbackTimelineTimer);
+		playbackTimelineTimer = null;
 		narrationTui = null;
 		narration.finish();
 		activeContext = null;
@@ -595,6 +662,7 @@ export default async function (pi: ExtensionAPI) {
 			playbackPaused = false;
 			livePlaybackId = `live:${++nextLivePlaybackId}`;
 			playbackHistory.beginCapture(livePlaybackId, "", 0, true);
+			refreshPlaybackTimeline();
 		}
 	});
 
@@ -716,6 +784,7 @@ export default async function (pi: ExtensionAPI) {
 			playbackPaused = true;
 			state = "idle";
 			refreshStatus();
+			refreshPlaybackTimeline();
 		},
 	});
 

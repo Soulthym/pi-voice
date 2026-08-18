@@ -24,6 +24,14 @@ test("maps playback time to approximate source checkpoints without audio storage
 		history.setSegmentAudio(id, start, 8);
 	}
 	history.setPlayback(1, 20);
+	assert.deepEqual(history.status(), {
+		messageId: "message",
+		position: 20,
+		duration: 24,
+		messageIndex: 0,
+		messageCount: 1,
+		hasTimings: true,
+	});
 	assert.deepEqual(history.seekTarget(-10), {
 		id: "message",
 		text: "x".repeat(120),
@@ -37,6 +45,8 @@ test("maps playback time to approximate source checkpoints without audio storage
 		sourceOffset: 80,
 	});
 
+	history.finishUtterance(1);
+	assert.equal(history.status()?.position, 24);
 	const snapshot = history.snapshotForUtterance(1);
 	assert.ok(snapshot);
 	assert.equal(history.snapshotForUtterance(1), undefined);
