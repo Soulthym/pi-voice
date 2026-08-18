@@ -1,6 +1,5 @@
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
-import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
@@ -42,26 +41,12 @@ function send(message) {
 function ensureAlignmentChild() {
 	if (alignmentChild && alignmentChild.exitCode === null) return alignmentChild;
 	const child = spawn(process.execPath, [fileURLToPath(new URL("./alignment-worker.mjs", import.meta.url))], {
-		stdio: ["pipe", "pipe", "ignore"],
+		// Alignment events bypass this synthesis process and reach Pi directly,
+		// even while native Kokoro inference is blocking this event loop.
+		stdio: ["pipe", "inherit", "ignore"],
 		env: { ...process.env },
 	});
 	alignmentChild = child;
-	const lines = readline.createInterface({ input: child.stdout });
-	lines.on("line", line => {
-		let event;
-		try {
-			event = JSON.parse(line);
-		} catch {
-			return;
-		}
-		if (
-			(event.epoch === epoch && (event.type === "alignment" || event.type === "alignment-error")) ||
-			event.type === "alignment-ready" ||
-			event.type === "alignment-preload-error"
-		) {
-			send(event);
-		}
-	});
 	child.on("error", () => {
 		if (alignmentChild === child) alignmentChild = null;
 	});
@@ -375,58 +360,65 @@ function parseTcpEndpoint(output) {
 }
 
 function createTcpSink(output, sampleRate, utterance) {
-	const { host, port } = parseTcpEndpoint(output);
-	const socket = net.createConnection({ host, port });
-	socket.setNoDelay(true);
-	let connected = false;
-	const ready = new Promise((resolve, reject) => {
-		socket.once("connect", () => {
-			connected = true;
-			resolve();
-		});
-		socket.once("error", reject);
+	parseTcpEndpoint(output);
+	const helperPath = fileURLToPath(new URL("./tcp-playback.mjs", import.meta.url));
+	const child = spawn(process.execPath, [helperPath, output, String(sampleRate), String(utterance)], {
+		// The helper inherits stdout so playback events bypass blocked Kokoro
+		// inference and flow directly into VoiceWorkerClient's JSON event stream.
+		stdio: ["pipe", "inherit", "pipe", "pipe"],
+		env: { ...process.env },
 	});
-	const sink = attachPlaybackClock({
-		writable: socket,
+	let stderr = "";
+	let readySettled = false;
+	const { promise: ready, resolve: resolveReady, reject: rejectReady } = Promise.withResolvers();
+	const control = child.stdio[3];
+	const controlLines = readline.createInterface({ input: control });
+	controlLines.on("line", line => {
+		if (readySettled) return;
+		readySettled = true;
+		if (line === "ready") resolveReady();
+		else rejectReady(new Error(line.replace(/^error\s*/, "") || "TCP playback helper failed"));
+	});
+	child.stderr.on("data", chunk => {
+		stderr = `${stderr}${String(chunk)}`.slice(-2_000);
+	});
+	child.on("error", error => {
+		if (!readySettled) {
+			readySettled = true;
+			rejectReady(error);
+		}
+	});
+	const sink = {
+		writable: child.stdin,
 		ready,
+		samplesWritten: 0,
+		noteAudio(samples) {
+			this.samplesWritten += samples;
+		},
 		async close() {
 			await ready;
-			if (socket.destroyed) return;
+			if (child.exitCode !== null) return;
 			// Android/Termux audio output can buffer well over half a second. Keep
 			// the stream alive with silence so EOF cannot discard the final word.
 			const padding = Buffer.alloc(Math.round(sampleRate * 1) * Float32Array.BYTES_PER_ELEMENT);
-			if (!socket.write(padding)) await new Promise(resolve => socket.once("drain", resolve));
-			const closed = new Promise(resolve => socket.once("close", resolve));
-			socket.end();
-			await closed;
-			this.stopPlaybackClock();
+			if (!child.stdin.write(padding)) await new Promise(resolve => child.stdin.once("drain", resolve));
+			const exited = new Promise(resolve => child.once("exit", resolve));
+			child.stdin.end();
+			await exited;
 		},
 		stop() {
-			this.stopPlaybackClock();
-			socket.destroy();
+			child.stdin.destroy();
+			child.kill("SIGKILL");
 		},
-	}, sampleRate, utterance, true);
-	let feedback = "";
-	socket.on("data", chunk => {
-		feedback = `${feedback}${String(chunk)}`.slice(-8_192);
-		for (;;) {
-			const newline = feedback.indexOf("\n");
-			if (newline < 0) break;
-			const line = feedback.slice(0, newline);
-			feedback = feedback.slice(newline + 1);
-			try {
-				const event = JSON.parse(line);
-				if (event.type === "playback") sink.reportPlayback(Number(event.position));
-			} catch {
-				// Ignore malformed feedback from legacy or interrupted phone bridges.
-			}
+	};
+	child.stdin.on("error", error => {
+		if (player === sink && !shuttingDown) send({ type: "error", message: error.message });
+	});
+	child.on("exit", code => {
+		if (!readySettled) {
+			readySettled = true;
+			rejectReady(new Error(stderr.trim() || `TCP playback helper exited with code ${code ?? "unknown"}`));
 		}
-	});
-	socket.on("error", error => {
-		if (connected && player === sink && !shuttingDown) send({ type: "error", message: error.message });
-	});
-	socket.on("close", () => {
-		sink.stopPlaybackClock();
 		if (player === sink) clearCurrentPlayer();
 	});
 	return sink;

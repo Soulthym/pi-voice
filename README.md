@@ -11,7 +11,7 @@ Both tunnel endpoints bind only to loopback, and phone audio stays inside the en
 
 - Speaks assistant output while it streams.
 - Runs `onnx-community/Kokoro-82M-v1.0-ONNX` locally with q8 weights.
-- Keeps ONNX inference in a child process so Pi's TUI remains responsive.
+- Keeps ONNX inference in child processes so Pi's TUI remains responsive. Phone playback and alignment events bypass the synthesis loop, so Kokoro cannot delay highlighting updates.
 - Speaks `text`-like fenced blocks directly and narrates concise model-generated descriptions of code and patches instead of silently skipping them.
 - Starts each code-description request as soon as its closing fence streams, using already queued speech as lead time while preserving spoken order; falls back to a local structural description if the request fails.
 - Omits tables and most other Markdown noise from speech.
@@ -116,7 +116,7 @@ If SSH reports that remote forwarding failed, ensure `AllowTcpForwarding yes` is
 - With `editMode: "smart"`, text that is already in the editor when recording starts becomes the existing draft. Another dictation can continue or revise it naturally: “Actually replace port 8000 with 8080,” “scratch the last sentence,” or “make the second paragraph shorter.” Start recording only after placing the text to revise in the editor. With an empty editor there is nothing to revise, so Pi resolves the new utterance as fresh dictation. In `append`, the model still resolves ASR ambiguity but preserves correction phrases literally instead of executing them.
 - Fences tagged `text`, `txt`, `plain`, `plaintext`, `md`, `markdown`, or `mdown` are read as prose. Other fenced blocks are sent to `editModel` for a short semantic description. Descriptions remain at the block's position in the spoken response, while requests begin early enough to overlap preceding queued TTS whenever possible.
 - Assistant speech automatically plays through the phone. While it plays, unread prose is dimmed, the current speech segment gets a subtle background, and words return to normal near their actual playback time. Fenced code remains normally styled because it is narrated as a semantic block rather than word-for-word.
-- A configurable Wav2Vec2 CTC model aligns clean Kokoro audio in a separate worker. When voice mode is enabled, Kokoro and the aligner warm concurrently in the background and remain resident in RAM until Pi exits or reloads. If alignment is late or unavailable, duration-weighted word timing is used; if phone feedback is unavailable, the desktop playback clock is estimated.
+- A configurable Wav2Vec2 CTC model aligns clean Kokoro audio in a separate worker whose events flow directly to Pi, independently of ongoing synthesis. When voice mode is enabled, Kokoro and the aligner warm concurrently in the background and remain resident in RAM until Pi exits or reloads. If alignment is late or unavailable, duration-weighted word timing is used; if phone feedback is unavailable, the desktop playback clock is estimated.
 - `Ctrl+Shift+V` toggles spoken output.
 
 Commands:
