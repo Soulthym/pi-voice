@@ -12,7 +12,7 @@ Both tunnel endpoints bind only to loopback, and phone audio stays inside the en
 - Speaks assistant output while it streams.
 - Runs `onnx-community/Kokoro-82M-v1.0-ONNX` locally with q8 weights.
 - Keeps ONNX inference in child processes so Pi's TUI remains responsive. Phone playback and alignment events bypass the synthesis loop, so Kokoro cannot delay highlighting updates.
-- Speaks `text`-like fenced blocks directly. In guided mode, code and patches stay visible but dim while a model-generated walkthrough reveals related line groups and bolds exact ranges in sync with narration. JavaScript and TypeScript fences use exact Tree-sitter syntax-node targets instead of model-guessed columns.
+- Speaks `text`-like fenced blocks directly and applies the same sentence background and word-by-word playback progression used for normal prose. In guided mode, code and patches stay visible but dim while a model-generated walkthrough reveals related line groups and bolds exact ranges in sync with narration. JavaScript and TypeScript fences use exact Tree-sitter syntax-node targets instead of model-guessed columns.
 - Starts each code-description request as soon as its closing fence streams, using already queued speech as lead time while preserving spoken order; falls back to a local structural description if the request fails.
 - Omits tables and most other Markdown noise from speech.
 - Starts with a short first segment, then synthesizes bounded sentence/clause segments.

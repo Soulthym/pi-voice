@@ -54,6 +54,27 @@ test("ignores completion from an older utterance", () => {
 	assert.equal(progress.transform("Still queued.", "assistant", dim), "<dim>Still</dim> <dim>queued</dim>.");
 });
 
+test("styles spoken text fences while preserving their Markdown markers", () => {
+	const markdown = "```text\nRead this sentence.\n```";
+	const progress = new NarrationProgress();
+	progress.begin();
+	progress.pushDelta("assistant", 0, markdown);
+	progress.registerSegment({
+		id: 12,
+		utterance: 4,
+		text: "Read this sentence.",
+		source: { start: 8, end: 27 },
+	});
+	progress.setSegmentAudio(12, 0, 2);
+
+	assert.equal(
+		progress.transform(markdown, "assistant", dim),
+		"```text\n<dim>Read</dim> <dim>this</dim> <dim>sentence</dim>.\n```",
+	);
+	progress.setPlayback(4, 0);
+	assert.match(progress.transform(markdown, "assistant", dim, background), /<bg>Read<\/bg>/);
+});
+
 test("does not inject styling into fenced code or link destinations", () => {
 	const markdown = "Read [the guide](https://example.test).\n```ts\nconst value = 1;\n```";
 	const progress = new NarrationProgress();

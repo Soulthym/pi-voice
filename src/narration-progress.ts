@@ -4,6 +4,7 @@ import type {
 	CodeNarrationOperation,
 	CodeSpanRange,
 } from "./code-narration.js";
+import { isTextFenceLanguage } from "./speakable.js";
 
 export type NarrationMessageType = "assistant" | "assistant-thinking";
 
@@ -69,7 +70,7 @@ type CodeFocusBlock = {
 };
 
 const WORD_RE = /[\p{L}\p{N}]+(?:[.'’_-][\p{L}\p{N}]+)*/gu;
-const FENCE_RE = /^\s*(`{3,}|~{3,})/;
+const FENCE_RE = /^\s*(`{3,}|~{3,})(.*)$/;
 
 function canonicalWord(text: string): string {
 	return text.normalize("NFKD").toLocaleLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
@@ -194,13 +195,25 @@ function alignedStarts(spoken: DisplayWord[], recognized: AlignmentWord[], durat
 function excludedMarkdownRanges(markdown: string): NarrationSourceRange[] {
 	const excluded: NarrationSourceRange[] = [];
 	let offset = 0;
-	let fence: string | undefined;
+	let fence: { marker: string; textLike: boolean } | undefined;
 	for (const line of markdown.split(/(?<=\n)/)) {
 		const content = line.endsWith("\n") ? line.slice(0, -1) : line;
-		const marker = FENCE_RE.exec(content)?.[1];
-		if (fence || marker) excluded.push({ start: offset, end: offset + content.length });
-		if (!fence && marker) fence = marker[0];
-		else if (fence && marker && marker[0] === fence) fence = undefined;
+		const match = FENCE_RE.exec(content);
+		if (!fence && match) {
+			const language = (match[2] ?? "").trim().toLowerCase().split(/[\s,{]/, 1)[0] ?? "";
+			fence = { marker: match[1][0], textLike: isTextFenceLanguage(language) };
+			excluded.push({ start: offset, end: offset + content.length });
+		} else if (fence) {
+			const trimmed = content.trim();
+			const closing =
+				trimmed.length >= 3 && [...trimmed].every(character => character === fence?.marker);
+			if (closing) {
+				excluded.push({ start: offset, end: offset + content.length });
+				fence = undefined;
+			} else if (!fence.textLike) {
+				excluded.push({ start: offset, end: offset + content.length });
+			}
+		}
 		offset += line.length;
 	}
 	for (const pattern of [/\]\((?:\\.|[^)])*\)/g, /<[^>]+>/g]) {

@@ -76,6 +76,10 @@ const PATH_RE = /(^|[\s("'`])((?:~|\.{1,2})?\/?[\w.@+-]+(?:\/[\w.@+-]+){2,}\/?)/
 const HAS_SPEAKABLE_RE = /[\p{L}\p{N}]/u;
 const TEXT_FENCE_LANGUAGES = new Set(["text", "txt", "plain", "plaintext", "md", "markdown", "mdown"]);
 
+export function isTextFenceLanguage(language: string): boolean {
+	return TEXT_FENCE_LANGUAGES.has(language.trim().toLowerCase());
+}
+
 export interface SpeakableSourceRange {
 	start: number;
 	end: number;
@@ -345,7 +349,7 @@ export class SpeakableStream {
 
 	#openFenceBody(): void {
 		this.#fenceLanguage = this.#fenceInfo.trim().toLowerCase().split(/[\s,{]/, 1)[0] ?? "";
-		this.#textFence = TEXT_FENCE_LANGUAGES.has(this.#fenceLanguage);
+		this.#textFence = isTextFenceLanguage(this.#fenceLanguage);
 		this.#fenceLine = "";
 		this.#fenceLinePositions = [];
 		this.#fenceBody = "";
