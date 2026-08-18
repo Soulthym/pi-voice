@@ -15,7 +15,7 @@ const DEFAULT_STT_DTYPE = "fp32";
 const DEFAULT_ALIGNMENT_MODEL = "onnx-community/wav2vec2-base-960h-ONNX";
 const DEFAULT_ALIGNMENT_DTYPE = "q8";
 const DEFAULT_SAMPLE_RATE = 24_000;
-const SEGMENT_ALIGNMENT_LEAD_MS = 750;
+const SEGMENT_ALIGNMENT_TIMEOUT_MS = 5_000;
 const cacheDir = process.env.PI_VOICE_CACHE_DIR ?? path.join(os.homedir(), ".cache", "pi-voice", "models");
 fs.mkdirSync(cacheDir, { recursive: true });
 transformersEnv.cacheDir = cacheDir;
@@ -557,7 +557,7 @@ async function runOperation(operation) {
 	const duration = pcm.length / sampleRate;
 	send({ type: "segment-audio", utterance: operation.utterance, segmentId: operation.segmentId, start, duration });
 	const alignment = requestAlignment(operation, pcm, sampleRate);
-	await Promise.race([alignment, wait(SEGMENT_ALIGNMENT_LEAD_MS)]);
+	await Promise.race([alignment, wait(SEGMENT_ALIGNMENT_TIMEOUT_MS)]);
 	if (operation.epoch !== epoch || player !== sink) return;
 	await writeAudio(sink, pcm);
 }
