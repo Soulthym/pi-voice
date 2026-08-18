@@ -75,6 +75,19 @@ test("styles spoken text fences while preserving their Markdown markers", () => 
 	assert.match(progress.transform(markdown, "assistant", dim, background), /<bg>Read<\/bg>/);
 });
 
+test("tracks table cells as independent active sentences", () => {
+	const markdown = "| Name | Status |";
+	const progress = new NarrationProgress();
+	progress.begin();
+	progress.pushDelta("assistant", 0, markdown);
+	progress.registerSegment({ id: 13, utterance: 5, text: "Name.", source: { start: 1, end: 8 } });
+	progress.setSegmentAudio(13, 0, 1);
+	progress.setPlayback(5, 0);
+
+	const transformed = progress.transform(markdown, "assistant", dim, background);
+	assert.match(transformed, /\| <bg>Name<\/bg> \| <dim>Status<\/dim> \|/);
+});
+
 test("does not inject styling into fenced code or link destinations", () => {
 	const markdown = "Read [the guide](https://example.test).\n```ts\nconst value = 1;\n```";
 	const progress = new NarrationProgress();

@@ -48,6 +48,15 @@ test("recognizes fenced blocks split across streaming deltas", () => {
 	]);
 });
 
+test("speaks Markdown table cells as separate sentences and skips separator cells", () => {
+	const stream = new SpeakableStream();
+	const items = [
+		...stream.push("| Name | Status |\n| :--- | ---: |\n| API | Ready |"),
+		...stream.flush(),
+	];
+	assert.deepEqual(speech(items), ["Name.", "Status.", "API.", "Ready."]);
+});
+
 test("speaks link labels and URL hosts instead of full URLs", () => {
 	const stream = new SpeakableStream();
 	const items = [...stream.push("Read [the guide](https://example.com/long/path). Visit https://pi.dev/docs next."), ...stream.flush()];

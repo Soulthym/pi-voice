@@ -10,7 +10,7 @@
  * to synthesize. Three passes:
  *
  * 1. Block pass (per character, stateful): emits fenced code blocks as
- *    description jobs, reads text-like fences as prose, drops table rows,
+ *    description jobs, reads text-like fences and table cells as prose,
  *    strips heading/bullet/blockquote markers (numbered-list markers are spoken
  *    as "1, …"), and turns newlines into hard segment breaks.
  * 2. Segmentation (stateful): emits a segment the moment a sentence boundary
@@ -113,6 +113,7 @@ function normalizeSpeakable(raw: string): string {
 		.replace(AUTOLINK_RE, (_match, url: string) => speakableUrl(url))
 		.replace(BARE_URL_RE, match => speakableUrl(match))
 		.replace(INLINE_CODE_RE, "$1")
+		.replace(/\s*\|\s*/g, ". ")
 		.replace(BOLD_STRIKE_RE, "")
 		.replace(EMPHASIS_ASTERISK_RE, "")
 		.replace(EMPHASIS_UNDERSCORE_RE, "$1")
@@ -182,11 +183,9 @@ type PrefixDecision =
 	| { kind: "undecided" }
 	| { kind: "prose"; text: string }
 	| { kind: "marker"; spoken: string }
-	| { kind: "swallow" }
 	| { kind: "fence"; fence: string };
 
 function classifyPrefix(prefix: string): PrefixDecision {
-	if (prefix === "|") return { kind: "swallow" };
 	if (/^(?:`{3}|~{3})/.test(prefix)) return { kind: "fence", fence: prefix.slice(0, 3) };
 	if (/^#{1,6}[ \t]/.test(prefix)) return { kind: "marker", spoken: "" };
 	if (/^[-*+][ \t]/.test(prefix)) return { kind: "marker", spoken: "" };
@@ -200,7 +199,7 @@ function classifyPrefix(prefix: string): PrefixDecision {
 }
 
 /** Block-pass state: where the current character lands. */
-type BlockMode = "linestart" | "prose" | "swallow" | "fence-open" | "fence-body";
+type BlockMode = "linestart" | "prose" | "fence-open" | "fence-body";
 
 /**
  * One per utterance. Feed raw assistant deltas through {@link push}; each call
@@ -221,8 +220,8 @@ export class SpeakableStream {
 	#fenceBody = "";
 	#fenceStart = 0;
 	#textFence = false;
-	/** Mode to enter after a swallowed table/closing-fence line. */
-	#afterSwallow: BlockMode = "linestart";
+	/** Whether the current prose line contains Markdown table cell separators. */
+	#tableLine = false;
 	/** Prose accumulator the segmenter cuts from. */
 	#buf = "";
 	/** Source offset for every transformed character in #buf. */
@@ -287,9 +286,6 @@ export class SpeakableStream {
 				if (ch === "\n") this.#hardBreak(out);
 				else this.#append(ch, offset);
 				return;
-			case "swallow":
-				if (ch === "\n") this.#mode = this.#afterSwallow;
-				return;
 			case "fence-open":
 				if (ch === "\n") this.#openFenceBody();
 				else this.#fenceInfo += ch;
@@ -334,10 +330,6 @@ export class SpeakableStream {
 				this.#appendSynthetic(decision.spoken, this.#prefixStart, offset + 1);
 				this.#mode = "prose";
 				return;
-			case "swallow":
-				this.#mode = "swallow";
-				this.#afterSwallow = "linestart";
-				return;
 			case "fence":
 				this.#fence = decision.fence;
 				this.#fenceInfo = "";
@@ -371,7 +363,10 @@ export class SpeakableStream {
 	#consumeFenceLine(line: string, positions: number[], newline: boolean, out: SpeakableItem[]): void {
 		if (this.#textFence) {
 			this.#appendWithPositions(line, positions);
-			if (newline) this.#drain(out);
+			if (newline) {
+				this.#drain(out);
+				this.#tableLine = false;
+			}
 		} else {
 			this.#fenceBody += line + (newline ? "\n" : "");
 		}
@@ -407,6 +402,7 @@ export class SpeakableStream {
 	#hardBreak(out: SpeakableItem[]): void {
 		this.#mode = "linestart";
 		this.#drain(out);
+		this.#tableLine = false;
 	}
 
 	/**
@@ -432,6 +428,13 @@ export class SpeakableStream {
 	#extract(out: SpeakableItem[]): void {
 		for (;;) {
 			const buf = this.#buf;
+			if (this.#tableLine) {
+				const pipe = buf.indexOf("|");
+				if (pipe >= 0) {
+					this.#cut(pipe + 1, out);
+					continue;
+				}
+			}
 			const min = this.#spoke ? MIN_SEGMENT : FIRST_SEGMENT_MIN;
 			// Bounded: a sentence past MAX_SEGMENT risks Kokoro's ~510-phoneme
 			// truncation — fall through to clause/word cuts instead.
@@ -490,6 +493,7 @@ export class SpeakableStream {
 	}
 
 	#append(text: string, offset: number): void {
+		if (text.includes("|")) this.#tableLine = true;
 		this.#buf += text;
 		for (let index = 0; index < text.length; index += 1) this.#bufPositions.push(offset + index);
 	}
@@ -507,6 +511,7 @@ export class SpeakableStream {
 	}
 
 	#appendWithPositions(text: string, positions: number[]): void {
+		if (text.includes("|")) this.#tableLine = true;
 		this.#buf += text;
 		this.#bufPositions.push(...positions.slice(0, text.length));
 	}
