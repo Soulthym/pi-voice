@@ -327,6 +327,7 @@ function createLocalSink(sampleRate, utterance) {
 	const sink = attachPlaybackClock({
 		writable: child.stdin,
 		ready,
+		stopped: false,
 		async close() {
 			this.stopPlaybackClock();
 			await ready;
@@ -336,6 +337,7 @@ function createLocalSink(sampleRate, utterance) {
 			await exited;
 		},
 		stop() {
+			this.stopped = true;
 			this.stopPlaybackClock();
 			child.stdin.destroy();
 			child.kill("SIGKILL");
@@ -370,6 +372,7 @@ function createTcpSink(output, sampleRate, utterance) {
 	});
 	let stderr = "";
 	let readySettled = false;
+	let intentionallyStopped = false;
 	const { promise: ready, resolve: resolveReady, reject: rejectReady } = Promise.withResolvers();
 	const control = child.stdio[3];
 	const controlLines = readline.createInterface({ input: control });
@@ -385,12 +388,14 @@ function createTcpSink(output, sampleRate, utterance) {
 	child.on("error", error => {
 		if (!readySettled) {
 			readySettled = true;
-			rejectReady(error);
+			if (intentionallyStopped) resolveReady();
+			else rejectReady(error);
 		}
 	});
 	const sink = {
 		writable: child.stdin,
 		ready,
+		stopped: false,
 		samplesWritten: 0,
 		noteAudio(samples) {
 			this.samplesWritten += samples;
@@ -407,6 +412,12 @@ function createTcpSink(output, sampleRate, utterance) {
 			await exited;
 		},
 		stop() {
+			this.stopped = true;
+			intentionallyStopped = true;
+			if (!readySettled) {
+				readySettled = true;
+				resolveReady();
+			}
 			child.stdin.destroy();
 			child.kill("SIGKILL");
 		},
@@ -417,7 +428,8 @@ function createTcpSink(output, sampleRate, utterance) {
 	child.on("exit", code => {
 		if (!readySettled) {
 			readySettled = true;
-			rejectReady(new Error(stderr.trim() || `TCP playback helper exited with code ${code ?? "unknown"}`));
+			if (intentionallyStopped) resolveReady();
+			else rejectReady(new Error(stderr.trim() || `TCP playback helper exited with code ${code ?? "unknown"}`));
 		}
 		if (player === sink) clearCurrentPlayer();
 	});
@@ -455,8 +467,9 @@ function stopPlayer() {
 }
 
 async function writeAudio(sink, pcm) {
-	if (!(pcm instanceof Float32Array) || pcm.length === 0) return;
+	if (!(pcm instanceof Float32Array) || pcm.length === 0 || sink.stopped) return;
 	await sink.ready;
+	if (sink.stopped) return;
 	sink.noteAudio(pcm.length);
 	const bytes = Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength);
 	if (!sink.writable.write(bytes)) await new Promise(resolve => sink.writable.once("drain", resolve));
@@ -544,6 +557,7 @@ async function runOperation(operation) {
 	if (!(pcm instanceof Float32Array) || pcm.length === 0) return;
 	const sink = startPlayer(sampleRate, operation.utterance, operation.output);
 	await sink.ready;
+	if (operation.epoch !== epoch || sink.stopped) return;
 	const start = sink.samplesWritten / sampleRate;
 	const duration = pcm.length / sampleRate;
 	send({ type: "segment-audio", utterance: operation.utterance, segmentId: operation.segmentId, start, duration });
