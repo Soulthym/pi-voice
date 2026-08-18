@@ -4,6 +4,7 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
+import { fileURLToPath } from "node:url";
 import { env as transformersEnv, pipeline } from "@huggingface/transformers";
 import { KokoroTTS } from "kokoro-js";
 
@@ -11,6 +12,8 @@ const DEFAULT_TTS_MODEL = "onnx-community/Kokoro-82M-v1.0-ONNX";
 const DEFAULT_TTS_DTYPE = "q8";
 const DEFAULT_STT_MODEL = "onnx-community/whisper-tiny.en";
 const DEFAULT_STT_DTYPE = "fp32";
+const DEFAULT_ALIGNMENT_MODEL = "onnx-community/wav2vec2-base-960h-ONNX";
+const DEFAULT_ALIGNMENT_DTYPE = "q8";
 const DEFAULT_SAMPLE_RATE = 24_000;
 const cacheDir = process.env.PI_VOICE_CACHE_DIR ?? path.join(os.homedir(), ".cache", "pi-voice", "models");
 fs.mkdirSync(cacheDir, { recursive: true });
@@ -29,10 +32,78 @@ let pumping = false;
 let player = null;
 let playerUtterance = null;
 let playerOutput = null;
+let alignmentChild = null;
 let shuttingDown = false;
 
 function send(message) {
 	process.stdout.write(`${JSON.stringify(message)}\n`);
+}
+
+function ensureAlignmentChild() {
+	if (alignmentChild && alignmentChild.exitCode === null) return alignmentChild;
+	const child = spawn(process.execPath, [fileURLToPath(new URL("./alignment-worker.mjs", import.meta.url))], {
+		stdio: ["pipe", "pipe", "ignore"],
+		env: { ...process.env },
+	});
+	alignmentChild = child;
+	const lines = readline.createInterface({ input: child.stdout });
+	lines.on("line", line => {
+		let event;
+		try {
+			event = JSON.parse(line);
+		} catch {
+			return;
+		}
+		if (event.epoch === epoch && (event.type === "alignment" || event.type === "alignment-error")) send(event);
+	});
+	child.on("error", () => {
+		if (alignmentChild === child) alignmentChild = null;
+	});
+	child.on("exit", () => {
+		if (alignmentChild === child) alignmentChild = null;
+	});
+	return child;
+}
+
+function requestAlignment(operation, pcm, sampleRate) {
+	try {
+		const bytes = Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength);
+		ensureAlignmentChild().stdin.write(
+			`${JSON.stringify({
+				type: "align",
+				epoch,
+				segmentId: operation.segmentId,
+				text: operation.text,
+				audio: bytes.toString("base64"),
+				sampleRate,
+				duration: pcm.length / sampleRate,
+				model: operation.alignmentModel,
+				dtype: operation.alignmentDtype,
+			})}\n`,
+		);
+	} catch {
+		// Estimated word timings remain available if the aligner cannot start.
+	}
+}
+
+function cancelAlignment() {
+	try {
+		alignmentChild?.stdin.write(`${JSON.stringify({ type: "cancel", epoch })}\n`);
+	} catch {
+		// Best effort.
+	}
+}
+
+function stopAlignment() {
+	const child = alignmentChild;
+	alignmentChild = null;
+	if (!child) return;
+	try {
+		child.stdin.end(`${JSON.stringify({ type: "shutdown" })}\n`);
+		child.kill("SIGTERM");
+	} catch {
+		// Best effort.
+	}
 }
 
 function progressPercent(info) {
@@ -214,7 +285,30 @@ function playerCommand(sampleRate) {
 	throw new Error("No audio player found. Install PipeWire (pw-play) or ffmpeg (ffplay).");
 }
 
-function createLocalSink(sampleRate) {
+function attachPlaybackClock(sink, sampleRate, utterance, expectFeedback = false) {
+	let startedAt = null;
+	let lastFeedbackAt = expectFeedback ? performance.now() : 0;
+	sink.samplesWritten = 0;
+	sink.noteAudio = samples => {
+		if (startedAt === null) startedAt = performance.now();
+		sink.samplesWritten += samples;
+	};
+	sink.reportPlayback = (position, estimated = false) => {
+		if (!Number.isFinite(position) || position < 0) return;
+		if (!estimated) lastFeedbackAt = performance.now();
+		send({ type: "playback", utterance, position, ...(estimated ? { estimated: true } : {}) });
+	};
+	const timer = setInterval(() => {
+		if (startedAt === null || performance.now() - lastFeedbackAt < 750) return;
+		const elapsed = (performance.now() - startedAt) / 1_000;
+		sink.reportPlayback(Math.min(elapsed, sink.samplesWritten / sampleRate), true);
+	}, 125);
+	timer.unref?.();
+	sink.stopPlaybackClock = () => clearInterval(timer);
+	return sink;
+}
+
+function createLocalSink(sampleRate, utterance) {
 	const { command, args } = playerCommand(sampleRate);
 	const child = spawn(command, args, { stdio: ["pipe", "ignore", "pipe"] });
 	let stderr = "";
@@ -225,10 +319,11 @@ function createLocalSink(sampleRate) {
 	child.stderr.on("data", chunk => {
 		stderr = `${stderr}${String(chunk)}`.slice(-2_000);
 	});
-	const sink = {
+	const sink = attachPlaybackClock({
 		writable: child.stdin,
 		ready,
 		async close() {
+			this.stopPlaybackClock();
 			await ready;
 			if (child.exitCode !== null) return;
 			const exited = new Promise(resolve => child.once("exit", resolve));
@@ -236,10 +331,11 @@ function createLocalSink(sampleRate) {
 			await exited;
 		},
 		stop() {
+			this.stopPlaybackClock();
 			child.stdin.destroy();
 			child.kill("SIGKILL");
 		},
-	};
+	}, sampleRate, utterance);
 	child.stdin.on("error", error => {
 		if (player === sink && !shuttingDown) send({ type: "error", message: error.message });
 	});
@@ -258,7 +354,7 @@ function parseTcpEndpoint(output) {
 	return { host: url.hostname.replace(/^\[|\]$/g, ""), port: Number(url.port) };
 }
 
-function createTcpSink(output, sampleRate) {
+function createTcpSink(output, sampleRate, utterance) {
 	const { host, port } = parseTcpEndpoint(output);
 	const socket = net.createConnection({ host, port });
 	socket.setNoDelay(true);
@@ -270,7 +366,7 @@ function createTcpSink(output, sampleRate) {
 		});
 		socket.once("error", reject);
 	});
-	const sink = {
+	const sink = attachPlaybackClock({
 		writable: socket,
 		ready,
 		async close() {
@@ -283,15 +379,34 @@ function createTcpSink(output, sampleRate) {
 			const closed = new Promise(resolve => socket.once("close", resolve));
 			socket.end();
 			await closed;
+			this.stopPlaybackClock();
 		},
 		stop() {
+			this.stopPlaybackClock();
 			socket.destroy();
 		},
-	};
+	}, sampleRate, utterance, true);
+	let feedback = "";
+	socket.on("data", chunk => {
+		feedback = `${feedback}${String(chunk)}`.slice(-8_192);
+		for (;;) {
+			const newline = feedback.indexOf("\n");
+			if (newline < 0) break;
+			const line = feedback.slice(0, newline);
+			feedback = feedback.slice(newline + 1);
+			try {
+				const event = JSON.parse(line);
+				if (event.type === "playback") sink.reportPlayback(Number(event.position));
+			} catch {
+				// Ignore malformed feedback from legacy or interrupted phone bridges.
+			}
+		}
+	});
 	socket.on("error", error => {
 		if (connected && player === sink && !shuttingDown) send({ type: "error", message: error.message });
 	});
 	socket.on("close", () => {
+		sink.stopPlaybackClock();
 		if (player === sink) clearCurrentPlayer();
 	});
 	return sink;
@@ -306,7 +421,9 @@ function clearCurrentPlayer() {
 function startPlayer(sampleRate, utterance, output) {
 	if (player && playerUtterance === utterance && playerOutput === output) return player;
 	if (player) stopPlayer();
-	const sink = output.startsWith("tcp://") ? createTcpSink(output, sampleRate) : createLocalSink(sampleRate);
+	const sink = output.startsWith("tcp://")
+		? createTcpSink(output, sampleRate, utterance)
+		: createLocalSink(sampleRate, utterance);
 	player = sink;
 	playerUtterance = utterance;
 	playerOutput = output;
@@ -325,10 +442,10 @@ function stopPlayer() {
 	}
 }
 
-async function writeAudio(sink, audio) {
-	const pcm = Array.isArray(audio) ? audio[0] : audio;
+async function writeAudio(sink, pcm) {
 	if (!(pcm instanceof Float32Array) || pcm.length === 0) return;
 	await sink.ready;
+	sink.noteAudio(pcm.length);
 	const bytes = Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength);
 	if (!sink.writable.write(bytes)) await new Promise(resolve => sink.writable.once("drain", resolve));
 }
@@ -338,7 +455,7 @@ async function closePlayer(utterance) {
 	if (!sink || playerUtterance !== utterance) return;
 	clearCurrentPlayer();
 	await sink.close();
-	send({ type: "idle" });
+	send({ type: "idle", utterance });
 }
 
 async function runOperation(operation) {
@@ -392,8 +509,15 @@ async function runOperation(operation) {
 	const output = await model.generate(operation.text, { voice: operation.voice, speed: operation.speed });
 	if (operation.epoch !== epoch) return;
 	const sampleRate = output.sampling_rate || DEFAULT_SAMPLE_RATE;
+	const pcm = Array.isArray(output.audio) ? output.audio[0] : output.audio;
+	if (!(pcm instanceof Float32Array) || pcm.length === 0) return;
 	const sink = startPlayer(sampleRate, operation.utterance, operation.output);
-	await writeAudio(sink, output.audio);
+	await sink.ready;
+	const start = sink.samplesWritten / sampleRate;
+	const duration = pcm.length / sampleRate;
+	send({ type: "segment-audio", utterance: operation.utterance, segmentId: operation.segmentId, start, duration });
+	requestAlignment(operation, pcm, sampleRate);
+	await writeAudio(sink, pcm);
 }
 
 async function pump() {
@@ -422,6 +546,7 @@ function enqueue(operation) {
 
 function cancel() {
 	epoch += 1;
+	cancelAlignment();
 	queue = queue
 		.filter(
 			operation =>
@@ -445,12 +570,15 @@ lines.on("line", line => {
 			enqueue({
 				type: "segment",
 				utterance: message.utterance,
+				segmentId: message.segmentId,
 				text: message.text,
 				voice: message.voice,
 				speed: message.speed,
 				output: message.output ?? "local",
 				model: message.model ?? DEFAULT_TTS_MODEL,
 				dtype: message.dtype ?? DEFAULT_TTS_DTYPE,
+				alignmentModel: message.alignmentModel ?? DEFAULT_ALIGNMENT_MODEL,
+				alignmentDtype: message.alignmentDtype ?? DEFAULT_ALIGNMENT_DTYPE,
 			});
 			break;
 		case "end":
@@ -492,11 +620,13 @@ lines.on("line", line => {
 		case "shutdown":
 			shuttingDown = true;
 			cancel();
+			stopAlignment();
 			process.exit(0);
 	}
 });
 lines.on("close", () => {
 	shuttingDown = true;
 	stopPlayer();
+	stopAlignment();
 	process.exit(0);
 });

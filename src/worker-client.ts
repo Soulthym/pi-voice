@@ -8,9 +8,13 @@ export type WorkerEvent =
 	| { type: "progress"; percent?: number; file?: string }
 	| { type: "ready"; requestId?: string }
 	| { type: "speaking" }
+	| { type: "segment-audio"; utterance: number; segmentId: number; start: number; duration: number }
+	| { type: "alignment"; segmentId: number; words: Array<{ text: string; start: number; end: number }> }
+	| { type: "playback"; utterance: number; position: number; estimated?: boolean }
+	| { type: "alignment-error"; segmentId: number; message: string }
 	| { type: "transcribing" }
 	| { type: "transcript"; text: string; candidates?: string[]; requestId: string; preview?: boolean }
-	| { type: "idle" }
+	| { type: "idle"; utterance?: number }
 	| { type: "error"; message: string; requestId?: string; preview?: boolean };
 
 type PendingPreload = {
@@ -36,15 +40,18 @@ export class VoiceWorkerClient {
 		this.#onEvent = onEvent;
 	}
 
-	sendSegment(utterance: number, text: string, config: VoiceConfig): void {
+	sendSegment(utterance: number, segmentId: number, text: string, config: VoiceConfig): void {
 		this.#send({
 			type: "segment",
 			utterance,
+			segmentId,
 			text,
 			voice: config.voice,
 			speed: config.speed,
 			model: config.ttsModel,
 			dtype: config.ttsDtype,
+			alignmentModel: config.alignmentModel,
+			alignmentDtype: config.alignmentDtype,
 			output: config.output,
 		});
 	}

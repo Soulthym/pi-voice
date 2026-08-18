@@ -20,10 +20,10 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # Kokoro emits mono float32 PCM at 24 kHz. Each connection is one utterance;
-# mpv starts immediately and exits after the server closes the stream.
-socat -u \
+# the session streams it to mpv and returns mpv's playback clock to the desktop.
+socat -t 5 \
   "TCP4-LISTEN:${AUDIO_PORT},bind=127.0.0.1,reuseaddr,fork" \
-  EXEC:"mpv --really-quiet --no-video --cache=no --demuxer=rawaudio --demuxer-rawaudio-format=floatle --demuxer-rawaudio-rate=24000 --demuxer-rawaudio-channels=mono -" &
+  EXEC:"${SCRIPT_DIR}/pi-voice-audio-session" &
 audio_pid=$!
 
 # A server-side Alt+M or /voice talk opens this control channel. The session

@@ -1,6 +1,7 @@
 import type { VoiceConfig } from "./config.js";
 import { fallbackCodeDescription } from "./code-describer.js";
-import { SpeakableStream, type FencedCodeBlock, type SpeakableItem } from "./speakable.js";
+import type { NarrationSegment } from "./narration-progress.js";
+import { SpeakableStream, type FencedCodeBlock, type SpeakableItem, type SpeakableSourceRange } from "./speakable.js";
 import { VoiceWorkerClient, type WorkerEvent } from "./worker-client.js";
 
 const IDLE_FLUSH_MS = 1_000;
@@ -18,6 +19,8 @@ export class Vocalizer {
 	#speakable: SpeakableStream | null = null;
 	#utterance: number | null = null;
 	#nextUtterance = 0;
+	#nextSegment = 0;
+	#onNarrationSegment: ((segment: NarrationSegment) => void) | undefined;
 	#idleTimer: NodeJS.Timeout | null = null;
 	#deliveryBarrier: Promise<void> | null = null;
 	#descriptionControllers = new Set<AbortController>();
@@ -27,11 +30,13 @@ export class Vocalizer {
 		getConfig: () => VoiceConfig,
 		onEvent: (event: WorkerEvent) => void,
 		describeCode?: CodeDescriber,
+		onNarrationSegment?: (segment: NarrationSegment) => void,
 		worker: VoiceWorker = new VoiceWorkerClient(onEvent),
 	) {
 		this.#getConfig = getConfig;
 		this.#worker = worker;
 		this.#describeCode = describeCode;
+		this.#onNarrationSegment = onNarrationSegment;
 	}
 
 	pushDelta(text: string): void {
@@ -101,24 +106,24 @@ export class Vocalizer {
 
 	#pushItems(items: SpeakableItem[]): void {
 		for (const item of items) {
-			if (item.kind === "speech") this.#scheduleSpeech(item.text);
-			else this.#scheduleCodeDescription(item.block);
+			if (item.kind === "speech") this.#scheduleSpeech(item.text, item.source);
+			else this.#scheduleCodeDescription(item.block, item.source);
 		}
 	}
 
-	#scheduleSpeech(text: string): void {
+	#scheduleSpeech(text: string, source: SpeakableSourceRange): void {
 		if (!this.#deliveryBarrier) {
-			this.#sendSegments([text]);
+			this.#sendSegments([text], undefined, source);
 			return;
 		}
 		const generation = this.#generation;
 		const utterance = this.#ensureUtterance();
 		this.#deliveryBarrier = this.#deliveryBarrier.then(() => {
-			if (generation === this.#generation) this.#sendSegments([text], utterance);
+			if (generation === this.#generation) this.#sendSegments([text], utterance, source);
 		});
 	}
 
-	#scheduleCodeDescription(block: FencedCodeBlock): void {
+	#scheduleCodeDescription(block: FencedCodeBlock, source: SpeakableSourceRange): void {
 		const utterance = this.#ensureUtterance();
 		const generation = this.#generation;
 		const controller = new AbortController();
@@ -138,16 +143,23 @@ export class Vocalizer {
 		this.#deliveryBarrier = before.then(async () => {
 			const spoken = await ready;
 			if (generation !== this.#generation) return;
-			this.#sendDescription(spoken, block, utterance);
+			this.#sendDescription(spoken, block, source, utterance);
 		});
 	}
 
-	#sendDescription(description: string, block: FencedCodeBlock, utterance: number): void {
+	#sendDescription(
+		description: string,
+		block: FencedCodeBlock,
+		source: SpeakableSourceRange,
+		utterance: number,
+	): void {
 		const stream = new SpeakableStream();
 		const items = [...stream.push(description), ...stream.flush()];
-		let segments = items.filter((item): item is Extract<SpeakableItem, { kind: "speech" }> => item.kind === "speech").map(item => item.text);
+		let segments = items
+			.filter((item): item is Extract<SpeakableItem, { kind: "speech" }> => item.kind === "speech")
+			.map(item => item.text);
 		if (segments.length === 0) segments = [fallbackCodeDescription(block)];
-		this.#sendSegments(segments, utterance);
+		this.#sendSegments(segments, utterance, source, true);
 	}
 
 	#ensureUtterance(): number {
@@ -155,10 +167,24 @@ export class Vocalizer {
 		return this.#utterance;
 	}
 
-	#sendSegments(segments: string[], utterance = this.#ensureUtterance()): void {
+	#sendSegments(
+		segments: string[],
+		utterance = this.#ensureUtterance(),
+		source?: SpeakableSourceRange,
+		revealAtEnd = false,
+	): void {
 		if (segments.length === 0) return;
 		const config = this.#getConfig();
-		for (const segment of segments) this.#worker.sendSegment(utterance, segment, config);
+		segments.forEach((text, index) => {
+			const id = ++this.#nextSegment;
+			const narrationSource = source
+				? revealAtEnd && index < segments.length - 1
+					? { start: source.start, end: source.start }
+					: source
+				: { start: 0, end: 0 };
+			this.#onNarrationSegment?.({ id, utterance, text, source: narrationSource, revealAtEnd });
+			this.#worker.sendSegment(utterance, id, text, config);
+		});
 	}
 
 	#armIdle(callback: () => void): void {

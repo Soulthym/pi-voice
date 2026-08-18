@@ -15,4 +15,5 @@ Kokoro model and runtime dependencies are distributed under their respective lic
 - `hexgrad/Kokoro-82M` and `onnx-community/Kokoro-82M-v1.0-ONNX`: Apache-2.0
 - `kokoro-js`: Apache-2.0
 - `openai/whisper-tiny.en` and `onnx-community/whisper-tiny.en`: Apache-2.0
+- `facebook/wav2vec2-base-960h` and `onnx-community/wav2vec2-base-960h-ONNX`: Apache-2.0
 - `@huggingface/transformers`: Apache-2.0

@@ -13,10 +13,14 @@ test("emits fenced code for description while preserving its spoken position", (
 		...stream.flush(),
 	];
 	assert.deepEqual(items, [
-		{ kind: "speech", text: "Result" },
-		{ kind: "speech", text: "The build passed." },
-		{ kind: "code", block: { language: "ts", code: "const hidden = true;" } },
-		{ kind: "speech", text: "Done." },
+		{ kind: "speech", text: "Result", source: { start: 2, end: 8 } },
+		{ kind: "speech", text: "The build passed.", source: { start: 9, end: 26 } },
+		{
+			kind: "code",
+			block: { language: "ts", code: "const hidden = true;" },
+			source: { start: 27, end: 58 },
+		},
+		{ kind: "speech", text: "Done.", source: { start: 58, end: 63 } },
 	]);
 });
 
@@ -39,7 +43,9 @@ test("recognizes fenced blocks split across streaming deltas", () => {
 		...stream.push("\n"),
 		...stream.flush(),
 	];
-	assert.deepEqual(items, [{ kind: "code", block: { language: "diff", code: "-old\n+new" } }]);
+	assert.deepEqual(items, [
+		{ kind: "code", block: { language: "diff", code: "-old\n+new" }, source: { start: 0, end: 22 } },
+	]);
 });
 
 test("speaks link labels and URL hosts instead of full URLs", () => {

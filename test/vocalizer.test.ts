@@ -10,7 +10,7 @@ function immediate(): Promise<void> {
 test("starts code description early while preserving spoken order", async () => {
 	const events: string[] = [];
 	const worker = {
-		sendSegment(_utterance: number, text: string): void {
+		sendSegment(_utterance: number, _segmentId: number, text: string): void {
 			events.push(`speech:${text}`);
 		},
 		endUtterance(): void {
@@ -35,6 +35,7 @@ test("starts code description early while preserving spoken order", async () => 
 			descriptionStarted = true;
 			return deferred.promise;
 		},
+		undefined,
 		worker,
 	);
 

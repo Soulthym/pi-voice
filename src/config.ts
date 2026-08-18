@@ -21,6 +21,9 @@ export interface VoiceConfig {
 	sttDtype: VoiceModelDtype;
 	/** Final hypotheses requested from the configured ASR model. */
 	sttCandidates: number;
+	/** Transformers.js CTC model used to force-align synthesized speech. */
+	alignmentModel: string;
+	alignmentDtype: VoiceModelDtype;
 	/** `local` for server speakers, or a TCP endpoint reached through an SSH reverse tunnel. */
 	output: string;
 	/** `disabled`, or the phone speech-to-text control endpoint reached through a second reverse tunnel. */
@@ -33,6 +36,8 @@ export interface VoiceConfig {
 	editMode: VoiceEditMode;
 	/** `current`, or a `provider/model-id` resolved through Pi's model registry. */
 	editModel: string;
+	/** Dim unread assistant prose and reveal it as phone playback advances. */
+	playbackHighlight: boolean;
 }
 
 export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
@@ -45,12 +50,15 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
 	sttModel: "onnx-community/whisper-tiny.en",
 	sttDtype: "fp32",
 	sttCandidates: 3,
+	alignmentModel: "onnx-community/wav2vec2-base-960h-ONNX",
+	alignmentDtype: "q8",
 	output: "local",
 	input: "disabled",
 	talkShortcut: "alt+m",
 	submitMode: "review",
 	editMode: "smart",
 	editModel: "current",
+	playbackHighlight: true,
 };
 
 export function getVoiceConfigPath(): string {
@@ -185,12 +193,18 @@ export async function loadVoiceConfig(): Promise<VoiceConfig> {
 			sttModel: normalizeModelId(parsed.sttModel) ?? DEFAULT_VOICE_CONFIG.sttModel,
 			sttDtype: normalizeModelDtype(parsed.sttDtype) ?? DEFAULT_VOICE_CONFIG.sttDtype,
 			sttCandidates: normalizeSttCandidates(parsed.sttCandidates) ?? DEFAULT_VOICE_CONFIG.sttCandidates,
+			alignmentModel: normalizeModelId(parsed.alignmentModel) ?? DEFAULT_VOICE_CONFIG.alignmentModel,
+			alignmentDtype: normalizeModelDtype(parsed.alignmentDtype) ?? DEFAULT_VOICE_CONFIG.alignmentDtype,
 			output: normalizeVoiceOutput(parsed.output) ?? DEFAULT_VOICE_CONFIG.output,
 			input: normalizeVoiceInput(parsed.input) ?? DEFAULT_VOICE_CONFIG.input,
 			talkShortcut: normalizeTalkShortcut(parsed.talkShortcut) ?? DEFAULT_VOICE_CONFIG.talkShortcut,
 			submitMode: isSubmitMode(parsed.submitMode) ? parsed.submitMode : DEFAULT_VOICE_CONFIG.submitMode,
 			editMode: isEditMode(parsed.editMode) ? parsed.editMode : DEFAULT_VOICE_CONFIG.editMode,
 			editModel: normalizeEditModel(parsed.editModel) ?? DEFAULT_VOICE_CONFIG.editModel,
+			playbackHighlight:
+				typeof parsed.playbackHighlight === "boolean"
+					? parsed.playbackHighlight
+					: DEFAULT_VOICE_CONFIG.playbackHighlight,
 		};
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return { ...DEFAULT_VOICE_CONFIG };

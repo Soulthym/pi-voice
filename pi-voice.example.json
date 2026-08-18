@@ -8,10 +8,13 @@
   "sttModel": "onnx-community/whisper-tiny.en",
   "sttDtype": "fp32",
   "sttCandidates": 3,
+  "alignmentModel": "onnx-community/wav2vec2-base-960h-ONNX",
+  "alignmentDtype": "q8",
   "editModel": "current",
   "output": "tcp://127.0.0.1:8765",
   "input": "tcp://127.0.0.1:8766",
   "talkShortcut": "alt+m",
   "submitMode": "review",
-  "editMode": "smart"
+  "editMode": "smart",
+  "playbackHighlight": true
 }

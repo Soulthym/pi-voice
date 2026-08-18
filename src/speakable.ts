@@ -76,12 +76,19 @@ const PATH_RE = /(^|[\s("'`])((?:~|\.{1,2})?\/?[\w.@+-]+(?:\/[\w.@+-]+){2,}\/?)/
 const HAS_SPEAKABLE_RE = /[\p{L}\p{N}]/u;
 const TEXT_FENCE_LANGUAGES = new Set(["text", "txt", "plain", "plaintext", "md", "markdown", "mdown"]);
 
+export interface SpeakableSourceRange {
+	start: number;
+	end: number;
+}
+
 export interface FencedCodeBlock {
 	language: string;
 	code: string;
 }
 
-export type SpeakableItem = { kind: "speech"; text: string } | { kind: "code"; block: FencedCodeBlock };
+export type SpeakableItem =
+	| { kind: "speech"; text: string; source: SpeakableSourceRange }
+	| { kind: "code"; block: FencedCodeBlock; source: SpeakableSourceRange };
 
 /** "https://github.com/foo/bar?x#y" → "github.com". */
 function speakableUrl(url: string): string {
@@ -206,19 +213,28 @@ export class SpeakableStream {
 	#fenceInfo = "";
 	#fenceLanguage = "";
 	#fenceLine = "";
+	#fenceLinePositions: number[] = [];
 	#fenceBody = "";
+	#fenceStart = 0;
 	#textFence = false;
 	/** Mode to enter after a swallowed table/closing-fence line. */
 	#afterSwallow: BlockMode = "linestart";
 	/** Prose accumulator the segmenter cuts from. */
 	#buf = "";
+	/** Source offset for every transformed character in #buf. */
+	#bufPositions: number[] = [];
+	#prefixStart = 0;
+	#offset = 0;
 	/** Whether anything has been emitted yet (enables the fast first segment). */
 	#spoke = false;
 
 	/** Consume a raw delta; returns segments now ready to speak, in order. */
 	push(delta: string): SpeakableItem[] {
 		const out: SpeakableItem[] = [];
-		for (const ch of delta) this.#consume(ch, out);
+		for (const ch of delta) {
+			this.#consume(ch, this.#offset, out);
+			this.#offset += 1;
+		}
 		this.#extract(out);
 		return out;
 	}
@@ -227,12 +243,12 @@ export class SpeakableStream {
 	flush(): SpeakableItem[] {
 		const out: SpeakableItem[] = [];
 		if (this.#mode === "linestart" && this.#prefix.length > 0 && !HR_LINE_RE.test(this.#prefix)) {
-			this.#buf += this.#prefix;
+			this.#appendSequential(this.#prefix, this.#prefixStart);
 		} else if (this.#mode === "fence-body") {
-			if (this.#isClosingFence(this.#fenceLine)) this.#finishFence(out);
+			if (this.#isClosingFence(this.#fenceLine)) this.#finishFence(out, this.#offset);
 			else {
-				this.#consumeFenceLine(this.#fenceLine, false, out);
-				if (!this.#textFence) this.#finishFence(out);
+				this.#consumeFenceLine(this.#fenceLine, this.#fenceLinePositions, false, out);
+				if (!this.#textFence) this.#finishFence(out, this.#offset);
 			}
 		}
 		this.#prefix = "";
@@ -258,14 +274,14 @@ export class SpeakableStream {
 		return out;
 	}
 
-	#consume(ch: string, out: SpeakableItem[]): void {
+	#consume(ch: string, offset: number, out: SpeakableItem[]): void {
 		switch (this.#mode) {
 			case "linestart":
-				this.#consumeLineStart(ch, out);
+				this.#consumeLineStart(ch, offset, out);
 				return;
 			case "prose":
 				if (ch === "\n") this.#hardBreak(out);
-				else this.#buf += ch;
+				else this.#append(ch, offset);
 				return;
 			case "swallow":
 				if (ch === "\n") this.#mode = this.#afterSwallow;
@@ -275,26 +291,28 @@ export class SpeakableStream {
 				else this.#fenceInfo += ch;
 				return;
 			case "fence-body":
-				this.#consumeFenceBody(ch, out);
+				this.#consumeFenceBody(ch, offset, out);
 				return;
 		}
 	}
 
-	#consumeLineStart(ch: string, out: SpeakableItem[]): void {
+	#consumeLineStart(ch: string, offset: number, out: SpeakableItem[]): void {
 		if (ch === "\n") {
 			// The whole line fit in the prefix: an hr/blank line is silence; a
 			// short undecided prefix ("Hi.", "OK") was prose all along.
 			const line = this.#prefix;
 			this.#prefix = "";
-			if (line.length > 0 && !HR_LINE_RE.test(line)) this.#buf += line;
+			if (line.length > 0 && !HR_LINE_RE.test(line)) this.#appendSequential(line, this.#prefixStart);
 			this.#hardBreak(out);
 			return;
 		}
+		if (this.#prefix.length === 0) this.#prefixStart = offset;
 		this.#prefix += ch;
-		const decision = classifyPrefix(this.#prefix);
+		const prefix = this.#prefix;
+		const decision = classifyPrefix(prefix);
 		if (decision.kind === "undecided") {
-			if (this.#prefix.length > 8) {
-				this.#buf += this.#prefix;
+			if (prefix.length > 8) {
+				this.#appendSequential(prefix, this.#prefixStart);
 				this.#prefix = "";
 				this.#mode = "prose";
 			}
@@ -302,12 +320,14 @@ export class SpeakableStream {
 		}
 		this.#prefix = "";
 		switch (decision.kind) {
-			case "prose":
-				this.#buf += decision.text;
+			case "prose": {
+				const relative = prefix.lastIndexOf(decision.text);
+				this.#appendSequential(decision.text, this.#prefixStart + Math.max(0, relative));
 				this.#mode = "prose";
 				return;
+			}
 			case "marker":
-				this.#buf += decision.spoken;
+				this.#appendSynthetic(decision.spoken, this.#prefixStart, offset + 1);
 				this.#mode = "prose";
 				return;
 			case "swallow":
@@ -317,6 +337,7 @@ export class SpeakableStream {
 			case "fence":
 				this.#fence = decision.fence;
 				this.#fenceInfo = "";
+				this.#fenceStart = this.#prefixStart;
 				this.#mode = "fence-open";
 				return;
 		}
@@ -326,23 +347,26 @@ export class SpeakableStream {
 		this.#fenceLanguage = this.#fenceInfo.trim().toLowerCase().split(/[\s,{]/, 1)[0] ?? "";
 		this.#textFence = TEXT_FENCE_LANGUAGES.has(this.#fenceLanguage);
 		this.#fenceLine = "";
+		this.#fenceLinePositions = [];
 		this.#fenceBody = "";
 		this.#mode = "fence-body";
 	}
 
-	#consumeFenceBody(ch: string, out: SpeakableItem[]): void {
+	#consumeFenceBody(ch: string, offset: number, out: SpeakableItem[]): void {
 		if (ch !== "\n") {
 			this.#fenceLine += ch;
+			this.#fenceLinePositions.push(offset);
 			return;
 		}
-		if (this.#isClosingFence(this.#fenceLine)) this.#finishFence(out);
-		else this.#consumeFenceLine(this.#fenceLine, true, out);
+		if (this.#isClosingFence(this.#fenceLine)) this.#finishFence(out, offset + 1);
+		else this.#consumeFenceLine(this.#fenceLine, this.#fenceLinePositions, true, out);
 		this.#fenceLine = "";
+		this.#fenceLinePositions = [];
 	}
 
-	#consumeFenceLine(line: string, newline: boolean, out: SpeakableItem[]): void {
+	#consumeFenceLine(line: string, positions: number[], newline: boolean, out: SpeakableItem[]): void {
 		if (this.#textFence) {
-			this.#buf += line;
+			this.#appendWithPositions(line, positions);
 			if (newline) this.#drain(out);
 		} else {
 			this.#fenceBody += line + (newline ? "\n" : "");
@@ -354,15 +378,22 @@ export class SpeakableStream {
 		return trimmed.length >= 3 && [...trimmed].every(character => character === this.#fence[0]);
 	}
 
-	#finishFence(out: SpeakableItem[]): void {
+	#finishFence(out: SpeakableItem[], end: number): void {
 		if (!this.#textFence) {
 			const code = this.#fenceBody.replace(/\n$/, "");
-			if (code.trim()) out.push({ kind: "code", block: { language: this.#fenceLanguage, code } });
+			if (code.trim()) {
+				out.push({
+					kind: "code",
+					block: { language: this.#fenceLanguage, code },
+					source: { start: this.#fenceStart, end },
+				});
+			}
 		}
 		this.#fence = "";
 		this.#fenceInfo = "";
 		this.#fenceLanguage = "";
 		this.#fenceLine = "";
+		this.#fenceLinePositions = [];
 		this.#fenceBody = "";
 		this.#textFence = false;
 		this.#mode = "linestart";
@@ -387,8 +418,10 @@ export class SpeakableStream {
 	#drain(out: SpeakableItem[]): void {
 		this.#extract(out);
 		const text = this.#buf;
+		const positions = this.#bufPositions;
 		this.#buf = "";
-		this.#emit(text, out);
+		this.#bufPositions = [];
+		this.#emit(text, positions, out);
 	}
 
 	/** Cut ready segments off the front of the buffer (streaming path). */
@@ -435,14 +468,42 @@ export class SpeakableStream {
 
 	#cut(at: number, out: SpeakableItem[]): void {
 		const head = this.#buf.slice(0, at);
+		const positions = this.#bufPositions.slice(0, at);
 		this.#buf = this.#buf.slice(at);
-		this.#emit(head, out);
+		this.#bufPositions = this.#bufPositions.slice(at);
+		this.#emit(head, positions, out);
 	}
 
-	#emit(raw: string, out: SpeakableItem[]): void {
+	#emit(raw: string, positions: number[], out: SpeakableItem[]): void {
 		const spoken = normalizeSpeakable(raw);
-		if (!spoken) return;
-		out.push({ kind: "speech", text: spoken });
+		if (!spoken || positions.length === 0) return;
+		out.push({
+			kind: "speech",
+			text: spoken,
+			source: { start: Math.min(...positions), end: Math.max(...positions) + 1 },
+		});
 		this.#spoke = true;
+	}
+
+	#append(text: string, offset: number): void {
+		this.#buf += text;
+		for (let index = 0; index < text.length; index += 1) this.#bufPositions.push(offset + index);
+	}
+
+	#appendSequential(text: string, offset: number): void {
+		this.#append(text, offset);
+	}
+
+	#appendSynthetic(text: string, start: number, end: number): void {
+		this.#buf += text;
+		const span = Math.max(1, end - start);
+		for (let index = 0; index < text.length; index += 1) {
+			this.#bufPositions.push(start + Math.min(span - 1, Math.floor((index * span) / Math.max(1, text.length))));
+		}
+	}
+
+	#appendWithPositions(text: string, positions: number[]): void {
+		this.#buf += text;
+		this.#bufPositions.push(...positions.slice(0, text.length));
 	}
 }

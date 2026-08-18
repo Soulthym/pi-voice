@@ -5,7 +5,7 @@ A bidirectional phone voice-mode extension for the [Pi coding agent](https://git
 - **Desktop → phone:** Pi runs Kokoro-82M locally and streams assistant speech through an SSH reverse tunnel to `mpv` in Termux.
 - **Phone → desktop:** The configured shortcut streams Ogg/Opus from the Termux microphone through a second reverse tunnel. Desktop-side voice activity detection stops on natural silence, Whisper transcribes locally, and Pi places the result in the prompt editor for review.
 
-Both tunnel endpoints bind only to loopback, and phone audio stays inside the encrypted SSH connection. Kokoro synthesis and Whisper transcription run locally on the desktop. Final ASR hypotheses are resolved against a bounded excerpt of the current session by Pi's configured editing model in both `append` and `smart` modes. The same model describes fenced code and patches for speech. If that model is remote, ASR hypotheses, existing drafts, recent session text, and fenced code being described are sent to its provider. Pin `editModel` to a local Pi-registered model to keep these requests local.
+Both tunnel endpoints bind only to loopback, and phone audio stays inside the encrypted SSH connection. The audio connection is full-duplex: the phone returns only `mpv` playback timestamps, not microphone data. Kokoro synthesis, Whisper transcription, and Wav2Vec2 alignment run locally on the desktop. Final ASR hypotheses are resolved against a bounded excerpt of the current session by Pi's configured editing model in both `append` and `smart` modes. The same model describes fenced code and patches for speech. If that model is remote, ASR hypotheses, existing drafts, recent session text, and fenced code being described are sent to its provider. Pin `editModel` to a local Pi-registered model to keep these requests local.
 
 ## Features
 
@@ -18,6 +18,7 @@ Both tunnel endpoints bind only to loopback, and phone audio stays inside the en
 - Starts with a short first segment, then synthesizes bounded sentence/clause segments.
 - Cancels queued speech when you send another prompt.
 - Supports server-local playback or raw PCM over TCP/SSH.
+- Slightly dims unread assistant prose and restores each word as it is heard, using fast local CTC forced alignment plus live `mpv` playback-position feedback from the phone.
 - Streams phone microphone audio in near real time and stops automatically after natural silence.
 - Shows a revisable Whisper preview directly in Pi's editor while you speak.
 - Supports a second `Alt+M` as a manual stop for long pauses or noisy environments.
@@ -25,7 +26,7 @@ Both tunnel endpoints bind only to loopback, and phone audio stays inside the en
 - Generates multiple final hypotheses with the same ASR model and lets any configured Pi model resolve technical ambiguities from recent context.
 - Resolves candidates in both edit modes; `smart` additionally applies spoken corrections to the existing draft.
 
-Kokoro setup downloads approximately 100 MB from Hugging Face. The first microphone transcription downloads approximately 150 MB of Whisper weights. Later synthesis and transcription are local.
+Kokoro setup downloads approximately 100 MB from Hugging Face. The first microphone transcription downloads approximately 150 MB of Whisper weights, and spoken-word alignment downloads approximately 100 MB of q8 Wav2Vec2 weights. Later synthesis, transcription, and alignment are local.
 
 ## Server installation
 
@@ -49,12 +50,15 @@ Configuration is stored in `~/.pi/agent/pi-voice.json`. For the bundled Termux b
   "sttModel": "onnx-community/whisper-tiny.en",
   "sttDtype": "fp32",
   "sttCandidates": 3,
+  "alignmentModel": "onnx-community/wav2vec2-base-960h-ONNX",
+  "alignmentDtype": "q8",
   "editModel": "current",
   "output": "tcp://127.0.0.1:8765",
   "input": "tcp://127.0.0.1:8766",
   "talkShortcut": "alt+m",
   "submitMode": "review",
-  "editMode": "smart"
+  "editMode": "smart",
+  "playbackHighlight": true
 }
 ```
 
@@ -70,6 +74,8 @@ cd pi-voice
 mkdir -p "$HOME/.local/bin"
 install -m755 termux/pi-voice-* "$HOME/.local/bin/"
 ```
+
+Repeat the `install` command and restart `pi-voice-ssh` after upgrading; playback highlighting requires the current `pi-voice-audio-session` bridge.
 
 Ensure `~/.local/bin` is included in Termux's `PATH`. For Bash:
 
@@ -109,7 +115,8 @@ If SSH reports that remote forwarding failed, ensure `AllowTcpForwarding yes` is
 - Final transcription requests up to `sttCandidates` hypotheses from the same ASR model. The configured editing model resolves them using the existing draft and a bounded, text-only excerpt of recent session context. This isolated request does not enter conversation history.
 - With `editMode: "smart"`, text that is already in the editor when recording starts becomes the existing draft. Another dictation can continue or revise it naturally: “Actually replace port 8000 with 8080,” “scratch the last sentence,” or “make the second paragraph shorter.” Start recording only after placing the text to revise in the editor. With an empty editor there is nothing to revise, so Pi resolves the new utterance as fresh dictation. In `append`, the model still resolves ASR ambiguity but preserves correction phrases literally instead of executing them.
 - Fences tagged `text`, `txt`, `plain`, `plaintext`, `md`, `markdown`, or `mdown` are read as prose. Other fenced blocks are sent to `editModel` for a short semantic description. Descriptions remain at the block's position in the spoken response, while requests begin early enough to overlap preceding queued TTS whenever possible.
-- Assistant speech automatically plays through the phone.
+- Assistant speech automatically plays through the phone. While it plays, unread prose is dimmed and words return to normal near their actual playback time. Fenced code remains normally styled because it is narrated as a semantic block rather than word-for-word.
+- A configurable Wav2Vec2 CTC model aligns clean Kokoro audio in a separate worker. If alignment is late or unavailable, duration-weighted word timing is used; if phone feedback is unavailable, the desktop playback clock is estimated.
 - `Ctrl+Shift+V` toggles spoken output.
 
 Commands:
@@ -128,7 +135,10 @@ Commands:
 /voice stt-model <huggingface-repo>
 /voice stt-dtype fp32|q8|q4
 /voice stt-candidates <1..8>
+/voice alignment-model <huggingface-repo>
+/voice alignment-dtype fp32|q8|q4
 /voice edit-model current|provider/model-id
+/voice highlight on|off
 /voice output local|tcp://host:port
 /voice input disabled|tcp://host:port
 /voice shortcut <key|disabled>
@@ -142,9 +152,10 @@ Shortcut names use Pi's key format, such as `alt+m`, `ctrl+shift+m`, or `f8`. Ru
 
 - `ttsModel` must be a `kokoro-js`-compatible Kokoro ONNX repository. Kokoro is a speech-synthesis model only; it cannot perform speech-to-text.
 - `sttModel` must be a Transformers.js-compatible automatic-speech-recognition repository. Tested defaults use Whisper ONNX models from `onnx-community`.
+- `alignmentModel` must be a Transformers.js-compatible English CTC acoustic model. The default `onnx-community/wav2vec2-base-960h-ONNX` is an Apache-2.0 conversion of `facebook/wav2vec2-base-960h`; its q8 weights are approximately 100 MB. Unsupported architectures fall back to duration-weighted timing.
 - `sttCandidates` defaults to 3. Live previews remain single-pass; only final Whisper transcription generates alternatives. Candidate 1 is deterministic and additional candidates are low-temperature samples because Transformers.js 3.x does not expose multiple beam-search outputs. Duplicate hypotheses are removed, so fewer than the requested count may be returned. Other ASR architectures may return only one candidate.
 - `editModel: "current"` follows whichever model is active in Pi, without assuming a particular model family. Set `provider/model-id` to pin candidate resolution, smart editing, and fenced-code descriptions to another model registered and authenticated in Pi.
-- Model and precision changes apply on the next synthesis or transcription. Missing weights download lazily into the configured cache.
+- Model and precision changes apply on the next synthesis, transcription, or alignment. Missing weights download lazily into the configured cache.
 - A repository must actually provide the selected `fp32`, `q8`, or `q4` ONNX variant. If loading fails, choose a precision shipped by that repository.
 
 Suggested STT repositories, from lighter to heavier, include `onnx-community/whisper-tiny.en`, `onnx-community/whisper-base.en`, and `onnx-community/whisper-small.en`. Remove `.en` for multilingual recognition.
