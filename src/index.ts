@@ -17,6 +17,7 @@ import {
 } from "./config.js";
 import { LiveTranscriptionSession } from "./live-transcription.js";
 import { NarrationProgress } from "./narration-progress.js";
+import { PlaybackHistory, type PlaybackMessage, type PlaybackTarget } from "./playback-history.js";
 import { PhoneInputClient } from "./phone-input.js";
 import { applySpokenEdit, resolveDictationCandidates } from "./prompt-editor.js";
 import { Vocalizer } from "./vocalizer.js";
@@ -49,17 +50,16 @@ function assistantStopReason(message: unknown): string | undefined {
 	return "stopReason" in message && typeof message.stopReason === "string" ? message.stopReason : undefined;
 }
 
-function latestCompletedAssistantText(ctx: ExtensionContext): string {
-	const branch = ctx.sessionManager.getBranch();
-	for (let index = branch.length - 1; index >= 0; index -= 1) {
-		const entry = branch[index];
-		if (entry?.type !== "message") continue;
+function completedAssistantMessages(ctx: ExtensionContext): PlaybackMessage[] {
+	const messages: PlaybackMessage[] = [];
+	for (const entry of ctx.sessionManager.getBranch()) {
+		if (entry.type !== "message") continue;
 		const stopReason = assistantStopReason(entry.message);
 		if (stopReason === undefined || stopReason === "aborted" || stopReason === "error") continue;
 		const text = assistantText(entry.message);
-		if (text) return text;
+		if (text) messages.push({ id: entry.id, text });
 	}
-	return "";
+	return messages;
 }
 
 function parseMode(value: string): VoiceMode | undefined {
@@ -93,7 +93,10 @@ export default async function (pi: ExtensionAPI) {
 	let contextEpoch = 0;
 	let narrationTui: { invalidate(): void; requestRender(force?: boolean): void } | null = null;
 	let narrationRenderTimer: NodeJS.Timeout | null = null;
-	let latestAssistantMessage = "";
+	let livePlaybackId: string | undefined;
+	let nextLivePlaybackId = 0;
+	let playbackPaused = false;
+	const playbackHistory = new PlaybackHistory();
 
 	const requestNarrationRender = (): void => {
 		if (!narrationTui || narrationRenderTimer) return;
@@ -204,12 +207,14 @@ export default async function (pi: ExtensionAPI) {
 				break;
 			case "segment-audio":
 				narration.setSegmentAudio(event.segmentId, event.start, event.duration);
+				playbackHistory.setSegmentAudio(event.segmentId, event.start, event.duration);
 				return;
 			case "alignment":
 				narration.setAlignment(event.segmentId, event.words);
 				return;
 			case "playback":
 				narration.setPlayback(event.utterance, event.position);
+				playbackHistory.setPlayback(event.utterance, event.position);
 				return;
 			case "alignment-error":
 				// Duration-weighted word timing remains active as a fallback.
@@ -246,9 +251,31 @@ export default async function (pi: ExtensionAPI) {
 			if (!activeContext) return Promise.reject(new Error("No active Pi context for code description"));
 			return describeCodeBlock(activeContext, block, config.editModel, config.codeNarration, signal);
 		},
-		segment => narration.registerSegment(segment),
+		segment => {
+			narration.registerSegment(segment);
+			playbackHistory.registerSegment(segment);
+		},
 	);
 	const phoneInput = new PhoneInputClient();
+
+	const playTarget = (target: PlaybackTarget, recordTimings: boolean): void => {
+		const sourceOffset = Math.max(0, Math.min(target.text.length, target.sourceOffset));
+		const suffix = target.text.slice(sourceOffset);
+		if (!suffix.trim()) return;
+		vocalizer.clear();
+		narration.finish();
+		narration.begin();
+		narration.setCompletedText(target.text);
+		playbackHistory.beginCapture(target.id, target.text, target.time, recordTimings);
+		playbackPaused = false;
+		vocalizer.speakFrom(suffix, sourceOffset);
+	};
+
+	const syncPlaybackMessages = (ctx: ExtensionContext, selectLatest = false): PlaybackMessage[] => {
+		const messages = completedAssistantMessages(ctx);
+		playbackHistory.sync(messages, selectLatest);
+		return messages;
+	};
 
 	const warmModels = async (): Promise<void> => {
 		await vocalizer.warm();
@@ -409,7 +436,7 @@ export default async function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		contextEpoch += 1;
 		activeContext = ctx;
-		latestAssistantMessage = latestCompletedAssistantText(ctx);
+		syncPlaybackMessages(ctx, true);
 		if (config.enabled) {
 			void warmModels().catch(error =>
 				ctx.ui.notify(`Voice model warm-up failed: ${error instanceof Error ? error.message : String(error)}`, "warning"),
@@ -465,6 +492,9 @@ export default async function (pi: ExtensionAPI) {
 		) {
 			narration.finish();
 			narration.begin();
+			playbackPaused = false;
+			livePlaybackId = `live:${++nextLivePlaybackId}`;
+			playbackHistory.beginCapture(livePlaybackId, "", 0, true);
 		}
 	});
 
@@ -482,12 +512,19 @@ export default async function (pi: ExtensionAPI) {
 
 	pi.on("message_end", event => {
 		const completedText = assistantText(event.message);
-		if (completedText) latestAssistantMessage = completedText;
-		if (!config.enabled || assistantStopReason(event.message) === undefined) return;
 		const stopReason = assistantStopReason(event.message);
+		if (completedText && stopReason !== undefined && stopReason !== "aborted" && stopReason !== "error" && activeContext) {
+			const messages = completedAssistantMessages(activeContext);
+			const completed = messages.findLast(message => message.text === completedText);
+			if (completed && livePlaybackId) playbackHistory.rename(livePlaybackId, completed);
+			playbackHistory.sync(messages);
+			livePlaybackId = undefined;
+		}
+		if (!config.enabled || stopReason === undefined) return;
 		if (stopReason === "aborted" || stopReason === "error") {
 			vocalizer.clear();
 			narration.finish();
+			livePlaybackId = undefined;
 		} else if (config.mode !== "yield") {
 			vocalizer.flush();
 		}
@@ -499,6 +536,12 @@ export default async function (pi: ExtensionAPI) {
 		if (stopReason === "aborted" || stopReason === "error" || stopReason === undefined) return;
 		const text = assistantText(event.message);
 		if (text) {
+			const messages = activeContext ? completedAssistantMessages(activeContext) : [];
+			const completed = messages.findLast(message => message.text === text);
+			if (completed) {
+				playbackHistory.sync(messages, true);
+				playbackHistory.beginCapture(completed.id, completed.text, 0, true);
+			}
 			narration.setCompletedText(text);
 			vocalizer.speak(text);
 		}
@@ -509,28 +552,93 @@ export default async function (pi: ExtensionAPI) {
 		handler: async ctx => toggle(ctx),
 	});
 
-	pi.registerShortcut("f11", {
-		description: "Restart the latest assistant message from the beginning",
+	const canNavigatePlayback = (ctx: ExtensionContext): boolean => {
+		if (!config.enabled) {
+			ctx.ui.notify("Voice mode is disabled", "warning");
+			return false;
+		}
+		if (!ctx.isIdle()) {
+			ctx.ui.notify("Wait for the current assistant response before navigating playback", "warning");
+			return false;
+		}
+		return true;
+	};
+
+	const replaySelected = (ctx: ExtensionContext): void => {
+		if (!canNavigatePlayback(ctx)) return;
+		syncPlaybackMessages(ctx);
+		const target = playbackHistory.restartTarget();
+		if (!target) {
+			ctx.ui.notify("There is no completed assistant message to replay yet", "warning");
+			return;
+		}
+		playTarget(target, true);
+	};
+
+	pi.registerShortcut("f6", {
+		description: "Play the previous assistant message",
 		handler: ctx => {
-			if (!config.enabled) {
-				ctx.ui.notify("Voice mode is disabled", "warning");
+			if (!canNavigatePlayback(ctx)) return;
+			syncPlaybackMessages(ctx);
+			const message = playbackHistory.move(-1);
+			if (message) playTarget({ ...message, time: 0, sourceOffset: 0 }, true);
+		},
+	});
+
+	pi.registerShortcut("f7", {
+		description: "Regenerate playback from about 10 seconds earlier",
+		handler: ctx => {
+			if (!canNavigatePlayback(ctx)) return;
+			const target = playbackHistory.seekTarget(-10);
+			if (target) playTarget(target, false);
+			else ctx.ui.notify("Rewind timing is available after this message has played", "warning");
+		},
+	});
+
+	pi.registerShortcut("f8", {
+		description: "Pause or resume regenerated voice playback",
+		handler: ctx => {
+			if (!canNavigatePlayback(ctx)) return;
+			if (playbackPaused) {
+				const target = playbackHistory.resumeTarget();
+				if (target) playTarget(target, false);
 				return;
 			}
-			if (!ctx.isIdle()) {
-				ctx.ui.notify("Wait for the current assistant response before replaying it", "warning");
-				return;
-			}
-			latestAssistantMessage ||= latestCompletedAssistantText(ctx);
-			if (!latestAssistantMessage) {
-				ctx.ui.notify("There is no completed assistant message to replay yet", "warning");
+			if (!playbackHistory.selected()) {
+				ctx.ui.notify("There is no assistant message playing", "warning");
 				return;
 			}
 			vocalizer.clear();
 			narration.finish();
-			narration.begin();
-			narration.setCompletedText(latestAssistantMessage);
-			vocalizer.speak(latestAssistantMessage);
+			playbackPaused = true;
+			state = "idle";
+			refreshStatus();
 		},
+	});
+
+	pi.registerShortcut("f9", {
+		description: "Regenerate playback from about 10 seconds later",
+		handler: ctx => {
+			if (!canNavigatePlayback(ctx)) return;
+			const target = playbackHistory.seekTarget(10);
+			if (target) playTarget(target, false);
+			else ctx.ui.notify("Forward timing is available after this message has played", "warning");
+		},
+	});
+
+	pi.registerShortcut("f10", {
+		description: "Play the next assistant message",
+		handler: ctx => {
+			if (!canNavigatePlayback(ctx)) return;
+			syncPlaybackMessages(ctx);
+			const message = playbackHistory.move(1);
+			if (message) playTarget({ ...message, time: 0, sourceOffset: 0 }, true);
+		},
+	});
+
+	pi.registerShortcut("f11", {
+		description: "Restart the selected assistant message from the beginning",
+		handler: replaySelected,
 	});
 
 	if (config.talkShortcut !== "disabled") {

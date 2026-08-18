@@ -35,7 +35,7 @@ The two recognition models have separate roles:
 - **Whisper** transcribes microphone recordings and generates final dictation candidates.
 - **Wav2Vec2 CTC** force-aligns known Kokoro text to synthesized audio; it is not used for microphone dictation.
 
-For every spoken segment, Pi retains its source-text range and PCM range. Wav2Vec2 supplies word timestamps, while the Termux audio session queries `mpv` for the position actually being played. The active sentence or clause receives a continuous subtle background, including inter-word whitespace. Words already reached by playback return to the normal foreground; later prose remains dim.
+For every spoken segment, Pi retains its source-text range and timing metadata, but not its PCM audio. Wav2Vec2 supplies word timestamps, while the Termux audio session queries `mpv` for the position actually being played. The active sentence or clause receives a continuous subtle background, including inter-word whitespace. Words already reached by playback return to the normal foreground; later prose remains dim.
 
 The segment background depends only on PCM boundaries and `mpv` position, so it remains reliable if word alignment is late or fails. Word progression falls back to duration-weighted estimates when necessary. Synthesis never waits for alignment and no artificial playback delay is added.
 
@@ -137,12 +137,13 @@ Sticky `Alt` combinations in Termux's extra-key row are inconvenient for control
   ]]
 ```
 
-The symmetric layout is phone voice input, previous assistant message, rewind 10 seconds, pause/resume, forward 10 seconds, next assistant message, and restart the latest completed message. Pause occupies the center key. Pi Voice currently registers `F5` as a one-tap alternative alongside the configured microphone shortcut (`Alt+M` by default), and `F11` for restart. Run `termux-reload-settings` after editing the file. `F6` through `F10` remain a reserved layout while navigation controls are implemented; extra-key labels are only visual unless a corresponding Pi shortcut is registered.
+The symmetric layout is phone voice input, previous assistant message, rewind 10 seconds, pause/resume, forward 10 seconds, next assistant message, and restart the selected message. Pause occupies the center key. Pi Voice registers all seven shortcuts; `F5` remains a one-tap alternative alongside the configured microphone shortcut (`Alt+M` by default). Run `termux-reload-settings` after editing the file.
 
 ## Usage
 
-- Press the configured microphone shortcut (**Alt+M** by default) or **F5** and speak for as long as needed.
-- Press **F11** to stop current playback and restart the latest completed assistant message from the beginning. Replay is available while Pi is idle and restores the latest message from session history after `/reload` or session resume. Recording stops automatically after about 1.35 seconds of silence.
+- Press the configured microphone shortcut (**Alt+M** by default) or **F5** and speak for as long as needed. Recording stops automatically after about 1.35 seconds of silence.
+- Press **F6**/**F10** to regenerate the previous/next completed assistant message, or **F11** to restart the selected message. Navigation is available while Pi is idle and restores message text from session history after `/reload` or session resume.
+- Press **F7**/**F9** to move approximately 10 seconds backward/forward using recorded segment-to-source timing checkpoints. Press **F8** to pause and regenerate from the nearest checkpoint when resuming. Timing is held only in memory and becomes available as a message plays; PCM audio is never cached. Consequently, seeks are approximate and replay invokes Kokoro again. Fenced-code descriptions are also regenerated when their source is replayed.
 - Press the shortcut again to stop manually. Pi displays a live, revisable transcript in the prompt editor.
 - In the default `review` submit mode, correct or extend the final prompt and press Enter yourself.
 - Final transcription requests up to `sttCandidates` hypotheses from the same ASR model. The configured editing model resolves them using the existing draft and a bounded, text-only excerpt of recent session context. This isolated request does not enter conversation history.

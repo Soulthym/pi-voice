@@ -8,6 +8,33 @@ function immediate(): Promise<void> {
 	return new Promise(resolve => setImmediate(resolve));
 }
 
+test("shifts narration source ranges when regenerating a message suffix", () => {
+	const sources: Array<{ start: number; end: number }> = [];
+	const worker = {
+		sendSegment(): void {},
+		endUtterance(): void {},
+		cancel(): void {},
+		async transcribe(): Promise<string[]> {
+			return [];
+		},
+		async transcribePcm(): Promise<string> {
+			return "";
+		},
+		async preload(): Promise<void> {},
+		async preloadAlignment(): Promise<void> {},
+		async terminate(): Promise<void> {},
+	};
+	const vocalizer = new Vocalizer(
+		() => ({ ...DEFAULT_VOICE_CONFIG, enabled: true }),
+		() => {},
+		undefined,
+		segment => sources.push(segment.source),
+		worker,
+	);
+	vocalizer.speakFrom("Replay this sentence.", 40);
+	assert.deepEqual(sources, [{ start: 40, end: 61 }]);
+});
+
 test("starts code description early while preserving spoken order", async () => {
 	const events: string[] = [];
 	const worker = {

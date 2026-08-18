@@ -37,6 +37,7 @@ export class Vocalizer {
 	#deliveryBarrier: Promise<void> | null = null;
 	#descriptionControllers = new Set<AbortController>();
 	#generation = 0;
+	#sourceOffset = 0;
 
 	constructor(
 		getConfig: () => VoiceConfig,
@@ -53,7 +54,10 @@ export class Vocalizer {
 
 	pushDelta(text: string): void {
 		if (!this.#getConfig().enabled || text.length === 0) return;
-		this.#speakable ??= new SpeakableStream();
+		if (!this.#speakable) {
+			this.#speakable = new SpeakableStream();
+			this.#sourceOffset = 0;
+		}
 		const current = this.#speakable;
 		this.#pushItems(current.push(text));
 		this.#armIdle(() => {
@@ -83,8 +87,14 @@ export class Vocalizer {
 	}
 
 	speak(text: string): void {
+		this.speakFrom(text, 0);
+	}
+
+	speakFrom(text: string, sourceOffset: number): void {
 		if (!this.#getConfig().enabled) return;
-		this.pushDelta(text);
+		this.#speakable = new SpeakableStream();
+		this.#sourceOffset = Math.max(0, sourceOffset);
+		this.#pushItems(this.#speakable.push(text));
 		this.flush();
 	}
 
@@ -94,6 +104,7 @@ export class Vocalizer {
 		this.#speakable = null;
 		this.#utterance = null;
 		this.#deliveryBarrier = null;
+		this.#sourceOffset = 0;
 		for (const controller of this.#descriptionControllers) controller.abort();
 		this.#descriptionControllers.clear();
 		this.#worker.cancel();
@@ -126,8 +137,12 @@ export class Vocalizer {
 
 	#pushItems(items: SpeakableItem[]): void {
 		for (const item of items) {
-			if (item.kind === "speech") this.#scheduleSpeech(item.text, item.source);
-			else this.#scheduleCodeDescription(item.block, item.source);
+			const source = {
+				start: item.source.start + this.#sourceOffset,
+				end: item.source.end + this.#sourceOffset,
+			};
+			if (item.kind === "speech") this.#scheduleSpeech(item.text, source);
+			else this.#scheduleCodeDescription(item.block, source);
 		}
 	}
 
