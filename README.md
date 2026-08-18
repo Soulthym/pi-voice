@@ -137,11 +137,12 @@ Sticky `Alt` combinations in Termux's extra-key row are inconvenient for control
   ]]
 ```
 
-The suggested layout is previous assistant message, rewind 10 seconds, pause/resume, forward 10 seconds, next assistant message, restart selected message, and start/stop phone voice input. Pi Voice registers `F11` as a one-tap alternative alongside the configured microphone shortcut (`Alt+M` by default). Run `termux-reload-settings` after editing the file. The playback-navigation keys are a reserved layout while those controls are implemented; extra-key labels are only visual unless a corresponding Pi shortcut is registered.
+The suggested layout is previous assistant message, rewind 10 seconds, pause/resume, forward 10 seconds, next assistant message, restart the latest completed message, and start/stop phone voice input. Pi Voice currently registers `F10` for restart and `F11` as a one-tap alternative alongside the configured microphone shortcut (`Alt+M` by default). Run `termux-reload-settings` after editing the file. `F5` through `F9` remain a reserved layout while navigation controls are implemented; extra-key labels are only visual unless a corresponding Pi shortcut is registered.
 
 ## Usage
 
-- Press the configured microphone shortcut (**Alt+M** by default) or **F11** and speak for as long as needed. Recording stops automatically after about 1.35 seconds of silence.
+- Press the configured microphone shortcut (**Alt+M** by default) or **F11** and speak for as long as needed.
+- Press **F10** to stop current playback and restart the latest completed assistant message from the beginning. Replay is available while Pi is idle. Recording stops automatically after about 1.35 seconds of silence.
 - Press the shortcut again to stop manually. Pi displays a live, revisable transcript in the prompt editor.
 - In the default `review` submit mode, correct or extend the final prompt and press Enter yourself.
 - Final transcription requests up to `sttCandidates` hypotheses from the same ASR model. The configured editing model resolves them using the existing draft and a bounded, text-only excerpt of recent session context. This isolated request does not enter conversation history.

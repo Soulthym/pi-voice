@@ -80,6 +80,7 @@ export default async function (pi: ExtensionAPI) {
 	let contextEpoch = 0;
 	let narrationTui: { invalidate(): void; requestRender(force?: boolean): void } | null = null;
 	let narrationRenderTimer: NodeJS.Timeout | null = null;
+	let latestAssistantMessage = "";
 
 	const requestNarrationRender = (): void => {
 		if (!narrationTui || narrationRenderTimer) return;
@@ -466,6 +467,8 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	pi.on("message_end", event => {
+		const completedText = assistantText(event.message);
+		if (completedText) latestAssistantMessage = completedText;
 		if (!config.enabled || assistantStopReason(event.message) === undefined) return;
 		const stopReason = assistantStopReason(event.message);
 		if (stopReason === "aborted" || stopReason === "error") {
@@ -490,6 +493,29 @@ export default async function (pi: ExtensionAPI) {
 	pi.registerShortcut("ctrl+shift+v", {
 		description: "Toggle Kokoro voice mode",
 		handler: async ctx => toggle(ctx),
+	});
+
+	pi.registerShortcut("f10", {
+		description: "Restart the latest assistant message from the beginning",
+		handler: ctx => {
+			if (!config.enabled) {
+				ctx.ui.notify("Voice mode is disabled", "warning");
+				return;
+			}
+			if (!ctx.isIdle()) {
+				ctx.ui.notify("Wait for the current assistant response before replaying it", "warning");
+				return;
+			}
+			if (!latestAssistantMessage) {
+				ctx.ui.notify("There is no completed assistant message to replay yet", "warning");
+				return;
+			}
+			vocalizer.clear();
+			narration.finish();
+			narration.begin();
+			narration.setCompletedText(latestAssistantMessage);
+			vocalizer.speak(latestAssistantMessage);
+		},
 	});
 
 	if (config.talkShortcut !== "disabled") {
