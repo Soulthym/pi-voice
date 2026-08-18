@@ -170,16 +170,27 @@ function excludedMarkdownRanges(markdown: string): NarrationSourceRange[] {
 	return excluded;
 }
 
-function styleUnreadMarkdown(markdown: string, cursor: number, style: (text: string) => string): string {
+function styleNarrationMarkdown(
+	markdown: string,
+	cursor: number,
+	active: NarrationSourceRange | undefined,
+	styleUnread: (text: string) => string,
+	styleActive: (text: string) => string,
+): string {
 	const excluded = excludedMarkdownRanges(markdown);
 	const ranges = tokenize(markdown).filter(word => {
-		return word.end > cursor && !excluded.some(range => word.start >= range.start && word.end <= range.end);
+		const unread = word.end > cursor;
+		const speaking = active ? word.end > active.start && word.start < active.end : false;
+		return (unread || speaking) && !excluded.some(range => word.start >= range.start && word.end <= range.end);
 	});
 	if (ranges.length === 0) return markdown;
 	let output = "";
 	let offset = 0;
 	for (const range of ranges) {
-		output += markdown.slice(offset, range.start) + style(markdown.slice(range.start, range.end));
+		let styled = markdown.slice(range.start, range.end);
+		if (range.end > cursor) styled = styleUnread(styled);
+		if (active && range.end > active.start && range.start < active.end) styled = styleActive(styled);
+		output += markdown.slice(offset, range.start) + styled;
 		offset = range.end;
 	}
 	return output + markdown.slice(offset);
@@ -192,6 +203,7 @@ export class NarrationProgress {
 	#raw = "";
 	#cursor = 0;
 	#active = false;
+	#activeSource: NarrationSourceRange | undefined;
 	#playback = new Map<number, number>();
 	#onChange: () => void;
 
@@ -205,6 +217,7 @@ export class NarrationProgress {
 		this.#raw = "";
 		this.#cursor = 0;
 		this.#active = true;
+		this.#activeSource = undefined;
 		this.#playback.clear();
 	}
 
@@ -263,6 +276,7 @@ export class NarrationProgress {
 		if (!this.#active) return;
 		this.#cursor = this.#raw.length;
 		this.#active = false;
+		this.#activeSource = undefined;
 		this.#onChange();
 	}
 
@@ -271,15 +285,25 @@ export class NarrationProgress {
 		this.finish();
 	}
 
-	transform(markdown: string, type: NarrationMessageType, style: (text: string) => string): string {
+	transform(
+		markdown: string,
+		type: NarrationMessageType,
+		styleUnread: (text: string) => string,
+		styleActive: (text: string) => string = text => text,
+	): string {
 		if (!this.#active || !markdown) return markdown;
 		const candidates = this.#blocks.filter(block => block.type === type && block.text.trim() === markdown);
 		if (candidates.length === 0) return markdown;
-		const block = candidates.find(candidate => this.#cursor <= candidate.start + candidate.text.length) ?? candidates[candidates.length - 1];
+		const block =
+			candidates.find(candidate => this.#cursor <= candidate.start + candidate.text.length) ?? candidates[candidates.length - 1];
 		const leading = block.text.length - block.text.trimStart().length;
-		const localCursor = this.#cursor - block.start - leading;
-		if (localCursor >= markdown.length) return markdown;
-		return styleUnreadMarkdown(markdown, Math.max(0, localCursor), style);
+		const blockStart = block.start + leading;
+		const localCursor = this.#cursor - blockStart;
+		const active = this.#activeSource
+			? { start: this.#activeSource.start - blockStart, end: this.#activeSource.end - blockStart }
+			: undefined;
+		if (localCursor >= markdown.length && (!active || active.start >= markdown.length || active.end <= 0)) return markdown;
+		return styleNarrationMarkdown(markdown, Math.max(0, localCursor), active, styleUnread, styleActive);
 	}
 
 	get cursor(): number {
@@ -290,6 +314,7 @@ export class NarrationProgress {
 		const playback = this.#playback.get(utterance);
 		if (playback === undefined) return;
 		let cursor = this.#cursor;
+		let activeSource: NarrationSourceRange | undefined;
 		const segments = [...this.#segments.values()]
 			.filter(segment => segment.utterance === utterance && segment.audioStart !== undefined && segment.duration !== undefined)
 			.sort((left, right) => (left.audioStart as number) - (right.audioStart as number));
@@ -301,6 +326,7 @@ export class NarrationProgress {
 				continue;
 			}
 			cursor = Math.max(cursor, segment.source.start);
+			if (segment.source.end > segment.source.start) activeSource = segment.source;
 			if (!segment.revealAtEnd) {
 				for (const word of segment.words) {
 					if (word.time > relative) break;
@@ -309,8 +335,11 @@ export class NarrationProgress {
 			}
 			break;
 		}
-		if (cursor === this.#cursor) return;
+		const activeChanged =
+			activeSource?.start !== this.#activeSource?.start || activeSource?.end !== this.#activeSource?.end;
+		if (cursor === this.#cursor && !activeChanged) return;
 		this.#cursor = cursor;
+		this.#activeSource = activeSource;
 		this.#onChange();
 	}
 }

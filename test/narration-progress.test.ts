@@ -3,6 +3,7 @@ import test from "node:test";
 import { NarrationProgress } from "../src/narration-progress.js";
 
 const dim = (text: string): string => `<dim>${text}</dim>`;
+const background = (text: string): string => `<bg>${text}</bg>`;
 
 test("dims unread prose and reveals words from playback progress", () => {
 	const progress = new NarrationProgress();
@@ -18,7 +19,10 @@ test("dims unread prose and reveals words from playback progress", () => {
 
 	assert.equal(progress.transform("First second.", "assistant", dim), "<dim>First</dim> <dim>second</dim>.");
 	progress.setPlayback(1, 0);
-	assert.equal(progress.transform("First second.", "assistant", dim), "First <dim>second</dim>.");
+	assert.equal(
+		progress.transform("First second.", "assistant", dim, background),
+		"<bg>First</bg> <bg><dim>second</dim></bg>.",
+	);
 	progress.setPlayback(1, 1.9);
 	assert.equal(progress.transform("First second.", "assistant", dim), "First second.");
 });

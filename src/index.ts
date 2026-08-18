@@ -94,7 +94,12 @@ export default async function (pi: ExtensionAPI) {
 
 	pi.registerMarkdownTransformer((markdown, context) => {
 		if (!config.enabled || !config.playbackHighlight || context.messageType === "user") return markdown;
-		return narration.transform(markdown, context.messageType, text => activeContext?.ui.theme.fg("dim", text) ?? text);
+		return narration.transform(
+			markdown,
+			context.messageType,
+			text => activeContext?.ui.theme.fg("dim", text) ?? text,
+			text => activeContext?.ui.theme.bg("selectedBg", text) ?? text,
+		);
 	});
 
 	const setInputProgress = (message: string | undefined): void => {

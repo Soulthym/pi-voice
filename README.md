@@ -18,7 +18,7 @@ Both tunnel endpoints bind only to loopback, and phone audio stays inside the en
 - Starts with a short first segment, then synthesizes bounded sentence/clause segments.
 - Cancels queued speech when you send another prompt.
 - Supports server-local playback or raw PCM over TCP/SSH.
-- Slightly dims unread assistant prose and restores each word as it is heard, using fast local CTC forced alignment plus live `mpv` playback-position feedback from the phone.
+- Slightly dims unread assistant prose, gives the currently spoken sentence or clause a subtle background, and restores each word as it is heard, using fast local CTC forced alignment plus live `mpv` playback-position feedback from the phone.
 - Streams phone microphone audio in near real time and stops automatically after natural silence.
 - Shows a revisable Whisper preview directly in Pi's editor while you speak.
 - Supports a second `Alt+M` as a manual stop for long pauses or noisy environments.
@@ -115,7 +115,7 @@ If SSH reports that remote forwarding failed, ensure `AllowTcpForwarding yes` is
 - Final transcription requests up to `sttCandidates` hypotheses from the same ASR model. The configured editing model resolves them using the existing draft and a bounded, text-only excerpt of recent session context. This isolated request does not enter conversation history.
 - With `editMode: "smart"`, text that is already in the editor when recording starts becomes the existing draft. Another dictation can continue or revise it naturally: “Actually replace port 8000 with 8080,” “scratch the last sentence,” or “make the second paragraph shorter.” Start recording only after placing the text to revise in the editor. With an empty editor there is nothing to revise, so Pi resolves the new utterance as fresh dictation. In `append`, the model still resolves ASR ambiguity but preserves correction phrases literally instead of executing them.
 - Fences tagged `text`, `txt`, `plain`, `plaintext`, `md`, `markdown`, or `mdown` are read as prose. Other fenced blocks are sent to `editModel` for a short semantic description. Descriptions remain at the block's position in the spoken response, while requests begin early enough to overlap preceding queued TTS whenever possible.
-- Assistant speech automatically plays through the phone. While it plays, unread prose is dimmed and words return to normal near their actual playback time. Fenced code remains normally styled because it is narrated as a semantic block rather than word-for-word.
+- Assistant speech automatically plays through the phone. While it plays, unread prose is dimmed, the current speech segment gets a subtle background, and words return to normal near their actual playback time. Fenced code remains normally styled because it is narrated as a semantic block rather than word-for-word.
 - A configurable Wav2Vec2 CTC model aligns clean Kokoro audio in a separate worker. When voice mode is enabled, Kokoro and the aligner warm concurrently in the background and remain resident in RAM until Pi exits or reloads. If alignment is late or unavailable, duration-weighted word timing is used; if phone feedback is unavailable, the desktop playback clock is estimated.
 - `Ctrl+Shift+V` toggles spoken output.
 
