@@ -15,6 +15,7 @@ const DEFAULT_STT_DTYPE = "fp32";
 const DEFAULT_ALIGNMENT_MODEL = "onnx-community/wav2vec2-base-960h-ONNX";
 const DEFAULT_ALIGNMENT_DTYPE = "q8";
 const DEFAULT_SAMPLE_RATE = 24_000;
+const FIRST_ALIGNMENT_LEAD_MS = 500;
 const cacheDir = process.env.PI_VOICE_CACHE_DIR ?? path.join(os.homedir(), ".cache", "pi-voice", "models");
 fs.mkdirSync(cacheDir, { recursive: true });
 transformersEnv.cacheDir = cacheDir;
@@ -33,6 +34,7 @@ let player = null;
 let playerUtterance = null;
 let playerOutput = null;
 let alignmentChild = null;
+const alignmentWaiters = new Map();
 let shuttingDown = false;
 
 function send(message) {
@@ -54,20 +56,24 @@ function ensureAlignmentChild() {
 		} catch {
 			return;
 		}
-		if (
-			(event.epoch === epoch && (event.type === "alignment" || event.type === "alignment-error")) ||
-			event.type === "alignment-ready" ||
-			event.type === "alignment-preload-error"
-		) {
+		if (event.epoch === epoch && (event.type === "alignment" || event.type === "alignment-error")) {
+			const waiter = alignmentWaiters.get(event.segmentId);
+			if (waiter) {
+				alignmentWaiters.delete(event.segmentId);
+				waiter(event.type === "alignment");
+			}
+			send(event);
+		} else if (event.type === "alignment-ready" || event.type === "alignment-preload-error") {
 			send(event);
 		}
 	});
-	child.on("error", () => {
+	const failed = () => {
 		if (alignmentChild === child) alignmentChild = null;
-	});
-	child.on("exit", () => {
-		if (alignmentChild === child) alignmentChild = null;
-	});
+		for (const resolve of alignmentWaiters.values()) resolve(false);
+		alignmentWaiters.clear();
+	};
+	child.on("error", failed);
+	child.on("exit", failed);
 	return child;
 }
 
@@ -86,6 +92,8 @@ function preloadAlignment(requestId, model, dtype) {
 }
 
 function requestAlignment(operation, pcm, sampleRate) {
+	const { promise, resolve } = Promise.withResolvers();
+	alignmentWaiters.set(operation.segmentId, resolve);
 	try {
 		const bytes = Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength);
 		ensureAlignmentChild().stdin.write(
@@ -102,11 +110,23 @@ function requestAlignment(operation, pcm, sampleRate) {
 			})}\n`,
 		);
 	} catch {
+		alignmentWaiters.delete(operation.segmentId);
+		resolve(false);
 		// Estimated word timings remain available if the aligner cannot start.
 	}
+	return promise;
+}
+
+function wait(milliseconds) {
+	return new Promise(resolve => {
+		const timer = setTimeout(resolve, milliseconds);
+		timer.unref?.();
+	});
 }
 
 function cancelAlignment() {
+	for (const resolve of alignmentWaiters.values()) resolve(false);
+	alignmentWaiters.clear();
 	try {
 		alignmentChild?.stdin.write(`${JSON.stringify({ type: "cancel", epoch })}\n`);
 	} catch {
@@ -536,7 +556,9 @@ async function runOperation(operation) {
 	const start = sink.samplesWritten / sampleRate;
 	const duration = pcm.length / sampleRate;
 	send({ type: "segment-audio", utterance: operation.utterance, segmentId: operation.segmentId, start, duration });
-	requestAlignment(operation, pcm, sampleRate);
+	const alignment = requestAlignment(operation, pcm, sampleRate);
+	if (start === 0) await Promise.race([alignment, wait(FIRST_ALIGNMENT_LEAD_MS)]);
+	if (operation.epoch !== epoch || player !== sink) return;
 	await writeAudio(sink, pcm);
 }
 
