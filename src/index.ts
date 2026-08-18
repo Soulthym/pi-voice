@@ -49,6 +49,19 @@ function assistantStopReason(message: unknown): string | undefined {
 	return "stopReason" in message && typeof message.stopReason === "string" ? message.stopReason : undefined;
 }
 
+function latestCompletedAssistantText(ctx: ExtensionContext): string {
+	const branch = ctx.sessionManager.getBranch();
+	for (let index = branch.length - 1; index >= 0; index -= 1) {
+		const entry = branch[index];
+		if (entry?.type !== "message") continue;
+		const stopReason = assistantStopReason(entry.message);
+		if (stopReason === undefined || stopReason === "aborted" || stopReason === "error") continue;
+		const text = assistantText(entry.message);
+		if (text) return text;
+	}
+	return "";
+}
+
 function parseMode(value: string): VoiceMode | undefined {
 	return value === "all" || value === "assistant" || value === "yield" ? value : undefined;
 }
@@ -396,6 +409,7 @@ export default async function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		contextEpoch += 1;
 		activeContext = ctx;
+		latestAssistantMessage = latestCompletedAssistantText(ctx);
 		if (config.enabled) {
 			void warmModels().catch(error =>
 				ctx.ui.notify(`Voice model warm-up failed: ${error instanceof Error ? error.message : String(error)}`, "warning"),
@@ -506,6 +520,7 @@ export default async function (pi: ExtensionAPI) {
 				ctx.ui.notify("Wait for the current assistant response before replaying it", "warning");
 				return;
 			}
+			latestAssistantMessage ||= latestCompletedAssistantText(ctx);
 			if (!latestAssistantMessage) {
 				ctx.ui.notify("There is no completed assistant message to replay yet", "warning");
 				return;
