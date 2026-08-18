@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+for command in mpv socat dd; do
+  if ! command -v "$command" >/dev/null 2>&1; then
+    printf 'Missing required command: %s\n' "$command" >&2
+    exit 1
+  fi
+done
+
+runtime_dir=${TMPDIR:-/data/data/com.termux/files/usr/tmp}
+test_id=${BASHPID:-$$}
+socket_path="$runtime_dir/pi-voice-mpv-test-$test_id.sock"
+fifo_path="$runtime_dir/pi-voice-mpv-test-$test_id.pcm"
+log_path="$runtime_dir/pi-voice-mpv-test-$test_id.log"
+mpv_pid=
+writer_pid=
+
+cleanup() {
+  trap - EXIT INT TERM
+  [[ -n "$writer_pid" ]] && kill "$writer_pid" 2>/dev/null || true
+  [[ -n "$mpv_pid" ]] && kill "$mpv_pid" 2>/dev/null || true
+  [[ -n "$writer_pid" ]] && wait "$writer_pid" 2>/dev/null || true
+  [[ -n "$mpv_pid" ]] && wait "$mpv_pid" 2>/dev/null || true
+  rm -f "$socket_path" "$fifo_path" "$log_path"
+}
+trap cleanup EXIT INT TERM
+
+rm -f "$socket_path" "$fifo_path" "$log_path"
+mkfifo "$fifo_path"
+
+# Match pi-voice's mono Float32 24 kHz raw PCM playback configuration. Eight
+# seconds of zero-valued samples are silent but still advance the audio clock.
+mpv --really-quiet --no-video --cache=no \
+  --input-ipc-server="$socket_path" \
+  --demuxer=rawaudio \
+  --demuxer-rawaudio-format=floatle \
+  --demuxer-rawaudio-rate=24000 \
+  --demuxer-rawaudio-channels=mono \
+  "$fifo_path" > /dev/null 2>"$log_path" &
+mpv_pid=$!
+
+dd if=/dev/zero bs=96000 count=8 status=none >"$fifo_path" &
+writer_pid=$!
+
+for _ in {1..50}; do
+  [[ -S "$socket_path" ]] && break
+  if ! kill -0 "$mpv_pid" 2>/dev/null; then
+    printf 'mpv exited before creating its IPC socket.\n' >&2
+    [[ -s "$log_path" ]] && cat "$log_path" >&2
+    exit 1
+  fi
+  sleep 0.1
+done
+
+if [[ ! -S "$socket_path" ]]; then
+  printf 'Timed out waiting for mpv IPC socket: %s\n' "$socket_path" >&2
+  exit 1
+fi
+
+printf 'Querying mpv time-pos while it plays eight seconds of silent raw PCM...\n'
+for ((query = 1; query <= 25; query++)); do
+  if ! kill -0 "$mpv_pid" 2>/dev/null; then
+    printf '%02d mpv exited\n' "$query"
+    break
+  fi
+
+  response=$(
+    printf '{"command":["get_property","time-pos"],"request_id":%d}\n' "$query" |
+      socat -T 0.15 - "UNIX-CONNECT:$socket_path" 2>/dev/null || true
+  )
+  printf '%02d %s\n' "$query" "${response:-<no response>}"
+  sleep 0.2
+done
+
+wait "$writer_pid" 2>/dev/null || true
+writer_pid=
+wait "$mpv_pid" 2>/dev/null || true
+mpv_pid=
+
+printf '\nExpected: data should rise gradually from near 0 toward 8 seconds.\n'
