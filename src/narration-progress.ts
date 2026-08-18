@@ -186,12 +186,19 @@ function styleNarrationMarkdown(
 	if (ranges.length === 0) return markdown;
 	let output = "";
 	let offset = 0;
+	let previousWasActive = false;
 	for (const range of ranges) {
+		const isActive = active ? range.end > active.start && range.start < active.end : false;
+		const gap = markdown.slice(offset, range.start);
+		// Keep the sentence background visually continuous without putting ANSI
+		// escapes around Markdown punctuation or line-start syntax.
+		output += previousWasActive && isActive && /^[ \t]+$/.test(gap) ? styleActive(gap) : gap;
 		let styled = markdown.slice(range.start, range.end);
 		if (range.end > cursor) styled = styleUnread(styled);
-		if (active && range.end > active.start && range.start < active.end) styled = styleActive(styled);
-		output += markdown.slice(offset, range.start) + styled;
+		if (isActive) styled = styleActive(styled);
+		output += styled;
 		offset = range.end;
+		previousWasActive = isActive;
 	}
 	return output + markdown.slice(offset);
 }

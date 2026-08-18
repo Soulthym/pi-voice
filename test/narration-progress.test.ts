@@ -21,7 +21,7 @@ test("dims unread prose and reveals words from playback progress", () => {
 	progress.setPlayback(1, 0);
 	assert.equal(
 		progress.transform("First second.", "assistant", dim, background),
-		"<bg>First</bg> <bg><dim>second</dim></bg>.",
+		"<bg>First</bg><bg> </bg><bg><dim>second</dim></bg>.",
 	);
 	progress.setPlayback(1, 1.9);
 	assert.equal(progress.transform("First second.", "assistant", dim), "First second.");
