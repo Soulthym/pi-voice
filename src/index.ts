@@ -493,12 +493,16 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	if (config.talkShortcut !== "disabled") {
-		pi.registerShortcut(config.talkShortcut, {
-			description: "Start or stop a prompt with the phone microphone",
-			handler: ctx => {
-				void talk(ctx);
-			},
-		});
+		const registerTalkShortcut = (key: Exclude<VoiceConfig["talkShortcut"], "disabled">): void => {
+			pi.registerShortcut(key, {
+				description: "Start or stop a prompt with the phone microphone",
+				handler: ctx => {
+					void talk(ctx);
+				},
+			});
+		};
+		registerTalkShortcut(config.talkShortcut);
+		if (config.talkShortcut !== "f11") registerTalkShortcut("f11");
 	}
 
 	pi.registerCommand("voice", {
