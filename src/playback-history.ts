@@ -10,6 +10,13 @@ export interface PlaybackTarget extends PlaybackMessage {
 	sourceOffset: number;
 }
 
+export interface PlaybackTimingSnapshot {
+	version: 1;
+	messageId: string;
+	duration: number;
+	checkpoints: Array<{ time: number; duration: number; sourceOffset: number }>;
+}
+
 type TimingCheckpoint = {
 	time: number;
 	duration: number;
@@ -37,6 +44,7 @@ export class PlaybackHistory {
 	#segments = new Map<number, { capture: Capture; sourceOffset: number }>();
 	#utterances = new Map<number, Capture>();
 	#activeUtterance: number | undefined;
+	#persistedUtterances = new Set<number>();
 
 	sync(messages: PlaybackMessage[], selectLatest = false): void {
 		this.#order = messages.map(message => message.id);
@@ -47,6 +55,28 @@ export class PlaybackHistory {
 		}
 		if (selectLatest || !this.#selectedId || !this.#order.includes(this.#selectedId)) {
 			this.#selectedId = this.#order.at(-1);
+		}
+	}
+
+	restore(snapshots: readonly PlaybackTimingSnapshot[]): void {
+		for (const snapshot of snapshots) {
+			if (snapshot.version !== 1 || !Number.isFinite(snapshot.duration) || snapshot.duration < 0) continue;
+			const record = this.#records.get(snapshot.messageId);
+			if (!record || !Array.isArray(snapshot.checkpoints) || snapshot.checkpoints.length > 2_000) continue;
+			const checkpoints = snapshot.checkpoints.filter(
+				checkpoint =>
+					Number.isFinite(checkpoint.time) &&
+					checkpoint.time >= 0 &&
+					Number.isFinite(checkpoint.duration) &&
+					checkpoint.duration >= 0 &&
+					Number.isInteger(checkpoint.sourceOffset) &&
+					checkpoint.sourceOffset >= 0 &&
+					checkpoint.sourceOffset < record.text.length,
+			);
+			if (checkpoints.length === 0) continue;
+			record.checkpoints = checkpoints.map(checkpoint => ({ ...checkpoint })).sort((left, right) => left.time - right.time);
+			record.duration = snapshot.duration;
+			record.position = 0;
 		}
 	}
 
@@ -100,6 +130,25 @@ export class PlaybackHistory {
 			record.checkpoints.sort((left, right) => left.time - right.time);
 			record.duration = Math.max(record.duration, absoluteTime + Math.max(0, duration));
 		}
+	}
+
+	snapshotForUtterance(utterance: number): PlaybackTimingSnapshot | undefined {
+		const capture = this.#utterances.get(utterance);
+		if (
+			!capture?.recordTimings ||
+			capture.record.id.startsWith("live:") ||
+			capture.record.checkpoints.length === 0 ||
+			this.#persistedUtterances.has(utterance)
+		) {
+			return undefined;
+		}
+		this.#persistedUtterances.add(utterance);
+		return {
+			version: 1,
+			messageId: capture.record.id,
+			duration: capture.record.duration,
+			checkpoints: capture.record.checkpoints.map(checkpoint => ({ ...checkpoint })),
+		};
 	}
 
 	setPlayback(utterance: number, position: number): void {

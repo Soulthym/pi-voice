@@ -35,7 +35,7 @@ The two recognition models have separate roles:
 - **Whisper** transcribes microphone recordings and generates final dictation candidates.
 - **Wav2Vec2 CTC** force-aligns known Kokoro text to synthesized audio; it is not used for microphone dictation.
 
-For every spoken segment, Pi retains its source-text range and timing metadata, but not its PCM audio. Wav2Vec2 supplies word timestamps, while the Termux audio session queries `mpv` for the position actually being played. The active sentence or clause receives a continuous subtle background, including inter-word whitespace. Words already reached by playback return to the normal foreground; later prose remains dim.
+For every spoken segment, Pi retains its source-text range and timing metadata, but not its PCM audio. Completed timing maps are persisted as Pi custom session entries, which are excluded from model context, so approximate seeking survives reloads and session resumes. Wav2Vec2 supplies word timestamps, while the Termux audio session queries `mpv` for the position actually being played. The active sentence or clause receives a continuous subtle background, including inter-word whitespace. Words already reached by playback return to the normal foreground; later prose remains dim.
 
 The segment background depends only on PCM boundaries and `mpv` position, so it remains reliable if word alignment is late or fails. Word progression falls back to duration-weighted estimates when necessary. Synthesis never waits for alignment and no artificial playback delay is added.
 
@@ -143,7 +143,7 @@ The symmetric layout is phone voice input, previous assistant message, rewind 10
 
 - Press the configured microphone shortcut (**Alt+M** by default) or **F5** and speak for as long as needed. Recording stops automatically after about 1.35 seconds of silence.
 - Press **F6**/**F10** to regenerate the previous/next completed assistant message, or **F11** to restart the selected message. Navigation is available while Pi is idle and restores message text from session history after `/reload` or session resume.
-- Press **F7**/**F9** to move approximately 10 seconds backward/forward using recorded segment-to-source timing checkpoints. Press **F8** to pause and regenerate from the nearest checkpoint when resuming. Timing is held only in memory and becomes available as a message plays; PCM audio is never cached. Consequently, seeks are approximate and replay invokes Kokoro again. Fenced-code descriptions are also regenerated when their source is replayed.
+- Press **F7**/**F9** to move approximately 10 seconds backward/forward using recorded segment-to-source timing checkpoints. Press **F8** to pause and regenerate from the nearest checkpoint when resuming. Timing is persisted in Pi's session after playback completes; PCM audio is never cached. Consequently, seeks are approximate and replay invokes Kokoro again. Messages narrated before timing persistence was introduced must play once to create their first timing map. Fenced-code descriptions are also regenerated when their source is replayed.
 - Press the shortcut again to stop manually. Pi displays a live, revisable transcript in the prompt editor.
 - In the default `review` submit mode, correct or extend the final prompt and press Enter yourself.
 - Final transcription requests up to `sttCandidates` hypotheses from the same ASR model. The configured editing model resolves them using the existing draft and a bounded, text-only excerpt of recent session context. This isolated request does not enter conversation history.

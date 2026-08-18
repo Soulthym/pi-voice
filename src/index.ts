@@ -17,7 +17,12 @@ import {
 } from "./config.js";
 import { LiveTranscriptionSession } from "./live-transcription.js";
 import { NarrationProgress } from "./narration-progress.js";
-import { PlaybackHistory, type PlaybackMessage, type PlaybackTarget } from "./playback-history.js";
+import {
+	PlaybackHistory,
+	type PlaybackMessage,
+	type PlaybackTarget,
+	type PlaybackTimingSnapshot,
+} from "./playback-history.js";
 import { PhoneInputClient } from "./phone-input.js";
 import { applySpokenEdit, resolveDictationCandidates } from "./prompt-editor.js";
 import { Vocalizer } from "./vocalizer.js";
@@ -26,6 +31,8 @@ import type { WorkerEvent } from "./worker-client.js";
 
 type VoiceState = "downloading" | "error" | "idle" | "listening" | "loading" | "speaking";
 type InputPhase = "idle" | "recording" | "transcribing";
+
+const PLAYBACK_TIMING_ENTRY = "pi-voice.playback-timing";
 
 function assistantText(message: unknown): string {
 	if (!message || typeof message !== "object" || !("role" in message) || message.role !== "assistant") return "";
@@ -60,6 +67,17 @@ function completedAssistantMessages(ctx: ExtensionContext): PlaybackMessage[] {
 		if (text) messages.push({ id: entry.id, text });
 	}
 	return messages;
+}
+
+function playbackTimingSnapshots(ctx: ExtensionContext): PlaybackTimingSnapshot[] {
+	const snapshots: PlaybackTimingSnapshot[] = [];
+	for (const entry of ctx.sessionManager.getBranch()) {
+		if (entry.type !== "custom" || entry.customType !== PLAYBACK_TIMING_ENTRY) continue;
+		const data = entry.data;
+		if (!data || typeof data !== "object" || !("version" in data) || data.version !== 1) continue;
+		snapshots.push(data as PlaybackTimingSnapshot);
+	}
+	return snapshots;
 }
 
 function parseMode(value: string): VoiceMode | undefined {
@@ -200,6 +218,10 @@ export default async function (pi: ExtensionAPI) {
 			case "idle":
 				if (!inputInProgress) state = "idle";
 				downloadPercent = undefined;
+				if (event.utterance !== undefined) {
+					const snapshot = playbackHistory.snapshotForUtterance(event.utterance);
+					if (snapshot) pi.appendEntry(PLAYBACK_TIMING_ENTRY, snapshot);
+				}
 				narration.finishUtterance(event.utterance);
 				break;
 			case "speaking":
@@ -437,6 +459,7 @@ export default async function (pi: ExtensionAPI) {
 		contextEpoch += 1;
 		activeContext = ctx;
 		syncPlaybackMessages(ctx, true);
+		playbackHistory.restore(playbackTimingSnapshots(ctx));
 		if (config.enabled) {
 			void warmModels().catch(error =>
 				ctx.ui.notify(`Voice model warm-up failed: ${error instanceof Error ? error.message : String(error)}`, "warning"),
@@ -572,7 +595,7 @@ export default async function (pi: ExtensionAPI) {
 			ctx.ui.notify("There is no completed assistant message to replay yet", "warning");
 			return;
 		}
-		playTarget(target, true);
+		playTarget(target, !playbackHistory.hasTimings());
 	};
 
 	pi.registerShortcut("f6", {
@@ -581,7 +604,7 @@ export default async function (pi: ExtensionAPI) {
 			if (!canNavigatePlayback(ctx)) return;
 			syncPlaybackMessages(ctx);
 			const message = playbackHistory.move(-1);
-			if (message) playTarget({ ...message, time: 0, sourceOffset: 0 }, true);
+			if (message) playTarget({ ...message, time: 0, sourceOffset: 0 }, !playbackHistory.hasTimings());
 		},
 	});
 
@@ -632,7 +655,7 @@ export default async function (pi: ExtensionAPI) {
 			if (!canNavigatePlayback(ctx)) return;
 			syncPlaybackMessages(ctx);
 			const message = playbackHistory.move(1);
-			if (message) playTarget({ ...message, time: 0, sourceOffset: 0 }, true);
+			if (message) playTarget({ ...message, time: 0, sourceOffset: 0 }, !playbackHistory.hasTimings());
 		},
 	});
 

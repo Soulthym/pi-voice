@@ -36,6 +36,19 @@ test("maps playback time to approximate source checkpoints without audio storage
 		time: 16,
 		sourceOffset: 80,
 	});
+
+	const snapshot = history.snapshotForUtterance(1);
+	assert.ok(snapshot);
+	assert.equal(history.snapshotForUtterance(1), undefined);
+	const restored = new PlaybackHistory();
+	restored.sync([{ id: "message", text: "x".repeat(120) }], true);
+	restored.restore([snapshot]);
+	assert.deepEqual(restored.seekTarget(10), {
+		id: "message",
+		text: "x".repeat(120),
+		time: 8,
+		sourceOffset: 40,
+	});
 });
 
 test("navigates session messages and preserves a live record when it receives its session id", () => {
