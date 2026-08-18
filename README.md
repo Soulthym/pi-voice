@@ -28,6 +28,19 @@ Both tunnel endpoints bind only to loopback, and phone audio stays inside the en
 
 With voice mode enabled, model warm-up starts in the background when the extension loads. Kokoro setup downloads approximately 100 MB from Hugging Face. The first microphone transcription downloads approximately 150 MB of Whisper weights, and spoken-word alignment downloads approximately 100 MB of q8 Wav2Vec2 weights. Later synthesis, transcription, and alignment are local.
 
+## Highlighting and worker architecture
+
+The two recognition models have separate roles:
+
+- **Whisper** transcribes microphone recordings and generates final dictation candidates.
+- **Wav2Vec2 CTC** force-aligns known Kokoro text to synthesized audio; it is not used for microphone dictation.
+
+For every spoken segment, Pi retains its source-text range and PCM range. Wav2Vec2 supplies word timestamps, while the Termux audio session queries `mpv` for the position actually being played. The active sentence or clause receives a continuous subtle background, including inter-word whitespace. Words already reached by playback return to the normal foreground; later prose remains dim.
+
+The segment background depends only on PCM boundaries and `mpv` position, so it remains reliable if word alignment is late or fails. Word progression falls back to duration-weighted estimates when necessary. Synthesis never waits for alignment and no artificial playback delay is added.
+
+Kokoro synthesis and microphone Whisper inference share the main voice worker. Wav2Vec2 runs in a dedicated alignment worker, and each TCP utterance uses a lightweight playback helper. Alignment and playback helpers write progress events directly to Pi instead of routing them through the potentially busy Kokoro loop. This keeps highlighting responsive while the next segment is being synthesized. Fenced blocks and link destinations are left untouched to preserve Markdown and syntax rendering.
+
 ## Server installation
 
 ```bash
@@ -115,7 +128,7 @@ If SSH reports that remote forwarding failed, ensure `AllowTcpForwarding yes` is
 - Final transcription requests up to `sttCandidates` hypotheses from the same ASR model. The configured editing model resolves them using the existing draft and a bounded, text-only excerpt of recent session context. This isolated request does not enter conversation history.
 - With `editMode: "smart"`, text that is already in the editor when recording starts becomes the existing draft. Another dictation can continue or revise it naturally: “Actually replace port 8000 with 8080,” “scratch the last sentence,” or “make the second paragraph shorter.” Start recording only after placing the text to revise in the editor. With an empty editor there is nothing to revise, so Pi resolves the new utterance as fresh dictation. In `append`, the model still resolves ASR ambiguity but preserves correction phrases literally instead of executing them.
 - Fences tagged `text`, `txt`, `plain`, `plaintext`, `md`, `markdown`, or `mdown` are read as prose. Other fenced blocks are sent to `editModel` for a short semantic description. Descriptions remain at the block's position in the spoken response, while requests begin early enough to overlap preceding queued TTS whenever possible.
-- Assistant speech automatically plays through the phone. While it plays, unread prose is dimmed, the current speech segment gets a subtle background, and words return to normal near their actual playback time. Fenced code remains normally styled because it is narrated as a semantic block rather than word-for-word.
+- Assistant speech automatically plays through the phone. While it plays, unread prose is dimmed, the current speech segment gets a subtle continuous background, and words return to normal near their actual playback time. Fenced blocks remain normally styled because code is narrated as a semantic block and ANSI styling is kept out of fence syntax.
 - A configurable Wav2Vec2 CTC model aligns clean Kokoro audio in a separate worker whose events flow directly to Pi, independently of ongoing synthesis. When voice mode is enabled, Kokoro and the aligner warm concurrently in the background and remain resident in RAM until Pi exits or reloads. If alignment is late or unavailable, duration-weighted word timing is used; if phone feedback is unavailable, the desktop playback clock is estimated.
 - `Ctrl+Shift+V` toggles spoken output.
 
@@ -147,7 +160,7 @@ Commands:
 /voice edit smart|append
 ```
 
-`/voice timing` reports metadata-to-background and redraw latency for the most recent narrated response without logging its text. Shortcut names use Pi's key format, such as `alt+m`, `ctrl+shift+m`, or `f8`. Run `/reload` after changing the shortcut. `review` leaves dictation in the editor for confirmation; `auto` immediately submits it. `smart` applies subsequent dictation to the existing draft; `append` only appends the model-resolved utterance and does not execute spoken corrections.
+`/voice timing` reports segment-metadata-to-background and background-to-redraw latency for the most recent narrated response without logging its text. It is intended for diagnosing delayed phone feedback or TUI rendering. Shortcut names use Pi's key format, such as `alt+m`, `ctrl+shift+m`, or `f8`. Run `/reload` after changing the shortcut. `review` leaves dictation in the editor for confirmation; `auto` immediately submits it. `smart` applies subsequent dictation to the existing draft; `append` only appends the model-resolved utterance and does not execute spoken corrections.
 
 ## Models
 
