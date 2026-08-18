@@ -139,6 +139,7 @@ Commands:
 /voice alignment-dtype fp32|q8|q4
 /voice edit-model current|provider/model-id
 /voice highlight on|off
+/voice timing
 /voice output local|tcp://host:port
 /voice input disabled|tcp://host:port
 /voice shortcut <key|disabled>
@@ -146,7 +147,7 @@ Commands:
 /voice edit smart|append
 ```
 
-Shortcut names use Pi's key format, such as `alt+m`, `ctrl+shift+m`, or `f8`. Run `/reload` after changing the shortcut. `review` leaves dictation in the editor for confirmation; `auto` immediately submits it. `smart` applies subsequent dictation to the existing draft; `append` only appends the model-resolved utterance and does not execute spoken corrections.
+`/voice timing` reports metadata-to-background and redraw latency for the most recent narrated response without logging its text. Shortcut names use Pi's key format, such as `alt+m`, `ctrl+shift+m`, or `f8`. Run `/reload` after changing the shortcut. `review` leaves dictation in the editor for confirmation; `auto` immediately submits it. `smart` applies subsequent dictation to the existing draft; `append` only appends the model-resolved utterance and does not execute spoken corrections.
 
 ## Models
 

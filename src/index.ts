@@ -530,6 +530,7 @@ export default async function (pi: ExtensionAPI) {
 				"alignment-dtype",
 				"edit-model",
 				"highlight",
+				"timing",
 			];
 			const parts = prefix.trimStart().split(/\s+/);
 			if (parts.length <= 1) {
@@ -841,6 +842,9 @@ export default async function (pi: ExtensionAPI) {
 					vocalizer.speak(text);
 					return;
 				}
+				case "timing":
+					ctx.ui.notify(narration.timingSummary(), "info");
+					return;
 				case "status":
 				case "":
 					ctx.ui.notify(
@@ -850,7 +854,7 @@ export default async function (pi: ExtensionAPI) {
 					return;
 				default:
 					ctx.ui.notify(
-						"Usage: /voice [on|off|toggle|status|stop|setup|test|talk|mode|voice|speed|tts-model|tts-dtype|stt-model|stt-dtype|stt-candidates|alignment-model|alignment-dtype|edit-model|highlight|output|input|shortcut|submit|edit]",
+						"Usage: /voice [on|off|toggle|status|stop|setup|test|talk|mode|voice|speed|tts-model|tts-dtype|stt-model|stt-dtype|stt-candidates|alignment-model|alignment-dtype|edit-model|highlight|timing|output|input|shortcut|submit|edit]",
 						"error",
 					);
 			}

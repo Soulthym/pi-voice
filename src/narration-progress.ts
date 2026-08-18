@@ -39,6 +39,9 @@ type TrackedSegment = NarrationSegment & {
 	duration?: number;
 	words: DisplayWord[];
 	aligned: boolean;
+	audioAt?: number;
+	activeAt?: number;
+	renderAt?: number;
 };
 
 const WORD_RE = /[\p{L}\p{N}]+(?:[.'’_-][\p{L}\p{N}]+)*/gu;
@@ -254,6 +257,7 @@ export class NarrationProgress {
 		if (!segment) return;
 		segment.audioStart = audioStart;
 		segment.duration = duration;
+		segment.audioAt = performance.now();
 		const starts = estimatedStarts(segment.words, segment.text, duration);
 		segment.words.forEach((word, index) => {
 			word.time = starts[index] ?? 0;
@@ -310,11 +314,34 @@ export class NarrationProgress {
 			? { start: this.#activeSource.start - blockStart, end: this.#activeSource.end - blockStart }
 			: undefined;
 		if (localCursor >= markdown.length && (!active || active.start >= markdown.length || active.end <= 0)) return markdown;
+		if (this.#activeSource && active && active.start < markdown.length && active.end > 0) {
+			const segment = [...this.#segments.values()].find(
+				candidate =>
+					candidate.activeAt !== undefined &&
+					candidate.source.start === this.#activeSource?.start &&
+					candidate.source.end === this.#activeSource.end,
+			);
+			if (segment) segment.renderAt ??= performance.now();
+		}
 		return styleNarrationMarkdown(markdown, Math.max(0, localCursor), active, styleUnread, styleActive);
 	}
 
 	get cursor(): number {
 		return this.#cursor;
+	}
+
+	timingSummary(): string {
+		const rows = [...this.#segments.values()]
+			.filter(segment => segment.audioAt !== undefined)
+			.map(segment => {
+				const active = segment.activeAt === undefined ? "n/a" : `${Math.round(segment.activeAt - (segment.audioAt as number))}ms`;
+				const render =
+					segment.renderAt === undefined || segment.activeAt === undefined
+						? "n/a"
+						: `${Math.round(segment.renderAt - segment.activeAt)}ms`;
+				return `segment ${segment.id}: audio→active=${active}, active→render=${render}, duration=${segment.duration?.toFixed(2) ?? "?"}s`;
+			});
+		return rows.length > 0 ? rows.join("; ") : "No narrated segment timing is available";
 	}
 
 	#recompute(utterance: number): void {
@@ -333,7 +360,10 @@ export class NarrationProgress {
 				continue;
 			}
 			cursor = Math.max(cursor, segment.source.start);
-			if (segment.source.end > segment.source.start) activeSource = segment.source;
+			if (segment.source.end > segment.source.start) {
+				activeSource = segment.source;
+				segment.activeAt ??= performance.now();
+			}
 			if (!segment.revealAtEnd) {
 				for (const word of segment.words) {
 					if (word.time > relative) break;
