@@ -32,7 +32,10 @@ mpv_pid=$!
 
 # stdin is the TCP audio direction. stdout is deliberately kept free for JSON
 # playback-position feedback over the reverse direction of the same socket.
-cat >"$audio_fifo" &
+# Bash redirects stdin of asynchronous commands to /dev/null when job control is
+# disabled, so preserve the socket on an explicit descriptor before backgrounding.
+exec 3<&0
+cat <&3 >"$audio_fifo" &
 feeder_pid=$!
 
 for _ in {1..50}; do
