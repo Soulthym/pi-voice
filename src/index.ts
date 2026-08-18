@@ -230,7 +230,7 @@ export default async function (pi: ExtensionAPI) {
 		handleWorkerEvent,
 		(block, signal) => {
 			if (!activeContext) return Promise.reject(new Error("No active Pi context for code description"));
-			return describeCodeBlock(activeContext, block, config.editModel, signal);
+			return describeCodeBlock(activeContext, block, config.editModel, config.codeNarration, signal);
 		},
 		segment => narration.registerSegment(segment),
 	);
@@ -531,6 +531,7 @@ export default async function (pi: ExtensionAPI) {
 				"edit-model",
 				"highlight",
 				"timing",
+				"code-narration",
 			];
 			const parts = prefix.trimStart().split(/\s+/);
 			if (parts.length <= 1) {
@@ -567,6 +568,11 @@ export default async function (pi: ExtensionAPI) {
 				return ["fp32", "q8", "q4"]
 					.filter(value => value.startsWith(parts[1] ?? ""))
 					.map(value => ({ value: `${parts[0]} ${value}`, label: value }));
+			}
+			if (parts[0] === "code-narration") {
+				return ["guided", "summary"]
+					.filter(value => value.startsWith(parts[1] ?? ""))
+					.map(value => ({ value: `code-narration ${value}`, label: value }));
 			}
 			if (parts[0] === "highlight") {
 				return ["on", "off"]
@@ -703,6 +709,16 @@ export default async function (pi: ExtensionAPI) {
 					}
 					await updateConfig({ ...config, sttCandidates: count });
 					ctx.ui.notify(`Final ASR candidate count set to ${count}`, "info");
+					return;
+				}
+				case "code-narration": {
+					const narrationMode = value.toLowerCase();
+					if (narrationMode !== "guided" && narrationMode !== "summary") {
+						ctx.ui.notify("Usage: /voice code-narration guided|summary", "error");
+						return;
+					}
+					await updateConfig({ ...config, codeNarration: narrationMode });
+					ctx.ui.notify(`Code narration mode set to ${narrationMode}`, "info");
 					return;
 				}
 				case "highlight": {
@@ -848,13 +864,13 @@ export default async function (pi: ExtensionAPI) {
 				case "status":
 				case "":
 					ctx.ui.notify(
-						`Voice ${config.enabled ? "on" : "off"}; mode=${config.mode}; voice=${config.voice}; speed=${config.speed}; tts=${config.ttsModel}@${config.ttsDtype}; stt=${config.sttModel}@${config.sttDtype}; sttCandidates=${config.sttCandidates}; alignment=${config.alignmentModel}@${config.alignmentDtype}; editModel=${config.editModel}; highlight=${config.playbackHighlight ? "on" : "off"}; output=${config.output}; input=${config.input}; shortcut=${config.talkShortcut}; submit=${config.submitMode}; edit=${config.editMode}`,
+						`Voice ${config.enabled ? "on" : "off"}; mode=${config.mode}; voice=${config.voice}; speed=${config.speed}; tts=${config.ttsModel}@${config.ttsDtype}; stt=${config.sttModel}@${config.sttDtype}; sttCandidates=${config.sttCandidates}; alignment=${config.alignmentModel}@${config.alignmentDtype}; editModel=${config.editModel}; highlight=${config.playbackHighlight ? "on" : "off"}; codeNarration=${config.codeNarration}; output=${config.output}; input=${config.input}; shortcut=${config.talkShortcut}; submit=${config.submitMode}; edit=${config.editMode}`,
 						"info",
 					);
 					return;
 				default:
 					ctx.ui.notify(
-						"Usage: /voice [on|off|toggle|status|stop|setup|test|talk|mode|voice|speed|tts-model|tts-dtype|stt-model|stt-dtype|stt-candidates|alignment-model|alignment-dtype|edit-model|highlight|timing|output|input|shortcut|submit|edit]",
+						"Usage: /voice [on|off|toggle|status|stop|setup|test|talk|mode|voice|speed|tts-model|tts-dtype|stt-model|stt-dtype|stt-candidates|alignment-model|alignment-dtype|edit-model|highlight|timing|code-narration|output|input|shortcut|submit|edit]",
 						"error",
 					);
 			}

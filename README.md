@@ -12,7 +12,7 @@ Both tunnel endpoints bind only to loopback, and phone audio stays inside the en
 - Speaks assistant output while it streams.
 - Runs `onnx-community/Kokoro-82M-v1.0-ONNX` locally with q8 weights.
 - Keeps ONNX inference in child processes so Pi's TUI remains responsive. Phone playback and alignment events bypass the synthesis loop, so Kokoro cannot delay highlighting updates.
-- Speaks `text`-like fenced blocks directly and narrates concise model-generated descriptions of code and patches instead of silently skipping them.
+- Speaks `text`-like fenced blocks directly. In guided mode, code and patches stay visible but dim while a model-generated walkthrough reveals related line groups and bolds exact ranges in sync with narration.
 - Starts each code-description request as soon as its closing fence streams, using already queued speech as lead time while preserving spoken order; falls back to a local structural description if the request fails.
 - Omits tables and most other Markdown noise from speech.
 - Starts with a short first segment, then synthesizes bounded sentence/clause segments.
@@ -39,7 +39,7 @@ For every spoken segment, Pi retains its source-text range and PCM range. Wav2Ve
 
 The segment background depends only on PCM boundaries and `mpv` position, so it remains reliable if word alignment is late or fails. Word progression falls back to duration-weighted estimates when necessary. Synthesis never waits for alignment and no artificial playback delay is added.
 
-Kokoro synthesis and microphone Whisper inference share the main voice worker. Wav2Vec2 runs in a dedicated alignment worker, and each TCP utterance uses a lightweight playback helper. Alignment and playback helpers write progress events directly to Pi instead of routing them through the potentially busy Kokoro loop. This keeps highlighting responsive while the next segment is being synthesized. Fenced blocks and link destinations are left untouched to preserve Markdown and syntax rendering.
+Kokoro synthesis and microphone Whisper inference share the main voice worker. Wav2Vec2 runs in a dedicated alignment worker, and each TCP utterance uses a lightweight playback helper. Alignment and playback helpers write progress events directly to Pi instead of routing them through the potentially busy Kokoro loop. This keeps highlighting responsive while the next segment is being synthesized. Prose styling leaves fence syntax and link destinations untouched; guided code styling uses terminal intensity markers only inside validated fence bodies.
 
 ## Server installation
 
@@ -71,7 +71,8 @@ Configuration is stored in `~/.pi/agent/pi-voice.json`. For the bundled Termux b
   "talkShortcut": "alt+m",
   "submitMode": "review",
   "editMode": "smart",
-  "playbackHighlight": true
+  "playbackHighlight": true,
+  "codeNarration": "guided"
 }
 ```
 
@@ -127,8 +128,8 @@ If SSH reports that remote forwarding failed, ensure `AllowTcpForwarding yes` is
 - In the default `review` submit mode, correct or extend the final prompt and press Enter yourself.
 - Final transcription requests up to `sttCandidates` hypotheses from the same ASR model. The configured editing model resolves them using the existing draft and a bounded, text-only excerpt of recent session context. This isolated request does not enter conversation history.
 - With `editMode: "smart"`, text that is already in the editor when recording starts becomes the existing draft. Another dictation can continue or revise it naturally: “Actually replace port 8000 with 8080,” “scratch the last sentence,” or “make the second paragraph shorter.” Start recording only after placing the text to revise in the editor. With an empty editor there is nothing to revise, so Pi resolves the new utterance as fresh dictation. In `append`, the model still resolves ASR ambiguity but preserves correction phrases literally instead of executing them.
-- Fences tagged `text`, `txt`, `plain`, `plaintext`, `md`, `markdown`, or `mdown` are read as prose. Other fenced blocks are sent to `editModel` for a short semantic description. Descriptions remain at the block's position in the spoken response, while requests begin early enough to overlap preceding queued TTS whenever possible.
-- Assistant speech automatically plays through the phone. While it plays, unread prose is dimmed, the current speech segment gets a subtle continuous background, and words return to normal near their actual playback time. Fenced blocks remain normally styled because code is narrated as a semantic block and ANSI styling is kept out of fence syntax.
+- Fences tagged `text`, `txt`, `plain`, `plaintext`, `md`, `markdown`, or `mdown` are read as prose. Other fenced blocks are sent to `editModel`. In `guided` mode it returns compact `operations|speech` records: `L+`/`L-` maintain independent bright line groups and `B+`/`B-` maintain independent bold ranges. Everything else stays dim until narration ends, when the complete original block returns to normal. Requests still begin as soon as closing fences arrive and preserve spoken order.
+- Assistant speech automatically plays through the phone. While it plays, unread prose is dimmed, the current speech segment gets a subtle continuous background, and words return to normal near their actual playback time.
 - A configurable Wav2Vec2 CTC model aligns clean Kokoro audio in a separate worker whose events flow directly to Pi, independently of ongoing synthesis. When voice mode is enabled, Kokoro and the aligner warm concurrently in the background and remain resident in RAM until Pi exits or reloads. If alignment is late or unavailable, duration-weighted word timing is used; if phone feedback is unavailable, the desktop playback clock is estimated.
 - `Ctrl+Shift+V` toggles spoken output.
 
@@ -152,6 +153,7 @@ Commands:
 /voice alignment-dtype fp32|q8|q4
 /voice edit-model current|provider/model-id
 /voice highlight on|off
+/voice code-narration guided|summary
 /voice timing
 /voice output local|tcp://host:port
 /voice input disabled|tcp://host:port
@@ -168,7 +170,8 @@ Commands:
 - `sttModel` must be a Transformers.js-compatible automatic-speech-recognition repository. Tested defaults use Whisper ONNX models from `onnx-community`.
 - `alignmentModel` must be a Transformers.js-compatible English CTC acoustic model. The default `onnx-community/wav2vec2-base-960h-ONNX` is an Apache-2.0 conversion of `facebook/wav2vec2-base-960h`; its q8 weights are approximately 100 MB. Unsupported architectures fall back to duration-weighted timing.
 - `sttCandidates` defaults to 3. Live previews remain single-pass; only final Whisper transcription generates alternatives. Candidate 1 is deterministic and additional candidates are low-temperature samples because Transformers.js 3.x does not expose multiple beam-search outputs. Duplicate hypotheses are removed, so fewer than the requested count may be returned. Other ASR architectures may return only one candidate.
-- `editModel: "current"` follows whichever model is active in Pi, without assuming a particular model family. Set `provider/model-id` to pin candidate resolution, smart editing, and fenced-code descriptions to another model registered and authenticated in Pi.
+- `editModel: "current"` follows whichever model is active in Pi, without assuming a particular model family. Set `provider/model-id` to pin candidate resolution, smart editing, and fenced-code narration to another model registered and authenticated in Pi.
+- `codeNarration: "guided"` requests synchronized line and bold groups using a compact line-record protocol. `summary` preserves the previous plain spoken description with no code dimming. Invalid guided plans safely fall back to the plain local structural description and leave code visible.
 - Model and precision changes apply on the next synthesis, transcription, or alignment. Missing weights download lazily into the configured cache.
 - A repository must actually provide the selected `fp32`, `q8`, or `q4` ONNX variant. If loading fails, choose a precision shipped by that repository.
 

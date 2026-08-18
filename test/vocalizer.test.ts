@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { plainCodeNarration, type CodeNarrationPlan } from "../src/code-narration.js";
 import { DEFAULT_VOICE_CONFIG } from "../src/config.js";
 import { Vocalizer } from "../src/vocalizer.js";
 
@@ -27,7 +28,7 @@ test("starts code description early while preserving spoken order", async () => 
 		async preloadAlignment(): Promise<void> {},
 		async terminate(): Promise<void> {},
 	};
-	const deferred = Promise.withResolvers<string>();
+	const deferred = Promise.withResolvers<CodeNarrationPlan>();
 	let descriptionStarted = false;
 	const vocalizer = new Vocalizer(
 		() => ({ ...DEFAULT_VOICE_CONFIG, enabled: true }),
@@ -46,7 +47,7 @@ test("starts code description early while preserving spoken order", async () => 
 	assert.equal(descriptionStarted, true);
 	assert.deepEqual(events, ["speech:Before."]);
 
-	deferred.resolve("The code defines a constant value.");
+	deferred.resolve(plainCodeNarration("The code defines a constant value."));
 	await immediate();
 	await immediate();
 	assert.deepEqual(events, ["speech:Before.", "speech:The code defines a constant value.", "speech:After.", "end"]);

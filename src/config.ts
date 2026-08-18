@@ -6,6 +6,7 @@ import type { KeyId } from "@earendil-works/pi-tui";
 export type VoiceMode = "all" | "assistant" | "yield";
 export type VoiceSubmitMode = "auto" | "review";
 export type VoiceEditMode = "append" | "smart";
+export type VoiceCodeNarration = "guided" | "summary";
 export type VoiceModelDtype = "fp32" | "q8" | "q4";
 
 export interface VoiceConfig {
@@ -38,6 +39,8 @@ export interface VoiceConfig {
 	editModel: string;
 	/** Dim unread assistant prose and reveal it as phone playback advances. */
 	playbackHighlight: boolean;
+	/** Narrate code with synchronized focus groups, or use a plain summary. */
+	codeNarration: VoiceCodeNarration;
 }
 
 export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
@@ -59,6 +62,7 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
 	editMode: "smart",
 	editModel: "current",
 	playbackHighlight: true,
+	codeNarration: "guided",
 };
 
 export function getVoiceConfigPath(): string {
@@ -75,6 +79,10 @@ function isSubmitMode(value: unknown): value is VoiceSubmitMode {
 
 function isEditMode(value: unknown): value is VoiceEditMode {
 	return value === "append" || value === "smart";
+}
+
+function isCodeNarration(value: unknown): value is VoiceCodeNarration {
+	return value === "guided" || value === "summary";
 }
 
 export function normalizeModelDtype(value: unknown): VoiceModelDtype | undefined {
@@ -205,6 +213,9 @@ export async function loadVoiceConfig(): Promise<VoiceConfig> {
 				typeof parsed.playbackHighlight === "boolean"
 					? parsed.playbackHighlight
 					: DEFAULT_VOICE_CONFIG.playbackHighlight,
+			codeNarration: isCodeNarration(parsed.codeNarration)
+				? parsed.codeNarration
+				: DEFAULT_VOICE_CONFIG.codeNarration,
 		};
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return { ...DEFAULT_VOICE_CONFIG };

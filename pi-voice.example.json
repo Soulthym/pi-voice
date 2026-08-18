@@ -16,5 +16,6 @@
   "talkShortcut": "alt+m",
   "submitMode": "review",
   "editMode": "smart",
-  "playbackHighlight": true
+  "playbackHighlight": true,
+  "codeNarration": "guided"
 }

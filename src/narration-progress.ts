@@ -1,3 +1,10 @@
+import type {
+	CodeLineRange,
+	CodeNarrationCue,
+	CodeNarrationOperation,
+	CodeSpanRange,
+} from "./code-narration.js";
+
 export type NarrationMessageType = "assistant" | "assistant-thinking";
 
 export interface NarrationSourceRange {
@@ -12,6 +19,11 @@ export interface NarrationSegment {
 	source: NarrationSourceRange;
 	/** Code descriptions reveal their source block only after narration finishes. */
 	revealAtEnd?: boolean;
+	code?: {
+		blockSource: NarrationSourceRange;
+		code: string;
+		cues: CodeNarrationCue[];
+	};
 }
 
 export interface AlignmentWord {
@@ -31,6 +43,8 @@ type DisplayWord = {
 	text: string;
 	start: number;
 	end: number;
+	localStart: number;
+	localEnd: number;
 	time: number;
 };
 
@@ -42,6 +56,16 @@ type TrackedSegment = NarrationSegment & {
 	audioAt?: number;
 	activeAt?: number;
 	renderAt?: number;
+	codeCues: Array<CodeNarrationCue & { time: number }>;
+	appliedCodeCues: number;
+};
+
+type CodeFocusBlock = {
+	source: NarrationSourceRange;
+	code: string;
+	lineGroups: Map<string, CodeLineRange[]>;
+	boldGroups: Map<string, CodeSpanRange[]>;
+	complete: boolean;
 };
 
 const WORD_RE = /[\p{L}\p{N}]+(?:[.'’_-][\p{L}\p{N}]+)*/gu;
@@ -77,11 +101,25 @@ function mapWordsToSource(text: string, source: NarrationSourceRange, raw: strin
 		if (match >= 0) {
 			rawIndex = match + 1;
 			const mapped = rawWords[match];
-			return { text: word.text, start: mapped.start, end: mapped.end, time: 0 };
+			return {
+				text: word.text,
+				start: mapped.start,
+				end: mapped.end,
+				localStart: word.start,
+				localEnd: word.end,
+				time: 0,
+			};
 		}
 		const start = Math.round(source.start + ((source.end - source.start) * index) / spoken.length);
 		const end = Math.round(source.start + ((source.end - source.start) * (index + 1)) / spoken.length);
-		return { text: word.text, start, end: Math.max(start, end), time: 0 };
+		return {
+			text: word.text,
+			start,
+			end: Math.max(start, end),
+			localStart: word.start,
+			localEnd: word.end,
+			time: 0,
+		};
 	});
 }
 
@@ -206,10 +244,60 @@ function styleNarrationMarkdown(
 	return output + markdown.slice(offset);
 }
 
+const DIM_ON = "\x1b[2m";
+const INTENSITY_OFF = "\x1b[22m";
+const BOLD_ON = "\x1b[1m";
+
+function mergeSpans(spans: Array<{ start: number; end: number }>): Array<{ start: number; end: number }> {
+	const sorted = spans.filter(span => span.end > span.start).sort((left, right) => left.start - right.start);
+	const merged: Array<{ start: number; end: number }> = [];
+	for (const span of sorted) {
+		const previous = merged[merged.length - 1];
+		if (previous && span.start <= previous.end) previous.end = Math.max(previous.end, span.end);
+		else merged.push({ ...span });
+	}
+	return merged;
+}
+
+function styleCodeLine(line: string, lineNumber: number, block: CodeFocusBlock): string {
+	const lineActive = [...block.lineGroups.values()]
+		.flat()
+		.some(range => lineNumber >= range.startLine && lineNumber <= range.endLine);
+	const bold = mergeSpans(
+		[...block.boldGroups.values()]
+			.flat()
+			.filter(range => lineNumber >= range.startLine && lineNumber <= range.endLine)
+			.map(range => ({
+				start: lineNumber === range.startLine ? Math.max(0, range.startColumn - 1) : 0,
+				end: lineNumber === range.endLine ? Math.min(line.length, range.endColumn) : line.length,
+			})),
+	);
+	let output = lineActive ? "" : DIM_ON;
+	let offset = 0;
+	for (const span of bold) {
+		output += line.slice(offset, span.start);
+		if (!lineActive) output += INTENSITY_OFF;
+		output += BOLD_ON + line.slice(span.start, span.end) + INTENSITY_OFF;
+		if (!lineActive && span.end < line.length) output += DIM_ON;
+		offset = span.end;
+	}
+	output += line.slice(offset);
+	if (!lineActive && (bold.length === 0 || offset < line.length)) output += INTENSITY_OFF;
+	return output;
+}
+
+function styleCodeBlock(code: string, block: CodeFocusBlock): string {
+	return code
+		.split("\n")
+		.map((line, index) => styleCodeLine(line, index + 1, block))
+		.join("\n");
+}
+
 /** Tracks synthesized segment timing and transforms the active Markdown block. */
 export class NarrationProgress {
 	#blocks: SourceBlock[] = [];
 	#segments = new Map<number, TrackedSegment>();
+	#codeBlocks = new Map<string, CodeFocusBlock>();
 	#raw = "";
 	#cursor = 0;
 	#active = false;
@@ -224,6 +312,7 @@ export class NarrationProgress {
 	begin(): void {
 		this.#blocks = [];
 		this.#segments.clear();
+		this.#codeBlocks.clear();
 		this.#raw = "";
 		this.#cursor = 0;
 		this.#active = true;
@@ -249,7 +338,26 @@ export class NarrationProgress {
 
 	registerSegment(segment: NarrationSegment): void {
 		const words = mapWordsToSource(segment.text, segment.source, this.#raw);
-		this.#segments.set(segment.id, { ...segment, words, aligned: false });
+		this.#segments.set(segment.id, {
+			...segment,
+			words,
+			aligned: false,
+			codeCues: (segment.code?.cues ?? []).map(cue => ({ ...cue, time: 0 })),
+			appliedCodeCues: 0,
+		});
+		if (segment.code) {
+			const key = this.#codeKey(segment.code.blockSource);
+			if (!this.#codeBlocks.has(key)) {
+				this.#codeBlocks.set(key, {
+					source: segment.code.blockSource,
+					code: segment.code.code,
+					lineGroups: new Map(),
+					boldGroups: new Map(),
+					complete: false,
+				});
+				this.#onChange();
+			}
+		}
 	}
 
 	setSegmentAudio(segmentId: number, audioStart: number, duration: number): void {
@@ -262,17 +370,19 @@ export class NarrationProgress {
 		segment.words.forEach((word, index) => {
 			word.time = starts[index] ?? 0;
 		});
+		this.#setCueTimes(segment);
 		this.#recompute(segment.utterance);
 	}
 
 	setAlignment(segmentId: number, words: AlignmentWord[]): void {
 		const segment = this.#segments.get(segmentId);
-		if (!segment || segment.duration === undefined || segment.revealAtEnd) return;
+		if (!segment || segment.duration === undefined) return;
 		const starts = alignedStarts(segment.words, words, segment.duration);
 		if (!starts) return;
 		segment.words.forEach((word, index) => {
 			word.time = starts[index] ?? word.time;
 		});
+		this.#setCueTimes(segment);
 		segment.aligned = true;
 		this.#recompute(segment.utterance);
 	}
@@ -288,6 +398,7 @@ export class NarrationProgress {
 		this.#cursor = this.#raw.length;
 		this.#active = false;
 		this.#activeSource = undefined;
+		for (const block of this.#codeBlocks.values()) block.complete = true;
 		this.#onChange();
 	}
 
@@ -313,7 +424,10 @@ export class NarrationProgress {
 		const active = this.#activeSource
 			? { start: this.#activeSource.start - blockStart, end: this.#activeSource.end - blockStart }
 			: undefined;
-		if (localCursor >= markdown.length && (!active || active.start >= markdown.length || active.end <= 0)) return markdown;
+		const hasCodeFocus = [...this.#codeBlocks.values()].some(block => !block.complete);
+		if (localCursor >= markdown.length && (!active || active.start >= markdown.length || active.end <= 0) && !hasCodeFocus) {
+			return markdown;
+		}
 		if (this.#activeSource && active && active.start < markdown.length && active.end > 0) {
 			const segment = [...this.#segments.values()].find(
 				candidate =>
@@ -323,7 +437,19 @@ export class NarrationProgress {
 			);
 			if (segment) segment.renderAt ??= performance.now();
 		}
-		return styleNarrationMarkdown(markdown, Math.max(0, localCursor), active, styleUnread, styleActive);
+		let transformed = styleNarrationMarkdown(markdown, Math.max(0, localCursor), active, styleUnread, styleActive);
+		const focused = [...this.#codeBlocks.values()]
+			.filter(codeBlock => !codeBlock.complete)
+			.sort((left, right) => left.source.start - right.source.start);
+		let searchFrom = 0;
+		for (const codeBlock of focused) {
+			const codeAt = transformed.indexOf(codeBlock.code, searchFrom);
+			if (codeAt < 0) continue;
+			const styled = styleCodeBlock(codeBlock.code, codeBlock);
+			transformed = transformed.slice(0, codeAt) + styled + transformed.slice(codeAt + codeBlock.code.length);
+			searchFrom = codeAt + styled.length;
+		}
+		return transformed;
 	}
 
 	get cursor(): number {
@@ -344,11 +470,70 @@ export class NarrationProgress {
 		return rows.length > 0 ? rows.join("; ") : "No narrated segment timing is available";
 	}
 
+	#codeKey(source: NarrationSourceRange): string {
+		return `${source.start}:${source.end}`;
+	}
+
+	#setCueTimes(segment: TrackedSegment): void {
+		if (segment.duration === undefined) return;
+		for (const cue of segment.codeCues) {
+			if (cue.offset <= 0) {
+				cue.time = 0;
+				continue;
+			}
+			const word = segment.words.find(candidate => candidate.localStart >= cue.offset);
+			cue.time = word?.time ?? segment.duration;
+		}
+		segment.codeCues.sort((left, right) => left.time - right.time || left.offset - right.offset);
+	}
+
+	#applyCodeCues(segment: TrackedSegment, relative: number): boolean {
+		let changed = false;
+		while (
+			segment.appliedCodeCues < segment.codeCues.length &&
+			(segment.codeCues[segment.appliedCodeCues]?.time ?? Number.POSITIVE_INFINITY) <= relative
+		) {
+			const cue = segment.codeCues[segment.appliedCodeCues];
+			segment.appliedCodeCues += 1;
+			const blockSource = segment.code?.blockSource;
+			if (!blockSource) continue;
+			const block = this.#codeBlocks.get(this.#codeKey(blockSource));
+			if (!block || block.complete) continue;
+			for (const operation of cue.operations) {
+				this.#applyCodeOperation(block, operation);
+				changed = true;
+			}
+		}
+		return changed;
+	}
+
+	#applyCodeOperation(block: CodeFocusBlock, operation: CodeNarrationOperation): void {
+		switch (operation.kind) {
+			case "line-add":
+				block.lineGroups.set(operation.id, [...(block.lineGroups.get(operation.id) ?? []), operation.range]);
+				break;
+			case "line-remove":
+				block.lineGroups.delete(operation.id);
+				break;
+			case "bold-add":
+				block.boldGroups.set(operation.id, [...(block.boldGroups.get(operation.id) ?? []), operation.range]);
+				break;
+			case "bold-remove":
+				block.boldGroups.delete(operation.id);
+				break;
+			case "reset":
+				block.lineGroups.clear();
+				block.boldGroups.clear();
+				block.complete = true;
+		}
+	}
+
 	#recompute(utterance: number): void {
 		const playback = this.#playback.get(utterance);
 		if (playback === undefined) return;
 		let cursor = this.#cursor;
 		let activeSource: NarrationSourceRange | undefined;
+		let codeChanged = false;
 		const segments = [...this.#segments.values()]
 			.filter(segment => segment.utterance === utterance && segment.audioStart !== undefined && segment.duration !== undefined)
 			.sort((left, right) => (left.audioStart as number) - (right.audioStart as number));
@@ -357,9 +542,11 @@ export class NarrationProgress {
 			if (relative < 0) break;
 			if (relative >= (segment.duration as number)) {
 				cursor = Math.max(cursor, segment.source.end);
+				codeChanged = this.#applyCodeCues(segment, Number.POSITIVE_INFINITY) || codeChanged;
 				continue;
 			}
 			cursor = Math.max(cursor, segment.source.start);
+			codeChanged = this.#applyCodeCues(segment, relative) || codeChanged;
 			if (segment.source.end > segment.source.start) {
 				activeSource = segment.source;
 				segment.activeAt ??= performance.now();
@@ -374,7 +561,7 @@ export class NarrationProgress {
 		}
 		const activeChanged =
 			activeSource?.start !== this.#activeSource?.start || activeSource?.end !== this.#activeSource?.end;
-		if (cursor === this.#cursor && !activeChanged) return;
+		if (cursor === this.#cursor && !activeChanged && !codeChanged) return;
 		this.#cursor = cursor;
 		this.#activeSource = activeSource;
 		this.#onChange();

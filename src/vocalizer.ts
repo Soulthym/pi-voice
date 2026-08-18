@@ -1,12 +1,17 @@
 import type { VoiceConfig } from "./config.js";
 import { fallbackCodeDescription } from "./code-describer.js";
+import {
+	chunkCodeNarration,
+	plainCodeNarration,
+	type CodeNarrationPlan,
+} from "./code-narration.js";
 import type { NarrationSegment } from "./narration-progress.js";
 import { SpeakableStream, type FencedCodeBlock, type SpeakableItem, type SpeakableSourceRange } from "./speakable.js";
 import { VoiceWorkerClient, type WorkerEvent } from "./worker-client.js";
 
 const IDLE_FLUSH_MS = 1_000;
 
-type CodeDescriber = (block: FencedCodeBlock, signal: AbortSignal) => Promise<string>;
+type CodeDescriber = (block: FencedCodeBlock, signal: AbortSignal) => Promise<CodeNarrationPlan>;
 type VoiceWorker = Pick<
 	VoiceWorkerClient,
 	| "sendSegment"
@@ -143,16 +148,16 @@ export class Vocalizer {
 		const generation = this.#generation;
 		const controller = new AbortController();
 		this.#descriptionControllers.add(controller);
-		let description: Promise<string>;
+		let description: Promise<CodeNarrationPlan>;
 		try {
 			description = this.#describeCode
 				? this.#describeCode(block, controller.signal)
-				: Promise.resolve(fallbackCodeDescription(block));
+				: Promise.resolve(plainCodeNarration(fallbackCodeDescription(block)));
 		} catch (error) {
 			description = Promise.reject(error);
 		}
 		const ready = description
-			.catch(() => fallbackCodeDescription(block))
+			.catch(() => plainCodeNarration(fallbackCodeDescription(block)))
 			.finally(() => this.#descriptionControllers.delete(controller));
 		const before = this.#deliveryBarrier ?? Promise.resolve();
 		this.#deliveryBarrier = before.then(async () => {
@@ -163,18 +168,22 @@ export class Vocalizer {
 	}
 
 	#sendDescription(
-		description: string,
+		plan: CodeNarrationPlan,
 		block: FencedCodeBlock,
 		source: SpeakableSourceRange,
 		utterance: number,
 	): void {
-		const stream = new SpeakableStream();
-		const items = [...stream.push(description), ...stream.flush()];
-		let segments = items
-			.filter((item): item is Extract<SpeakableItem, { kind: "speech" }> => item.kind === "speech")
-			.map(item => item.text);
-		if (segments.length === 0) segments = [fallbackCodeDescription(block)];
-		this.#sendSegments(segments, utterance, source, true);
+		let chunks = chunkCodeNarration(plan);
+		if (chunks.length === 0) chunks = chunkCodeNarration(plainCodeNarration(fallbackCodeDescription(block)));
+		for (const chunk of chunks) {
+			this.#sendSegments(
+				[chunk.text],
+				utterance,
+				{ start: source.start, end: source.start },
+				true,
+				plan.guided ? { blockSource: source, code: block.code, cues: chunk.cues } : undefined,
+			);
+		}
 	}
 
 	#ensureUtterance(): number {
@@ -187,6 +196,7 @@ export class Vocalizer {
 		utterance = this.#ensureUtterance(),
 		source?: SpeakableSourceRange,
 		revealAtEnd = false,
+		code?: NarrationSegment["code"],
 	): void {
 		if (segments.length === 0) return;
 		const config = this.#getConfig();
@@ -197,7 +207,7 @@ export class Vocalizer {
 					? { start: source.start, end: source.start }
 					: source
 				: { start: 0, end: 0 };
-			this.#onNarrationSegment?.({ id, utterance, text, source: narrationSource, revealAtEnd });
+			this.#onNarrationSegment?.({ id, utterance, text, source: narrationSource, revealAtEnd, code });
 			this.#worker.sendSegment(utterance, id, text, config);
 		});
 	}
