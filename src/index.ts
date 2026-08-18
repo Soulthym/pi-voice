@@ -495,7 +495,7 @@ export default async function (pi: ExtensionAPI) {
 		handler: async ctx => toggle(ctx),
 	});
 
-	pi.registerShortcut("f10", {
+	pi.registerShortcut("f11", {
 		description: "Restart the latest assistant message from the beginning",
 		handler: ctx => {
 			if (!config.enabled) {
@@ -528,7 +528,7 @@ export default async function (pi: ExtensionAPI) {
 			});
 		};
 		registerTalkShortcut(config.talkShortcut);
-		if (config.talkShortcut !== "f11") registerTalkShortcut("f11");
+		if (config.talkShortcut !== "f5") registerTalkShortcut("f5");
 	}
 
 	pi.registerCommand("voice", {

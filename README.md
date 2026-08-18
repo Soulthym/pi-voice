@@ -127,22 +127,22 @@ Sticky `Alt` combinations in Termux's extra-key row are inconvenient for control
 
 ```properties
   ], [\
-    {key: 'F5',  display: '⏮'},\
-    {key: 'F6',  display: '↶10'},\
-    {key: 'F7',  display: '⏯'},\
-    {key: 'F8',  display: '10↷'},\
-    {key: 'F9',  display: '⏭'},\
-    {key: 'F10', display: '↺'},\
-    {key: 'F11', display: '🎙'}\
+    {key: 'F5',  display: '🎙'},\
+    {key: 'F6',  display: '⏮'},\
+    {key: 'F7',  display: '↶10'},\
+    {key: 'F8',  display: '⏯'},\
+    {key: 'F9',  display: '10↷'},\
+    {key: 'F10', display: '⏭'},\
+    {key: 'F11', display: '↺'}\
   ]]
 ```
 
-The suggested layout is previous assistant message, rewind 10 seconds, pause/resume, forward 10 seconds, next assistant message, restart the latest completed message, and start/stop phone voice input. Pi Voice currently registers `F10` for restart and `F11` as a one-tap alternative alongside the configured microphone shortcut (`Alt+M` by default). Run `termux-reload-settings` after editing the file. `F5` through `F9` remain a reserved layout while navigation controls are implemented; extra-key labels are only visual unless a corresponding Pi shortcut is registered.
+The symmetric layout is phone voice input, previous assistant message, rewind 10 seconds, pause/resume, forward 10 seconds, next assistant message, and restart the latest completed message. Pause occupies the center key. Pi Voice currently registers `F5` as a one-tap alternative alongside the configured microphone shortcut (`Alt+M` by default), and `F11` for restart. Run `termux-reload-settings` after editing the file. `F6` through `F10` remain a reserved layout while navigation controls are implemented; extra-key labels are only visual unless a corresponding Pi shortcut is registered.
 
 ## Usage
 
-- Press the configured microphone shortcut (**Alt+M** by default) or **F11** and speak for as long as needed.
-- Press **F10** to stop current playback and restart the latest completed assistant message from the beginning. Replay is available while Pi is idle. Recording stops automatically after about 1.35 seconds of silence.
+- Press the configured microphone shortcut (**Alt+M** by default) or **F5** and speak for as long as needed.
+- Press **F11** to stop current playback and restart the latest completed assistant message from the beginning. Replay is available while Pi is idle. Recording stops automatically after about 1.35 seconds of silence.
 - Press the shortcut again to stop manually. Pi displays a live, revisable transcript in the prompt editor.
 - In the default `review` submit mode, correct or extend the final prompt and press Enter yourself.
 - Final transcription requests up to `sttCandidates` hypotheses from the same ASR model. The configured editing model resolves them using the existing draft and a bounded, text-only excerpt of recent session context. This isolated request does not enter conversation history.
