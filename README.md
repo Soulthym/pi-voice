@@ -121,6 +121,24 @@ server 127.0.0.1:8766 → SSH → phone microphone recorder
 
 If SSH reports that remote forwarding failed, ensure `AllowTcpForwarding yes` is enabled in the desktop's SSH server configuration.
 
+### Optional one-tap voice control key row
+
+Sticky `Alt` combinations in Termux's extra-key row are inconvenient for controls that may be pressed repeatedly. Termux can instead expose dedicated function keys, which pass cleanly through SSH and are unbound by Pi by default. Replace the final `]]` of `extra-keys` in `~/.termux/termux.properties` with this third-row suffix:
+
+```properties
+  ], [\
+    {key: 'F5',  display: '⏮'},\
+    {key: 'F6',  display: '↶10'},\
+    {key: 'F7',  display: '⏯'},\
+    {key: 'F8',  display: '10↷'},\
+    {key: 'F9',  display: '⏭'},\
+    {key: 'F10', display: '↺'},\
+    {key: 'F11', display: '🎙'}\
+  ]]
+```
+
+The suggested layout is previous assistant message, rewind 10 seconds, pause/resume, forward 10 seconds, next assistant message, restart selected message, and start/stop phone voice input. `F11` is intended as a one-tap alternative alongside the default `Alt+M` microphone shortcut. Run `termux-reload-settings` after editing the file. Function-key labels are only visual; the corresponding Pi extension shortcuts determine their behavior.
+
 ## Usage
 
 - Press the configured microphone shortcut (**Alt+M** by default) and speak for as long as needed. Recording stops automatically after about 1.35 seconds of silence.
