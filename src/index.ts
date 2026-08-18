@@ -58,12 +58,14 @@ function assistantStopReason(message: unknown): string | undefined {
 	return "stopReason" in message && typeof message.stopReason === "string" ? message.stopReason : undefined;
 }
 
-function completedAssistantMessages(ctx: ExtensionContext): PlaybackMessage[] {
+function completedAssistantMessages(ctx: ExtensionContext, mode: VoiceMode): PlaybackMessage[] {
 	const messages: PlaybackMessage[] = [];
 	for (const entry of ctx.sessionManager.getBranch()) {
 		if (entry.type !== "message") continue;
 		const stopReason = assistantStopReason(entry.message);
 		if (stopReason === undefined || stopReason === "aborted" || stopReason === "error") continue;
+		// Yield mode only speaks the final response, not intermediate text attached to tool/edit calls.
+		if (mode === "yield" && stopReason === "toolUse") continue;
 		const text = assistantText(entry.message);
 		if (text) messages.push({ id: entry.id, text });
 	}
@@ -303,7 +305,7 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	const syncPlaybackMessages = (ctx: ExtensionContext, selectLatest = false): PlaybackMessage[] => {
-		const messages = completedAssistantMessages(ctx);
+		const messages = completedAssistantMessages(ctx, config.mode);
 		playbackHistory.sync(messages, selectLatest);
 		return messages;
 	};
@@ -315,7 +317,7 @@ export default async function (pi: ExtensionAPI) {
 		attempt = 0,
 	): void => {
 		playbackHistory.updateText(playbackId, text);
-		const messages = completedAssistantMessages(ctx);
+		const messages = completedAssistantMessages(ctx, config.mode);
 		const completed = messages.findLast(message => message.text === text);
 		if (completed) {
 			playbackHistory.rename(playbackId, completed);
@@ -631,7 +633,7 @@ export default async function (pi: ExtensionAPI) {
 			if (stopReason !== "aborted" && stopReason !== "error" && stopReason !== undefined) {
 				const text = assistantText(event.message);
 				if (text) {
-					const messages = completedAssistantMessages(ctx);
+					const messages = completedAssistantMessages(ctx, config.mode);
 					const completed = messages.findLast(message => message.text === text);
 					if (completed) {
 						playbackHistory.sync(messages, true);
@@ -689,7 +691,10 @@ export default async function (pi: ExtensionAPI) {
 			if (!canNavigatePlayback(ctx)) return;
 			const target = playbackHistory.seekTarget(-10);
 			if (target) playTarget(target, false);
-			else ctx.ui.notify("Rewind timing is available after this message has played", "warning");
+			else {
+				scheduleMissingTimings(ctx);
+				ctx.ui.notify("Timing preprocessing for this message has not finished yet", "warning");
+			}
 		},
 	});
 
@@ -720,7 +725,10 @@ export default async function (pi: ExtensionAPI) {
 			if (!canNavigatePlayback(ctx)) return;
 			const target = playbackHistory.seekTarget(10);
 			if (target) playTarget(target, false);
-			else ctx.ui.notify("Forward timing is available after this message has played", "warning");
+			else {
+				scheduleMissingTimings(ctx);
+				ctx.ui.notify("Timing preprocessing for this message has not finished yet", "warning");
+			}
 		},
 	});
 
