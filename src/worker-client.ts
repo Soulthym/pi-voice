@@ -9,6 +9,7 @@ export type WorkerEvent =
 	| { type: "ready"; requestId?: string }
 	| { type: "speaking" }
 	| { type: "segment-audio"; utterance: number; segmentId: number; start: number; duration: number }
+	| { type: "measurement"; requestId: string; duration: number }
 	| { type: "alignment"; segmentId: number; words: Array<{ text: string; start: number; end: number }> }
 	| { type: "playback"; utterance: number; position: number; estimated?: boolean }
 	| { type: "alignment-error"; segmentId: number; message: string }
@@ -25,6 +26,12 @@ type PendingPreload = {
 	timer: NodeJS.Timeout;
 };
 
+type PendingMeasurement = {
+	resolve: (duration: number) => void;
+	reject: (error: Error) => void;
+	timer: NodeJS.Timeout;
+};
+
 type PendingTranscription = {
 	resolve: (candidates: string[]) => void;
 	reject: (error: Error) => void;
@@ -35,6 +42,7 @@ export class VoiceWorkerClient {
 	#child: ChildProcessWithoutNullStreams | null = null;
 	#pendingPreloads = new Map<string, PendingPreload>();
 	#pendingTranscriptions = new Map<string, PendingTranscription>();
+	#pendingMeasurements = new Map<string, PendingMeasurement>();
 	#nextRequestId = 0;
 	#onEvent: (event: WorkerEvent) => void;
 
@@ -63,8 +71,34 @@ export class VoiceWorkerClient {
 	}
 
 	cancel(): void {
+		for (const pending of this.#pendingMeasurements.values()) {
+			clearTimeout(pending.timer);
+			pending.reject(new Error("Speech timing measurement interrupted"));
+		}
+		this.#pendingMeasurements.clear();
 		if (!this.#child) return;
 		this.#send({ type: "cancel" });
+	}
+
+	measureSegment(text: string, config: VoiceConfig): Promise<number> {
+		const requestId = String(++this.#nextRequestId);
+		const { promise, resolve, reject } = Promise.withResolvers<number>();
+		const timer = setTimeout(() => {
+			this.#pendingMeasurements.delete(requestId);
+			reject(new Error("Speech timing measurement timed out after 10 minutes"));
+		}, 10 * 60_000);
+		timer.unref?.();
+		this.#pendingMeasurements.set(requestId, { resolve, reject, timer });
+		this.#send({
+			type: "measure",
+			requestId,
+			text,
+			voice: config.voice,
+			speed: config.speed,
+			model: config.ttsModel,
+			dtype: config.ttsDtype,
+		});
+		return promise;
 	}
 
 	transcribe(audio: Buffer, config: VoiceConfig): Promise<string[]> {
@@ -151,6 +185,11 @@ export class VoiceWorkerClient {
 			pending.reject(new Error("Voice worker stopped"));
 		}
 		this.#pendingTranscriptions.clear();
+		for (const pending of this.#pendingMeasurements.values()) {
+			clearTimeout(pending.timer);
+			pending.reject(new Error("Voice worker stopped"));
+		}
+		this.#pendingMeasurements.clear();
 		try {
 			child.stdin.write(`${JSON.stringify({ type: "shutdown" })}\n`);
 			child.stdin.end();
@@ -230,6 +269,15 @@ export class VoiceWorkerClient {
 				else pending.reject(new Error(event.message));
 			}
 		}
+		if ((event.type === "measurement" || event.type === "error") && event.requestId) {
+			const pending = this.#pendingMeasurements.get(event.requestId);
+			if (pending) {
+				this.#pendingMeasurements.delete(event.requestId);
+				clearTimeout(pending.timer);
+				if (event.type === "measurement") pending.resolve(event.duration);
+				else pending.reject(new Error(event.message));
+			}
+		}
 		if ((event.type === "transcript" || event.type === "error") && event.requestId) {
 			const pending = this.#pendingTranscriptions.get(event.requestId);
 			if (pending) {
@@ -255,6 +303,11 @@ export class VoiceWorkerClient {
 			pending.reject(error);
 		}
 		this.#pendingTranscriptions.clear();
+		for (const pending of this.#pendingMeasurements.values()) {
+			clearTimeout(pending.timer);
+			pending.reject(error);
+		}
+		this.#pendingMeasurements.clear();
 		this.#onEvent({ type: "error", message: error.message });
 	}
 }

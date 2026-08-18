@@ -15,6 +15,7 @@ type CodeDescriber = (block: FencedCodeBlock, signal: AbortSignal) => Promise<Co
 type VoiceWorker = Pick<
 	VoiceWorkerClient,
 	| "sendSegment"
+	| "measureSegment"
 	| "endUtterance"
 	| "cancel"
 	| "transcribe"
@@ -108,6 +109,10 @@ export class Vocalizer {
 		for (const controller of this.#descriptionControllers) controller.abort();
 		this.#descriptionControllers.clear();
 		this.#worker.cancel();
+	}
+
+	measureSegment(text: string): Promise<number> {
+		return this.#worker.measureSegment(text, this.#getConfig());
 	}
 
 	transcribe(audio: Buffer): Promise<string[]> {

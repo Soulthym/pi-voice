@@ -98,6 +98,11 @@ export class PlaybackHistory {
 		this.#activeUtterance = undefined;
 	}
 
+	updateText(id: string, text: string): void {
+		const record = this.#records.get(id);
+		if (record) record.text = text;
+	}
+
 	rename(fromId: string, message: PlaybackMessage): void {
 		const record = this.#records.get(fromId);
 		if (!record) return;
@@ -190,8 +195,11 @@ export class PlaybackHistory {
 		return this.seekTarget(0) ?? this.restartTarget();
 	}
 
+	hasTimingFor(messageId: string): boolean {
+		return Boolean(this.#records.get(messageId)?.checkpoints.length);
+	}
+
 	hasTimings(): boolean {
-		const record = this.#selectedId ? this.#records.get(this.#selectedId) : undefined;
-		return Boolean(record?.checkpoints.length);
+		return this.#selectedId ? this.hasTimingFor(this.#selectedId) : false;
 	}
 }

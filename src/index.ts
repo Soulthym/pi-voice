@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { describeCodeBlock } from "./code-describer.js";
+import { describeCodeBlock, fallbackCodeDescription } from "./code-describer.js";
 import {
 	loadVoiceConfig,
 	normalizeEditModel,
@@ -24,6 +24,7 @@ import {
 	type PlaybackTimingSnapshot,
 } from "./playback-history.js";
 import { PhoneInputClient } from "./phone-input.js";
+import { SpeakableStream, type SpeakableSourceRange } from "./speakable.js";
 import { applySpokenEdit, resolveDictationCandidates } from "./prompt-editor.js";
 import { Vocalizer } from "./vocalizer.js";
 import { isVoice, VOICES } from "./voices.js";
@@ -78,6 +79,14 @@ function playbackTimingSnapshots(ctx: ExtensionContext): PlaybackTimingSnapshot[
 		snapshots.push(data as PlaybackTimingSnapshot);
 	}
 	return snapshots;
+}
+
+function timingItems(text: string): Array<{ text: string; source: SpeakableSourceRange }> {
+	const stream = new SpeakableStream();
+	return [...stream.push(text), ...stream.flush()].map(item => ({
+		text: item.kind === "speech" ? item.text : fallbackCodeDescription(item.block),
+		source: item.source,
+	}));
 }
 
 function parseMode(value: string): VoiceMode | undefined {
@@ -299,6 +308,71 @@ export default async function (pi: ExtensionAPI) {
 		return messages;
 	};
 
+	const finalizePlaybackMessage = (
+		ctx: ExtensionContext,
+		playbackId: string,
+		text: string,
+		attempt = 0,
+	): void => {
+		playbackHistory.updateText(playbackId, text);
+		const messages = completedAssistantMessages(ctx);
+		const completed = messages.findLast(message => message.text === text);
+		if (completed) {
+			playbackHistory.rename(playbackId, completed);
+			playbackHistory.sync(messages);
+			return;
+		}
+		if (attempt >= 5) return;
+		const epoch = contextEpoch;
+		const timer = setTimeout(
+			() => {
+				if (epoch === contextEpoch && activeContext === ctx) finalizePlaybackMessage(ctx, playbackId, text, attempt + 1);
+			},
+			[0, 20, 100, 250, 500][attempt] ?? 500,
+		);
+		timer.unref?.();
+	};
+
+	let timingPreprocessing: Promise<void> | undefined;
+	const scheduleMissingTimings = (ctx: ExtensionContext): void => {
+		if (!config.enabled || timingPreprocessing) return;
+		const epoch = contextEpoch;
+		const missing = syncPlaybackMessages(ctx)
+			.filter(message => !playbackHistory.hasTimingFor(message.id))
+			.reverse();
+		if (missing.length === 0) return;
+		timingPreprocessing = (async () => {
+			for (const message of missing) {
+				if (epoch !== contextEpoch || activeContext !== ctx || !config.enabled) break;
+				const checkpoints: PlaybackTimingSnapshot["checkpoints"] = [];
+				let time = 0;
+				try {
+					for (const item of timingItems(message.text)) {
+						const duration = await vocalizer.measureSegment(item.text);
+						if (epoch !== contextEpoch || activeContext !== ctx) return;
+						if (!Number.isFinite(duration) || duration <= 0) continue;
+						checkpoints.push({ time, duration, sourceOffset: item.source.start });
+						time += duration;
+					}
+				} catch {
+					// Live speech and microphone actions preempt low-priority timing work.
+					break;
+				}
+				if (checkpoints.length === 0) continue;
+				const snapshot: PlaybackTimingSnapshot = {
+					version: 1,
+					messageId: message.id,
+					duration: time,
+					checkpoints,
+				};
+				playbackHistory.restore([snapshot]);
+				pi.appendEntry(PLAYBACK_TIMING_ENTRY, snapshot);
+			}
+		})().finally(() => {
+			timingPreprocessing = undefined;
+		});
+	};
+
 	const warmModels = async (): Promise<void> => {
 		await vocalizer.warm();
 	};
@@ -461,6 +535,7 @@ export default async function (pi: ExtensionAPI) {
 		syncPlaybackMessages(ctx, true);
 		playbackHistory.restore(playbackTimingSnapshots(ctx));
 		if (config.enabled) {
+			scheduleMissingTimings(ctx);
 			void warmModels().catch(error =>
 				ctx.ui.notify(`Voice model warm-up failed: ${error instanceof Error ? error.message : String(error)}`, "warning"),
 			);
@@ -537,10 +612,7 @@ export default async function (pi: ExtensionAPI) {
 		const completedText = assistantText(event.message);
 		const stopReason = assistantStopReason(event.message);
 		if (completedText && stopReason !== undefined && stopReason !== "aborted" && stopReason !== "error" && activeContext) {
-			const messages = completedAssistantMessages(activeContext);
-			const completed = messages.findLast(message => message.text === completedText);
-			if (completed && livePlaybackId) playbackHistory.rename(livePlaybackId, completed);
-			playbackHistory.sync(messages);
+			if (livePlaybackId) finalizePlaybackMessage(activeContext, livePlaybackId, completedText);
 			livePlaybackId = undefined;
 		}
 		if (!config.enabled || stopReason === undefined) return;
@@ -553,21 +625,24 @@ export default async function (pi: ExtensionAPI) {
 		}
 	});
 
-	pi.on("turn_end", event => {
-		if (!config.enabled || config.mode !== "yield") return;
-		const stopReason = assistantStopReason(event.message);
-		if (stopReason === "aborted" || stopReason === "error" || stopReason === undefined) return;
-		const text = assistantText(event.message);
-		if (text) {
-			const messages = activeContext ? completedAssistantMessages(activeContext) : [];
-			const completed = messages.findLast(message => message.text === text);
-			if (completed) {
-				playbackHistory.sync(messages, true);
-				playbackHistory.beginCapture(completed.id, completed.text, 0, true);
+	pi.on("turn_end", (event, ctx) => {
+		if (config.enabled && config.mode === "yield") {
+			const stopReason = assistantStopReason(event.message);
+			if (stopReason !== "aborted" && stopReason !== "error" && stopReason !== undefined) {
+				const text = assistantText(event.message);
+				if (text) {
+					const messages = completedAssistantMessages(ctx);
+					const completed = messages.findLast(message => message.text === text);
+					if (completed) {
+						playbackHistory.sync(messages, true);
+						playbackHistory.beginCapture(completed.id, completed.text, 0, true);
+					}
+					narration.setCompletedText(text);
+					vocalizer.speak(text);
+				}
 			}
-			narration.setCompletedText(text);
-			vocalizer.speak(text);
 		}
+		scheduleMissingTimings(ctx);
 	});
 
 	pi.registerShortcut("ctrl+shift+v", {

@@ -13,6 +13,9 @@ test("shifts narration source ranges when regenerating a message suffix", () => 
 	const worker = {
 		sendSegment(): void {},
 		endUtterance(): void {},
+		async measureSegment(): Promise<number> {
+			return 1;
+		},
 		cancel(): void {},
 		async transcribe(): Promise<string[]> {
 			return [];
@@ -43,6 +46,9 @@ test("starts code description early while preserving spoken order", async () => 
 		},
 		endUtterance(): void {
 			events.push("end");
+		},
+		async measureSegment(): Promise<number> {
+			return 1;
 		},
 		cancel(): void {},
 		async transcribe(): Promise<string[]> {

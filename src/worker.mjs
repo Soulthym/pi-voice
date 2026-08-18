@@ -516,6 +516,25 @@ async function runOperation(operation) {
 		await closePlayer(operation.utterance);
 		return;
 	}
+	if (operation.type === "measure") {
+		try {
+			const model = await getModel(operation.model, operation.dtype);
+			if (operation.epoch !== epoch) return;
+			const output = await model.generate(operation.text, { voice: operation.voice, speed: operation.speed });
+			if (operation.epoch !== epoch) return;
+			const sampleRate = output.sampling_rate || DEFAULT_SAMPLE_RATE;
+			const pcm = Array.isArray(output.audio) ? output.audio[0] : output.audio;
+			const duration = pcm instanceof Float32Array ? pcm.length / sampleRate : 0;
+			send({ type: "measurement", requestId: operation.requestId, duration });
+		} catch (error) {
+			send({
+				type: "error",
+				requestId: operation.requestId,
+				message: error instanceof Error ? error.message : String(error),
+			});
+		}
+		return;
+	}
 	const model = await getModel(operation.model, operation.dtype);
 	if (operation.epoch !== epoch) return;
 	const output = await model.generate(operation.text, { voice: operation.voice, speed: operation.speed });
@@ -552,7 +571,13 @@ async function pump() {
 }
 
 function enqueue(operation) {
-	queue.push({ ...operation, epoch });
+	const queued = { ...operation, epoch };
+	if (operation.type === "measure") queue.push(queued);
+	else {
+		const backgroundAt = queue.findIndex(candidate => candidate.type === "measure");
+		if (backgroundAt < 0) queue.push(queued);
+		else queue.splice(backgroundAt, 0, queued);
+	}
 	void pump();
 }
 
@@ -591,6 +616,17 @@ lines.on("line", line => {
 				dtype: message.dtype ?? DEFAULT_TTS_DTYPE,
 				alignmentModel: message.alignmentModel ?? DEFAULT_ALIGNMENT_MODEL,
 				alignmentDtype: message.alignmentDtype ?? DEFAULT_ALIGNMENT_DTYPE,
+			});
+			break;
+		case "measure":
+			enqueue({
+				type: "measure",
+				requestId: message.requestId,
+				text: message.text,
+				voice: message.voice,
+				speed: message.speed,
+				model: message.model ?? DEFAULT_TTS_MODEL,
+				dtype: message.dtype ?? DEFAULT_TTS_DTYPE,
 			});
 			break;
 		case "end":
