@@ -54,7 +54,13 @@ function ensureAlignmentChild() {
 		} catch {
 			return;
 		}
-		if (event.epoch === epoch && (event.type === "alignment" || event.type === "alignment-error")) send(event);
+		if (
+			(event.epoch === epoch && (event.type === "alignment" || event.type === "alignment-error")) ||
+			event.type === "alignment-ready" ||
+			event.type === "alignment-preload-error"
+		) {
+			send(event);
+		}
 	});
 	child.on("error", () => {
 		if (alignmentChild === child) alignmentChild = null;
@@ -63,6 +69,20 @@ function ensureAlignmentChild() {
 		if (alignmentChild === child) alignmentChild = null;
 	});
 	return child;
+}
+
+function preloadAlignment(requestId, model, dtype) {
+	try {
+		ensureAlignmentChild().stdin.write(
+			`${JSON.stringify({ type: "preload", epoch, requestId, model, dtype })}\n`,
+		);
+	} catch (error) {
+		send({
+			type: "alignment-preload-error",
+			requestId,
+			message: error instanceof Error ? error.message : String(error),
+		});
+	}
 }
 
 function requestAlignment(operation, pcm, sampleRate) {
@@ -583,6 +603,13 @@ lines.on("line", line => {
 			break;
 		case "end":
 			enqueue({ type: "end", utterance: message.utterance });
+			break;
+		case "preload-alignment":
+			preloadAlignment(
+				message.requestId,
+				message.model ?? DEFAULT_ALIGNMENT_MODEL,
+				message.dtype ?? DEFAULT_ALIGNMENT_DTYPE,
+			);
 			break;
 		case "preload":
 			enqueue({

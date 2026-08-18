@@ -12,6 +12,8 @@ export type WorkerEvent =
 	| { type: "alignment"; segmentId: number; words: Array<{ text: string; start: number; end: number }> }
 	| { type: "playback"; utterance: number; position: number; estimated?: boolean }
 	| { type: "alignment-error"; segmentId: number; message: string }
+	| { type: "alignment-ready"; requestId: string }
+	| { type: "alignment-preload-error"; requestId: string; message: string }
 	| { type: "transcribing" }
 	| { type: "transcript"; text: string; candidates?: string[]; requestId: string; preview?: boolean }
 	| { type: "idle"; utterance?: number }
@@ -107,20 +109,31 @@ export class VoiceWorkerClient {
 	}
 
 	preload(config: VoiceConfig): Promise<void> {
+		return this.#requestPreload("Kokoro", {
+			type: "preload",
+			model: config.ttsModel,
+			dtype: config.ttsDtype,
+		});
+	}
+
+	preloadAlignment(config: VoiceConfig): Promise<void> {
+		return this.#requestPreload("Speech alignment", {
+			type: "preload-alignment",
+			model: config.alignmentModel,
+			dtype: config.alignmentDtype,
+		});
+	}
+
+	#requestPreload(label: string, message: object): Promise<void> {
 		const requestId = String(++this.#nextRequestId);
 		const { promise, resolve, reject } = Promise.withResolvers<void>();
 		const timer = setTimeout(() => {
 			this.#pendingPreloads.delete(requestId);
-			reject(new Error("Kokoro setup timed out after 10 minutes"));
+			reject(new Error(`${label} setup timed out after 10 minutes`));
 		}, 10 * 60_000);
 		timer.unref?.();
 		this.#pendingPreloads.set(requestId, { resolve, reject, timer });
-		this.#send({
-			type: "preload",
-			requestId,
-			model: config.ttsModel,
-			dtype: config.ttsDtype,
-		});
+		this.#send({ ...message, requestId });
 		return promise;
 	}
 
@@ -202,12 +215,18 @@ export class VoiceWorkerClient {
 		} catch {
 			return;
 		}
-		if ((event.type === "ready" || event.type === "error") && event.requestId) {
+		if (
+			(event.type === "ready" ||
+				event.type === "error" ||
+				event.type === "alignment-ready" ||
+				event.type === "alignment-preload-error") &&
+			event.requestId
+		) {
 			const pending = this.#pendingPreloads.get(event.requestId);
 			if (pending) {
 				this.#pendingPreloads.delete(event.requestId);
 				clearTimeout(pending.timer);
-				if (event.type === "ready") pending.resolve();
+				if (event.type === "ready" || event.type === "alignment-ready") pending.resolve();
 				else pending.reject(new Error(event.message));
 			}
 		}

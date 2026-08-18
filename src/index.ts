@@ -231,7 +231,12 @@ export default async function (pi: ExtensionAPI) {
 	);
 	const phoneInput = new PhoneInputClient();
 
+	const warmModels = async (): Promise<void> => {
+		await vocalizer.warm();
+	};
+
 	const updateConfig = async (next: VoiceConfig): Promise<void> => {
+		const previous = config;
 		const wasEnabled = config.enabled;
 		await saveVoiceConfig(next);
 		config = next;
@@ -241,6 +246,18 @@ export default async function (pi: ExtensionAPI) {
 		}
 		state = "idle";
 		refreshStatus();
+		if (
+			config.enabled &&
+			(!wasEnabled ||
+				previous.ttsModel !== config.ttsModel ||
+				previous.ttsDtype !== config.ttsDtype ||
+				previous.alignmentModel !== config.alignmentModel ||
+				previous.alignmentDtype !== config.alignmentDtype)
+		) {
+			void warmModels().catch(error =>
+				activeContext?.ui.notify(`Voice model warm-up failed: ${error instanceof Error ? error.message : String(error)}`, "warning"),
+			);
+		}
 	};
 
 	const toggle = async (ctx: ExtensionContext): Promise<void> => {
@@ -373,6 +390,11 @@ export default async function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		contextEpoch += 1;
 		activeContext = ctx;
+		if (config.enabled) {
+			void warmModels().catch(error =>
+				ctx.ui.notify(`Voice model warm-up failed: ${error instanceof Error ? error.message : String(error)}`, "warning"),
+			);
+		}
 		if (ctx.mode === "tui") {
 			ctx.ui.setWidget("pi-voice-render-driver", tui => {
 				narrationTui = tui;
@@ -629,10 +651,10 @@ export default async function (pi: ExtensionAPI) {
 					void talk(ctx);
 					return;
 				case "setup":
-					ctx.ui.notify(`Preparing ${config.ttsModel} (${config.ttsDtype})…`, "info");
+					ctx.ui.notify("Preparing speech synthesis and alignment models…", "info");
 					try {
-						await vocalizer.preload();
-						ctx.ui.notify("Text-to-speech model is ready", "info");
+						await warmModels();
+						ctx.ui.notify("Speech synthesis and alignment models are resident in RAM", "info");
 					} catch (error) {
 						ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 					}

@@ -203,7 +203,18 @@ lines.on("line", line => {
 	} catch {
 		return;
 	}
-	if (message.type === "align") {
+	if (message.type === "preload") {
+		epoch = Number.isInteger(message.epoch) ? message.epoch : epoch;
+		void getAligner(message.model ?? DEFAULT_ALIGNMENT_MODEL, message.dtype ?? DEFAULT_ALIGNMENT_DTYPE).then(
+			() => send({ type: "alignment-ready", requestId: message.requestId }),
+			error =>
+				send({
+					type: "alignment-preload-error",
+					requestId: message.requestId,
+					message: error instanceof Error ? error.message : String(error),
+				}),
+		);
+	} else if (message.type === "align") {
 		epoch = Number.isInteger(message.epoch) ? message.epoch : epoch;
 		queue.push({
 			type: "align",

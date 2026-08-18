@@ -9,7 +9,14 @@ const IDLE_FLUSH_MS = 1_000;
 type CodeDescriber = (block: FencedCodeBlock, signal: AbortSignal) => Promise<string>;
 type VoiceWorker = Pick<
 	VoiceWorkerClient,
-	"sendSegment" | "endUtterance" | "cancel" | "transcribe" | "transcribePcm" | "preload" | "terminate"
+	| "sendSegment"
+	| "endUtterance"
+	| "cancel"
+	| "transcribe"
+	| "transcribePcm"
+	| "preload"
+	| "preloadAlignment"
+	| "terminate"
 >;
 
 export class Vocalizer {
@@ -97,6 +104,14 @@ export class Vocalizer {
 
 	preload(): Promise<void> {
 		return this.#worker.preload(this.#getConfig());
+	}
+
+	preloadAlignment(): Promise<void> {
+		return this.#worker.preloadAlignment(this.#getConfig());
+	}
+
+	async warm(): Promise<void> {
+		await Promise.all([this.preload(), this.preloadAlignment()]);
 	}
 
 	async shutdown(): Promise<void> {

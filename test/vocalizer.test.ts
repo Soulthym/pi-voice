@@ -24,6 +24,7 @@ test("starts code description early while preserving spoken order", async () => 
 			return "";
 		},
 		async preload(): Promise<void> {},
+		async preloadAlignment(): Promise<void> {},
 		async terminate(): Promise<void> {},
 	};
 	const deferred = Promise.withResolvers<string>();
