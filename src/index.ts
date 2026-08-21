@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { describeCodeBlock, fallbackCodeDescription } from "./code-describer.js";
+import { CodeDescriptionCache, type CodeDescriptionCacheSnapshot } from "./code-description-cache.js";
+import { codeDescriptionCacheKey, describeCodeBlock, fallbackCodeDescription } from "./code-describer.js";
 import {
 	loadVoiceConfig,
 	normalizeEditModel,
@@ -34,6 +35,7 @@ type VoiceState = "downloading" | "error" | "idle" | "listening" | "loading" | "
 type InputPhase = "idle" | "recording" | "transcribing";
 
 const PLAYBACK_TIMING_ENTRY = "pi-voice.playback-timing";
+const CODE_DESCRIPTION_CACHE_ENTRY = "pi-voice.code-description";
 
 function assistantText(message: unknown): string {
 	if (!message || typeof message !== "object" || !("role" in message) || message.role !== "assistant") return "";
@@ -79,6 +81,14 @@ function playbackTimingSnapshots(ctx: ExtensionContext): PlaybackTimingSnapshot[
 		const data = entry.data;
 		if (!data || typeof data !== "object" || !("version" in data) || data.version !== 1) continue;
 		snapshots.push(data as PlaybackTimingSnapshot);
+	}
+	return snapshots;
+}
+
+function codeDescriptionSnapshots(ctx: ExtensionContext): unknown[] {
+	const snapshots: unknown[] = [];
+	for (const entry of ctx.sessionManager.getEntries()) {
+		if (entry.type === "custom" && entry.customType === CODE_DESCRIPTION_CACHE_ENTRY) snapshots.push(entry.data);
 	}
 	return snapshots;
 }
@@ -140,6 +150,8 @@ export default async function (pi: ExtensionAPI) {
 	let playbackPositionEstimated = false;
 	let playbackTimelineTimer: NodeJS.Timeout | null = null;
 	const playbackHistory = new PlaybackHistory();
+	const codeDescriptionCache = new CodeDescriptionCache();
+	const pendingCodeDescriptions = new Map<string, CodeDescriptionCacheSnapshot>();
 
 	const requestNarrationRender = (): void => {
 		if (!narrationTui || narrationRenderTimer) return;
@@ -340,8 +352,20 @@ export default async function (pi: ExtensionAPI) {
 		() => config,
 		handleWorkerEvent,
 		(block, signal) => {
-			if (!activeContext) return Promise.reject(new Error("No active Pi context for code description"));
-			return describeCodeBlock(activeContext, block, config.editModel, config.codeNarration, signal);
+			const ctx = activeContext;
+			if (!ctx) return Promise.reject(new Error("No active Pi context for code description"));
+			const editModel = config.editModel;
+			const narrationMode = config.codeNarration;
+			const key = codeDescriptionCacheKey(ctx, block, editModel, narrationMode);
+			return codeDescriptionCache.getOrCreate(
+				key,
+				() => describeCodeBlock(ctx, block, editModel, narrationMode, signal),
+				snapshot => {
+					if (activeContext !== ctx) return;
+					if (ctx.isIdle()) pi.appendEntry(CODE_DESCRIPTION_CACHE_ENTRY, snapshot);
+					else pendingCodeDescriptions.set(snapshot.key, snapshot);
+				},
+			);
 		},
 		segment => {
 			narration.registerSegment(segment);
@@ -597,6 +621,8 @@ export default async function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		contextEpoch += 1;
 		activeContext = ctx;
+		pendingCodeDescriptions.clear();
+		codeDescriptionCache.restore(codeDescriptionSnapshots(ctx));
 		syncPlaybackMessages(ctx, true);
 		playbackHistory.restore(playbackTimingSnapshots(ctx));
 		refreshPlaybackTimeline();
@@ -623,6 +649,7 @@ export default async function (pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async (_event, ctx) => {
 		contextEpoch += 1;
+		pendingCodeDescriptions.clear();
 		ctx.ui.setStatus("pi-voice", undefined);
 		ctx.ui.setWidget("pi-voice-render-driver", undefined);
 		ctx.ui.setWidget("pi-voice-playback", undefined);
@@ -713,6 +740,14 @@ export default async function (pi: ExtensionAPI) {
 			}
 		}
 		scheduleMissingTimings(ctx);
+	});
+
+	pi.on("agent_settled", (_event, ctx) => {
+		if (activeContext !== ctx || pendingCodeDescriptions.size === 0) return;
+		for (const snapshot of pendingCodeDescriptions.values()) {
+			pi.appendEntry(CODE_DESCRIPTION_CACHE_ENTRY, snapshot);
+		}
+		pendingCodeDescriptions.clear();
 	});
 
 	pi.registerShortcut("ctrl+shift+v", {
