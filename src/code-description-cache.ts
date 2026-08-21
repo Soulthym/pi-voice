@@ -75,6 +75,10 @@ export class CodeDescriptionCache {
 		}
 	}
 
+	get(key: string): CodeNarrationPlan | undefined {
+		return this.#plans.get(key);
+	}
+
 	getOrCreate(
 		key: string,
 		create: () => Promise<CodeNarrationPlan>,

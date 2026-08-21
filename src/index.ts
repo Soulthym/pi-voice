@@ -16,6 +16,7 @@ import {
 	type VoiceMode,
 	type VoiceSubmitMode,
 } from "./config.js";
+import { chunkCodeNarration } from "./code-narration.js";
 import { LiveTranscriptionSession } from "./live-transcription.js";
 import { NarrationProgress } from "./narration-progress.js";
 import {
@@ -151,6 +152,7 @@ export default async function (pi: ExtensionAPI) {
 	let playbackTimelineTimer: NodeJS.Timeout | null = null;
 	const playbackHistory = new PlaybackHistory();
 	const codeDescriptionCache = new CodeDescriptionCache();
+	const codeDescriptionText = new Map<string, string>();
 	const pendingCodeDescriptions = new Map<string, CodeDescriptionCacheSnapshot>();
 
 	const requestNarrationRender = (): void => {
@@ -165,12 +167,31 @@ export default async function (pi: ExtensionAPI) {
 	const narration = new NarrationProgress(requestNarrationRender);
 
 	pi.registerMarkdownTransformer((markdown, context) => {
-		if (!config.enabled || !config.playbackHighlight || context.messageType === "user") return markdown;
+		if (!config.enabled || context.messageType === "user") return markdown;
 		return narration.transform(
 			markdown,
 			context.messageType,
-			text => activeContext?.ui.theme.fg("dim", text) ?? text,
-			text => activeContext?.ui.theme.bg("selectedBg", text) ?? text,
+			text => (config.playbackHighlight ? (activeContext?.ui.theme.fg("dim", text) ?? text) : text),
+			text => (config.playbackHighlight ? (activeContext?.ui.theme.bg("selectedBg", text) ?? text) : text),
+			block => {
+				const ctx = activeContext;
+				if (!ctx) return undefined;
+				try {
+					const key = codeDescriptionCacheKey(ctx, block, config.editModel, config.codeNarration);
+					const existing = codeDescriptionText.get(key);
+					if (existing !== undefined) return existing;
+					const plan = codeDescriptionCache.get(key);
+					if (!plan) return undefined;
+					const text = chunkCodeNarration(plan)
+						.map(chunk => chunk.text)
+						.join(" ");
+					codeDescriptionText.set(key, text);
+					return text;
+				} catch {
+					return undefined;
+				}
+			},
+			config.playbackHighlight,
 		);
 	});
 
@@ -622,6 +643,7 @@ export default async function (pi: ExtensionAPI) {
 		contextEpoch += 1;
 		activeContext = ctx;
 		pendingCodeDescriptions.clear();
+		codeDescriptionText.clear();
 		codeDescriptionCache.restore(codeDescriptionSnapshots(ctx));
 		syncPlaybackMessages(ctx, true);
 		playbackHistory.restore(playbackTimingSnapshots(ctx));

@@ -75,6 +75,55 @@ test("styles spoken text fences while preserving their Markdown markers", () => 
 	assert.match(progress.transform(markdown, "assistant", dim, background), /<bg>Read<\/bg>/);
 });
 
+test("shows a code description below its block and reveals it with playback", () => {
+	const markdown = "```ts\nfor (const value of values) console.log(value);\n```";
+	const description = "The loop prints each value.";
+	const progress = new NarrationProgress();
+	progress.setCompletedText(markdown);
+	progress.registerSegment({
+		id: 14,
+		utterance: 6,
+		text: description,
+		source: { start: 0, end: 0 },
+		revealAtEnd: true,
+		codeDescription: {
+			blockSource: { start: 0, end: markdown.length },
+			text: description,
+			offset: 0,
+		},
+	});
+	progress.setSegmentAudio(14, 0, 2);
+
+	const pending = progress.transform(markdown, "assistant", dim, background, () => description);
+	assert.match(pending, /```\n\n> \*\*Code description\*\*/);
+	assert.match(pending, /> <dim>The<\/dim> <dim>loop<\/dim>/);
+
+	progress.setPlayback(6, 0);
+	const active = progress.transform(markdown, "assistant", dim, background, () => description);
+	assert.match(active, /> <bg>The<\/bg><bg> <\/bg><bg><dim>loop<\/dim><\/bg>/);
+
+	progress.finish();
+	assert.match(progress.transform(markdown, "assistant", dim, background, () => description), /> The loop prints each value\./);
+});
+
+test("shows cached descriptions for every fenced code block", () => {
+	const markdown = "```ts\nconst one = 1;\n```\nBetween.\n```py\ntwo = 2\n```";
+	const descriptions = new Map([
+		["const one = 1;", "TypeScript defines one."],
+		["two = 2", "Python defines two."],
+	]);
+	const transformed = new NarrationProgress().transform(
+		markdown,
+		"assistant",
+		dim,
+		background,
+		block => descriptions.get(block.code),
+	);
+
+	assert.equal(transformed.match(/\*\*Code description\*\*/g)?.length, 2);
+	assert.match(transformed, /TypeScript defines one\.[\s\S]*Between\.[\s\S]*Python defines two\./);
+});
+
 test("tracks table cells as independent active sentences", () => {
 	const markdown = "| Name | Status |";
 	const progress = new NarrationProgress();

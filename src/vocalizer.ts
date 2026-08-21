@@ -195,6 +195,8 @@ export class Vocalizer {
 	): void {
 		let chunks = chunkCodeNarration(plan);
 		if (chunks.length === 0) chunks = chunkCodeNarration(plainCodeNarration(fallbackCodeDescription(block)));
+		const description = chunks.map(chunk => chunk.text).join(" ");
+		let descriptionOffset = 0;
 		for (const chunk of chunks) {
 			this.#sendSegments(
 				[chunk.text],
@@ -202,7 +204,9 @@ export class Vocalizer {
 				{ start: source.start, end: source.start },
 				true,
 				plan.guided ? { blockSource: source, code: block.code, cues: chunk.cues } : undefined,
+				{ blockSource: source, text: description, offset: descriptionOffset },
 			);
+			descriptionOffset += chunk.text.length + 1;
 		}
 	}
 
@@ -217,6 +221,7 @@ export class Vocalizer {
 		source?: SpeakableSourceRange,
 		revealAtEnd = false,
 		code?: NarrationSegment["code"],
+		codeDescription?: NarrationSegment["codeDescription"],
 	): void {
 		if (segments.length === 0) return;
 		const config = this.#getConfig();
@@ -227,7 +232,7 @@ export class Vocalizer {
 					? { start: source.start, end: source.start }
 					: source
 				: { start: 0, end: 0 };
-			this.#onNarrationSegment?.({ id, utterance, text, source: narrationSource, revealAtEnd, code });
+			this.#onNarrationSegment?.({ id, utterance, text, source: narrationSource, revealAtEnd, code, codeDescription });
 			this.#worker.sendSegment(utterance, id, text, config);
 		});
 	}
