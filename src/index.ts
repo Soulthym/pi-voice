@@ -34,6 +34,7 @@ import type { WorkerEvent } from "./worker-client.js";
 
 type VoiceState = "downloading" | "error" | "idle" | "listening" | "loading" | "speaking";
 type InputPhase = "idle" | "recording" | "transcribing";
+type PreprocessingProgress = { label: string; current: number; total: number };
 
 const PLAYBACK_TIMING_ENTRY = "pi-voice.playback-timing";
 const CODE_DESCRIPTION_CACHE_ENTRY = "pi-voice.code-description";
@@ -157,6 +158,8 @@ export default async function (pi: ExtensionAPI) {
 	let playbackPaused = false;
 	let playbackPositionEstimated = false;
 	let playbackTimelineTimer: NodeJS.Timeout | null = null;
+	let codePreprocessingProgress: PreprocessingProgress | undefined;
+	let timingPreprocessingProgress: PreprocessingProgress | undefined;
 	const playbackHistory = new PlaybackHistory();
 	const codeDescriptionCache = new CodeDescriptionCache();
 	const codeDescriptionText = new Map<string, string>();
@@ -172,6 +175,17 @@ export default async function (pi: ExtensionAPI) {
 		narrationRenderTimer.unref?.();
 	};
 	const narration = new NarrationProgress(requestNarrationRender);
+
+	const refreshPreprocessingProgress = (): void => {
+		const ctx = activeContext;
+		if (!ctx) return;
+		const lines = [codePreprocessingProgress, timingPreprocessingProgress]
+			.filter((progress): progress is PreprocessingProgress => progress !== undefined)
+			.map(progress =>
+				ctx.ui.theme.fg("dim", `${progress.label}: message ${progress.current}/${progress.total}`),
+			);
+		ctx.ui.setWidget("pi-voice-preprocessing", lines.length > 0 ? lines : undefined, { placement: "belowEditor" });
+	};
 
 	const descriptionText = (plan: CodeNarrationPlan): string =>
 		chunkCodeNarration(plan)
@@ -210,25 +224,39 @@ export default async function (pi: ExtensionAPI) {
 	const scheduleMissingCodeDescriptions = (ctx: ExtensionContext): void => {
 		if (codeDescriptionPreprocessing) return;
 		const epoch = contextEpoch;
-		const queued = new Map<string, FencedCodeBlock>();
+		const queuedKeys = new Set<string>();
+		const queuedMessages: FencedCodeBlock[][] = [];
 		for (const message of completedAssistantMessages(ctx, "assistant").reverse()) {
+			const blocks: FencedCodeBlock[] = [];
 			for (const block of describableCodeBlocks(message.text)) {
 				try {
 					const key = codeDescriptionCacheKey(ctx, block, config.editModel, config.codeNarration);
-					if (!codeDescriptionCache.get(key) && !queued.has(key)) queued.set(key, block);
+					if (!codeDescriptionCache.get(key) && !queuedKeys.has(key)) {
+						queuedKeys.add(key);
+						blocks.push(block);
+					}
 				} catch {
 					// A missing edit model is handled by the local fallback when requested directly.
 				}
 			}
+			if (blocks.length > 0) queuedMessages.push(blocks);
 		}
-		if (queued.size === 0) return;
+		if (queuedMessages.length === 0) return;
 		codeDescriptionPreprocessing = (async () => {
-			for (const block of queued.values()) {
+			for (let index = 0; index < queuedMessages.length; index += 1) {
 				if (epoch !== contextEpoch || activeContext !== ctx) break;
-				await requestCodeDescription(ctx, block);
+				codePreprocessingProgress = {
+					label: "Code descriptions",
+					current: index + 1,
+					total: queuedMessages.length,
+				};
+				refreshPreprocessingProgress();
+				for (const block of queuedMessages[index]) await requestCodeDescription(ctx, block);
 			}
 		})().finally(() => {
 			codeDescriptionPreprocessing = undefined;
+			codePreprocessingProgress = undefined;
+			refreshPreprocessingProgress();
 		});
 	};
 
@@ -509,8 +537,15 @@ export default async function (pi: ExtensionAPI) {
 			.reverse();
 		if (missing.length === 0) return;
 		timingPreprocessing = (async () => {
-			for (const message of missing) {
+			for (let index = 0; index < missing.length; index += 1) {
 				if (epoch !== contextEpoch || activeContext !== ctx || !config.enabled) break;
+				const message = missing[index];
+				timingPreprocessingProgress = {
+					label: "Speech timing",
+					current: index + 1,
+					total: missing.length,
+				};
+				refreshPreprocessingProgress();
 				const checkpoints: PlaybackTimingSnapshot["checkpoints"] = [];
 				let time = 0;
 				try {
@@ -538,6 +573,8 @@ export default async function (pi: ExtensionAPI) {
 			}
 		})().finally(() => {
 			timingPreprocessing = undefined;
+			timingPreprocessingProgress = undefined;
+			refreshPreprocessingProgress();
 		});
 	};
 
@@ -736,6 +773,9 @@ export default async function (pi: ExtensionAPI) {
 		ctx.ui.setStatus("pi-voice", undefined);
 		ctx.ui.setWidget("pi-voice-render-driver", undefined);
 		ctx.ui.setWidget("pi-voice-playback", undefined);
+		ctx.ui.setWidget("pi-voice-preprocessing", undefined);
+		codePreprocessingProgress = undefined;
+		timingPreprocessingProgress = undefined;
 		clearInputProgress();
 		if (narrationRenderTimer) clearTimeout(narrationRenderTimer);
 		narrationRenderTimer = null;
