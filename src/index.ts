@@ -34,7 +34,7 @@ import type { WorkerEvent } from "./worker-client.js";
 
 type VoiceState = "downloading" | "error" | "idle" | "listening" | "loading" | "speaking";
 type InputPhase = "idle" | "recording" | "transcribing";
-type PreprocessingProgress = { label: string; current: number; total: number };
+type PreprocessingProgress = { label: string; processed: number; total: number };
 
 const PLAYBACK_TIMING_ENTRY = "pi-voice.playback-timing";
 const CODE_DESCRIPTION_CACHE_ENTRY = "pi-voice.code-description";
@@ -182,7 +182,7 @@ export default async function (pi: ExtensionAPI) {
 		const lines = [codePreprocessingProgress, timingPreprocessingProgress]
 			.filter((progress): progress is PreprocessingProgress => progress !== undefined)
 			.map(progress =>
-				ctx.ui.theme.fg("dim", `${progress.label}: message ${progress.current}/${progress.total}`),
+				ctx.ui.theme.fg("dim", `${progress.label}: ${progress.processed}/${progress.total} processed`),
 			);
 		ctx.ui.setWidget("pi-voice-preprocessing", lines.length > 0 ? lines : undefined, { placement: "belowEditor" });
 	};
@@ -224,34 +224,43 @@ export default async function (pi: ExtensionAPI) {
 	const scheduleMissingCodeDescriptions = (ctx: ExtensionContext): void => {
 		if (codeDescriptionPreprocessing) return;
 		const epoch = contextEpoch;
-		const queuedKeys = new Set<string>();
 		const queuedMessages: FencedCodeBlock[][] = [];
+		let totalMessages = 0;
+		let processedMessages = 0;
 		for (const message of completedAssistantMessages(ctx, "assistant").reverse()) {
-			const blocks: FencedCodeBlock[] = [];
+			const keyedBlocks = new Map<string, FencedCodeBlock>();
 			for (const block of describableCodeBlocks(message.text)) {
 				try {
 					const key = codeDescriptionCacheKey(ctx, block, config.editModel, config.codeNarration);
-					if (!codeDescriptionCache.get(key) && !queuedKeys.has(key)) {
-						queuedKeys.add(key);
-						blocks.push(block);
-					}
+					keyedBlocks.set(key, block);
 				} catch {
 					// A missing edit model is handled by the local fallback when requested directly.
 				}
 			}
-			if (blocks.length > 0) queuedMessages.push(blocks);
+			if (keyedBlocks.size === 0) continue;
+			totalMessages += 1;
+			const missing = [...keyedBlocks].filter(([key]) => !codeDescriptionCache.get(key)).map(([, block]) => block);
+			if (missing.length === 0) processedMessages += 1;
+			else queuedMessages.push(missing);
 		}
 		if (queuedMessages.length === 0) return;
+		codePreprocessingProgress = {
+			label: "Code descriptions",
+			processed: processedMessages,
+			total: totalMessages,
+		};
+		refreshPreprocessingProgress();
 		codeDescriptionPreprocessing = (async () => {
-			for (let index = 0; index < queuedMessages.length; index += 1) {
+			for (const blocks of queuedMessages) {
 				if (epoch !== contextEpoch || activeContext !== ctx) break;
+				for (const block of blocks) await requestCodeDescription(ctx, block);
+				processedMessages += 1;
 				codePreprocessingProgress = {
 					label: "Code descriptions",
-					current: index + 1,
-					total: queuedMessages.length,
+					processed: processedMessages,
+					total: totalMessages,
 				};
 				refreshPreprocessingProgress();
-				for (const block of queuedMessages[index]) await requestCodeDescription(ctx, block);
 			}
 		})().finally(() => {
 			codeDescriptionPreprocessing = undefined;
@@ -532,20 +541,19 @@ export default async function (pi: ExtensionAPI) {
 	const scheduleMissingTimings = (ctx: ExtensionContext): void => {
 		if (!config.enabled || timingPreprocessing) return;
 		const epoch = contextEpoch;
-		const missing = syncPlaybackMessages(ctx)
-			.filter(message => !playbackHistory.hasTimingFor(message.id))
-			.reverse();
+		const messages = syncPlaybackMessages(ctx);
+		const missing = messages.filter(message => !playbackHistory.hasTimingFor(message.id)).reverse();
 		if (missing.length === 0) return;
+		let processedMessages = messages.length - missing.length;
+		timingPreprocessingProgress = {
+			label: "Speech timing",
+			processed: processedMessages,
+			total: messages.length,
+		};
+		refreshPreprocessingProgress();
 		timingPreprocessing = (async () => {
-			for (let index = 0; index < missing.length; index += 1) {
+			for (const message of missing) {
 				if (epoch !== contextEpoch || activeContext !== ctx || !config.enabled) break;
-				const message = missing[index];
-				timingPreprocessingProgress = {
-					label: "Speech timing",
-					current: index + 1,
-					total: missing.length,
-				};
-				refreshPreprocessingProgress();
 				const checkpoints: PlaybackTimingSnapshot["checkpoints"] = [];
 				let time = 0;
 				try {
@@ -570,6 +578,13 @@ export default async function (pi: ExtensionAPI) {
 				playbackHistory.restore([snapshot]);
 				requestPlaybackTimeline();
 				pi.appendEntry(PLAYBACK_TIMING_ENTRY, snapshot);
+				processedMessages += 1;
+				timingPreprocessingProgress = {
+					label: "Speech timing",
+					processed: processedMessages,
+					total: messages.length,
+				};
+				refreshPreprocessingProgress();
 			}
 		})().finally(() => {
 			timingPreprocessing = undefined;
