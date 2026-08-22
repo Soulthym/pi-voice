@@ -50,6 +50,7 @@ test("ignores completion from an older utterance", () => {
 	progress.pushDelta("assistant", 0, "Still queued.");
 	progress.registerSegment({ id: 9, utterance: 2, text: "Still queued.", source: { start: 0, end: 13 } });
 	progress.finishUtterance(1);
+	progress.finishUtterance(undefined);
 
 	assert.equal(progress.transform("Still queued.", "assistant", dim), "<dim>Still</dim> <dim>queued</dim>.");
 });

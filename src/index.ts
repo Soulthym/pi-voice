@@ -635,6 +635,7 @@ export default async function (pi: ExtensionAPI) {
 		}
 		beginInputProgress();
 		vocalizer.clear();
+		narration.finish();
 		state = "listening";
 		refreshStatus();
 		const editorBase = ctx.ui.getEditorText();
@@ -1138,6 +1139,7 @@ export default async function (pi: ExtensionAPI) {
 					return;
 				case "stop":
 					vocalizer.clear();
+					narration.finish();
 					if (inputPhase === "recording") {
 						setInputProgress("🎙 Stopping phone recording…");
 						void phoneInput.stop(config.input).catch(error =>
@@ -1168,6 +1170,7 @@ export default async function (pi: ExtensionAPI) {
 						return;
 					}
 					vocalizer.clear();
+					narration.finish();
 					if (action.toLowerCase() === "tts-model") await updateConfig({ ...config, ttsModel: model });
 					else if (action.toLowerCase() === "stt-model") await updateConfig({ ...config, sttModel: model });
 					else await updateConfig({ ...config, alignmentModel: model });
@@ -1183,6 +1186,7 @@ export default async function (pi: ExtensionAPI) {
 						return;
 					}
 					vocalizer.clear();
+					narration.finish();
 					if (action.toLowerCase() === "tts-dtype") await updateConfig({ ...config, ttsDtype: dtype });
 					else if (action.toLowerCase() === "stt-dtype") await updateConfig({ ...config, sttDtype: dtype });
 					else await updateConfig({ ...config, alignmentDtype: dtype });
@@ -1244,6 +1248,7 @@ export default async function (pi: ExtensionAPI) {
 						return;
 					}
 					vocalizer.clear();
+					narration.finish();
 					await updateConfig({ ...config, mode });
 					ctx.ui.notify(`Voice mode set to ${mode}`, "info");
 					return;
@@ -1262,6 +1267,7 @@ export default async function (pi: ExtensionAPI) {
 						return;
 					}
 					vocalizer.clear();
+					narration.finish();
 					await updateConfig({ ...config, voice: selected });
 					ctx.ui.notify(`Kokoro voice set to ${selected}`, "info");
 					return;
@@ -1283,6 +1289,7 @@ export default async function (pi: ExtensionAPI) {
 						return;
 					}
 					vocalizer.clear();
+					narration.finish();
 					await updateConfig({ ...config, output });
 					ctx.ui.notify(`Voice output set to ${output}`, "info");
 					return;
@@ -1343,6 +1350,7 @@ export default async function (pi: ExtensionAPI) {
 					}
 					const text = args.slice(action.length).trim() || "Pi voice mode is ready.";
 					vocalizer.clear();
+					narration.finish();
 					vocalizer.speak(text);
 					return;
 				}

@@ -462,7 +462,11 @@ export class NarrationProgress {
 	}
 
 	finishUtterance(utterance: number | undefined): void {
-		if (utterance !== undefined && ![...this.#segments.values()].some(segment => segment.utterance === utterance)) return;
+		// Unscoped idle events come from cancellation. A replacement replay may
+		// already be registered by the time that event arrives, so only a matching
+		// completed utterance may finish narration progress.
+		if (utterance === undefined) return;
+		if (![...this.#segments.values()].some(segment => segment.utterance === utterance)) return;
 		this.finish();
 	}
 
