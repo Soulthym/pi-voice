@@ -16,7 +16,7 @@ import {
 	type VoiceMode,
 	type VoiceSubmitMode,
 } from "./config.js";
-import { chunkCodeNarration } from "./code-narration.js";
+import { chunkCodeNarration, plainCodeNarration, type CodeNarrationPlan } from "./code-narration.js";
 import { LiveTranscriptionSession } from "./live-transcription.js";
 import { NarrationProgress } from "./narration-progress.js";
 import {
@@ -26,7 +26,7 @@ import {
 	type PlaybackTimingSnapshot,
 } from "./playback-history.js";
 import { PhoneInputClient } from "./phone-input.js";
-import { SpeakableStream, type SpeakableSourceRange } from "./speakable.js";
+import { SpeakableStream, type FencedCodeBlock, type SpeakableSourceRange } from "./speakable.js";
 import { applySpokenEdit, resolveDictationCandidates } from "./prompt-editor.js";
 import { Vocalizer } from "./vocalizer.js";
 import { isVoice, VOICES } from "./voices.js";
@@ -102,6 +102,13 @@ function timingItems(text: string): Array<{ text: string; source: SpeakableSourc
 	}));
 }
 
+function describableCodeBlocks(text: string): FencedCodeBlock[] {
+	const stream = new SpeakableStream();
+	return [...stream.push(text), ...stream.flush()]
+		.filter(item => item.kind === "code")
+		.map(item => item.block);
+}
+
 function parseMode(value: string): VoiceMode | undefined {
 	return value === "all" || value === "assistant" || value === "yield" ? value : undefined;
 }
@@ -166,8 +173,71 @@ export default async function (pi: ExtensionAPI) {
 	};
 	const narration = new NarrationProgress(requestNarrationRender);
 
+	const descriptionText = (plan: CodeNarrationPlan): string =>
+		chunkCodeNarration(plan)
+			.map(chunk => chunk.text)
+			.join(" ")
+			.replace(/\s+/g, " ")
+			.trim();
+
+	const requestCodeDescription = (ctx: ExtensionContext, block: FencedCodeBlock): Promise<CodeNarrationPlan> => {
+		const editModel = config.editModel;
+		const narrationMode = config.codeNarration;
+		const key = codeDescriptionCacheKey(ctx, block, editModel, narrationMode);
+		return codeDescriptionCache
+			.getOrCreate(
+				key,
+				() =>
+					describeCodeBlock(ctx, block, editModel, narrationMode).catch(() =>
+						plainCodeNarration(fallbackCodeDescription(block)),
+					),
+				snapshot => {
+					if (activeContext !== ctx) return;
+					if (ctx.isIdle()) pi.appendEntry(CODE_DESCRIPTION_CACHE_ENTRY, snapshot);
+					else pendingCodeDescriptions.set(snapshot.key, snapshot);
+				},
+			)
+			.then(plan => {
+				if (activeContext === ctx) {
+					codeDescriptionText.set(key, descriptionText(plan));
+					requestNarrationRender();
+				}
+				return plan;
+			});
+	};
+
+	let codeDescriptionPreprocessing: Promise<void> | undefined;
+	const scheduleMissingCodeDescriptions = (ctx: ExtensionContext): void => {
+		if (codeDescriptionPreprocessing) return;
+		const epoch = contextEpoch;
+		const queued = new Map<string, FencedCodeBlock>();
+		for (const message of completedAssistantMessages(ctx, "assistant").reverse()) {
+			for (const block of describableCodeBlocks(message.text)) {
+				try {
+					const key = codeDescriptionCacheKey(ctx, block, config.editModel, config.codeNarration);
+					if (!codeDescriptionCache.get(key) && !queued.has(key)) queued.set(key, block);
+				} catch {
+					// A missing edit model is handled by the local fallback when requested directly.
+				}
+			}
+		}
+		if (queued.size === 0) return;
+		codeDescriptionPreprocessing = (async () => {
+			for (const block of queued.values()) {
+				if (epoch !== contextEpoch || activeContext !== ctx) break;
+				await requestCodeDescription(ctx, block);
+			}
+		})().finally(() => {
+			codeDescriptionPreprocessing = undefined;
+		});
+	};
+
+	const scheduleCodeDescriptionsInText = (ctx: ExtensionContext, text: string): void => {
+		for (const block of describableCodeBlocks(text)) void requestCodeDescription(ctx, block);
+	};
+
 	pi.registerMarkdownTransformer((markdown, context) => {
-		if (!config.enabled || context.messageType === "user") return markdown;
+		if (context.messageType === "user") return markdown;
 		return narration.transform(
 			markdown,
 			context.messageType,
@@ -191,7 +261,7 @@ export default async function (pi: ExtensionAPI) {
 					return undefined;
 				}
 			},
-			config.playbackHighlight,
+			config.enabled && config.playbackHighlight,
 		);
 	});
 
@@ -372,21 +442,10 @@ export default async function (pi: ExtensionAPI) {
 	const vocalizer = new Vocalizer(
 		() => config,
 		handleWorkerEvent,
-		(block, signal) => {
+		(block, _signal) => {
 			const ctx = activeContext;
 			if (!ctx) return Promise.reject(new Error("No active Pi context for code description"));
-			const editModel = config.editModel;
-			const narrationMode = config.codeNarration;
-			const key = codeDescriptionCacheKey(ctx, block, editModel, narrationMode);
-			return codeDescriptionCache.getOrCreate(
-				key,
-				() => describeCodeBlock(ctx, block, editModel, narrationMode, signal),
-				snapshot => {
-					if (activeContext !== ctx) return;
-					if (ctx.isIdle()) pi.appendEntry(CODE_DESCRIPTION_CACHE_ENTRY, snapshot);
-					else pendingCodeDescriptions.set(snapshot.key, snapshot);
-				},
-			);
+			return requestCodeDescription(ctx, block);
 		},
 		segment => {
 			narration.registerSegment(segment);
@@ -498,6 +557,7 @@ export default async function (pi: ExtensionAPI) {
 		state = "idle";
 		refreshStatus();
 		refreshPlaybackTimeline();
+		if (activeContext) scheduleMissingCodeDescriptions(activeContext);
 		if (
 			config.enabled &&
 			(!wasEnabled ||
@@ -645,6 +705,7 @@ export default async function (pi: ExtensionAPI) {
 		pendingCodeDescriptions.clear();
 		codeDescriptionText.clear();
 		codeDescriptionCache.restore(codeDescriptionSnapshots(ctx));
+		scheduleMissingCodeDescriptions(ctx);
 		syncPlaybackMessages(ctx, true);
 		playbackHistory.restore(playbackTimingSnapshots(ctx));
 		refreshPlaybackTimeline();
@@ -731,6 +792,7 @@ export default async function (pi: ExtensionAPI) {
 		const completedText = assistantText(event.message);
 		const stopReason = assistantStopReason(event.message);
 		if (completedText && stopReason !== undefined && stopReason !== "aborted" && stopReason !== "error" && activeContext) {
+			scheduleCodeDescriptionsInText(activeContext, completedText);
 			if (livePlaybackId) finalizePlaybackMessage(activeContext, livePlaybackId, completedText);
 			livePlaybackId = undefined;
 		}
@@ -765,11 +827,12 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	pi.on("agent_settled", (_event, ctx) => {
-		if (activeContext !== ctx || pendingCodeDescriptions.size === 0) return;
+		if (activeContext !== ctx) return;
 		for (const snapshot of pendingCodeDescriptions.values()) {
 			pi.appendEntry(CODE_DESCRIPTION_CACHE_ENTRY, snapshot);
 		}
 		pendingCodeDescriptions.clear();
+		scheduleMissingCodeDescriptions(ctx);
 	});
 
 	pi.registerShortcut("ctrl+shift+v", {
