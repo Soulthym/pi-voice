@@ -17,5 +17,7 @@
   "submitMode": "review",
   "editMode": "smart",
   "playbackHighlight": true,
-  "codeNarration": "guided"
+  "codeNarration": "guided",
+  "codeDescriptionPreprocessConcurrency": "auto",
+  "timingPreprocessConcurrency": "auto"
 }

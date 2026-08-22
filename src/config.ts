@@ -8,6 +8,7 @@ export type VoiceSubmitMode = "auto" | "review";
 export type VoiceEditMode = "append" | "smart";
 export type VoiceCodeNarration = "guided" | "summary";
 export type VoiceModelDtype = "fp32" | "q8" | "q4";
+export type VoicePreprocessConcurrency = "auto" | number;
 
 export interface VoiceConfig {
 	enabled: boolean;
@@ -41,6 +42,10 @@ export interface VoiceConfig {
 	playbackHighlight: boolean;
 	/** Narrate code with synchronized focus groups, or use a plain summary. */
 	codeNarration: VoiceCodeNarration;
+	/** Parallel model requests used to fill missing written code descriptions. */
+	codeDescriptionPreprocessConcurrency: VoicePreprocessConcurrency;
+	/** Parallel CPU Kokoro workers used to fill missing playback timings. */
+	timingPreprocessConcurrency: VoicePreprocessConcurrency;
 }
 
 export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
@@ -63,6 +68,8 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
 	editModel: "current",
 	playbackHighlight: true,
 	codeNarration: "guided",
+	codeDescriptionPreprocessConcurrency: "auto",
+	timingPreprocessConcurrency: "auto",
 };
 
 export function getVoiceConfigPath(): string {
@@ -90,6 +97,11 @@ export function normalizeModelDtype(value: unknown): VoiceModelDtype | undefined
 }
 
 export function normalizeSttCandidates(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 8 ? value : undefined;
+}
+
+export function normalizePreprocessConcurrency(value: unknown): VoicePreprocessConcurrency | undefined {
+	if (typeof value === "string" && value.toLowerCase() === "auto") return "auto";
 	return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 8 ? value : undefined;
 }
 
@@ -216,6 +228,12 @@ export async function loadVoiceConfig(): Promise<VoiceConfig> {
 			codeNarration: isCodeNarration(parsed.codeNarration)
 				? parsed.codeNarration
 				: DEFAULT_VOICE_CONFIG.codeNarration,
+			codeDescriptionPreprocessConcurrency:
+				normalizePreprocessConcurrency(parsed.codeDescriptionPreprocessConcurrency) ??
+				DEFAULT_VOICE_CONFIG.codeDescriptionPreprocessConcurrency,
+			timingPreprocessConcurrency:
+				normalizePreprocessConcurrency(parsed.timingPreprocessConcurrency) ??
+				DEFAULT_VOICE_CONFIG.timingPreprocessConcurrency,
 		};
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return { ...DEFAULT_VOICE_CONFIG };

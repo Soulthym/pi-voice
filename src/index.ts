@@ -6,6 +6,7 @@ import {
 	normalizeEditModel,
 	normalizeModelDtype,
 	normalizeModelId,
+	normalizePreprocessConcurrency,
 	normalizeSttCandidates,
 	normalizeTalkShortcut,
 	normalizeVoiceInput,
@@ -26,11 +27,16 @@ import {
 	type PlaybackTimingSnapshot,
 } from "./playback-history.js";
 import { PhoneInputClient } from "./phone-input.js";
+import {
+	processConcurrently,
+	resolveCodeDescriptionConcurrency,
+	resolveTimingConcurrency,
+} from "./preprocessing.js";
 import { SpeakableStream, type FencedCodeBlock, type SpeakableSourceRange } from "./speakable.js";
 import { applySpokenEdit, resolveDictationCandidates } from "./prompt-editor.js";
 import { Vocalizer } from "./vocalizer.js";
 import { isVoice, VOICES } from "./voices.js";
-import type { WorkerEvent } from "./worker-client.js";
+import { VoiceWorkerClient, type WorkerEvent } from "./worker-client.js";
 
 type VoiceState = "downloading" | "error" | "idle" | "listening" | "loading" | "speaking";
 type InputPhase = "idle" | "recording" | "transcribing";
@@ -250,19 +256,18 @@ export default async function (pi: ExtensionAPI) {
 			total: totalMessages,
 		};
 		refreshPreprocessingProgress();
-		codeDescriptionPreprocessing = (async () => {
-			for (const blocks of queuedMessages) {
-				if (epoch !== contextEpoch || activeContext !== ctx) break;
-				for (const block of blocks) await requestCodeDescription(ctx, block);
-				processedMessages += 1;
-				codePreprocessingProgress = {
-					label: "Code descriptions",
-					processed: processedMessages,
-					total: totalMessages,
-				};
-				refreshPreprocessingProgress();
-			}
-		})().finally(() => {
+		const concurrency = resolveCodeDescriptionConcurrency(config.codeDescriptionPreprocessConcurrency);
+		codeDescriptionPreprocessing = processConcurrently(queuedMessages, concurrency, async blocks => {
+			if (epoch !== contextEpoch || activeContext !== ctx) return;
+			for (const block of blocks) await requestCodeDescription(ctx, block);
+			processedMessages += 1;
+			codePreprocessingProgress = {
+				label: "Code descriptions",
+				processed: processedMessages,
+				total: totalMessages,
+			};
+			refreshPreprocessingProgress();
+		}).finally(() => {
 			codeDescriptionPreprocessing = undefined;
 			codePreprocessingProgress = undefined;
 			refreshPreprocessingProgress();
@@ -490,11 +495,24 @@ export default async function (pi: ExtensionAPI) {
 		},
 	);
 	const phoneInput = new PhoneInputClient();
+	const timingWorkers: VoiceWorkerClient[] = [];
+	let timingWorkEpoch = 0;
+
+	const ensureTimingWorkers = (count: number): VoiceWorkerClient[] => {
+		while (timingWorkers.length < count) timingWorkers.push(new VoiceWorkerClient(() => {}));
+		return timingWorkers.slice(0, count);
+	};
+
+	const cancelTimingWorkers = (): void => {
+		timingWorkEpoch += 1;
+		for (const worker of timingWorkers) worker.cancel();
+	};
 
 	const playTarget = (target: PlaybackTarget, recordTimings: boolean): void => {
 		const sourceOffset = Math.max(0, Math.min(target.text.length, target.sourceOffset));
 		const suffix = target.text.slice(sourceOffset);
 		if (!suffix.trim()) return;
+		cancelTimingWorkers();
 		vocalizer.clear();
 		narration.finish();
 		narration.begin();
@@ -551,42 +569,44 @@ export default async function (pi: ExtensionAPI) {
 			total: messages.length,
 		};
 		refreshPreprocessingProgress();
-		timingPreprocessing = (async () => {
-			for (const message of missing) {
-				if (epoch !== contextEpoch || activeContext !== ctx || !config.enabled) break;
-				const checkpoints: PlaybackTimingSnapshot["checkpoints"] = [];
-				let time = 0;
-				try {
-					for (const item of timingItems(message.text)) {
-						const duration = await vocalizer.measureSegment(item.text);
-						if (epoch !== contextEpoch || activeContext !== ctx) return;
-						if (!Number.isFinite(duration) || duration <= 0) continue;
-						checkpoints.push({ time, duration, sourceOffset: item.source.start });
-						time += duration;
-					}
-				} catch {
-					// Live speech and microphone actions preempt low-priority timing work.
-					break;
+		const concurrency = resolveTimingConcurrency(config.timingPreprocessConcurrency, config.ttsDtype);
+		const workEpoch = timingWorkEpoch;
+		const workers = ensureTimingWorkers(concurrency);
+		const measurementConfig = config;
+		timingPreprocessing = processConcurrently(missing, concurrency, async (message, lane) => {
+			if (epoch !== contextEpoch || workEpoch !== timingWorkEpoch || activeContext !== ctx || !config.enabled) return;
+			const checkpoints: PlaybackTimingSnapshot["checkpoints"] = [];
+			let time = 0;
+			try {
+				for (const item of timingItems(message.text)) {
+					const duration = await workers[lane].measureSegment(item.text, measurementConfig);
+					if (epoch !== contextEpoch || workEpoch !== timingWorkEpoch || activeContext !== ctx) return;
+					if (!Number.isFinite(duration) || duration <= 0) continue;
+					checkpoints.push({ time, duration, sourceOffset: item.source.start });
+					time += duration;
 				}
-				if (checkpoints.length === 0) continue;
-				const snapshot: PlaybackTimingSnapshot = {
-					version: 1,
-					messageId: message.id,
-					duration: time,
-					checkpoints,
-				};
-				playbackHistory.restore([snapshot]);
-				requestPlaybackTimeline();
-				pi.appendEntry(PLAYBACK_TIMING_ENTRY, snapshot);
-				processedMessages += 1;
-				timingPreprocessingProgress = {
-					label: "Speech timing",
-					processed: processedMessages,
-					total: messages.length,
-				};
-				refreshPreprocessingProgress();
+			} catch {
+				// Live speech and microphone actions preempt low-priority timing work.
+				return;
 			}
-		})().finally(() => {
+			if (checkpoints.length === 0) return;
+			const snapshot: PlaybackTimingSnapshot = {
+				version: 1,
+				messageId: message.id,
+				duration: time,
+				checkpoints,
+			};
+			playbackHistory.restore([snapshot]);
+			requestPlaybackTimeline();
+			pi.appendEntry(PLAYBACK_TIMING_ENTRY, snapshot);
+			processedMessages += 1;
+			timingPreprocessingProgress = {
+				label: "Speech timing",
+				processed: processedMessages,
+				total: messages.length,
+			};
+			refreshPreprocessingProgress();
+		}).finally(() => {
 			timingPreprocessing = undefined;
 			timingPreprocessingProgress = undefined;
 			refreshPreprocessingProgress();
@@ -649,6 +669,7 @@ export default async function (pi: ExtensionAPI) {
 			return;
 		}
 		beginInputProgress();
+		cancelTimingWorkers();
 		vocalizer.clear();
 		narration.finish();
 		state = "listening";
@@ -801,15 +822,18 @@ export default async function (pi: ExtensionAPI) {
 		narration.finish();
 		activeContext = null;
 		phoneInput.cancel();
-		await vocalizer.shutdown();
+		const workers = timingWorkers.splice(0);
+		await Promise.all([...workers.map(worker => worker.terminate()), vocalizer.shutdown()]);
 	});
 
 	pi.on("input", () => {
+		cancelTimingWorkers();
 		vocalizer.clear();
 		narration.finish();
 	});
 
 	pi.on("before_agent_start", () => {
+		cancelTimingWorkers();
 		vocalizer.clear();
 		narration.finish();
 	});
@@ -1036,6 +1060,8 @@ export default async function (pi: ExtensionAPI) {
 				"highlight",
 				"timing",
 				"code-narration",
+				"code-preprocess",
+				"timing-preprocess",
 			];
 			const parts = prefix.trimStart().split(/\s+/);
 			if (parts.length <= 1) {
@@ -1067,6 +1093,11 @@ export default async function (pi: ExtensionAPI) {
 				return ["1", "2", "3", "4", "5", "6", "7", "8"]
 					.filter(value => value.startsWith(parts[1] ?? ""))
 					.map(value => ({ value: `stt-candidates ${value}`, label: value }));
+			}
+			if (parts[0] === "code-preprocess" || parts[0] === "timing-preprocess") {
+				return ["auto", "1", "2", "3", "4", "5", "6", "7", "8"]
+					.filter(value => value.startsWith(parts[1] ?? ""))
+					.map(value => ({ value: `${parts[0]} ${value}`, label: value }));
 			}
 			if (parts[0] === "tts-dtype" || parts[0] === "stt-dtype" || parts[0] === "alignment-dtype") {
 				return ["fp32", "q8", "q4"]
@@ -1216,6 +1247,21 @@ export default async function (pi: ExtensionAPI) {
 					}
 					await updateConfig({ ...config, sttCandidates: count });
 					ctx.ui.notify(`Final ASR candidate count set to ${count}`, "info");
+					return;
+				}
+				case "code-preprocess":
+				case "timing-preprocess": {
+					const concurrency = normalizePreprocessConcurrency(value.toLowerCase() === "auto" ? "auto" : Number(value));
+					if (concurrency === undefined) {
+						ctx.ui.notify(`Usage: /voice ${action} auto|<1..8>`, "error");
+						return;
+					}
+					if (action.toLowerCase() === "code-preprocess") {
+						await updateConfig({ ...config, codeDescriptionPreprocessConcurrency: concurrency });
+					} else {
+						await updateConfig({ ...config, timingPreprocessConcurrency: concurrency });
+					}
+					ctx.ui.notify(`${action} concurrency set to ${concurrency}`, "info");
 					return;
 				}
 				case "code-narration": {
@@ -1375,13 +1421,13 @@ export default async function (pi: ExtensionAPI) {
 				case "status":
 				case "":
 					ctx.ui.notify(
-						`Voice ${config.enabled ? "on" : "off"}; mode=${config.mode}; voice=${config.voice}; speed=${config.speed}; tts=${config.ttsModel}@${config.ttsDtype}; stt=${config.sttModel}@${config.sttDtype}; sttCandidates=${config.sttCandidates}; alignment=${config.alignmentModel}@${config.alignmentDtype}; editModel=${config.editModel}; highlight=${config.playbackHighlight ? "on" : "off"}; codeNarration=${config.codeNarration}; output=${config.output}; input=${config.input}; shortcut=${config.talkShortcut}; submit=${config.submitMode}; edit=${config.editMode}`,
+						`Voice ${config.enabled ? "on" : "off"}; mode=${config.mode}; voice=${config.voice}; speed=${config.speed}; tts=${config.ttsModel}@${config.ttsDtype}; stt=${config.sttModel}@${config.sttDtype}; sttCandidates=${config.sttCandidates}; alignment=${config.alignmentModel}@${config.alignmentDtype}; editModel=${config.editModel}; highlight=${config.playbackHighlight ? "on" : "off"}; codeNarration=${config.codeNarration}; codePreprocess=${config.codeDescriptionPreprocessConcurrency}; timingPreprocess=${config.timingPreprocessConcurrency}; output=${config.output}; input=${config.input}; shortcut=${config.talkShortcut}; submit=${config.submitMode}; edit=${config.editMode}`,
 						"info",
 					);
 					return;
 				default:
 					ctx.ui.notify(
-						"Usage: /voice [on|off|toggle|status|stop|setup|test|talk|mode|voice|speed|tts-model|tts-dtype|stt-model|stt-dtype|stt-candidates|alignment-model|alignment-dtype|edit-model|highlight|timing|code-narration|output|input|shortcut|submit|edit]",
+						"Usage: /voice [on|off|toggle|status|stop|setup|test|talk|mode|voice|speed|tts-model|tts-dtype|stt-model|stt-dtype|stt-candidates|alignment-model|alignment-dtype|edit-model|highlight|timing|code-narration|code-preprocess|timing-preprocess|output|input|shortcut|submit|edit]",
 						"error",
 					);
 			}

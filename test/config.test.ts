@@ -4,6 +4,7 @@ import {
 	normalizeEditModel,
 	normalizeModelDtype,
 	normalizeModelId,
+	normalizePreprocessConcurrency,
 	normalizeSttCandidates,
 	normalizeTalkShortcut,
 	normalizeVoiceInput,
@@ -35,6 +36,10 @@ test("normalizes configurable model selections", () => {
 	assert.equal(normalizeSttCandidates(0), undefined);
 	assert.equal(normalizeSttCandidates(9), undefined);
 	assert.equal(normalizeSttCandidates(2.5), undefined);
+	assert.equal(normalizePreprocessConcurrency("AUTO"), "auto");
+	assert.equal(normalizePreprocessConcurrency(4), 4);
+	assert.equal(normalizePreprocessConcurrency(0), undefined);
+	assert.equal(normalizePreprocessConcurrency(9), undefined);
 });
 
 test("normalizes configurable microphone shortcuts", () => {
