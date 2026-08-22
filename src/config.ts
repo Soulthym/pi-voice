@@ -43,7 +43,7 @@ export interface VoiceConfig {
 	/** Narrate code with synchronized focus groups, or use a plain summary. */
 	codeNarration: VoiceCodeNarration;
 	/** Parallel model requests used to fill missing written code descriptions. */
-	codeDescriptionPreprocessConcurrency: VoicePreprocessConcurrency;
+	codeDescriptionPreprocessConcurrency: number;
 	/** Parallel CPU Kokoro workers used to fill missing playback timings. */
 	timingPreprocessConcurrency: VoicePreprocessConcurrency;
 }
@@ -68,7 +68,7 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
 	editModel: "current",
 	playbackHighlight: true,
 	codeNarration: "guided",
-	codeDescriptionPreprocessConcurrency: "auto",
+	codeDescriptionPreprocessConcurrency: 4,
 	timingPreprocessConcurrency: "auto",
 };
 
@@ -100,9 +100,13 @@ export function normalizeSttCandidates(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 8 ? value : undefined;
 }
 
+export function normalizeWorkerCount(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 8 ? value : undefined;
+}
+
 export function normalizePreprocessConcurrency(value: unknown): VoicePreprocessConcurrency | undefined {
 	if (typeof value === "string" && value.toLowerCase() === "auto") return "auto";
-	return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 8 ? value : undefined;
+	return normalizeWorkerCount(value);
 }
 
 export function normalizeModelId(value: unknown): string | undefined {
@@ -229,7 +233,7 @@ export async function loadVoiceConfig(): Promise<VoiceConfig> {
 				? parsed.codeNarration
 				: DEFAULT_VOICE_CONFIG.codeNarration,
 			codeDescriptionPreprocessConcurrency:
-				normalizePreprocessConcurrency(parsed.codeDescriptionPreprocessConcurrency) ??
+				normalizeWorkerCount(parsed.codeDescriptionPreprocessConcurrency) ??
 				DEFAULT_VOICE_CONFIG.codeDescriptionPreprocessConcurrency,
 			timingPreprocessConcurrency:
 				normalizePreprocessConcurrency(parsed.timingPreprocessConcurrency) ??

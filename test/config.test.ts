@@ -9,6 +9,7 @@ import {
 	normalizeTalkShortcut,
 	normalizeVoiceInput,
 	normalizeVoiceOutput,
+	normalizeWorkerCount,
 } from "../src/config.js";
 
 test("accepts local playback and SSH tunnel endpoints", () => {
@@ -40,6 +41,8 @@ test("normalizes configurable model selections", () => {
 	assert.equal(normalizePreprocessConcurrency(4), 4);
 	assert.equal(normalizePreprocessConcurrency(0), undefined);
 	assert.equal(normalizePreprocessConcurrency(9), undefined);
+	assert.equal(normalizeWorkerCount(4), 4);
+	assert.equal(normalizeWorkerCount("auto"), undefined);
 });
 
 test("normalizes configurable microphone shortcuts", () => {

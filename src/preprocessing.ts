@@ -15,14 +15,6 @@ function systemResources(): PreprocessingResources {
 	};
 }
 
-export function resolveCodeDescriptionConcurrency(
-	configured: VoicePreprocessConcurrency,
-	resources: PreprocessingResources = systemResources(),
-): number {
-	if (configured !== "auto") return configured;
-	return Math.max(1, Math.min(AUTO_LIMIT, resources.parallelism));
-}
-
 export function resolveTimingConcurrency(
 	configured: VoicePreprocessConcurrency,
 	dtype: VoiceModelDtype,

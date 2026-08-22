@@ -8,6 +8,7 @@ import {
 	normalizeModelId,
 	normalizePreprocessConcurrency,
 	normalizeSttCandidates,
+	normalizeWorkerCount,
 	normalizeTalkShortcut,
 	normalizeVoiceInput,
 	normalizeVoiceOutput,
@@ -27,11 +28,7 @@ import {
 	type PlaybackTimingSnapshot,
 } from "./playback-history.js";
 import { PhoneInputClient } from "./phone-input.js";
-import {
-	processConcurrently,
-	resolveCodeDescriptionConcurrency,
-	resolveTimingConcurrency,
-} from "./preprocessing.js";
+import { processConcurrently, resolveTimingConcurrency } from "./preprocessing.js";
 import { SpeakableStream, type FencedCodeBlock, type SpeakableSourceRange } from "./speakable.js";
 import { applySpokenEdit, resolveDictationCandidates } from "./prompt-editor.js";
 import { Vocalizer } from "./vocalizer.js";
@@ -256,7 +253,7 @@ export default async function (pi: ExtensionAPI) {
 			total: totalMessages,
 		};
 		refreshPreprocessingProgress();
-		const concurrency = resolveCodeDescriptionConcurrency(config.codeDescriptionPreprocessConcurrency);
+		const concurrency = config.codeDescriptionPreprocessConcurrency;
 		codeDescriptionPreprocessing = processConcurrently(queuedMessages, concurrency, async blocks => {
 			if (epoch !== contextEpoch || activeContext !== ctx) return;
 			for (const block of blocks) await requestCodeDescription(ctx, block);
@@ -1095,7 +1092,9 @@ export default async function (pi: ExtensionAPI) {
 					.map(value => ({ value: `stt-candidates ${value}`, label: value }));
 			}
 			if (parts[0] === "code-preprocess" || parts[0] === "timing-preprocess") {
-				return ["auto", "1", "2", "3", "4", "5", "6", "7", "8"]
+				const choices = ["1", "2", "3", "4", "5", "6", "7", "8"];
+				if (parts[0] === "timing-preprocess") choices.unshift("auto");
+				return choices
 					.filter(value => value.startsWith(parts[1] ?? ""))
 					.map(value => ({ value: `${parts[0]} ${value}`, label: value }));
 			}
@@ -1249,19 +1248,24 @@ export default async function (pi: ExtensionAPI) {
 					ctx.ui.notify(`Final ASR candidate count set to ${count}`, "info");
 					return;
 				}
-				case "code-preprocess":
+				case "code-preprocess": {
+					const concurrency = normalizeWorkerCount(Number(value));
+					if (concurrency === undefined) {
+						ctx.ui.notify("Usage: /voice code-preprocess <1..8>", "error");
+						return;
+					}
+					await updateConfig({ ...config, codeDescriptionPreprocessConcurrency: concurrency });
+					ctx.ui.notify(`code-preprocess concurrency set to ${concurrency}`, "info");
+					return;
+				}
 				case "timing-preprocess": {
 					const concurrency = normalizePreprocessConcurrency(value.toLowerCase() === "auto" ? "auto" : Number(value));
 					if (concurrency === undefined) {
-						ctx.ui.notify(`Usage: /voice ${action} auto|<1..8>`, "error");
+						ctx.ui.notify("Usage: /voice timing-preprocess auto|<1..8>", "error");
 						return;
 					}
-					if (action.toLowerCase() === "code-preprocess") {
-						await updateConfig({ ...config, codeDescriptionPreprocessConcurrency: concurrency });
-					} else {
-						await updateConfig({ ...config, timingPreprocessConcurrency: concurrency });
-					}
-					ctx.ui.notify(`${action} concurrency set to ${concurrency}`, "info");
+					await updateConfig({ ...config, timingPreprocessConcurrency: concurrency });
+					ctx.ui.notify(`timing-preprocess concurrency set to ${concurrency}`, "info");
 					return;
 				}
 				case "code-narration": {

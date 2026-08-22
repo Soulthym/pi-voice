@@ -18,6 +18,6 @@
   "editMode": "smart",
   "playbackHighlight": true,
   "codeNarration": "guided",
-  "codeDescriptionPreprocessConcurrency": "auto",
+  "codeDescriptionPreprocessConcurrency": 4,
   "timingPreprocessConcurrency": "auto"
 }

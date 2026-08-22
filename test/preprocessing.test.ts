@@ -2,13 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
 	processConcurrently,
-	resolveCodeDescriptionConcurrency,
 	resolveTimingConcurrency,
 } from "../src/preprocessing.js";
 
-test("resolves automatic preprocessing concurrency from CPU and memory", () => {
-	assert.equal(resolveCodeDescriptionConcurrency("auto", { availableMemory: 1024, parallelism: 16 }), 4);
-	assert.equal(resolveCodeDescriptionConcurrency("auto", { availableMemory: 1024, parallelism: 2 }), 2);
+test("resolves automatic timing concurrency from CPU and memory", () => {
 	assert.equal(resolveTimingConcurrency("auto", "q8", { availableMemory: 8 * 1024 ** 3, parallelism: 16 }), 4);
 	assert.equal(resolveTimingConcurrency("auto", "fp32", { availableMemory: 2 * 1024 ** 3, parallelism: 16 }), 1);
 	assert.equal(resolveTimingConcurrency(6, "fp32", { availableMemory: 1, parallelism: 1 }), 6);
