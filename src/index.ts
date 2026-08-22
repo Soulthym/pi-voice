@@ -28,7 +28,7 @@ import {
 	type PlaybackTimingSnapshot,
 } from "./playback-history.js";
 import { PhoneInputClient } from "./phone-input.js";
-import { processConcurrently, resolveTimingConcurrency } from "./preprocessing.js";
+import { prioritizeFromCurrent, processConcurrently, resolveTimingConcurrency } from "./preprocessing.js";
 import { SpeakableStream, type FencedCodeBlock, type SpeakableSourceRange } from "./speakable.js";
 import { applySpokenEdit, resolveDictationCandidates } from "./prompt-editor.js";
 import { Vocalizer } from "./vocalizer.js";
@@ -167,6 +167,7 @@ export default async function (pi: ExtensionAPI) {
 	const codeDescriptionCache = new CodeDescriptionCache();
 	const codeDescriptionText = new Map<string, string>();
 	const pendingCodeDescriptions = new Map<string, CodeDescriptionCacheSnapshot>();
+	let scheduleMissingTimings: (ctx: ExtensionContext) => void = () => {};
 
 	const requestNarrationRender = (): void => {
 		if (!narrationTui || narrationRenderTimer) return;
@@ -224,13 +225,16 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	let codeDescriptionPreprocessing: Promise<void> | undefined;
+	let codeWorkEpoch = 0;
 	const scheduleMissingCodeDescriptions = (ctx: ExtensionContext): void => {
 		if (codeDescriptionPreprocessing) return;
 		const epoch = contextEpoch;
+		const workEpoch = codeWorkEpoch;
 		const queuedMessages: FencedCodeBlock[][] = [];
 		let totalMessages = 0;
 		let processedMessages = 0;
-		for (const message of completedAssistantMessages(ctx, "assistant").reverse()) {
+		const currentId = playbackHistory.status()?.messageId;
+		for (const message of prioritizeFromCurrent(completedAssistantMessages(ctx, "assistant"), currentId)) {
 			const keyedBlocks = new Map<string, FencedCodeBlock>();
 			for (const block of describableCodeBlocks(message.text)) {
 				try {
@@ -255,8 +259,9 @@ export default async function (pi: ExtensionAPI) {
 		refreshPreprocessingProgress();
 		const concurrency = config.codeDescriptionPreprocessConcurrency;
 		codeDescriptionPreprocessing = processConcurrently(queuedMessages, concurrency, async blocks => {
-			if (epoch !== contextEpoch || activeContext !== ctx) return;
+			if (epoch !== contextEpoch || workEpoch !== codeWorkEpoch || activeContext !== ctx) return;
 			for (const block of blocks) await requestCodeDescription(ctx, block);
+			if (workEpoch !== codeWorkEpoch) return;
 			processedMessages += 1;
 			codePreprocessingProgress = {
 				label: "Code descriptions",
@@ -268,6 +273,9 @@ export default async function (pi: ExtensionAPI) {
 			codeDescriptionPreprocessing = undefined;
 			codePreprocessingProgress = undefined;
 			refreshPreprocessingProgress();
+			if (epoch === contextEpoch && workEpoch !== codeWorkEpoch && activeContext === ctx) {
+				scheduleMissingCodeDescriptions(ctx);
+			}
 		});
 	};
 
@@ -430,6 +438,7 @@ export default async function (pi: ExtensionAPI) {
 					if (snapshot) pi.appendEntry(PLAYBACK_TIMING_ENTRY, snapshot);
 				}
 				narration.finishUtterance(event.utterance);
+				if (event.utterance !== undefined && activeContext) scheduleMissingTimings(activeContext);
 				break;
 			case "speaking":
 				state = "speaking";
@@ -509,6 +518,8 @@ export default async function (pi: ExtensionAPI) {
 		const sourceOffset = Math.max(0, Math.min(target.text.length, target.sourceOffset));
 		const suffix = target.text.slice(sourceOffset);
 		if (!suffix.trim()) return;
+		codeWorkEpoch += 1;
+		if (activeContext) scheduleMissingCodeDescriptions(activeContext);
 		cancelTimingWorkers();
 		vocalizer.clear();
 		narration.finish();
@@ -553,11 +564,12 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	let timingPreprocessing: Promise<void> | undefined;
-	const scheduleMissingTimings = (ctx: ExtensionContext): void => {
+	scheduleMissingTimings = (ctx: ExtensionContext): void => {
 		if (!config.enabled || timingPreprocessing) return;
 		const epoch = contextEpoch;
 		const messages = syncPlaybackMessages(ctx);
-		const missing = messages.filter(message => !playbackHistory.hasTimingFor(message.id)).reverse();
+		const ordered = prioritizeFromCurrent(messages, playbackHistory.status()?.messageId);
+		const missing = ordered.filter(message => !playbackHistory.hasTimingFor(message.id));
 		if (missing.length === 0) return;
 		let processedMessages = messages.length - missing.length;
 		timingPreprocessingProgress = {
@@ -776,9 +788,9 @@ export default async function (pi: ExtensionAPI) {
 		pendingCodeDescriptions.clear();
 		codeDescriptionText.clear();
 		codeDescriptionCache.restore(codeDescriptionSnapshots(ctx));
-		scheduleMissingCodeDescriptions(ctx);
 		syncPlaybackMessages(ctx, true);
 		playbackHistory.restore(playbackTimingSnapshots(ctx));
+		scheduleMissingCodeDescriptions(ctx);
 		refreshPlaybackTimeline();
 		if (config.enabled) {
 			scheduleMissingTimings(ctx);

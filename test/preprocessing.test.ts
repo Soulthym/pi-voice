@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+	prioritizeFromCurrent,
 	processConcurrently,
 	resolveTimingConcurrency,
 } from "../src/preprocessing.js";
@@ -9,6 +10,12 @@ test("resolves automatic timing concurrency from CPU and memory", () => {
 	assert.equal(resolveTimingConcurrency("auto", "q8", { availableMemory: 8 * 1024 ** 3, parallelism: 16 }), 4);
 	assert.equal(resolveTimingConcurrency("auto", "fp32", { availableMemory: 2 * 1024 ** 3, parallelism: 16 }), 1);
 	assert.equal(resolveTimingConcurrency(6, "fp32", { availableMemory: 1, parallelism: 1 }), 6);
+});
+
+test("orders preprocessing forward from the current message, then backward", () => {
+	const messages = ["a", "b", "c", "d", "e"].map(id => ({ id }));
+	assert.deepEqual(prioritizeFromCurrent(messages, "c").map(message => message.id), ["c", "d", "e", "b", "a"]);
+	assert.deepEqual(prioritizeFromCurrent(messages).map(message => message.id), ["e", "d", "c", "b", "a"]);
 });
 
 test("processes only the configured number of items concurrently", async () => {

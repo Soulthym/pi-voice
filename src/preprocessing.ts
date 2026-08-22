@@ -29,6 +29,13 @@ export function resolveTimingConcurrency(
 	return Math.max(1, Math.min(AUTO_LIMIT, memoryLanes, cpuLanes));
 }
 
+export function prioritizeFromCurrent<T extends { id: string }>(items: readonly T[], currentId?: string): T[] {
+	if (items.length === 0) return [];
+	const found = currentId ? items.findIndex(item => item.id === currentId) : -1;
+	const current = found >= 0 ? found : items.length - 1;
+	return [...items.slice(current), ...items.slice(0, current).reverse()];
+}
+
 export async function processConcurrently<T>(
 	items: readonly T[],
 	concurrency: number,
