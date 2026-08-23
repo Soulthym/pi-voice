@@ -20,6 +20,8 @@ export class FakeVoiceHost {
 	readonly notices: Notice[] = [];
 	readonly entries: any[] = [];
 	readonly modelRequests: ModelRequest[] = [];
+	/** Latest value per widget name, in update order. */
+	readonly widgets = new Map<string, { lines?: string[]; placement?: string } | undefined>();	readonly widgetOperations: Array<{ name: string; value: { lines?: string[]; placement?: string } | undefined }> = [];
 	readonly model = {
 		provider: "test",
 		id: "model",
@@ -57,7 +59,18 @@ export class FakeVoiceHost {
 				theme,
 				notify: (message: string, level: string) => this.notices.push({ message, level }),
 				setStatus: () => {},
-				setWidget: () => {},
+				setWidget: (
+					name: string,
+					value: { lines?: string[]; placement?: string } | undefined,
+					options?: { placement?: string },
+				) => {
+					const normalized = Array.isArray(value)
+						? { lines: value as string[], ...(options ? { placement: options.placement } : {}) }
+						: value;
+					this.widgets.set(name, normalized);
+					this.widgetOperations.push({ name, value: normalized });
+				},
+
 				setEditorText: () => {},
 				getEditorText: () => "",
 			},
@@ -138,6 +151,10 @@ export class FakeVoiceHost {
 			(current, transformer) => transformer(current, { messageType }),
 			markdown,
 		);
+	}
+
+	widgetLines(name = "pi-voice-progress"): string[] | undefined {
+		return this.widgets.get(name)?.lines;
 	}
 
 	addMessage(id: string, parentId: string | null, message: unknown): void {
