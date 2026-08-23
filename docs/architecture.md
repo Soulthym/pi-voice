@@ -24,7 +24,7 @@ The extension incrementally parses assistant deltas into speech and code items. 
 
 Each narration segment carries source ranges, utterance/segment IDs, optional code focus cues, and description offsets. Playback and alignment events update the corresponding TUI ranges.
 
-Conversation-aware descriptions retain two parallel representations: a canonical text transcript for stable content-addressed identity and Pi's provider-compatible structured messages for inference. When the description model is the active model, the effective system prompt, active tools, session ID, and pre-response messages preserve the normal request prefix for provider prompt-cache reuse; narration instructions are appended after the assistant prefix rather than replacing that system prompt.
+Conversation-aware descriptions use a deterministic serialization of Pi's provider-compatible structured messages—and, when reusing the active model, its effective system prompt and active tool schemas—for stable content-addressed identity and use the same structured prefix for inference. When the description model is the active model, the effective system prompt, active tools, session ID, and pre-response messages preserve the normal request prefix for provider prompt-cache reuse; narration instructions are appended after the assistant prefix rather than replacing that system prompt.
 
 Assistant messages separated by tool calls retain distinct source bases inside one continued narration state, preventing later messages from resetting highlighting for queued earlier audio.
 
@@ -36,7 +36,7 @@ Pi Voice persists non-context-injecting custom entries for:
 - code-description cache snapshots;
 - per-session device preference.
 
-These entries are excluded from model context. In opt-in `conversation` mode, code-description keys hash Pi's resolved historical text context through each block, including preceding compaction summaries; default `block-only` keys omit discussion context. Content-addressed Opus lives outside the session under the audio cache.
+These entries are excluded from model context. In opt-in `conversation` mode, code-description keys hash Pi's resolved provider context through each block—including preceding compaction summaries and, for the active model, its effective system/tool prefix—while default `block-only` keys omit discussion context. Content-addressed Opus lives outside the session under the audio cache.
 
 ## Cross-session coordination
 

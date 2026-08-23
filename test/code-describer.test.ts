@@ -50,14 +50,19 @@ test("extends the normal prompt prefix and sends the concerned block exactly onc
 		},
 	} as never;
 	const body = "UNIQUE_CONCERNED_BODY";
+	const assistant = {
+		role: "assistant",
+		content: [{ type: "text", text: `Here it is.\n\`\`\`ts\n${body}\n\`\`\`` }],
+	};
 
 	await describeCodeBlock(ctx, { language: "ts", code: body }, "current", "summary", {
-		messages: [prior] as never,
+		messages: [prior, assistant] as never,
 		normalPrompt: { systemPrompt: "NORMAL PI SYSTEM PROMPT", tools: [normalTool] as never, sessionId: "pi-session" },
 	});
 
 	assert.equal(submitted?.systemPrompt, "NORMAL PI SYSTEM PROMPT");
 	assert.equal(submitted?.messages[0], prior);
+	assert.equal(submitted?.messages[1], assistant);
 	assert.deepEqual(submitted?.tools, [normalTool]);
 	const serialized = JSON.stringify(submitted);
 	assert.equal(serialized.split(body).length - 1, 1);
@@ -88,7 +93,10 @@ test("does not forward the active system prompt or tools to a different pinned m
 	} as never;
 
 	await describeCodeBlock(ctx, { language: "ts", code: "run();" }, "remote/narrator", "summary", {
-		messages: [{ role: "user", content: [{ type: "text", text: "Prior discussion." }], timestamp: 1 }] as never,
+		messages: [
+			{ role: "user", content: [{ type: "text", text: "Prior discussion." }], timestamp: 1 },
+			{ role: "assistant", content: [{ type: "text", text: "```ts\nrun();\n```" }] },
+		] as never,
 		normalPrompt: {
 			systemPrompt: "PRIVATE ACTIVE SYSTEM PROMPT",
 			tools: [{ name: "private_tool", description: "Private", parameters: { type: "object" } }] as never,

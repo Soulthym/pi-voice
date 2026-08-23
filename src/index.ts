@@ -2,15 +2,17 @@ import type { Message, Tool } from "@earendil-works/pi-ai";
 import { highlightCode, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { hasSpeakableAudio, requiresVoiceAttention } from "./attention.js";
 import {
-	contextualMessages,
-	contextualTranscript,
+	contextualAssistantMessages,
+	contextualAssistantMessagesThroughText,
 	resolvedSessionContext,
+	structuredContextIdentity,
 	type ResolvedCodeContext,
 } from "./code-context.js";
 import { CodeDescriptionCache, type CodeDescriptionCacheSnapshot } from "./code-description-cache.js";
 import {
 	codeDescriptionCacheKey,
 	CodeDescriptionContextOverflowError,
+	codeDescriptionUsesActivePrompt,
 	describeCodeBlock,
 	fallbackCodeDescription,
 } from "./code-describer.js";
@@ -87,8 +89,8 @@ function assistantStopReason(message: unknown): string | undefined {
 }
 
 type ContextualPlaybackMessage = PlaybackMessage & {
-	conversationBefore: string;
 	conversationMessages: Message[];
+	assistantMessage: unknown;
 };
 
 const conversationBeforeCache = new WeakMap<object, Map<string, ResolvedCodeContext>>();
@@ -132,8 +134,8 @@ function completedAssistantMessages(ctx: ExtensionContext, mode: VoiceMode): Con
 			messages.push({
 				id: entry.id,
 				text,
-				conversationBefore: before.transcript,
 				conversationMessages: before.messages,
+				assistantMessage: entry.message,
 			});
 		}
 	}
@@ -242,9 +244,8 @@ export default async function (pi: ExtensionAPI) {
 	let blockedMessageHasSpeech = false;
 	let blockedSpeechText = "";
 	let ownedSpeechText = "";
-	let speechConversationBefore = "";
 	let speechConversationMessages: Message[] = [];
-	let speechSourcePrefix = "";
+	let speechAssistantMessage: unknown;
 	let completingOwnerSpeech = false;
 	let attentionPollTimer: NodeJS.Timeout | null = null;
 	let voiceWorkerIdleTimer: NodeJS.Timeout | null = null;
@@ -347,19 +348,6 @@ export default async function (pi: ExtensionAPI) {
 			.replace(/\s+/g, " ")
 			.trim();
 
-	const contextualCodeDescription = (context: string): string =>
-		config.codeDescriptionContext === "conversation" ? context : "";
-
-	const descriptionCacheKey = (ctx: ExtensionContext, block: FencedCodeBlock, identityContext: string): string =>
-		codeDescriptionCacheKey(
-			ctx,
-			block,
-			config.editModel,
-			config.codeNarration,
-			contextualCodeDescription(identityContext),
-			config.codeDescriptionContext,
-		);
-
 	const activePromptTools = (): Tool[] => {
 		const available = new Map(pi.getAllTools().map(tool => [tool.name, tool]));
 		return pi.getActiveTools().flatMap(name => {
@@ -367,6 +355,22 @@ export default async function (pi: ExtensionAPI) {
 			return tool ? [{ name: tool.name, description: tool.description, parameters: tool.parameters }] : [];
 		});
 	};
+
+	const contextualCodeDescription = (ctx: ExtensionContext, context: string): string => {
+		if (config.codeDescriptionContext !== "conversation") return "";
+		if (!codeDescriptionUsesActivePrompt(ctx, config.editModel)) return context;
+		return JSON.stringify({ context, systemPrompt: ctx.getSystemPrompt(), tools: activePromptTools() });
+	};
+
+	const descriptionCacheKey = (ctx: ExtensionContext, block: FencedCodeBlock, identityContext: string): string =>
+		codeDescriptionCacheKey(
+			ctx,
+			block,
+			config.editModel,
+			config.codeNarration,
+			contextualCodeDescription(ctx, identityContext),
+			config.codeDescriptionContext,
+		);
 
 	const requestCodeDescription = async (
 		ctx: ExtensionContext,
@@ -379,16 +383,29 @@ export default async function (pi: ExtensionAPI) {
 			const editModel = config.editModel;
 			const narrationMode = config.codeNarration;
 			const contextMode = config.codeDescriptionContext;
-			const contextualIdentity = contextMode === "conversation" ? identityContext : "";
+			const reusesActivePrompt =
+				contextMode === "conversation" && codeDescriptionUsesActivePrompt(ctx, editModel);
+			const systemPrompt = reusesActivePrompt ? ctx.getSystemPrompt() : undefined;
+			const tools = reusesActivePrompt ? activePromptTools() : undefined;
+			const contextualIdentity =
+				contextMode === "conversation"
+					? reusesActivePrompt
+						? JSON.stringify({ context: identityContext, systemPrompt, tools })
+						: identityContext
+					: "";
 			const conversation =
 				contextMode === "conversation"
 					? {
 							messages: discussionBeforeBlock,
-							normalPrompt: {
-								systemPrompt: ctx.getSystemPrompt(),
-								tools: activePromptTools(),
-								sessionId: ctx.sessionManager.getSessionId(),
-							},
+							...(reusesActivePrompt
+								? {
+										normalPrompt: {
+											systemPrompt: systemPrompt!,
+											tools: tools!,
+											sessionId: ctx.sessionManager.getSessionId(),
+										},
+									}
+								: {}),
 						}
 					: undefined;
 			const key = codeDescriptionCacheKey(
@@ -458,8 +475,8 @@ export default async function (pi: ExtensionAPI) {
 	const timingItemsFor = async (
 		ctx: ExtensionContext,
 		text: string,
-		conversationBefore: string,
 		conversationMessages: readonly Message[],
+		assistantMessage: unknown,
 	): Promise<Array<{ text: string; source: SpeakableSourceRange }>> => {
 		const stream = new SpeakableStream();
 		const result: Array<{ text: string; source: SpeakableSourceRange }> = [];
@@ -468,9 +485,17 @@ export default async function (pi: ExtensionAPI) {
 				result.push({ text: item.text, source: item.source });
 				continue;
 			}
-			const identityContext = contextualTranscript(conversationBefore, text.slice(0, item.source.end));
-			const discussionBeforeBlock = contextualMessages(conversationMessages, text.slice(0, item.source.start));
-			const plan = await requestCodeDescription(ctx, item.block, identityContext, discussionBeforeBlock);
+			const providerMessages = contextualAssistantMessagesThroughText(
+				conversationMessages,
+				assistantMessage,
+				item.source.end,
+			);
+			const plan = await requestCodeDescription(
+				ctx,
+				item.block,
+				structuredContextIdentity(providerMessages),
+				providerMessages,
+			);
 			let chunks = chunkCodeNarration(plan);
 			if (chunks.length === 0) chunks = chunkCodeNarration(plainCodeNarration(fallbackCodeDescription(item.block)));
 			for (const chunk of chunks) result.push({ text: chunk.text, source: item.source });
@@ -497,10 +522,14 @@ export default async function (pi: ExtensionAPI) {
 			>();
 			for (const item of describableCodeItems(message.text)) {
 				try {
-					const identityContext = contextualTranscript(message.conversationBefore, item.throughBlock);
-					const discussionBeforeBlock = contextualMessages(message.conversationMessages, item.beforeBlock);
+					const providerMessages = contextualAssistantMessagesThroughText(
+						message.conversationMessages,
+						message.assistantMessage,
+						item.throughBlock.length,
+					);
+					const identityContext = structuredContextIdentity(providerMessages);
 					const key = descriptionCacheKey(ctx, item.block, identityContext);
-					keyedBlocks.set(key, { block: item.block, identityContext, discussionBeforeBlock });
+					keyedBlocks.set(key, { block: item.block, identityContext, discussionBeforeBlock: providerMessages });
 				} catch {
 					// A missing edit model is handled by the local fallback when requested directly.
 				}
@@ -551,12 +580,12 @@ export default async function (pi: ExtensionAPI) {
 		const message = completedAssistantMessages(ctx, "assistant").findLast(candidate => candidate.text === text);
 		if (!message) return; // agent_settled retries after the session entry is committed
 		for (const item of describableCodeItems(text)) {
-			void requestCodeDescription(
-				ctx,
-				item.block,
-				contextualTranscript(message.conversationBefore, item.throughBlock),
-				contextualMessages(message.conversationMessages, item.beforeBlock),
+			const providerMessages = contextualAssistantMessagesThroughText(
+				message.conversationMessages,
+				message.assistantMessage,
+				item.throughBlock.length,
 			);
+			void requestCodeDescription(ctx, item.block, structuredContextIdentity(providerMessages), providerMessages);
 		}
 	};
 
@@ -572,8 +601,20 @@ export default async function (pi: ExtensionAPI) {
 				if (!ctx) return undefined;
 				try {
 					const completed = completedAssistantMessages(ctx, "assistant").findLast(message => message.text === markdown);
-					const transcript = contextualTranscript(completed?.conversationBefore ?? speechConversationBefore, messageThroughBlock);
-					const key = descriptionCacheKey(ctx, block, transcript);
+					const providerMessages = completed
+						? contextualAssistantMessagesThroughText(
+								completed.conversationMessages,
+								completed.assistantMessage,
+								messageThroughBlock.length,
+							)
+						: speechAssistantMessage
+							? contextualAssistantMessagesThroughText(
+									speechConversationMessages,
+									speechAssistantMessage,
+									messageThroughBlock.length,
+								)
+							: [];
+					const key = descriptionCacheKey(ctx, block, structuredContextIdentity(providerMessages));
 					const existing = codeDescriptionText.get(key);
 					if (existing !== undefined) return existing;
 					const plan = codeDescriptionCache.get(key);
@@ -756,15 +797,16 @@ export default async function (pi: ExtensionAPI) {
 		(block, sourceContext, _signal) => {
 			const ctx = activeContext;
 			if (!ctx) return Promise.reject(new Error("No active Pi context for code description"));
-			const identityContext = contextualTranscript(
-				speechConversationBefore,
-				`${speechSourcePrefix}${sourceContext.throughBlock}`,
-			);
-			const discussionBeforeBlock = contextualMessages(
-				speechConversationMessages,
-				`${speechSourcePrefix}${sourceContext.beforeBlock}`,
-			);
-			return requestCodeDescription(ctx, block, identityContext, discussionBeforeBlock);
+			const providerMessages = sourceContext.providerMessages
+				? [...sourceContext.providerMessages]
+				: speechAssistantMessage
+					? contextualAssistantMessagesThroughText(
+							speechConversationMessages,
+							speechAssistantMessage,
+							sourceContext.sourceEnd,
+						)
+					: [];
+			return requestCodeDescription(ctx, block, structuredContextIdentity(providerMessages), providerMessages);
 		},
 		segment => {
 			if (ownsSpeech) {
@@ -1014,9 +1056,8 @@ export default async function (pi: ExtensionAPI) {
 		const contextual = activeContext
 			? completedAssistantMessages(activeContext, config.mode).find(message => message.id === target.id)
 			: undefined;
-		speechConversationBefore = contextual?.conversationBefore ?? "";
 		speechConversationMessages = contextual?.conversationMessages ?? [];
-		speechSourcePrefix = target.text.slice(0, sourceOffset);
+		speechAssistantMessage = contextual?.assistantMessage;
 		playbackPaused = false;
 		pausedOwnerUtterance = undefined;
 		playbackPositionEstimated = false;
@@ -1031,12 +1072,17 @@ export default async function (pi: ExtensionAPI) {
 	const renderKeyFor = (ctx: ExtensionContext, message: ContextualPlaybackMessage): string => {
 		const codeDependencies: string[] = [];
 		for (const item of describableCodeItems(message.text)) {
-			const transcript = contextualTranscript(message.conversationBefore, item.throughBlock);
+			const providerMessages = contextualAssistantMessagesThroughText(
+				message.conversationMessages,
+				message.assistantMessage,
+				item.throughBlock.length,
+			);
+			const identity = structuredContextIdentity(providerMessages);
 			try {
-				const key = descriptionCacheKey(ctx, item.block, transcript);
+				const key = descriptionCacheKey(ctx, item.block, identity);
 				codeDependencies.push(JSON.stringify([key, codeDescriptionCache.get(key) ?? "missing"]));
 			} catch {
-				codeDependencies.push(`fallback:${item.block.language}:${contextualCodeDescription(transcript)}`);
+				codeDependencies.push(`fallback:${item.block.language}:${contextualCodeDescription(ctx, identity)}`);
 			}
 		}
 		return narrationRenderKey(message.text, config, codeDependencies);
@@ -1118,8 +1164,8 @@ export default async function (pi: ExtensionAPI) {
 					for (const item of await timingItemsFor(
 						ctx,
 						message.text,
-						contextual.conversationBefore,
 						contextual.conversationMessages,
+						contextual.assistantMessage,
 					)) {
 						const duration = await workers[lane].measureSegment(item.text, measurementConfig);
 						if (epoch !== contextEpoch || workEpoch !== timingWorkEpoch || activeContext !== ctx) return;
@@ -1475,10 +1521,9 @@ export default async function (pi: ExtensionAPI) {
 		) {
 			if (activeContext) {
 				const before = liveConversationBefore(activeContext);
-				speechConversationBefore = before.transcript;
 				speechConversationMessages = before.messages;
 			}
-			speechSourcePrefix = "";
+			speechAssistantMessage = event.message;
 			const continuingTurn =
 				liveTurnNarrationActive && ownsSpeech && speechPurpose === "turn" && (coordinator?.ownsSpeech() ?? true);
 			if (!continuingTurn && !acquireSpeech("turn")) {
@@ -1508,6 +1553,8 @@ export default async function (pi: ExtensionAPI) {
 
 	pi.on("message_update", event => {
 		if (!interactiveVoiceSession || !config.enabled || config.mode === "yield") return;
+		speechAssistantMessage = event.message;
+		vocalizer.setCodeDescriptionMessages(contextualAssistantMessages(speechConversationMessages, event.message));
 		const delta = event.assistantMessageEvent;
 		const speakableDelta =
 			delta.type === "text_delta" || (delta.type === "thinking_delta" && config.mode === "all")
@@ -1578,9 +1625,8 @@ export default async function (pi: ExtensionAPI) {
 					playbackHistory.sync(messages, true);
 					playbackHistory.beginCapture(completed.id, completed.text, 0, true);
 				}
-				speechConversationBefore = contextual?.conversationBefore ?? "";
 				speechConversationMessages = contextual?.conversationMessages ?? [];
-				speechSourcePrefix = "";
+				speechAssistantMessage = contextual?.assistantMessage;
 				narration.setCompletedText(text);
 				ownerContentExpected = hasSpeakableAudio(text);
 				if (ownerContentExpected) announceProjectForSpeech();

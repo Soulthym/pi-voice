@@ -1,3 +1,4 @@
+import type { Message } from "@earendil-works/pi-ai";
 import type { VoiceConfig } from "./config.js";
 import { fallbackCodeDescription } from "./code-describer.js";
 import {
@@ -14,6 +15,10 @@ const IDLE_FLUSH_MS = 1_000;
 export interface CodeDescriptionSourceContext {
 	beforeBlock: string;
 	throughBlock: string;
+	/** Absolute end offset in the replay/display source. */
+	sourceEnd: number;
+	/** Exact provider context captured from a live assistant partial. */
+	providerMessages?: readonly Message[];
 }
 
 type CodeDescriber = (
@@ -51,6 +56,7 @@ export class Vocalizer {
 	#nextSourceOffset = 0;
 	#trackNarration = true;
 	#sourceText = "";
+	#codeDescriptionMessages: readonly Message[] | undefined;
 
 	constructor(
 		getConfig: () => VoiceConfig,
@@ -67,6 +73,10 @@ export class Vocalizer {
 
 	setNarrationSourceOffset(offset: number): void {
 		this.#nextSourceOffset = Math.max(0, offset);
+	}
+
+	setCodeDescriptionMessages(messages: readonly Message[] | undefined): void {
+		this.#codeDescriptionMessages = messages;
 	}
 
 	pushDelta(text: string): void {
@@ -144,6 +154,7 @@ export class Vocalizer {
 		this.#sourceOffset = 0;
 		this.#nextSourceOffset = 0;
 		this.#sourceText = "";
+		this.#codeDescriptionMessages = undefined;
 		for (const controller of this.#descriptionControllers) controller.abort();
 		this.#descriptionControllers.clear();
 		this.#worker.cancel();
@@ -189,6 +200,8 @@ export class Vocalizer {
 				this.#scheduleCodeDescription(item.block, source, {
 					beforeBlock: this.#sourceText.slice(0, item.source.start),
 					throughBlock: this.#sourceText.slice(0, item.source.end),
+					sourceEnd: source.end,
+					...(this.#codeDescriptionMessages ? { providerMessages: [...this.#codeDescriptionMessages] } : {}),
 				});
 			}
 		}

@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import {
-	contextualMessages,
+	contextualAssistantMessages,
+	contextualAssistantMessagesThroughText,
 	contextualTranscript,
 	resolvedSessionContext,
 	sessionContextTranscript,
+	structuredContextIdentity,
 } from "../src/code-context.js";
 
 const message = (id: string, parentId: string | null, role: "user" | "assistant", text: string): SessionEntry =>
@@ -45,11 +47,29 @@ test("reconstructs an older block context through its preceding compaction", () 
 	assert.match(JSON.stringify(resolved.messages[0]), /Earlier discussion summary/);
 });
 
-test("extends structured context with an assistant prefix without flattening roles", () => {
+test("gives live and historical blocks the same structured identity", () => {
 	const before = [{ role: "user", content: [{ type: "text", text: "Explain it." }], timestamp: 1 }] as never;
-	const messages = contextualMessages(before, "Answer prefix.\n");
-	assert.deepEqual(messages.map(message => message.role), ["user", "assistant"]);
-	assert.equal((messages[1].content[0] as { text: string }).text, "Answer prefix.\n");
+	const throughBlock = "Answer.\n```ts\nrun();\n```\n";
+	const complete = {
+		role: "assistant",
+		content: [
+			{ type: "thinking", thinking: "Consider the request." },
+			{ type: "text", text: `${throughBlock}Later text.` },
+		],
+	};
+	const partial = {
+		...complete,
+		content: [complete.content[0], { type: "text", text: throughBlock }],
+	};
+	const live = contextualAssistantMessages(before, partial);
+	const historical = contextualAssistantMessagesThroughText(before, complete, throughBlock.length);
+	partial.content[1] = { type: "text", text: `${throughBlock}Mutated later.` };
+
+	assert.deepEqual(live.map(message => message.role), ["user", "assistant"]);
+	assert.equal(structuredContextIdentity(live), structuredContextIdentity(historical));
+	assert.match(JSON.stringify(historical), /Consider the request/);
+	assert.doesNotMatch(JSON.stringify(historical), /Later text/);
+	assert.doesNotMatch(JSON.stringify(live), /Mutated later/);
 });
 
 test("extends a stable conversation prefix only through the concerned block", () => {

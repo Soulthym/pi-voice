@@ -20,7 +20,7 @@ The generated description:
 
 - explains purpose and meaningful behavior rather than reading punctuation;
 - is rendered in a bordered callout below the original fence;
-- is keyed by the concerned block alone in the default `block-only` context mode, or by the compaction-aware transcript through that block in `conversation` mode, and stored in a non-context-injecting Pi custom entry;
+- is keyed by the concerned block alone in the default `block-only` context mode, or by the deterministic provider-compatible context through that block plus the effective system/tool prefix when the active model is reused in `conversation` mode, and stored in a non-context-injecting Pi custom entry;
 - is reused for the same block and selected context mode by timing/audio preprocessing;
 - falls back to a local structural description if the model is unavailable or returns an invalid plan.
 

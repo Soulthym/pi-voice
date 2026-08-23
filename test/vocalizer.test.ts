@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { plainCodeNarration, type CodeNarrationPlan } from "../src/code-narration.js";
 import { DEFAULT_VOICE_CONFIG } from "../src/config.js";
-import { Vocalizer } from "../src/vocalizer.js";
+import { type CodeDescriptionSourceContext, Vocalizer } from "../src/vocalizer.js";
 
 function immediate(): Promise<void> {
 	return new Promise(resolve => setImmediate(resolve));
@@ -121,7 +121,7 @@ test("starts code description early while preserving spoken order", async () => 
 	};
 	const deferred = Promise.withResolvers<CodeNarrationPlan>();
 	let descriptionStarted = false;
-	let descriptionContext = { beforeBlock: "", throughBlock: "" };
+	let descriptionContext: CodeDescriptionSourceContext = { beforeBlock: "", throughBlock: "", sourceEnd: 0 };
 	const vocalizer = new Vocalizer(
 		() => ({ ...DEFAULT_VOICE_CONFIG, enabled: true }),
 		() => {},
@@ -134,6 +134,8 @@ test("starts code description early while preserving spoken order", async () => 
 		worker,
 	);
 
+	const providerMessages = [{ role: "user", content: [{ type: "text", text: "Actual API context" }] }] as never;
+	vocalizer.setCodeDescriptionMessages(providerMessages);
 	vocalizer.pushDelta("Before.\n```ts\nconst value = 1;\n```\nAfter.");
 	vocalizer.flush();
 
@@ -141,6 +143,8 @@ test("starts code description early while preserving spoken order", async () => 
 	assert.deepEqual(descriptionContext, {
 		beforeBlock: "Before.\n",
 		throughBlock: "Before.\n```ts\nconst value = 1;\n```\n",
+		sourceEnd: "Before.\n```ts\nconst value = 1;\n```\n".length,
+		providerMessages,
 	});
 	assert.deepEqual(events, ["speech:Before."]);
 

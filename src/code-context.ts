@@ -58,27 +58,58 @@ export function contextualTranscript(conversationBefore: string, messageThroughB
 	return [conversationBefore, `Assistant:\n${messageThroughBlock}`].filter(Boolean).join("\n\n");
 }
 
-/** Extends the exact resolved request prefix with the assistant output available through a block. */
-export function contextualMessages(conversationBefore: readonly Message[], messageThroughBlock: string): Message[] {
-	if (!messageThroughBlock) return [...conversationBefore];
-	return [
-		...conversationBefore,
-		{
-			role: "assistant",
-			content: [{ type: "text", text: messageThroughBlock }],
-			api: "pi-voice-context",
-			provider: "pi-voice",
-			model: "context",
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			stopReason: "stop",
-			timestamp: 0,
-		},
-	];
+function providerMessagesForAssistant(conversationBefore: readonly Message[], assistant: unknown): Message[] {
+	return [...conversationBefore, ...convertToLlm([structuredClone(assistant)] as never)];
+}
+
+/** Extends a resolved request prefix with an actual live or persisted assistant message. */
+export function contextualAssistantMessages(conversationBefore: readonly Message[], assistant: unknown): Message[] {
+	return providerMessagesForAssistant(conversationBefore, assistant);
+}
+
+/**
+ * Truncates a persisted assistant message at an offset in its text-only joined
+ * display, while retaining preceding thinking and tool-call content exactly.
+ */
+export function contextualAssistantMessagesThroughText(
+	conversationBefore: readonly Message[],
+	assistant: unknown,
+	textOffset: number,
+): Message[] {
+	if (!assistant || typeof assistant !== "object" || !("content" in assistant) || !Array.isArray(assistant.content)) {
+		return [...conversationBefore];
+	}
+	let joinedOffset = 0;
+	let seenText = false;
+	const content: unknown[] = [];
+	for (const block of assistant.content) {
+		if (!block || typeof block !== "object" || !("type" in block) || block.type !== "text" || !("text" in block) || typeof block.text !== "string") {
+			content.push(structuredClone(block));
+			continue;
+		}
+		if (seenText) joinedOffset += 1; // assistantText() joins text blocks with one newline.
+		seenText = true;
+		const localEnd = Math.max(0, Math.min(block.text.length, textOffset - joinedOffset));
+		content.push({ ...structuredClone(block), text: block.text.slice(0, localEnd) });
+		if (localEnd < block.text.length || joinedOffset + block.text.length >= textOffset) break;
+		joinedOffset += block.text.length;
+	}
+	return providerMessagesForAssistant(conversationBefore, { ...structuredClone(assistant), content });
+}
+
+function providerVisibleMessage(message: Message): unknown {
+	if (message.role === "user") return { role: message.role, content: message.content };
+	if (message.role === "assistant") return { role: message.role, content: message.content };
+	return {
+		role: message.role,
+		toolCallId: message.toolCallId,
+		toolName: message.toolName,
+		content: message.content,
+		isError: message.isError,
+	};
+}
+
+/** Deterministic identity for the content providers actually receive. */
+export function structuredContextIdentity(messages: readonly Message[]): string {
+	return JSON.stringify(messages.map(providerVisibleMessage));
 }
