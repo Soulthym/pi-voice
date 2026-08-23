@@ -488,7 +488,8 @@ export default async function (pi: ExtensionAPI) {
 				break;
 			case "speaking":
 				state = "speaking";
-				playbackPaused = false;
+				// Coordinator project/attention prompts are separate from the selected
+				// message transport and must not turn a paused message back into playing.
 				break;
 			case "segment-audio":
 				narration.setSegmentAudio(event.segmentId, event.start, event.duration);
