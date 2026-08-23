@@ -19,5 +19,7 @@
   "playbackHighlight": true,
   "codeNarration": "guided",
   "codeDescriptionPreprocessConcurrency": 4,
-  "timingPreprocessConcurrency": "auto"
+  "timingPreprocessConcurrency": "auto",
+  "audioCache": true,
+  "audioCacheBitrate": 32
 }

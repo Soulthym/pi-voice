@@ -62,6 +62,8 @@ export class VoiceWorkerClient {
 			dtype: config.ttsDtype,
 			alignmentModel: config.alignmentModel,
 			alignmentDtype: config.alignmentDtype,
+			audioCache: config.audioCache,
+			audioCacheBitrate: config.audioCacheBitrate,
 			output: config.output,
 		});
 	}
@@ -97,6 +99,8 @@ export class VoiceWorkerClient {
 			speed: config.speed,
 			model: config.ttsModel,
 			dtype: config.ttsDtype,
+			audioCache: config.audioCache,
+			audioCacheBitrate: config.audioCacheBitrate,
 		});
 		return promise;
 	}

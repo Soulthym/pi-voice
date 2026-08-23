@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+	normalizeAudioCacheBitrate,
 	normalizeEditModel,
 	normalizeModelDtype,
 	normalizeModelId,
@@ -43,6 +44,9 @@ test("normalizes configurable model selections", () => {
 	assert.equal(normalizePreprocessConcurrency(9), undefined);
 	assert.equal(normalizeWorkerCount(4), 4);
 	assert.equal(normalizeWorkerCount("auto"), undefined);
+	assert.equal(normalizeAudioCacheBitrate(32), 32);
+	assert.equal(normalizeAudioCacheBitrate(11), undefined);
+	assert.equal(normalizeAudioCacheBitrate(129), undefined);
 });
 
 test("normalizes configurable microphone shortcuts", () => {

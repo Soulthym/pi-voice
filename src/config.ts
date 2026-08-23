@@ -46,6 +46,10 @@ export interface VoiceConfig {
 	codeDescriptionPreprocessConcurrency: number;
 	/** Parallel CPU Kokoro workers used to fill missing playback timings. */
 	timingPreprocessConcurrency: VoicePreprocessConcurrency;
+	/** Persist synthesized speech as local Opus segment files for reuse. */
+	audioCache: boolean;
+	/** Target Opus bitrate in kilobits per second. */
+	audioCacheBitrate: number;
 }
 
 export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
@@ -70,6 +74,8 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
 	codeNarration: "guided",
 	codeDescriptionPreprocessConcurrency: 4,
 	timingPreprocessConcurrency: "auto",
+	audioCache: true,
+	audioCacheBitrate: 32,
 };
 
 export function getVoiceConfigPath(): string {
@@ -102,6 +108,10 @@ export function normalizeSttCandidates(value: unknown): number | undefined {
 
 export function normalizeWorkerCount(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 8 ? value : undefined;
+}
+
+export function normalizeAudioCacheBitrate(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isInteger(value) && value >= 12 && value <= 128 ? value : undefined;
 }
 
 export function normalizePreprocessConcurrency(value: unknown): VoicePreprocessConcurrency | undefined {
@@ -238,6 +248,9 @@ export async function loadVoiceConfig(): Promise<VoiceConfig> {
 			timingPreprocessConcurrency:
 				normalizePreprocessConcurrency(parsed.timingPreprocessConcurrency) ??
 				DEFAULT_VOICE_CONFIG.timingPreprocessConcurrency,
+			audioCache: typeof parsed.audioCache === "boolean" ? parsed.audioCache : DEFAULT_VOICE_CONFIG.audioCache,
+			audioCacheBitrate:
+				normalizeAudioCacheBitrate(parsed.audioCacheBitrate) ?? DEFAULT_VOICE_CONFIG.audioCacheBitrate,
 		};
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return { ...DEFAULT_VOICE_CONFIG };

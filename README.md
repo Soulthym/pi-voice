@@ -36,7 +36,7 @@ The two recognition models have separate roles:
 - **Whisper** transcribes microphone recordings and generates final dictation candidates.
 - **Wav2Vec2 CTC** force-aligns known Kokoro text to synthesized audio; it is not used for microphone dictation.
 
-For every spoken segment, Pi retains its source-text range and timing metadata, but not its PCM audio. Completed timing maps are persisted as Pi custom session entries, which are excluded from model context, so approximate seeking survives reloads and session resumes. When Pi opens or loads a session, missing timing annotations for speech-eligible assistant prose are scheduled from the currently selected playback message forward to the session end, then backward toward the start for silent, low-priority Kokoro preprocessing. The same progress widget reports cumulative timing progress, such as `Speech timing: 18/61 processed`. Timing preprocessing uses a pool of independent CPU Kokoro workers because the native runtime does not batch or execute concurrent jobs in one process; configure `timingPreprocessConcurrency` as `auto` or `1..8` (`/voice timing-preprocess auto|1..8`). Timing `auto` caps the worker pool at four and additionally limits it using available system RAM and CPU parallelism. Kokoro is currently forced to CPU, so VRAM is not part of this calculation. Thinking content, tool results, and pure edit/tool-call messages are not scheduled; `yield` mode indexes only final responses. Normal speech and microphone actions preempt this work; unfinished indexing resumes after a later turn. Wav2Vec2 supplies word timestamps, while the Termux audio session queries `mpv` for the position actually being played. The active sentence or clause receives a continuous subtle background, including inter-word whitespace. Words already reached by playback return to the normal foreground; later prose remains dim.
+For every spoken segment, Pi retains its source-text range and timing metadata. Audio caching is enabled by default: synthesized segments are content-addressed and stored locally as 32 kbps VBR Opus under `~/.cache/pi-voice/audio`, while uncompressed PCM is never retained. Replays decode matching cached segments instead of rerunning Kokoro. Set `audioCache` to `false` (`/voice audio-cache off`) to restore regeneration-only behavior, and configure `audioCacheBitrate` from 12 to 128 kbps (`/voice audio-bitrate 32`). Changing model, dtype, voice, speed, text, or bitrate creates a distinct cache key; disabling caching does not delete existing files. Completed timing maps are persisted as Pi custom session entries, which are excluded from model context, so approximate seeking survives reloads and session resumes. When Pi opens or loads a session, missing timing annotations for speech-eligible assistant prose are scheduled from the currently selected playback message forward to the session end, then backward toward the start for silent, low-priority Kokoro preprocessing. The same progress widget reports cumulative timing progress, such as `Speech timing: 18/61 processed`. Timing preprocessing uses a pool of independent CPU Kokoro workers because the native runtime does not batch or execute concurrent jobs in one process; configure `timingPreprocessConcurrency` as `auto` or `1..8` (`/voice timing-preprocess auto|1..8`). Timing `auto` caps the worker pool at four and additionally limits it using available system RAM and CPU parallelism. Kokoro is currently forced to CPU, so VRAM is not part of this calculation. Thinking content, tool results, and pure edit/tool-call messages are not scheduled; `yield` mode indexes only final responses. Normal speech and microphone actions preempt this work; unfinished indexing resumes after a later turn. Wav2Vec2 supplies word timestamps, while the Termux audio session queries `mpv` for the position actually being played. The active sentence or clause receives a continuous subtle background, including inter-word whitespace. Words already reached by playback return to the normal foreground; later prose remains dim.
 
 The segment background depends only on PCM boundaries and `mpv` position, so it remains reliable if word alignment is late or fails. Word progression falls back to duration-weighted estimates when necessary. Synthesis never waits for alignment and no artificial playback delay is added.
 
@@ -50,6 +50,8 @@ cd pi-voice
 npm install
 pi install .
 ```
+
+Install `ffmpeg` on the server to encode and decode the optional Opus audio cache. If it is unavailable, synthesis continues normally but cache reads and writes are skipped.
 
 Configuration is stored in `~/.pi/agent/pi-voice.json`. For the bundled Termux bridge:
 
@@ -75,7 +77,9 @@ Configuration is stored in `~/.pi/agent/pi-voice.json`. For the bundled Termux b
   "playbackHighlight": true,
   "codeNarration": "guided",
   "codeDescriptionPreprocessConcurrency": 4,
-  "timingPreprocessConcurrency": "auto"
+  "timingPreprocessConcurrency": "auto",
+  "audioCache": true,
+  "audioCacheBitrate": 32
 }
 ```
 
@@ -145,8 +149,8 @@ The symmetric layout is phone voice input, previous assistant message, rewind 10
 ## Usage
 
 - Press the configured microphone shortcut (**Alt+M** by default) or **F5** and speak for as long as needed. Recording stops automatically after about 1.35 seconds of silence.
-- Press **F6**/**F10** to regenerate the previous/next completed assistant message, or **F11** to restart the selected message. Navigation is available while Pi is idle and restores message text from session history after `/reload` or session resume.
-- Press **F7**/**F9** to move approximately 10 seconds backward/forward using recorded segment-to-source timing checkpoints. Press **F8** to pause and regenerate from the nearest checkpoint when resuming. The timeline's authoritative position variable is updated from the phone's live `mpv` clock and is also used by these controls. Timing is persisted in Pi's session after playback or silent preprocessing completes; PCM audio is never cached. Consequently, seeks are approximate and replay invokes Kokoro again. Missing historical annotations are generated silently when a session loads, without playing audio through the phone. The background indexer uses local structural text for code blocks to avoid historical `editModel` calls; when fenced code is actually replayed, its persisted narration is reused if one was generated previously.
+- Press **F6**/**F10** to replay the previous/next completed assistant message, or **F11** to restart the selected message. Navigation is available while Pi is idle and restores message text from session history after `/reload` or session resume.
+- Press **F7**/**F9** to move approximately 10 seconds backward/forward using recorded segment-to-source timing checkpoints. Press **F8** to pause and regenerate from the nearest checkpoint when resuming. The timeline's authoritative position variable is updated from the phone's live `mpv` clock and is also used by these controls. Timing is persisted in Pi's session after playback or silent preprocessing completes; PCM audio is never cached. Consequently, seeks remain approximate. Replay uses matching Opus segments when audio caching is enabled and invokes Kokoro only for cache misses. Missing historical annotations are generated silently when a session loads, without playing audio through the phone. The background indexer uses local structural text for code blocks to avoid historical `editModel` calls; when fenced code is actually replayed, its persisted narration is reused if one was generated previously.
 - Press the shortcut again to stop manually. Pi displays a live, revisable transcript in the prompt editor.
 - In the default `review` submit mode, correct or extend the final prompt and press Enter yourself.
 - Final transcription requests up to `sttCandidates` hypotheses from the same ASR model. The configured editing model resolves them using the existing draft and a bounded, text-only excerpt of recent session context. This isolated request does not enter conversation history.
@@ -210,6 +214,7 @@ Modes:
 
 - `PI_VOICE_CONFIG`: alternate server config path
 - `PI_VOICE_CACHE_DIR`: alternate model cache (default `~/.cache/pi-voice/models`)
+- `PI_VOICE_AUDIO_CACHE_DIR`: alternate Opus audio cache (default `~/.cache/pi-voice/audio`)
 - `PI_VOICE_PLAYER`: alternate `pw-play`-compatible local player executable
 - `PI_VOICE_AUDIO_PORT`: phone audio-listener port (default `8765`)
 - `PI_VOICE_CONTROL_PORT`: phone microphone-control port (default `8766`)

@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -15,6 +16,7 @@ const DEFAULT_ALIGNMENT_MODEL = "onnx-community/wav2vec2-base-960h-ONNX";
 const DEFAULT_ALIGNMENT_DTYPE = "q8";
 const DEFAULT_SAMPLE_RATE = 24_000;
 const cacheDir = process.env.PI_VOICE_CACHE_DIR ?? path.join(os.homedir(), ".cache", "pi-voice", "models");
+const audioCacheDir = process.env.PI_VOICE_AUDIO_CACHE_DIR ?? path.join(os.homedir(), ".cache", "pi-voice", "audio");
 fs.mkdirSync(cacheDir, { recursive: true });
 transformersEnv.cacheDir = cacheDir;
 transformersEnv.allowLocalModels = true;
@@ -117,6 +119,111 @@ function progressPercent(info) {
 		return Math.round((info.loaded / info.total) * 100);
 	}
 	return undefined;
+}
+
+function audioCachePath(operation) {
+	if (!operation.audioCache) return undefined;
+	const bitrate = Number(operation.audioCacheBitrate);
+	if (!Number.isInteger(bitrate) || bitrate < 12 || bitrate > 128) return undefined;
+	const key = createHash("sha256")
+		.update(
+			JSON.stringify([
+				1,
+				operation.model,
+				operation.dtype,
+				operation.voice,
+				operation.speed,
+				bitrate,
+				operation.text,
+			]),
+		)
+		.digest("hex");
+	return path.join(audioCacheDir, key.slice(0, 2), `${key}.opus`);
+}
+
+function runFfmpeg(args, input) {
+	return new Promise((resolve, reject) => {
+		const child = spawn("ffmpeg", ["-v", "error", ...args], { stdio: ["pipe", "pipe", "pipe"] });
+		const stdout = [];
+		let stderr = "";
+		child.stdout.on("data", chunk => stdout.push(chunk));
+		child.stderr.on("data", chunk => {
+			stderr = `${stderr}${String(chunk)}`.slice(-4_096);
+		});
+		child.once("error", reject);
+		child.once("exit", code => {
+			if (code === 0) resolve(Buffer.concat(stdout));
+			else reject(new Error(stderr.trim() || `ffmpeg exited with code ${code ?? "unknown"}`));
+		});
+		child.stdin.on("error", () => {});
+		child.stdin.end(input);
+	});
+}
+
+async function readCachedAudio(file) {
+	try {
+		await fs.promises.access(file, fs.constants.R_OK);
+		const bytes = await runFfmpeg(["-i", file, "-f", "f32le", "-ar", String(DEFAULT_SAMPLE_RATE), "-ac", "1", "pipe:1"]);
+		if (bytes.length === 0 || bytes.length % Float32Array.BYTES_PER_ELEMENT !== 0) throw new Error("Empty audio cache entry");
+		const array = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+		return new Float32Array(array);
+	} catch {
+		await fs.promises.rm(file, { force: true }).catch(() => {});
+		return undefined;
+	}
+}
+
+async function writeCachedAudio(file, pcm, bitrate) {
+	const directory = path.dirname(file);
+	const temporary = `${file}.${process.pid}.${Math.random().toString(16).slice(2)}.tmp.opus`;
+	try {
+		await fs.promises.mkdir(directory, { recursive: true });
+		const input = Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength);
+		await runFfmpeg(
+			[
+				"-f",
+				"f32le",
+				"-ar",
+				String(DEFAULT_SAMPLE_RATE),
+				"-ac",
+				"1",
+				"-i",
+				"pipe:0",
+				"-c:a",
+				"libopus",
+				"-b:a",
+				`${bitrate}k`,
+				"-vbr",
+				"on",
+				"-application",
+				"audio",
+				"-y",
+				temporary,
+			],
+			input,
+		);
+		await fs.promises.rename(temporary, file);
+		await fs.promises.chmod(file, 0o600);
+	} catch {
+		await fs.promises.rm(temporary, { force: true }).catch(() => {});
+	}
+}
+
+async function audioForOperation(operation) {
+	const file = audioCachePath(operation);
+	if (file) {
+		const cached = await readCachedAudio(file);
+		if (cached) return { pcm: cached, sampleRate: DEFAULT_SAMPLE_RATE, cacheWrite: undefined };
+	}
+	const model = await getModel(operation.model, operation.dtype);
+	const output = await model.generate(operation.text, { voice: operation.voice, speed: operation.speed });
+	const sampleRate = output.sampling_rate || DEFAULT_SAMPLE_RATE;
+	const pcm = Array.isArray(output.audio) ? output.audio[0] : output.audio;
+	const cacheWrite =
+		file && pcm instanceof Float32Array && sampleRate === DEFAULT_SAMPLE_RATE
+			? writeCachedAudio(file, pcm, Number(operation.audioCacheBitrate))
+			: undefined;
+	return { pcm, sampleRate, cacheWrite };
 }
 
 async function getModel(modelId = DEFAULT_TTS_MODEL, dtype = DEFAULT_TTS_DTYPE) {
@@ -531,13 +638,10 @@ async function runOperation(operation) {
 	}
 	if (operation.type === "measure") {
 		try {
-			const model = await getModel(operation.model, operation.dtype);
+			const audio = await audioForOperation(operation);
 			if (operation.epoch !== epoch) return;
-			const output = await model.generate(operation.text, { voice: operation.voice, speed: operation.speed });
-			if (operation.epoch !== epoch) return;
-			const sampleRate = output.sampling_rate || DEFAULT_SAMPLE_RATE;
-			const pcm = Array.isArray(output.audio) ? output.audio[0] : output.audio;
-			const duration = pcm instanceof Float32Array ? pcm.length / sampleRate : 0;
+			if (audio.cacheWrite) await audio.cacheWrite;
+			const duration = audio.pcm instanceof Float32Array ? audio.pcm.length / audio.sampleRate : 0;
 			send({ type: "measurement", requestId: operation.requestId, duration });
 		} catch (error) {
 			send({
@@ -548,12 +652,10 @@ async function runOperation(operation) {
 		}
 		return;
 	}
-	const model = await getModel(operation.model, operation.dtype);
+	const audio = await audioForOperation(operation);
 	if (operation.epoch !== epoch) return;
-	const output = await model.generate(operation.text, { voice: operation.voice, speed: operation.speed });
-	if (operation.epoch !== epoch) return;
-	const sampleRate = output.sampling_rate || DEFAULT_SAMPLE_RATE;
-	const pcm = Array.isArray(output.audio) ? output.audio[0] : output.audio;
+	const sampleRate = audio.sampleRate;
+	const pcm = audio.pcm;
 	if (!(pcm instanceof Float32Array) || pcm.length === 0) return;
 	const sink = startPlayer(sampleRate, operation.utterance, operation.output);
 	await sink.ready;
@@ -563,6 +665,7 @@ async function runOperation(operation) {
 	send({ type: "segment-audio", utterance: operation.utterance, segmentId: operation.segmentId, start, duration });
 	requestAlignment(operation, pcm, sampleRate);
 	await writeAudio(sink, pcm);
+	if (audio.cacheWrite) await audio.cacheWrite;
 }
 
 async function pump() {
@@ -630,6 +733,8 @@ lines.on("line", line => {
 				dtype: message.dtype ?? DEFAULT_TTS_DTYPE,
 				alignmentModel: message.alignmentModel ?? DEFAULT_ALIGNMENT_MODEL,
 				alignmentDtype: message.alignmentDtype ?? DEFAULT_ALIGNMENT_DTYPE,
+				audioCache: message.audioCache === true,
+				audioCacheBitrate: message.audioCacheBitrate,
 			});
 			break;
 		case "measure":
@@ -641,6 +746,8 @@ lines.on("line", line => {
 				speed: message.speed,
 				model: message.model ?? DEFAULT_TTS_MODEL,
 				dtype: message.dtype ?? DEFAULT_TTS_DTYPE,
+				audioCache: message.audioCache === true,
+				audioCacheBitrate: message.audioCacheBitrate,
 			});
 			break;
 		case "end":

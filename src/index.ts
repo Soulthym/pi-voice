@@ -3,6 +3,7 @@ import { CodeDescriptionCache, type CodeDescriptionCacheSnapshot } from "./code-
 import { codeDescriptionCacheKey, describeCodeBlock, fallbackCodeDescription } from "./code-describer.js";
 import {
 	loadVoiceConfig,
+	normalizeAudioCacheBitrate,
 	normalizeEditModel,
 	normalizeModelDtype,
 	normalizeModelId,
@@ -1071,6 +1072,8 @@ export default async function (pi: ExtensionAPI) {
 				"code-narration",
 				"code-preprocess",
 				"timing-preprocess",
+				"audio-cache",
+				"audio-bitrate",
 			];
 			const parts = prefix.trimStart().split(/\s+/);
 			if (parts.length <= 1) {
@@ -1102,6 +1105,16 @@ export default async function (pi: ExtensionAPI) {
 				return ["1", "2", "3", "4", "5", "6", "7", "8"]
 					.filter(value => value.startsWith(parts[1] ?? ""))
 					.map(value => ({ value: `stt-candidates ${value}`, label: value }));
+			}
+			if (parts[0] === "audio-cache") {
+				return ["on", "off"]
+					.filter(value => value.startsWith(parts[1] ?? ""))
+					.map(value => ({ value: `audio-cache ${value}`, label: value }));
+			}
+			if (parts[0] === "audio-bitrate") {
+				return ["24", "32", "48", "64"]
+					.filter(value => value.startsWith(parts[1] ?? ""))
+					.map(value => ({ value: `audio-bitrate ${value}`, label: `${value} kbps` }));
 			}
 			if (parts[0] === "code-preprocess" || parts[0] === "timing-preprocess") {
 				const choices = ["1", "2", "3", "4", "5", "6", "7", "8"];
@@ -1258,6 +1271,26 @@ export default async function (pi: ExtensionAPI) {
 					}
 					await updateConfig({ ...config, sttCandidates: count });
 					ctx.ui.notify(`Final ASR candidate count set to ${count}`, "info");
+					return;
+				}
+				case "audio-cache": {
+					const enabled = value.toLowerCase();
+					if (enabled !== "on" && enabled !== "off") {
+						ctx.ui.notify("Usage: /voice audio-cache on|off", "error");
+						return;
+					}
+					await updateConfig({ ...config, audioCache: enabled === "on" });
+					ctx.ui.notify(`Audio caching ${enabled === "on" ? "enabled" : "disabled"}`, "info");
+					return;
+				}
+				case "audio-bitrate": {
+					const bitrate = normalizeAudioCacheBitrate(Number(value));
+					if (bitrate === undefined) {
+						ctx.ui.notify("Usage: /voice audio-bitrate <12..128>", "error");
+						return;
+					}
+					await updateConfig({ ...config, audioCacheBitrate: bitrate });
+					ctx.ui.notify(`Opus audio cache bitrate set to ${bitrate} kbps`, "info");
 					return;
 				}
 				case "code-preprocess": {
@@ -1437,13 +1470,13 @@ export default async function (pi: ExtensionAPI) {
 				case "status":
 				case "":
 					ctx.ui.notify(
-						`Voice ${config.enabled ? "on" : "off"}; mode=${config.mode}; voice=${config.voice}; speed=${config.speed}; tts=${config.ttsModel}@${config.ttsDtype}; stt=${config.sttModel}@${config.sttDtype}; sttCandidates=${config.sttCandidates}; alignment=${config.alignmentModel}@${config.alignmentDtype}; editModel=${config.editModel}; highlight=${config.playbackHighlight ? "on" : "off"}; codeNarration=${config.codeNarration}; codePreprocess=${config.codeDescriptionPreprocessConcurrency}; timingPreprocess=${config.timingPreprocessConcurrency}; output=${config.output}; input=${config.input}; shortcut=${config.talkShortcut}; submit=${config.submitMode}; edit=${config.editMode}`,
+						`Voice ${config.enabled ? "on" : "off"}; mode=${config.mode}; voice=${config.voice}; speed=${config.speed}; tts=${config.ttsModel}@${config.ttsDtype}; stt=${config.sttModel}@${config.sttDtype}; sttCandidates=${config.sttCandidates}; alignment=${config.alignmentModel}@${config.alignmentDtype}; editModel=${config.editModel}; highlight=${config.playbackHighlight ? "on" : "off"}; codeNarration=${config.codeNarration}; codePreprocess=${config.codeDescriptionPreprocessConcurrency}; timingPreprocess=${config.timingPreprocessConcurrency}; audioCache=${config.audioCache ? `${config.audioCacheBitrate}kbps` : "off"}; output=${config.output}; input=${config.input}; shortcut=${config.talkShortcut}; submit=${config.submitMode}; edit=${config.editMode}`,
 						"info",
 					);
 					return;
 				default:
 					ctx.ui.notify(
-						"Usage: /voice [on|off|toggle|status|stop|setup|test|talk|mode|voice|speed|tts-model|tts-dtype|stt-model|stt-dtype|stt-candidates|alignment-model|alignment-dtype|edit-model|highlight|timing|code-narration|code-preprocess|timing-preprocess|output|input|shortcut|submit|edit]",
+						"Usage: /voice [on|off|toggle|status|stop|setup|test|talk|mode|voice|speed|tts-model|tts-dtype|stt-model|stt-dtype|stt-candidates|alignment-model|alignment-dtype|edit-model|highlight|timing|code-narration|code-preprocess|timing-preprocess|audio-cache|audio-bitrate|output|input|shortcut|submit|edit]",
 						"error",
 					);
 			}
