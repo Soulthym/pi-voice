@@ -26,12 +26,15 @@ test("grants speech to only the first session and records waiting attention", ()
 		second.releaseSpeech();
 		assert.equal(first.tryAcquireSpeech(), true);
 		const waiting = second.markWaiting();
+		assert.equal(second.isWaiting(), true);
+		assert.equal(first.isWaiting(second.instanceId), true);
 		assert.equal(first.nextUnannouncedWaiting()?.instanceId, waiting.instanceId);
 		first.markAnnounced(waiting.instanceId);
 		assert.equal(first.nextUnannouncedWaiting(), undefined);
 		first.releaseSpeech();
 		assert.equal(second.tryAcquireSpeech(), true);
 		second.clearWaiting();
+		assert.equal(second.isWaiting(), false);
 		assert.equal(first.waitingSessions().length, 0);
 	} finally {
 		first.shutdown();

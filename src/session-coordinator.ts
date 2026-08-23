@@ -162,6 +162,10 @@ export class SessionCoordinator {
 		remove(this.#waitingFile(this.instanceId));
 	}
 
+	isWaiting(instanceId = this.instanceId): boolean {
+		return this.waitingSessions().some(waiting => waiting.instanceId === instanceId);
+	}
+
 	waitingSessions(): WaitingSession[] {
 		this.#cleanStaleFiles();
 		return this.#jsonFiles<WaitingSession>(this.#waitingDir())

@@ -177,6 +177,7 @@ export default async function (pi: ExtensionAPI) {
 	let pendingNotification: WaitingSession | undefined;
 	let pausedForAttention = false;
 	let speechBlocked = false;
+	let blockedMessageHasSpeech = false;
 	let blockedSpeechText = "";
 	let ownedSpeechText = "";
 	let completingOwnerSpeech = false;
@@ -757,6 +758,7 @@ export default async function (pi: ExtensionAPI) {
 		completingOwnerSpeech = false;
 		pausedForAttention = false;
 		speechBlocked = false;
+		blockedMessageHasSpeech = false;
 		blockedSpeechText = "";
 		coordinator.clearWaiting();
 		refreshStatus();
@@ -1245,6 +1247,7 @@ export default async function (pi: ExtensionAPI) {
 		coordinator?.clearWaiting();
 		pausedForAttention = false;
 		speechBlocked = false;
+		blockedMessageHasSpeech = false;
 		blockedSpeechText = "";
 		cancelTimingWorkers();
 		vocalizer.clear();
@@ -1256,6 +1259,7 @@ export default async function (pi: ExtensionAPI) {
 	pi.on("before_agent_start", () => {
 		if (!interactiveVoiceSession) return;
 		speechBlocked = false;
+		blockedMessageHasSpeech = false;
 		blockedSpeechText = "";
 		cancelTimingWorkers();
 		vocalizer.clear();
@@ -1277,6 +1281,7 @@ export default async function (pi: ExtensionAPI) {
 				liveTurnNarrationActive && ownsSpeech && speechPurpose === "turn" && (coordinator?.ownsSpeech() ?? true);
 			if (!continuingTurn && !acquireSpeech("turn")) {
 				speechBlocked = true;
+				blockedMessageHasSpeech = false;
 				blockedSpeechText = "";
 				livePlaybackId = undefined;
 				refreshStatus();
@@ -1310,6 +1315,7 @@ export default async function (pi: ExtensionAPI) {
 			if (speechBlocked && speakableDelta !== undefined) {
 				blockedSpeechText += speakableDelta;
 				if (hasSpeakableAudio(blockedSpeechText)) {
+					blockedMessageHasSpeech = true;
 					pausedForAttention = true;
 					refreshStatus();
 				}
@@ -1339,6 +1345,7 @@ export default async function (pi: ExtensionAPI) {
 			livePlaybackId = undefined;
 		}
 		if (config.enabled && speechBlocked && requiresVoiceAttention(completedText, config.mode, stopReason)) {
+			blockedMessageHasSpeech = true;
 			pausedForAttention = true;
 			refreshStatus();
 		}
@@ -1374,6 +1381,7 @@ export default async function (pi: ExtensionAPI) {
 				vocalizer.speak(text);
 			} else if (requiresVoiceAttention(text, config.mode, stopReason)) {
 				speechBlocked = true;
+				blockedMessageHasSpeech = true;
 				blockedSpeechText = text;
 				pausedForAttention = true;
 			}
@@ -1382,14 +1390,21 @@ export default async function (pi: ExtensionAPI) {
 			if (ownsSpeech && speechPurpose === "turn") {
 				ownerTurnEnded = true;
 				completeOwnerSpeech();
-			} else if (pausedForAttention) {
+			} else if (blockedMessageHasSpeech) {
+				const alreadyWaiting = coordinator?.isWaiting() ?? false;
 				coordinator?.markWaiting();
-				ctx.ui.notify("Voice response paused behind another project; run /voice attention or press F11 to play it", "warning");
+				pausedForAttention = true;
+				speechBlocked = false;
+				blockedMessageHasSpeech = false;
+				blockedSpeechText = "";
+				if (!alreadyWaiting) {
+					ctx.ui.notify("Voice response paused behind another project; run /voice attention or press F11 to play it", "warning");
+				}
 				refreshStatus();
 			} else if (speechBlocked) {
 				speechBlocked = false;
 				blockedSpeechText = "";
-				coordinator?.clearWaiting();
+				pausedForAttention = coordinator?.isWaiting() ?? false;
 				refreshStatus();
 			}
 		}
