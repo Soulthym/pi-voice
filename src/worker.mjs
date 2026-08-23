@@ -213,17 +213,18 @@ async function audioForOperation(operation) {
 	const file = audioCachePath(operation);
 	if (file) {
 		const cached = await readCachedAudio(file);
-		if (cached) return { pcm: cached, sampleRate: DEFAULT_SAMPLE_RATE, cacheWrite: undefined };
+		if (cached) return { pcm: cached, sampleRate: DEFAULT_SAMPLE_RATE };
 	}
 	const model = await getModel(operation.model, operation.dtype);
 	const output = await model.generate(operation.text, { voice: operation.voice, speed: operation.speed });
 	const sampleRate = output.sampling_rate || DEFAULT_SAMPLE_RATE;
 	const pcm = Array.isArray(output.audio) ? output.audio[0] : output.audio;
-	const cacheWrite =
-		file && pcm instanceof Float32Array && sampleRate === DEFAULT_SAMPLE_RATE
-			? writeCachedAudio(file, pcm, Number(operation.audioCacheBitrate))
-			: undefined;
-	return { pcm, sampleRate, cacheWrite };
+	if (file && pcm instanceof Float32Array && sampleRate === DEFAULT_SAMPLE_RATE) {
+		await writeCachedAudio(file, pcm, Number(operation.audioCacheBitrate));
+		const cached = await readCachedAudio(file);
+		if (cached) return { pcm: cached, sampleRate: DEFAULT_SAMPLE_RATE };
+	}
+	return { pcm, sampleRate };
 }
 
 async function getModel(modelId = DEFAULT_TTS_MODEL, dtype = DEFAULT_TTS_DTYPE) {
@@ -640,7 +641,6 @@ async function runOperation(operation) {
 		try {
 			const audio = await audioForOperation(operation);
 			if (operation.epoch !== epoch) return;
-			if (audio.cacheWrite) await audio.cacheWrite;
 			const duration = audio.pcm instanceof Float32Array ? audio.pcm.length / audio.sampleRate : 0;
 			send({ type: "measurement", requestId: operation.requestId, duration });
 		} catch (error) {
@@ -665,7 +665,6 @@ async function runOperation(operation) {
 	send({ type: "segment-audio", utterance: operation.utterance, segmentId: operation.segmentId, start, duration });
 	requestAlignment(operation, pcm, sampleRate);
 	await writeAudio(sink, pcm);
-	if (audio.cacheWrite) await audio.cacheWrite;
 }
 
 async function pump() {

@@ -3,6 +3,7 @@ import type { NarrationSegment } from "./narration-progress.js";
 export interface PlaybackMessage {
 	id: string;
 	text: string;
+	renderKey?: string;
 }
 
 export interface PlaybackTarget extends PlaybackMessage {
@@ -20,8 +21,9 @@ export interface PlaybackStatus {
 }
 
 export interface PlaybackTimingSnapshot {
-	version: 1;
+	version: 2;
 	messageId: string;
+	renderKey: string;
 	duration: number;
 	checkpoints: Array<{ time: number; duration: number; sourceOffset: number }>;
 }
@@ -59,8 +61,15 @@ export class PlaybackHistory {
 		this.#order = messages.map(message => message.id);
 		for (const message of messages) {
 			const existing = this.#records.get(message.id);
-			if (existing) existing.text = message.text;
-			else this.#records.set(message.id, { ...message, checkpoints: [], duration: 0, position: 0 });
+			if (existing) {
+				if (existing.text !== message.text || existing.renderKey !== message.renderKey) {
+					existing.checkpoints = [];
+					existing.duration = 0;
+					existing.position = 0;
+				}
+				existing.text = message.text;
+				existing.renderKey = message.renderKey;
+			} else this.#records.set(message.id, { ...message, checkpoints: [], duration: 0, position: 0 });
 		}
 		if (selectLatest || !this.#selectedId || !this.#order.includes(this.#selectedId)) {
 			this.#selectedId = this.#order.at(-1);
@@ -69,9 +78,13 @@ export class PlaybackHistory {
 
 	restore(snapshots: readonly PlaybackTimingSnapshot[]): void {
 		for (const snapshot of snapshots) {
-			if (snapshot.version !== 1 || !Number.isFinite(snapshot.duration) || snapshot.duration < 0) continue;
+			if (snapshot.version !== 2 || !Number.isFinite(snapshot.duration) || snapshot.duration < 0) continue;
 			const record = this.#records.get(snapshot.messageId);
-			if (!record || !Array.isArray(snapshot.checkpoints) || snapshot.checkpoints.length > 2_000) continue;
+			if (
+				!record ||
+				!record.renderKey ||
+				snapshot.renderKey !== record.renderKey ||
+				!Array.isArray(snapshot.checkpoints) || snapshot.checkpoints.length > 2_000) continue;
 			const checkpoints = snapshot.checkpoints.filter(
 				checkpoint =>
 					Number.isFinite(checkpoint.time) &&
@@ -118,6 +131,7 @@ export class PlaybackHistory {
 		this.#records.delete(fromId);
 		record.id = message.id;
 		record.text = message.text;
+		record.renderKey = message.renderKey;
 		this.#records.set(message.id, record);
 		if (this.#selectedId === fromId) this.#selectedId = message.id;
 	}
@@ -157,9 +171,11 @@ export class PlaybackHistory {
 			return undefined;
 		}
 		this.#persistedUtterances.add(utterance);
+		if (!capture.record.renderKey) return undefined;
 		return {
-			version: 1,
+			version: 2,
 			messageId: capture.record.id,
+			renderKey: capture.record.renderKey,
 			duration: capture.record.duration,
 			checkpoints: capture.record.checkpoints.map(checkpoint => ({ ...checkpoint })),
 		};

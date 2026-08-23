@@ -32,6 +32,7 @@ import { PhoneInputClient } from "./phone-input.js";
 import { prioritizeFromCurrent, processConcurrently, resolveTimingConcurrency } from "./preprocessing.js";
 import { SpeakableStream, type FencedCodeBlock, type SpeakableSourceRange } from "./speakable.js";
 import { applySpokenEdit, resolveDictationCandidates } from "./prompt-editor.js";
+import { narrationRenderKey } from "./render-identity.js";
 import { Vocalizer } from "./vocalizer.js";
 import { isVoice, VOICES } from "./voices.js";
 import { VoiceWorkerClient, type WorkerEvent } from "./worker-client.js";
@@ -85,7 +86,7 @@ function playbackTimingSnapshots(ctx: ExtensionContext): PlaybackTimingSnapshot[
 	for (const entry of ctx.sessionManager.getBranch()) {
 		if (entry.type !== "custom" || entry.customType !== PLAYBACK_TIMING_ENTRY) continue;
 		const data = entry.data;
-		if (!data || typeof data !== "object" || !("version" in data) || data.version !== 1) continue;
+		if (!data || typeof data !== "object" || !("version" in data) || data.version !== 2) continue;
 		snapshots.push(data as PlaybackTimingSnapshot);
 	}
 	return snapshots;
@@ -97,14 +98,6 @@ function codeDescriptionSnapshots(ctx: ExtensionContext): unknown[] {
 		if (entry.type === "custom" && entry.customType === CODE_DESCRIPTION_CACHE_ENTRY) snapshots.push(entry.data);
 	}
 	return snapshots;
-}
-
-function timingItems(text: string): Array<{ text: string; source: SpeakableSourceRange }> {
-	const stream = new SpeakableStream();
-	return [...stream.push(text), ...stream.flush()].map(item => ({
-		text: item.kind === "speech" ? item.text : fallbackCodeDescription(item.block),
-		source: item.source,
-	}));
 }
 
 function describableCodeBlocks(text: string): FencedCodeBlock[] {
@@ -223,6 +216,25 @@ export default async function (pi: ExtensionAPI) {
 				}
 				return plan;
 			});
+	};
+
+	const timingItemsFor = async (
+		ctx: ExtensionContext,
+		text: string,
+	): Promise<Array<{ text: string; source: SpeakableSourceRange }>> => {
+		const stream = new SpeakableStream();
+		const result: Array<{ text: string; source: SpeakableSourceRange }> = [];
+		for (const item of [...stream.push(text), ...stream.flush()]) {
+			if (item.kind === "speech") {
+				result.push({ text: item.text, source: item.source });
+				continue;
+			}
+			const plan = await requestCodeDescription(ctx, item.block);
+			let chunks = chunkCodeNarration(plan);
+			if (chunks.length === 0) chunks = chunkCodeNarration(plainCodeNarration(fallbackCodeDescription(item.block)));
+			for (const chunk of chunks) result.push({ text: chunk.text, source: item.source });
+		}
+		return result;
 	};
 
 	let codeDescriptionPreprocessing: Promise<void> | undefined;
@@ -504,6 +516,7 @@ export default async function (pi: ExtensionAPI) {
 	const phoneInput = new PhoneInputClient();
 	const timingWorkers: VoiceWorkerClient[] = [];
 	let timingWorkEpoch = 0;
+	let timingRescheduleRequested = false;
 
 	const ensureTimingWorkers = (count: number): VoiceWorkerClient[] => {
 		while (timingWorkers.length < count) timingWorkers.push(new VoiceWorkerClient(() => {}));
@@ -533,8 +546,27 @@ export default async function (pi: ExtensionAPI) {
 		vocalizer.speakFrom(suffix, sourceOffset);
 	};
 
+	const renderKeyFor = (ctx: ExtensionContext, text: string): string => {
+		const codeDependencies: string[] = [];
+		for (const block of describableCodeBlocks(text)) {
+			try {
+				const key = codeDescriptionCacheKey(ctx, block, config.editModel, config.codeNarration);
+				codeDependencies.push(JSON.stringify([key, codeDescriptionCache.get(key) ?? "missing"]));
+			} catch {
+				codeDependencies.push(`fallback:${block.language}:${block.code}`);
+			}
+		}
+		return narrationRenderKey(text, config, codeDependencies);
+	};
+
+	const playbackMessages = (ctx: ExtensionContext): PlaybackMessage[] =>
+		completedAssistantMessages(ctx, config.mode).map(message => ({
+			...message,
+			renderKey: renderKeyFor(ctx, message.text),
+		}));
+
 	const syncPlaybackMessages = (ctx: ExtensionContext, selectLatest = false): PlaybackMessage[] => {
-		const messages = completedAssistantMessages(ctx, config.mode);
+		const messages = playbackMessages(ctx);
 		playbackHistory.sync(messages, selectLatest);
 		return messages;
 	};
@@ -546,7 +578,7 @@ export default async function (pi: ExtensionAPI) {
 		attempt = 0,
 	): void => {
 		playbackHistory.updateText(playbackId, text);
-		const messages = completedAssistantMessages(ctx, config.mode);
+		const messages = playbackMessages(ctx);
 		const completed = messages.findLast(message => message.text === text);
 		if (completed) {
 			playbackHistory.rename(playbackId, completed);
@@ -588,7 +620,7 @@ export default async function (pi: ExtensionAPI) {
 			const checkpoints: PlaybackTimingSnapshot["checkpoints"] = [];
 			let time = 0;
 			try {
-				for (const item of timingItems(message.text)) {
+				for (const item of await timingItemsFor(ctx, message.text)) {
 					const duration = await workers[lane].measureSegment(item.text, measurementConfig);
 					if (epoch !== contextEpoch || workEpoch !== timingWorkEpoch || activeContext !== ctx) return;
 					if (!Number.isFinite(duration) || duration <= 0) continue;
@@ -600,9 +632,15 @@ export default async function (pi: ExtensionAPI) {
 				return;
 			}
 			if (checkpoints.length === 0) return;
+			const resolvedRenderKey = renderKeyFor(ctx, message.text);
+			if (resolvedRenderKey !== message.renderKey) {
+				message.renderKey = resolvedRenderKey;
+				playbackHistory.sync(playbackMessages(ctx));
+			}
 			const snapshot: PlaybackTimingSnapshot = {
-				version: 1,
+				version: 2,
 				messageId: message.id,
+				renderKey: resolvedRenderKey,
 				duration: time,
 				checkpoints,
 			};
@@ -620,6 +658,10 @@ export default async function (pi: ExtensionAPI) {
 			timingPreprocessing = undefined;
 			timingPreprocessingProgress = undefined;
 			refreshPreprocessingProgress();
+			if (timingRescheduleRequested && epoch === contextEpoch && activeContext === ctx && config.enabled) {
+				timingRescheduleRequested = false;
+				scheduleMissingTimings(ctx);
+			}
 		});
 	};
 
@@ -632,6 +674,19 @@ export default async function (pi: ExtensionAPI) {
 		const wasEnabled = config.enabled;
 		await saveVoiceConfig(next);
 		config = next;
+		const renderDependenciesChanged =
+			previous.ttsModel !== config.ttsModel ||
+			previous.ttsDtype !== config.ttsDtype ||
+			previous.voice !== config.voice ||
+			previous.speed !== config.speed ||
+			previous.codeNarration !== config.codeNarration ||
+			previous.editModel !== config.editModel ||
+			previous.audioCache !== config.audioCache ||
+			previous.audioCacheBitrate !== config.audioCacheBitrate;
+		if (renderDependenciesChanged) {
+			timingRescheduleRequested = true;
+			cancelTimingWorkers();
+		}
 		if (wasEnabled && !config.enabled) {
 			vocalizer.clear();
 			narration.finish();
@@ -639,7 +694,14 @@ export default async function (pi: ExtensionAPI) {
 		state = "idle";
 		refreshStatus();
 		refreshPlaybackTimeline();
-		if (activeContext) scheduleMissingCodeDescriptions(activeContext);
+		if (activeContext) {
+			syncPlaybackMessages(activeContext);
+			scheduleMissingCodeDescriptions(activeContext);
+			if (config.enabled && !timingPreprocessing) {
+				timingRescheduleRequested = false;
+				scheduleMissingTimings(activeContext);
+			}
+		}
 		if (
 			config.enabled &&
 			(!wasEnabled ||
@@ -902,7 +964,7 @@ export default async function (pi: ExtensionAPI) {
 			if (stopReason !== "aborted" && stopReason !== "error" && stopReason !== undefined) {
 				const text = assistantText(event.message);
 				if (text) {
-					const messages = completedAssistantMessages(ctx, config.mode);
+					const messages = playbackMessages(ctx);
 					const completed = messages.findLast(message => message.text === text);
 					if (completed) {
 						playbackHistory.sync(messages, true);
@@ -922,7 +984,9 @@ export default async function (pi: ExtensionAPI) {
 			pi.appendEntry(CODE_DESCRIPTION_CACHE_ENTRY, snapshot);
 		}
 		pendingCodeDescriptions.clear();
+		syncPlaybackMessages(ctx);
 		scheduleMissingCodeDescriptions(ctx);
+		scheduleMissingTimings(ctx);
 	});
 
 	pi.registerShortcut("ctrl+shift+v", {
@@ -950,7 +1014,7 @@ export default async function (pi: ExtensionAPI) {
 			ctx.ui.notify("There is no completed assistant message to replay yet", "warning");
 			return;
 		}
-		playTarget(target, true);
+		playTarget(target, !playbackHistory.hasTimings());
 	};
 
 	pi.registerShortcut("f6", {
@@ -959,7 +1023,7 @@ export default async function (pi: ExtensionAPI) {
 			if (!canNavigatePlayback(ctx)) return;
 			syncPlaybackMessages(ctx);
 			const message = playbackHistory.move(-1);
-			if (message) playTarget({ ...message, time: 0, sourceOffset: 0 }, true);
+			if (message) playTarget({ ...message, time: 0, sourceOffset: 0 }, !playbackHistory.hasTimings());
 		},
 	});
 
@@ -1017,7 +1081,7 @@ export default async function (pi: ExtensionAPI) {
 			if (!canNavigatePlayback(ctx)) return;
 			syncPlaybackMessages(ctx);
 			const message = playbackHistory.move(1);
-			if (message) playTarget({ ...message, time: 0, sourceOffset: 0 }, true);
+			if (message) playTarget({ ...message, time: 0, sourceOffset: 0 }, !playbackHistory.hasTimings());
 		},
 	});
 

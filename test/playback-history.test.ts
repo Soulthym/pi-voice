@@ -13,7 +13,7 @@ function segment(id: number, utterance: number, start: number) {
 
 test("maps playback time to approximate source checkpoints without audio storage", () => {
 	const history = new PlaybackHistory();
-	history.sync([{ id: "message", text: "x".repeat(120) }], true);
+	history.sync([{ id: "message", text: "x".repeat(120), renderKey: "render-a" }], true);
 	history.beginCapture("message", "x".repeat(120));
 	for (const [id, start, source] of [
 		[1, 0, 0],
@@ -51,7 +51,7 @@ test("maps playback time to approximate source checkpoints without audio storage
 	assert.ok(snapshot);
 	assert.equal(history.snapshotForUtterance(1), undefined);
 	const restored = new PlaybackHistory();
-	restored.sync([{ id: "message", text: "x".repeat(120) }], true);
+	restored.sync([{ id: "message", text: "x".repeat(120), renderKey: "render-a" }], true);
 	restored.restore([snapshot]);
 	assert.deepEqual(restored.seekTarget(10), {
 		id: "message",
@@ -64,24 +64,29 @@ test("maps playback time to approximate source checkpoints without audio storage
 test("invalidates and replaces timing checkpoints for a full rerender", () => {
 	const text = "x".repeat(80);
 	const history = new PlaybackHistory();
-	history.sync([{ id: "message", text }], true);
+	history.sync([{ id: "message", text, renderKey: "old-render" }], true);
 	history.restore([
 		{
-			version: 1,
+			version: 2,
 			messageId: "message",
+			renderKey: "old-render",
 			duration: 9,
 			checkpoints: [{ time: 0, duration: 9, sourceOffset: 0 }],
 		},
 	]);
 	assert.equal(history.status()?.duration, 9);
+	history.sync([{ id: "message", text, renderKey: "old-render" }]);
+	assert.equal(history.status()?.duration, 9);
 
-	history.beginCapture("message", text, 0, true);
+	history.sync([{ id: "message", text, renderKey: "new-render" }]);
 	assert.equal(history.status()?.hasTimings, false);
+	history.beginCapture("message", text, 0, true);
 	history.registerSegment(segment(10, 3, 0));
 	history.setSegmentAudio(10, 0, 4);
 	history.finishUtterance(3);
 	const replacement = history.snapshotForUtterance(3);
 	assert.ok(replacement);
+	assert.equal(replacement.renderKey, "new-render");
 	assert.equal(replacement.duration, 4);
 	assert.deepEqual(replacement.checkpoints, [{ time: 0, duration: 4, sourceOffset: 0 }]);
 });
@@ -90,8 +95,8 @@ test("navigates session messages and preserves a live record when it receives it
 	const history = new PlaybackHistory();
 	history.sync(
 		[
-			{ id: "one", text: "First" },
-			{ id: "two", text: "Second" },
+			{ id: "one", text: "First", renderKey: "one" },
+			{ id: "two", text: "Second", renderKey: "two" },
 		],
 		true,
 	);
@@ -101,12 +106,12 @@ test("navigates session messages and preserves a live record when it receives it
 	history.beginCapture("live:1", "");
 	history.registerSegment(segment(4, 2, 0));
 	history.setSegmentAudio(4, 0, 3);
-	history.rename("live:1", { id: "three", text: "Third" });
+	history.rename("live:1", { id: "three", text: "Third", renderKey: "three" });
 	history.sync(
 		[
-			{ id: "one", text: "First" },
-			{ id: "two", text: "Second" },
-			{ id: "three", text: "Third" },
+			{ id: "one", text: "First", renderKey: "one" },
+			{ id: "two", text: "Second", renderKey: "two" },
+			{ id: "three", text: "Third", renderKey: "three" },
 		],
 	);
 	assert.equal(history.selected()?.id, "three");
