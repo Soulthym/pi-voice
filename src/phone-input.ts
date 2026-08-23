@@ -1,5 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { EventEmitter } from "node:events";
 import * as net from "node:net";
+import { fileURLToPath } from "node:url";
 
 const RECORDING_TIMEOUT_MS = 2 * 60_000;
 const MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
@@ -9,10 +11,46 @@ const SPEECH_THRESHOLD = 0.012;
 const SILENCE_SECONDS = 1.35;
 const NO_SPEECH_TIMEOUT_SECONDS = 12;
 
-function parseEndpoint(endpoint: string): { host: string; port: number } {
+type InputConnection = EventEmitter & {
+	write(data: string): void;
+	destroy(): void;
+	setNoDelay?(enabled: boolean): void;
+	setEncoding?(encoding: BufferEncoding): void;
+};
+
+class LocalInputConnection extends EventEmitter implements InputConnection {
+	#child: ChildProcessWithoutNullStreams;
+
+	constructor() {
+		super();
+		const script = fileURLToPath(new URL("../client/pi-voice-stt-session", import.meta.url));
+		this.#child = spawn("bash", [script], { stdio: ["pipe", "pipe", "pipe"] });
+		this.#child.stdout.on("data", chunk => this.emit("data", chunk));
+		this.#child.once("error", error => this.emit("error", error));
+		this.#child.once("close", () => this.emit("close"));
+		queueMicrotask(() => this.emit("connect"));
+	}
+
+	write(data: string): void {
+		if (!this.#child.stdin.destroyed) this.#child.stdin.write(data);
+	}
+
+	destroy(): void {
+		this.#child.stdin.destroy();
+		this.#child.kill("SIGTERM");
+	}
+}
+
+function connectEndpoint(endpoint: string): InputConnection {
+	if (endpoint === "local") return new LocalInputConnection();
 	const url = new URL(endpoint);
-	if (url.protocol !== "tcp:" || !url.hostname || !url.port) throw new Error(`Invalid phone input endpoint: ${endpoint}`);
-	return { host: url.hostname.replace(/^\[|\]$/g, ""), port: Number(url.port) };
+	if (url.protocol === "tcp:" && url.hostname && url.port) {
+		return net.createConnection({ host: url.hostname.replace(/^\[|\]$/g, ""), port: Number(url.port) });
+	}
+	if (url.protocol === "unix:" && !url.hostname && url.pathname.startsWith("/")) {
+		return net.createConnection({ path: decodeURIComponent(url.pathname) });
+	}
+	throw new Error(`Invalid voice input endpoint: ${endpoint}`);
 }
 
 export type PhoneCapture = { type: "audio"; data: Buffer } | { type: "text"; data: string };
@@ -103,7 +141,7 @@ class LiveVoiceDetector {
 }
 
 export class PhoneInputClient {
-	#socket: net.Socket | null = null;
+	#socket: InputConnection | null = null;
 	#activeEndpoint: string | null = null;
 
 	cancel(): void {
@@ -113,9 +151,8 @@ export class PhoneInputClient {
 	}
 
 	stop(endpoint: string): Promise<void> {
-		const { host, port } = parseEndpoint(endpoint);
 		return new Promise<void>((resolve, reject) => {
-			const socket = net.createConnection({ host, port });
+			const socket = connectEndpoint(endpoint);
 			let response = "";
 			let settled = false;
 			const finish = (error?: Error): void => {
@@ -126,9 +163,9 @@ export class PhoneInputClient {
 				if (error) reject(error);
 				else resolve();
 			};
-			const timer = setTimeout(() => finish(new Error("Phone microphone stop timed out")), 10_000);
+			const timer = setTimeout(() => finish(new Error("Voice microphone stop timed out")), 10_000);
 			timer.unref?.();
-			socket.setEncoding("utf8");
+			socket.setEncoding?.("utf8");
 			socket.on("connect", () => socket.write("stop\n"));
 			socket.on("data", chunk => {
 				response += chunk;
@@ -141,18 +178,17 @@ export class PhoneInputClient {
 			});
 			socket.on("error", finish);
 			socket.on("close", () => {
-				if (!settled) finish(new Error("Phone microphone stop connection closed"));
+				if (!settled) finish(new Error("Voice microphone stop connection closed"));
 			});
 		});
 	}
 
 	capture(endpoint: string, options: PhoneCaptureOptions = {}): Promise<PhoneCapture> {
 		this.cancel();
-		const { host, port } = parseEndpoint(endpoint);
-		const socket = net.createConnection({ host, port });
+		const socket = connectEndpoint(endpoint);
 		this.#socket = socket;
 		this.#activeEndpoint = endpoint;
-		socket.setNoDelay(true);
+		socket.setNoDelay?.(true);
 
 		return new Promise<PhoneCapture>((resolve, reject) => {
 			let settled = false;
@@ -172,11 +208,11 @@ export class PhoneInputClient {
 				socket.destroy();
 				if (error) reject(error);
 				else if (capture) resolve(capture);
-				else reject(new Error("Phone returned no capture"));
+				else reject(new Error("Voice device returned no capture"));
 			};
 			const timer = setTimeout(() => {
 				void this.stop(endpoint).catch(() => {});
-				finish(new Error("Phone microphone timed out"));
+				finish(new Error("Voice microphone timed out"));
 			}, RECORDING_TIMEOUT_MS);
 			timer.unref?.();
 
@@ -185,7 +221,7 @@ export class PhoneInputClient {
 				streamBytes += chunk.length;
 				if (streamBytes > MAX_RESPONSE_BYTES) {
 					void this.stop(endpoint).catch(() => {});
-					finish(new Error("Phone microphone stream exceeded 32 MB"));
+					finish(new Error("Voice microphone stream exceeded 32 MB"));
 					return;
 				}
 				audioChunks.push(chunk);
@@ -200,7 +236,7 @@ export class PhoneInputClient {
 				}
 				headerBuffer = Buffer.concat([headerBuffer, raw]);
 				if (headerBuffer.length > MAX_RESPONSE_BYTES) {
-					finish(new Error("Phone microphone response was too large"));
+					finish(new Error("Voice microphone response was too large"));
 					return;
 				}
 				const newline = headerBuffer.indexOf(0x0a);
@@ -221,13 +257,13 @@ export class PhoneInputClient {
 				const payload = separator === -1 ? "" : header.slice(separator + 1);
 				if (status === "audio") {
 					const audio = Buffer.from(payload, "base64");
-					if (audio.length === 0) finish(new Error("Phone returned an empty recording"));
+					if (audio.length === 0) finish(new Error("Voice device returned an empty recording"));
 					else finish(undefined, { type: "audio", data: audio });
 					return;
 				}
 				const decoded = Buffer.from(payload, "base64").toString("utf8").trim();
 				if (status === "ok") finish(undefined, { type: "text", data: decoded });
-				else finish(new Error(decoded || "Phone microphone failed"));
+				else finish(new Error(decoded || "Voice microphone failed"));
 			});
 			socket.on("error", error => finish(error));
 			socket.on("close", () => {
@@ -235,7 +271,7 @@ export class PhoneInputClient {
 				if (streamMode && streamBytes > 0) {
 					finish(undefined, { type: "audio", data: Buffer.concat(audioChunks, streamBytes) });
 				} else {
-					finish(new Error("Phone microphone connection closed before returning audio"));
+					finish(new Error("Voice microphone connection closed before returning audio"));
 				}
 			});
 		});

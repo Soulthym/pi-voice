@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+set -u
+
+runtime_dir=${TMPDIR:-/data/data/com.termux/files/usr/tmp}
+session_id=${BASHPID:-$$}
+ipc_socket="$runtime_dir/pi-voice-mpv-$session_id.sock"
+audio_fifo="$runtime_dir/pi-voice-mpv-$session_id.pcm"
+mpv_pid=
+feeder_pid=
+
+cleanup() {
+  trap - EXIT INT TERM
+  [[ -n "$feeder_pid" ]] && kill "$feeder_pid" 2>/dev/null || true
+  [[ -n "$mpv_pid" ]] && kill "$mpv_pid" 2>/dev/null || true
+  [[ -n "$feeder_pid" ]] && wait "$feeder_pid" 2>/dev/null || true
+  [[ -n "$mpv_pid" ]] && wait "$mpv_pid" 2>/dev/null || true
+  rm -f "$ipc_socket" "$audio_fifo"
+}
+trap cleanup EXIT INT TERM
+
+rm -f "$ipc_socket" "$audio_fifo"
+mkfifo "$audio_fifo"
+
+mpv --really-quiet --no-video --cache=no \
+  --input-ipc-server="$ipc_socket" \
+  --demuxer=rawaudio \
+  --demuxer-rawaudio-format=floatle \
+  --demuxer-rawaudio-rate=24000 \
+  --demuxer-rawaudio-channels=mono \
+  "$audio_fifo" > /dev/null 2>/dev/null &
+mpv_pid=$!
+
+# stdin is the TCP audio direction. stdout is deliberately kept free for JSON
+# playback-position feedback over the reverse direction of the same socket.
+# Bash redirects stdin of asynchronous commands to /dev/null when job control is
+# disabled, so preserve the socket on an explicit descriptor before backgrounding.
+exec 3<&0
+cat <&3 >"$audio_fifo" &
+feeder_pid=$!
+
+for _ in {1..50}; do
+  [[ -S "$ipc_socket" ]] && break
+  kill -0 "$mpv_pid" 2>/dev/null || exit 1
+  sleep 0.02
+done
+[[ -S "$ipc_socket" ]] || exit 1
+
+request_id=0
+while kill -0 "$mpv_pid" 2>/dev/null; do
+  ((request_id += 1))
+  response=$(
+    printf '{"command":["get_property","time-pos"],"request_id":%d}\n' "$request_id" |
+      socat -T 0.08 - "UNIX-CONNECT:$ipc_socket" 2>/dev/null || true
+  )
+  position=${response#*\"data\":}
+  position=${position%%,*}
+  if [[ "$position" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    printf '{"type":"playback","position":%s}\n' "$position" || exit 0
+  fi
+  sleep 0.08
+done
+
+if kill -0 "$feeder_pid" 2>/dev/null; then
+  kill "$feeder_pid" 2>/dev/null || true
+fi
+wait "$feeder_pid" 2>/dev/null || true
+feeder_pid=
+wait "$mpv_pid" 2>/dev/null || true
+mpv_pid=

@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+set -u
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+if [[ ${PREFIX:-} == *com.termux* ]] || command -v termux-microphone-record >/dev/null 2>&1; then
+  exec "$SCRIPT_DIR/../termux/pi-voice-stt-session"
+fi
+
+runtime_dir=${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}
+state_dir="$runtime_dir/pi-voice-client-${UID:-$(id -u)}"
+stop_file="$state_dir/stop-recording"
+active_file="$state_dir/recording-active"
+mkdir -p "$state_dir"
+
+encode_message() {
+  printf '%s' "$1" | base64 | tr -d '\n'
+}
+
+IFS= read -r command || exit 1
+if [[ $command == stop ]]; then
+  if [[ -e $active_file ]]; then
+    : >"$stop_file"
+    printf 'ok %s\n' "$(encode_message stopping)"
+  else
+    printf 'error %s\n' "$(encode_message 'The local microphone is not recording')"
+  fi
+  exit 0
+fi
+if [[ $command != record ]]; then
+  printf 'error %s\n' "$(encode_message "Unsupported local voice command: $command")"
+  exit 0
+fi
+if ! command -v ffmpeg >/dev/null 2>&1; then
+  printf 'error %s\n' "$(encode_message 'ffmpeg is required for local microphone capture')"
+  exit 0
+fi
+
+pulse_source=
+command -v pactl >/dev/null 2>&1 && pulse_source=$(pactl get-default-source 2>/dev/null || true)
+if command -v pw-record >/dev/null 2>&1 && command -v wpctl >/dev/null 2>&1 && wpctl get-volume @DEFAULT_AUDIO_SOURCE@ >/dev/null 2>&1 && { [[ -z $pulse_source ]] || [[ $pulse_source != *.monitor ]]; }; then
+  recorder=pw-record
+elif command -v parec >/dev/null 2>&1 && { [[ -z $pulse_source ]] || [[ $pulse_source != *.monitor ]]; }; then
+  recorder=parec
+else
+  printf 'error %s\n' "$(encode_message 'No usable default Linux microphone found; connect one and install PipeWire or PulseAudio utilities')"
+  exit 0
+fi
+
+max_record_seconds=${PI_VOICE_MAX_RECORD_SECONDS:-120}
+rm -f "$stop_file"
+printf '%s\n' "${BASHPID:-$$}" >"$active_file"
+producer_pid=
+cleanup() {
+  trap - EXIT INT TERM
+  [[ -n ${producer_pid:-} ]] && kill -- "-$producer_pid" 2>/dev/null || true
+  [[ -n ${producer_pid:-} ]] && wait "$producer_pid" 2>/dev/null || true
+  rm -f "$active_file" "$stop_file"
+}
+trap cleanup EXIT INT TERM
+
+printf 'stream\n'
+if [[ $recorder == pw-record ]]; then
+  setsid bash -c '
+    pw-record --raw --format s16 --rate 16000 --channels 1 - 2>/dev/null |
+      ffmpeg -hide_banner -loglevel error -f s16le -ar 16000 -ac 1 -i pipe:0 \
+        -c:a libopus -application voip -b:a 32k -vbr on -f ogg pipe:1 2>/dev/null
+  ' &
+else
+  setsid bash -c '
+    parec --raw --format=s16le --rate=16000 --channels=1 2>/dev/null |
+      ffmpeg -hide_banner -loglevel error -f s16le -ar 16000 -ac 1 -i pipe:0 \
+        -c:a libopus -application voip -b:a 32k -vbr on -f ogg pipe:1 2>/dev/null
+  ' &
+fi
+producer_pid=$!
+
+for ((tick = 0; tick < max_record_seconds * 10; tick += 1)); do
+  [[ -e $stop_file ]] && break
+  kill -0 "$producer_pid" 2>/dev/null || break
+  sleep 0.1
+done
+kill -INT -- "-$producer_pid" 2>/dev/null || kill -INT "$producer_pid" 2>/dev/null || true
+wait "$producer_pid" 2>/dev/null || true
+producer_pid=

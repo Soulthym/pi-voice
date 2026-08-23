@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+AUDIO_PORT=${PI_VOICE_AUDIO_PORT:-8765}
+CONTROL_PORT=${PI_VOICE_CONTROL_PORT:-8766}
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+
+for command in socat mpv ffmpeg; do
+  if ! command -v "$command" >/dev/null 2>&1; then
+    if [[ ${PREFIX:-} == *com.termux* ]]; then
+      printf 'Missing %s. Run: pkg install socat mpv ffmpeg termux-api\n' "$command" >&2
+    else
+      printf 'Missing %s. Install socat, mpv, ffmpeg, and PipeWire or PulseAudio utilities.\n' "$command" >&2
+    fi
+    exit 1
+  fi
+done
+
+cleanup() {
+  trap - EXIT INT TERM
+  kill "${audio_pid:-}" "${control_pid:-}" 2>/dev/null || true
+  wait "${audio_pid:-}" "${control_pid:-}" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+socat -t 5 \
+  "TCP4-LISTEN:${AUDIO_PORT},bind=127.0.0.1,reuseaddr,fork" \
+  EXEC:"${SCRIPT_DIR}/pi-voice-audio-session" &
+audio_pid=$!
+
+socat \
+  "TCP4-LISTEN:${CONTROL_PORT},bind=127.0.0.1,reuseaddr,fork" \
+  EXEC:"${SCRIPT_DIR}/pi-voice-stt-session" &
+control_pid=$!
+
+printf 'Pi Voice client ready: audio=%s microphone=%s\n' "$AUDIO_PORT" "$CONTROL_PORT" >&2
+wait -n "$audio_pid" "$control_pid"

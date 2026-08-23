@@ -1,9 +1,9 @@
 {
   "name": "pi-voice",
-  "version": "0.21.2",
+  "version": "0.22.0",
   "private": true,
   "type": "module",
-  "description": "Bidirectional Kokoro and Whisper phone voice mode for the Pi coding agent",
+  "description": "Bidirectional local and SSH-routed Kokoro/Whisper voice mode for the Pi coding agent",
   "license": "MIT",
   "keywords": [
     "pi-package",
@@ -12,6 +12,7 @@
     "text-to-speech",
     "speech-to-text",
     "termux",
+    "linux",
     "voice"
   ],
   "pi": {

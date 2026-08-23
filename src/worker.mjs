@@ -274,7 +274,7 @@ function decodePhoneAudio(encoded) {
 	return new Promise((resolve, reject) => {
 		const ffmpeg = executable("ffmpeg");
 		if (!ffmpeg) {
-			reject(new Error("ffmpeg is required on the desktop for phone microphone input"));
+			reject(new Error("ffmpeg is required on the Pi host for microphone input"));
 			return;
 		}
 		const child = spawn(
@@ -289,7 +289,7 @@ function decodePhoneAudio(encoded) {
 			bytes += chunk.length;
 			if (bytes > 32 * 1024 * 1024) {
 				child.kill("SIGKILL");
-				reject(new Error("Decoded phone recording exceeded 32 MB"));
+				reject(new Error("Decoded microphone recording exceeded 32 MB"));
 				return;
 			}
 			chunks.push(chunk);
@@ -388,6 +388,22 @@ function playerCommand(sampleRate) {
 			args: ["--raw", "--format", "f32", "--rate", String(sampleRate), "--channels", "1", "--latency", "100ms", "-"],
 		};
 	}
+	const mpv = executable("mpv");
+	if (mpv) {
+		return {
+			command: mpv,
+			args: [
+				"--really-quiet",
+				"--no-video",
+				"--cache=no",
+				"--demuxer=rawaudio",
+				"--demuxer-rawaudio-format=floatle",
+				"--demuxer-rawaudio-rate=" + String(sampleRate),
+				"--demuxer-rawaudio-channels=mono",
+				"-",
+			],
+		};
+	}
 	const ffplay = executable(process.platform === "win32" ? "ffplay.exe" : "ffplay");
 	if (ffplay) {
 		return {
@@ -395,7 +411,7 @@ function playerCommand(sampleRate) {
 			args: ["-nodisp", "-autoexit", "-loglevel", "error", "-f", "f32le", "-ar", String(sampleRate), "-ac", "1", "-i", "pipe:0"],
 		};
 	}
-	throw new Error("No audio player found. Install PipeWire (pw-play) or ffmpeg (ffplay).");
+	throw new Error("No audio player found. Install PipeWire (pw-play), mpv, or ffmpeg (ffplay).");
 }
 
 function attachPlaybackClock(sink, sampleRate, utterance, expectFeedback = false) {
@@ -463,14 +479,15 @@ function createLocalSink(sampleRate, utterance) {
 	return sink;
 }
 
-function parseTcpEndpoint(output) {
+function validateNetworkEndpoint(output) {
 	const url = new URL(output);
-	if (url.protocol !== "tcp:" || !url.hostname || !url.port) throw new Error(`Invalid TCP voice output: ${output}`);
-	return { host: url.hostname.replace(/^\[|\]$/g, ""), port: Number(url.port) };
+	if (url.protocol === "tcp:" && url.hostname && url.port) return;
+	if (url.protocol === "unix:" && !url.hostname && url.pathname.startsWith("/")) return;
+	throw new Error(`Invalid network voice output: ${output}`);
 }
 
-function createTcpSink(output, sampleRate, utterance) {
-	parseTcpEndpoint(output);
+function createNetworkSink(output, sampleRate, utterance) {
+	validateNetworkEndpoint(output);
 	const helperPath = fileURLToPath(new URL("./tcp-playback.mjs", import.meta.url));
 	const child = spawn(process.execPath, [helperPath, output, String(sampleRate), String(utterance)], {
 		// The helper inherits stdout so playback events bypass blocked Kokoro
@@ -553,8 +570,8 @@ function clearCurrentPlayer() {
 function startPlayer(sampleRate, utterance, output) {
 	if (player && playerUtterance === utterance && playerOutput === output) return player;
 	if (player) stopPlayer();
-	const sink = output.startsWith("tcp://")
-		? createTcpSink(output, sampleRate, utterance)
+	const sink = output.startsWith("tcp://") || output.startsWith("unix://")
+		? createNetworkSink(output, sampleRate, utterance)
 		: createLocalSink(sampleRate, utterance);
 	player = sink;
 	playerUtterance = utterance;

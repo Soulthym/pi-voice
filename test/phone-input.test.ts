@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import * as net from "node:net";
+import * as os from "node:os";
+import * as path from "node:path";
 import test from "node:test";
 import { PhoneInputClient } from "../src/phone-input.js";
 
@@ -28,6 +30,27 @@ test("requests a phone recording and decodes the returned audio", async () => {
 		const capture = await client.capture(`tcp://127.0.0.1:${port}`);
 		assert.equal(capture.type, "audio");
 		if (capture.type === "audio") assert.deepEqual(capture.data, expectedAudio);
+	} finally {
+		await new Promise<void>(resolve => server.close(() => resolve()));
+	}
+});
+
+test("connects to microphone bridges forwarded over Unix sockets", async () => {
+	const socketPath = path.join(os.tmpdir(), `pi-voice-input-${process.pid}-${Date.now()}.sock`);
+	const server = net.createServer(socket => {
+		socket.once("data", command => {
+			assert.equal(String(command), "record\n");
+			socket.end(`audio ${Buffer.from("unix-audio").toString("base64")}\n`);
+		});
+	});
+	await new Promise<void>((resolve, reject) => {
+		server.once("error", reject);
+		server.listen(socketPath, resolve);
+	});
+	try {
+		const capture = await new PhoneInputClient().capture(`unix://${socketPath}`);
+		assert.equal(capture.type, "audio");
+		if (capture.type === "audio") assert.equal(capture.data.toString(), "unix-audio");
 	} finally {
 		await new Promise<void>(resolve => server.close(() => resolve()));
 	}

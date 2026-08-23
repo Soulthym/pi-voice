@@ -35,7 +35,12 @@ function fail(error) {
 let endpoint;
 try {
 	endpoint = new URL(output);
-	if (endpoint.protocol !== "tcp:" || !endpoint.hostname || !endpoint.port) throw new Error(`Invalid TCP output: ${output}`);
+	if (
+		!((endpoint.protocol === "tcp:" && endpoint.hostname && endpoint.port) ||
+			(endpoint.protocol === "unix:" && !endpoint.hostname && endpoint.pathname.startsWith("/")))
+	) {
+		throw new Error(`Invalid network output: ${output}`);
+	}
 	if (!Number.isFinite(sampleRate) || sampleRate <= 0 || !Number.isInteger(utterance)) {
 		throw new Error("Invalid TCP playback parameters");
 	}
@@ -44,10 +49,13 @@ try {
 	process.exit(1);
 }
 
-const socket = net.createConnection({
-	host: endpoint.hostname.replace(/^\[|\]$/g, ""),
-	port: Number(endpoint.port),
-});
+const socket =
+	endpoint.protocol === "unix:"
+		? net.createConnection({ path: decodeURIComponent(endpoint.pathname) })
+		: net.createConnection({
+				host: endpoint.hostname.replace(/^\[|\]$/g, ""),
+				port: Number(endpoint.port),
+			});
 socket.setNoDelay(true);
 
 const timer = setInterval(() => {

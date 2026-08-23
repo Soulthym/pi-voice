@@ -132,18 +132,18 @@ new_master=false
 if ! ssh -S "$control_socket" -O check "$target" >/dev/null 2>&1; then
   new_master=true
   rm -f "$control_socket"
-  ssh "${ssh_options[@]}" -o RemoteCommand=none -o ControlMaster=yes -o ControlPersist=no \
+  ssh "${ssh_options[@]}" -T -o RemoteCommand=none -o ControlMaster=yes -o ControlPersist=no \
     -S "$control_socket" -N -f "$target"
 fi
-remote_home=$(ssh "${ssh_options[@]}" -S "$control_socket" -o RemoteCommand=none "$target" 'printf %s "$HOME"')
+remote_home=$(ssh "${ssh_options[@]}" -T -S "$control_socket" -o RemoteCommand=none "$target" 'printf %s "$HOME"')
 remote_device_dir=$remote_home/.cache/pi-voice/devices
 remote_audio_socket=$remote_device_dir/$device_id.audio.sock
 remote_input_socket=$remote_device_dir/$device_id.input.sock
 remote_registration=$remote_device_dir/$device_id.json
-ssh "${ssh_options[@]}" -S "$control_socket" -o RemoteCommand=none "$target" \
+ssh "${ssh_options[@]}" -T -S "$control_socket" -o RemoteCommand=none "$target" \
   "mkdir -p $(shell_quote "$remote_device_dir") && chmod 700 $(shell_quote "$remote_device_dir")" >/dev/null
 if [[ $new_master == true ]]; then
-  ssh "${ssh_options[@]}" -S "$control_socket" -o RemoteCommand=none "$target" \
+  ssh "${ssh_options[@]}" -T -S "$control_socket" -o RemoteCommand=none "$target" \
     "rm -f $(shell_quote "$remote_audio_socket") $(shell_quote "$remote_input_socket")" >/dev/null
   ssh -S "$control_socket" -O forward -R "$remote_audio_socket:127.0.0.1:$AUDIO_PORT" "$target" >/dev/null
   ssh -S "$control_socket" -O forward -R "$remote_input_socket:127.0.0.1:$CONTROL_PORT" "$target" >/dev/null
@@ -151,7 +151,7 @@ fi
 now=$(date +%s000)
 printf -v registration '{"version":1,"id":"%s","name":"%s","platform":"%s","audioEndpoint":"unix://%s","inputEndpoint":"unix://%s","connectedAt":%s,"lastActive":%s}\n' \
   "$device_id" "${device_name//\"/}" "$platform" "$remote_audio_socket" "$remote_input_socket" "$now" "$now"
-printf '%s' "$registration" | ssh "${ssh_options[@]}" -S "$control_socket" -o RemoteCommand=none "$target" \
+printf '%s' "$registration" | ssh "${ssh_options[@]}" -T -S "$control_socket" -o RemoteCommand=none "$target" \
   "umask 077; cat >$(shell_quote "$remote_registration")"
 printf '%s\n' "$$" >"$session_file"
 release_lock
@@ -165,7 +165,7 @@ cleanup() {
   target_sessions=("$target_state"/sessions/*)
   shopt -u nullglob
   if (( ${#target_sessions[@]} == 0 )); then
-    ssh "${ssh_options[@]}" -S "$control_socket" -o RemoteCommand=none "$target" \
+    ssh "${ssh_options[@]}" -T -S "$control_socket" -o RemoteCommand=none "$target" \
       "rm -f $(shell_quote "$remote_registration") $(shell_quote "$remote_audio_socket") $(shell_quote "$remote_input_socket")" >/dev/null 2>&1 || true
     ssh -S "$control_socket" -O exit "$target" >/dev/null 2>&1 || true
     rm -rf "$target_state" "$control_socket"

@@ -2,10 +2,10 @@
 
 A bidirectional phone voice-mode extension for the [Pi coding agent](https://github.com/earendil-works/pi), modeled after Oh My Pi's Kokoro vocalizer.
 
-- **Desktop → phone:** Pi runs Kokoro-82M locally and streams assistant speech through an SSH reverse tunnel to `mpv` in Termux.
-- **Phone → desktop:** The configured shortcut streams Ogg/Opus from the Termux microphone through a second reverse tunnel. Desktop-side voice activity detection stops on natural silence, Whisper transcribes locally, and Pi places the result in the prompt editor for review.
+- **Pi host → selected device:** Pi runs Kokoro-82M locally and plays through local Linux/Termux audio or streams through an SSH reverse tunnel to `mpv` on a selected Linux or Termux client.
+- **Selected device → Pi host:** The configured shortcut streams Ogg/Opus from the selected local or SSH-client microphone. Host-side voice activity detection stops on natural silence, Whisper transcribes locally, and Pi places the result in the prompt editor for review.
 
-Both tunnel endpoints bind only to loopback, and phone audio stays inside the encrypted SSH connection. The audio connection is full-duplex: the phone returns only `mpv` playback timestamps, not microphone data. Kokoro synthesis, Whisper transcription, and Wav2Vec2 alignment run locally on the desktop. Final ASR hypotheses are resolved against a bounded excerpt of the current session by Pi's configured editing model in both `append` and `smart` modes. The same model describes fenced code and patches for speech. If that model is remote, ASR hypotheses, existing drafts, recent session text, and fenced code being described are sent to its provider. Pin `editModel` to a local Pi-registered model to keep these requests local.
+Network bridge endpoints bind only to loopback or private per-device Unix sockets, and audio stays inside the encrypted SSH connection. The audio connection is full-duplex: the client returns only `mpv` playback timestamps, not microphone data. Kokoro synthesis, Whisper transcription, and Wav2Vec2 alignment run locally on the desktop. Final ASR hypotheses are resolved against a bounded excerpt of the current session by Pi's configured editing model in both `append` and `smart` modes. The same model describes fenced code and patches for speech. If that model is remote, ASR hypotheses, existing drafts, recent session text, and fenced code being described are sent to its provider. Pin `editModel` to a local Pi-registered model to keep these requests local.
 
 ## Features
 
@@ -22,7 +22,7 @@ Both tunnel endpoints bind only to loopback, and phone audio stays inside the en
 - Supports server-local playback or raw PCM over TCP/SSH.
 - Slightly dims unread assistant prose, gives the currently spoken sentence or clause a subtle background, and restores each word as it is heard, using fast local CTC forced alignment plus live `mpv` playback-position feedback from the phone.
 - Shows a classic playback timeline below the editor with play/pause/idle state, the current phone position, total narrated duration, and selected-message index. A `~` marks fallback clock estimates.
-- Streams phone microphone audio in near real time and stops automatically after natural silence.
+- Streams local or SSH-client microphone audio in near real time and stops automatically after natural silence.
 - Shows a revisable Whisper preview directly in Pi's editor while you speak.
 - Supports a second `Alt+M` as a manual stop for long pauses or noisy environments.
 - Leaves reviewed dictation in the editor by default; press Enter after correcting or extending it.
@@ -53,9 +53,9 @@ npm install
 pi install .
 ```
 
-Install `ffmpeg` on the server to encode and decode the optional Opus audio cache. If it is unavailable, synthesis continues normally but cache reads and writes are skipped.
+Install `ffmpeg` on the Pi host to encode/decode the Opus cache and microphone streams. Linux-local playback prefers PipeWire's `pw-play`, then `mpv`, then `ffplay`; microphone capture prefers `pw-record`, then PulseAudio's `parec`. Install `pipewire-utils` or `pulseaudio-utils` as appropriate.
 
-Configuration is stored in `~/.pi/agent/pi-voice.json`. For the bundled Termux bridge:
+Configuration is stored in `~/.pi/agent/pi-voice.json`. Automatic device routing is the default:
 
 ```json
 {
@@ -71,8 +71,8 @@ Configuration is stored in `~/.pi/agent/pi-voice.json`. For the bundled Termux b
   "alignmentModel": "onnx-community/wav2vec2-base-960h-ONNX",
   "alignmentDtype": "q8",
   "editModel": "current",
-  "output": "tcp://127.0.0.1:8765",
-  "input": "tcp://127.0.0.1:8766",
+  "output": "auto",
+  "input": "auto",
   "talkShortcut": "alt+m",
   "submitMode": "review",
   "editMode": "smart",
@@ -85,20 +85,41 @@ Configuration is stored in `~/.pi/agent/pi-voice.json`. For the bundled Termux b
 }
 ```
 
-## Termux setup
+With `auto`, a connected `pi-voice-ssh` client wins; otherwise Pi uses the host's local Linux or Termux microphone and speakers. Explicit `local`, `disabled`, `tcp://…`, and `unix:///…` values bypass automatic routing. `/voice device auto|local|<id>` stores a per-session preference. Output-producing keybindings and voice commands claim that session's device and update most-recently-active routing.
 
-Install Termux and the **Termux:API Android app from the same source** (normally F-Droid), then in Termux:
+| Pi host and connection | Automatic microphone and output |
+| --- | --- |
+| Linux desktop, normal `pi` | Desktop defaults |
+| Server, `pi-voice-ssh` from Linux | Linux client defaults |
+| Server, `pi-voice-ssh` from Termux | Termux client |
+| Linux desktop, `pi-voice-ssh` from Termux | Termux client |
+| Termux, normal `pi` | Termux microphone and `mpv` |
+
+## Linux and Termux client setup
+
+On a Linux laptop/desktop used as the SSH client:
 
 ```bash
-pkg update
-pkg install git openssh mpv socat termux-api
 git clone https://github.com/Soulthym/pi-voice.git
 cd pi-voice
 mkdir -p "$HOME/.local/bin"
-install -m755 termux/pi-voice-* "$HOME/.local/bin/"
+install -m755 client/pi-voice-* "$HOME/.local/bin/"
 ```
 
-Repeat the `install` command and restart `pi-voice-ssh` after upgrading; playback highlighting requires the current `pi-voice-audio-session` bridge.
+Install `openssh`, `socat`, `mpv`, `ffmpeg`, and either PipeWire or PulseAudio recording utilities.
+
+For Termux, install Termux and the **Termux:API Android app from the same source** (normally F-Droid), then:
+
+```bash
+pkg update
+pkg install git openssh mpv socat ffmpeg termux-api
+git clone https://github.com/Soulthym/pi-voice.git
+cd pi-voice
+mkdir -p "$HOME/.local/bin"
+install -m755 client/pi-voice-* "$HOME/.local/bin/"
+```
+
+Repeat the appropriate `install` command and restart `pi-voice-ssh` after upgrading.
 
 Ensure `~/.local/bin` is included in Termux's `PATH`. For Bash:
 
@@ -121,14 +142,16 @@ Connect using the wrapper instead of plain `ssh`:
 pi-voice-ssh YOUR_DESKTOP
 ```
 
-Then start `pi` in the remote shell. The wrapper starts the phone bridge and creates:
+Then start `pi` in the remote shell. The wrapper detects Linux versus Termux, exports a persistent device identity into the remote session, and creates per-device Unix-socket reverse forwards. Multiple wrappers from the same device to the same target multiplex through one SSH ControlMaster, one audio bridge, and one microphone bridge. The last wrapper to exit closes the master and client bridge immediately. Multiple devices may connect simultaneously; automatic routing prefers the current session's inherited device and otherwise the most recently active client.
 
 ```text
-server 127.0.0.1:8765 → SSH → phone audio player
-server 127.0.0.1:8766 → SSH → phone microphone recorder
+Pi host ~/.cache/pi-voice/devices/<id>.audio.sock → SSH → client player
+Pi host ~/.cache/pi-voice/devices/<id>.input.sock → SSH → client microphone
 ```
 
-If SSH reports that remote forwarding failed, ensure `AllowTcpForwarding yes` is enabled in the desktop's SSH server configuration.
+If forwarding is rejected, enable `AllowTcpForwarding yes` and `AllowStreamLocalForwarding yes` in the target SSH server. Plain local Pi needs no wrapper: `auto` falls back to local devices on Linux and Termux.
+
+> **TODO:** add native macOS and Windows client capture/playback backends after the Linux implementation has stabilized.
 
 ### Optional one-tap voice control key row
 
@@ -188,9 +211,10 @@ Commands:
 /voice timing-preprocess auto|<1..8>
 /voice audio-cache on|off
 /voice audio-bitrate <12..128>
+/voice device auto|local|<connected-device-id>
 /voice timing
-/voice output local|tcp://host:port
-/voice input disabled|tcp://host:port
+/voice output auto|local|tcp://host:port|unix:///path
+/voice input auto|local|disabled|tcp://host:port|unix:///path
 /voice shortcut <key|disabled>
 /voice submit review|auto
 /voice edit smart|append
@@ -223,9 +247,12 @@ Modes:
 - `PI_VOICE_CACHE_DIR`: alternate model cache (default `~/.cache/pi-voice/models`)
 - `PI_VOICE_AUDIO_CACHE_DIR`: alternate Opus audio cache (default `~/.cache/pi-voice/audio`)
 - `PI_VOICE_COORDINATOR_DIR`: alternate cross-session lease/attention directory (default `~/.cache/pi-voice/coordinator`)
+- `PI_VOICE_DEVICE_DIR`: alternate connected-device registry (default `~/.cache/pi-voice/devices`)
+- `PI_VOICE_DEVICE_NAME`: client name advertised by `pi-voice-ssh` (default: short hostname)
+- `PI_VOICE_CLIENT_COMMAND`: alternate client bridge executable used by `pi-voice-ssh`
 - `PI_VOICE_PLAYER`: alternate `pw-play`-compatible local player executable
-- `PI_VOICE_AUDIO_PORT`: phone audio-listener port (default `8765`)
+- `PI_VOICE_AUDIO_PORT`: client audio-listener port (default `8765`)
 - `PI_VOICE_CONTROL_PORT`: phone microphone-control port (default `8766`)
-- `PI_VOICE_MAX_RECORD_SECONDS`: safety limit for one phone recording (default `120`; export it in Termux before running `pi-voice-ssh`)
+- `PI_VOICE_MAX_RECORD_SECONDS`: safety limit for one client recording (default `120`; export it before running `pi-voice-ssh`)
 
 See `THIRD_PARTY_NOTICES.md` for attribution and model/runtime licensing.

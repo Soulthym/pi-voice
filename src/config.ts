@@ -26,11 +26,11 @@ export interface VoiceConfig {
 	/** Transformers.js CTC model used to force-align synthesized speech. */
 	alignmentModel: string;
 	alignmentDtype: VoiceModelDtype;
-	/** `local` for server speakers, or a TCP endpoint reached through an SSH reverse tunnel. */
+	/** `auto`, `local`, or a TCP/Unix endpoint reached through an SSH reverse tunnel. */
 	output: string;
-	/** `disabled`, or the phone speech-to-text control endpoint reached through a second reverse tunnel. */
+	/** `auto`, `local`, `disabled`, or a TCP/Unix microphone-control endpoint. */
 	input: string;
-	/** Pi key identifier used to start/stop phone recording, or `disabled`. */
+	/** Pi key identifier used to start/stop microphone recording, or `disabled`. */
 	talkShortcut: KeyId | "disabled";
 	/** Submit recognized speech immediately, or leave it in the editor for review. */
 	submitMode: VoiceSubmitMode;
@@ -64,8 +64,8 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
 	sttCandidates: 3,
 	alignmentModel: "onnx-community/wav2vec2-base-960h-ONNX",
 	alignmentDtype: "q8",
-	output: "local",
-	input: "disabled",
+	output: "auto",
+	input: "auto",
 	talkShortcut: "alt+m",
 	submitMode: "review",
 	editMode: "smart",
@@ -133,6 +133,20 @@ export function normalizeEditModel(value: unknown): string | undefined {
 	return separator > 0 && separator < model.length - 1 ? model : undefined;
 }
 
+export function normalizeDeviceEndpoint(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	try {
+		const url = new URL(value);
+		if (url.protocol === "unix:") {
+			if (url.hostname || url.username || url.password || url.search || url.hash || !url.pathname.startsWith("/")) return undefined;
+			return `unix://${url.pathname}`;
+		}
+	} catch {
+		return undefined;
+	}
+	return normalizeTcpEndpoint(value);
+}
+
 export function normalizeTcpEndpoint(value: unknown): string | undefined {
 	if (typeof value !== "string") return undefined;
 	try {
@@ -150,11 +164,11 @@ export function normalizeTcpEndpoint(value: unknown): string | undefined {
 }
 
 export function normalizeVoiceOutput(value: unknown): string | undefined {
-	return value === "local" ? "local" : normalizeTcpEndpoint(value);
+	return value === "auto" || value === "local" ? value : normalizeDeviceEndpoint(value);
 }
 
 export function normalizeVoiceInput(value: unknown): string | undefined {
-	return value === "disabled" ? "disabled" : normalizeTcpEndpoint(value);
+	return value === "auto" || value === "local" || value === "disabled" ? value : normalizeDeviceEndpoint(value);
 }
 
 const MODIFIERS = new Set(["alt", "ctrl", "shift", "super"]);

@@ -14,10 +14,14 @@ import {
 } from "../src/config.js";
 
 test("accepts local playback and SSH tunnel endpoints", () => {
+	assert.equal(normalizeVoiceOutput("auto"), "auto");
 	assert.equal(normalizeVoiceOutput("local"), "local");
 	assert.equal(normalizeVoiceOutput("tcp://127.0.0.1:8765"), "tcp://127.0.0.1:8765");
 	assert.equal(normalizeVoiceInput("tcp://127.0.0.1:8766"), "tcp://127.0.0.1:8766");
+	assert.equal(normalizeVoiceInput("auto"), "auto");
+	assert.equal(normalizeVoiceInput("local"), "local");
 	assert.equal(normalizeVoiceInput("disabled"), "disabled");
+	assert.equal(normalizeVoiceOutput("unix:///tmp/pi-voice.sock"), "unix:///tmp/pi-voice.sock");
 });
 
 test("rejects unsafe or malformed tunnel endpoints", () => {

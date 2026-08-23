@@ -20,6 +20,7 @@ import {
 	type VoiceSubmitMode,
 } from "./config.js";
 import { chunkCodeNarration, plainCodeNarration, type CodeNarrationPlan } from "./code-narration.js";
+import { DeviceRouter, type VoiceDeviceSelection } from "./device-router.js";
 import { LiveTranscriptionSession } from "./live-transcription.js";
 import { NarrationProgress } from "./narration-progress.js";
 import {
@@ -45,6 +46,7 @@ type SpeechPurpose = "turn" | "replay" | "notification";
 
 const PLAYBACK_TIMING_ENTRY = "pi-voice.playback-timing";
 const CODE_DESCRIPTION_CACHE_ENTRY = "pi-voice.code-description";
+const DEVICE_SELECTION_ENTRY = "pi-voice.device-selection";
 
 function assistantText(message: unknown): string {
 	if (!message || typeof message !== "object" || !("role" in message) || message.role !== "assistant") return "";
@@ -92,6 +94,19 @@ function playbackTimingSnapshots(ctx: ExtensionContext): PlaybackTimingSnapshot[
 		snapshots.push(data as PlaybackTimingSnapshot);
 	}
 	return snapshots;
+}
+
+function sessionDeviceSelection(ctx: ExtensionContext): VoiceDeviceSelection {
+	let selection: VoiceDeviceSelection = "auto";
+	for (const entry of ctx.sessionManager.getBranch()) {
+		if (entry.type !== "custom" || entry.customType !== DEVICE_SELECTION_ENTRY) continue;
+		const data = entry.data;
+		if (!data || typeof data !== "object" || !("selection" in data) || typeof data.selection !== "string") continue;
+		if (data.selection === "auto" || data.selection === "local" || /^[a-zA-Z0-9._-]{1,128}$/.test(data.selection)) {
+			selection = data.selection;
+		}
+	}
+	return selection;
 }
 
 function codeDescriptionSnapshots(ctx: ExtensionContext): unknown[] {
@@ -148,6 +163,9 @@ export default async function (pi: ExtensionAPI) {
 	let config = await loadVoiceConfig();
 	let activeContext: ExtensionContext | null = null;
 	let coordinator: SessionCoordinator | null = null;
+	const deviceRouter = new DeviceRouter();
+	let deviceSelection: VoiceDeviceSelection = "auto";
+	let activeDeviceId: string | undefined;
 	let ownsSpeech = false;
 	let speechPurpose: SpeechPurpose | undefined;
 	let ownerTurnEnded = false;
@@ -168,6 +186,7 @@ export default async function (pi: ExtensionAPI) {
 	let downloadPercent: number | undefined;
 	let lastError = "";
 	let inputInProgress = false;
+	let activeInputEndpoint: string | undefined;
 	let inputPhase: InputPhase = "idle";
 	let inputProgressTimer: NodeJS.Timeout | null = null;
 	let inputStartedAt = 0;
@@ -197,6 +216,23 @@ export default async function (pi: ExtensionAPI) {
 		narrationRenderTimer.unref?.();
 	};
 	const narration = new NarrationProgress(requestNarrationRender);
+
+	const routedVoiceConfig = (claim = false): VoiceConfig => {
+		const pinnedSelection = activeDeviceId && (ownsSpeech || inputInProgress) ? activeDeviceId : deviceSelection;
+		const device = claim ? deviceRouter.claim(deviceSelection) : deviceRouter.resolve(pinnedSelection);
+		activeDeviceId = device?.id;
+		return {
+			...config,
+			output: config.output === "auto" ? (device?.audioEndpoint ?? "local") : config.output,
+			input: config.input === "auto" ? (device?.inputEndpoint ?? "local") : config.input,
+		};
+	};
+
+	const claimOutputDevice = (): VoiceConfig => {
+		const routed = routedVoiceConfig(true);
+		refreshStatus();
+		return routed;
+	};
 
 	const refreshPreprocessingProgress = (): void => {
 		const ctx = activeContext;
@@ -535,7 +571,7 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	const vocalizer = new Vocalizer(
-		() => config,
+		() => routedVoiceConfig(),
 		handleWorkerEvent,
 		(block, _signal) => {
 			const ctx = activeContext;
@@ -657,6 +693,7 @@ export default async function (pi: ExtensionAPI) {
 			const acquired = force ? coordinator.forceAcquireSpeech() : coordinator.tryAcquireSpeech();
 			if (!acquired) return false;
 		}
+		claimOutputDevice();
 		if (voiceWorkerIdleTimer) clearTimeout(voiceWorkerIdleTimer);
 		voiceWorkerIdleTimer = null;
 		cancelTimingWorkers();
@@ -713,6 +750,7 @@ export default async function (pi: ExtensionAPI) {
 		if (!config.enabled || ownsSpeech) return;
 		const waiting = coordinator.nextUnannouncedWaiting();
 		if (!waiting || !coordinator.tryAcquireSpeech()) return;
+		claimOutputDevice();
 		if (voiceWorkerIdleTimer) clearTimeout(voiceWorkerIdleTimer);
 		voiceWorkerIdleTimer = null;
 		cancelTimingWorkers();
@@ -921,21 +959,22 @@ export default async function (pi: ExtensionAPI) {
 
 	const talk = async (ctx: ExtensionContext): Promise<void> => {
 		const talkEpoch = contextEpoch;
-		if (config.input === "disabled") {
-			ctx.ui.notify("Phone microphone is disabled. Configure /voice input tcp://127.0.0.1:8766", "warning");
+		const routed = claimOutputDevice();
+		if (routed.input === "disabled") {
+			ctx.ui.notify("Voice microphone input is disabled", "warning");
 			return;
 		}
 		if (inputPhase === "recording") {
-			setInputProgress("🎙 Stopping phone recording…");
+			setInputProgress("🎙 Stopping voice recording…");
 			try {
-				await phoneInput.stop(config.input);
+				await phoneInput.stop(activeInputEndpoint ?? routed.input);
 			} catch (error) {
-				ctx.ui.notify(`Phone microphone: ${error instanceof Error ? error.message : String(error)}`, "error");
+				ctx.ui.notify(`Voice microphone: ${error instanceof Error ? error.message : String(error)}`, "error");
 			}
 			return;
 		}
 		if (inputPhase === "transcribing") {
-			ctx.ui.notify("The previous phone recording is still being transcribed", "info");
+			ctx.ui.notify("The previous voice recording is still being transcribed", "info");
 			return;
 		}
 		beginInputProgress();
@@ -943,6 +982,8 @@ export default async function (pi: ExtensionAPI) {
 		vocalizer.clear();
 		narration.finish();
 		releaseSpeechOwnership(false);
+		reserveSpeechForInput();
+		activeInputEndpoint = routed.input;
 		state = "listening";
 		refreshStatus();
 		const editorBase = ctx.ui.getEditorText();
@@ -964,7 +1005,7 @@ export default async function (pi: ExtensionAPI) {
 			},
 		});
 		try {
-			const capture = await phoneInput.capture(config.input, {
+			const capture = await phoneInput.capture(routed.input, {
 				onProgress: progress => {
 					const elapsed = progress.elapsedSeconds.toFixed(1);
 					setInputProgress(
@@ -975,6 +1016,7 @@ export default async function (pi: ExtensionAPI) {
 				},
 				onAudio: audio => live.push(audio),
 			});
+			activeInputEndpoint = undefined;
 			inputPhase = "transcribing";
 			if (inputProgressTimer) clearInterval(inputProgressTimer);
 			inputProgressTimer = null;
@@ -998,6 +1040,7 @@ export default async function (pi: ExtensionAPI) {
 			state = "idle";
 			refreshStatus();
 			if (candidates.length === 0) {
+				releaseSpeechOwnership(false);
 				ctx.ui.setEditorText(editorBase);
 				ctx.ui.notify("No speech recognized", "warning");
 				return;
@@ -1027,6 +1070,7 @@ export default async function (pi: ExtensionAPI) {
 			}
 			if (talkEpoch !== contextEpoch || !activeContext) return;
 			if (config.submitMode === "review") {
+				releaseSpeechOwnership(false);
 				ctx.ui.setEditorText(prompt);
 				ctx.ui.notify("Dictation ready to review — press Enter to submit", "info");
 				return;
@@ -1035,12 +1079,14 @@ export default async function (pi: ExtensionAPI) {
 			if (ctx.isIdle()) pi.sendUserMessage(prompt);
 			else pi.sendUserMessage(prompt, { deliverAs: "steer" });
 		} catch (error) {
+			activeInputEndpoint = undefined;
+			releaseSpeechOwnership(false);
 			live.cancel();
 			if (talkEpoch !== contextEpoch || !activeContext) return;
 			clearInputProgress();
 			state = "error";
 			refreshStatus();
-			ctx.ui.notify(`Phone microphone: ${error instanceof Error ? error.message : String(error)}`, "error");
+			ctx.ui.notify(`Voice microphone: ${error instanceof Error ? error.message : String(error)}`, "error");
 		}
 	};
 
@@ -1050,6 +1096,8 @@ export default async function (pi: ExtensionAPI) {
 		coordinator?.shutdown();
 		coordinator = new SessionCoordinator(ctx.cwd, ctx.sessionManager.getSessionId());
 		coordinator.start();
+		deviceSelection = sessionDeviceSelection(ctx);
+		activeDeviceId = deviceRouter.resolve(deviceSelection)?.id;
 		if (attentionPollTimer) clearInterval(attentionPollTimer);
 		attentionPollTimer = setInterval(pollWaitingAttention, 200);
 		attentionPollTimer.unref?.();
@@ -1373,6 +1421,7 @@ export default async function (pi: ExtensionAPI) {
 				"timing-preprocess",
 				"audio-cache",
 				"audio-bitrate",
+				"device",
 			];
 			const parts = prefix.trimStart().split(/\s+/);
 			if (parts.length <= 1) {
@@ -1404,6 +1453,17 @@ export default async function (pi: ExtensionAPI) {
 				return ["1", "2", "3", "4", "5", "6", "7", "8"]
 					.filter(value => value.startsWith(parts[1] ?? ""))
 					.map(value => ({ value: `stt-candidates ${value}`, label: value }));
+			}
+			if (parts[0] === "device") {
+				return [
+					{ value: "device auto", label: "auto", description: "Use this SSH client, then the latest connected device" },
+					{ value: "device local", label: "local", description: "Use devices on the machine running Pi" },
+					...deviceRouter.connected().map(device => ({
+						value: `device ${device.id}`,
+						label: device.name,
+						description: `${device.platform} · ${device.id}`,
+					})),
+				].filter(candidate => candidate.label.startsWith(parts[1] ?? "") || candidate.value.includes(parts[1] ?? ""));
 			}
 			if (parts[0] === "audio-cache") {
 				return ["on", "off"]
@@ -1456,6 +1516,7 @@ export default async function (pi: ExtensionAPI) {
 			}
 			if (parts[0] === "output") {
 				return [
+					{ value: "output auto", label: "auto", description: "Prefer the selected SSH client, then local speakers" },
 					{ value: "output local", label: "local", description: "Play through this machine's speakers" },
 					{
 						value: "output tcp://127.0.0.1:8765",
@@ -1481,6 +1542,8 @@ export default async function (pi: ExtensionAPI) {
 			}
 			if (parts[0] === "input") {
 				return [
+					{ value: "input auto", label: "auto", description: "Prefer the selected SSH client, then the local microphone" },
+					{ value: "input local", label: "local", description: "Use this machine's default microphone" },
 					{ value: "input disabled", label: "disabled" },
 					{
 						value: "input tcp://127.0.0.1:8766",
@@ -1511,9 +1574,9 @@ export default async function (pi: ExtensionAPI) {
 					narration.finish();
 					releaseSpeechOwnership(true);
 					if (inputPhase === "recording") {
-						setInputProgress("🎙 Stopping phone recording…");
-						void phoneInput.stop(config.input).catch(error =>
-							ctx.ui.notify(`Phone microphone: ${error instanceof Error ? error.message : String(error)}`, "error"),
+						setInputProgress("🎙 Stopping voice recording…");
+						void phoneInput.stop(activeInputEndpoint ?? routedVoiceConfig().input).catch(error =>
+							ctx.ui.notify(`Voice microphone: ${error instanceof Error ? error.message : String(error)}`, "error"),
 						);
 					}
 					state = inputInProgress ? "listening" : "idle";
@@ -1574,6 +1637,27 @@ export default async function (pi: ExtensionAPI) {
 					}
 					await updateConfig({ ...config, sttCandidates: count });
 					ctx.ui.notify(`Final ASR candidate count set to ${count}`, "info");
+					return;
+				}
+				case "device": {
+					const requested = value.trim();
+					if (
+						requested !== "auto" &&
+						requested !== "local" &&
+						!deviceRouter.connected().some(device => device.id === requested)
+					) {
+						ctx.ui.notify("Usage: /voice device auto|local|<connected-device-id>", "error");
+						return;
+					}
+					deviceSelection = requested;
+					pi.appendEntry(DEVICE_SELECTION_ENTRY, { version: 1, selection: requested });
+					const device = deviceRouter.claim(deviceSelection);
+					activeDeviceId = device?.id;
+					ctx.ui.notify(
+						device ? `Voice device set to ${device.name}` : "Voice device set to local input/output",
+						"info",
+					);
+					refreshStatus();
 					return;
 				}
 				case "audio-cache": {
@@ -1698,7 +1782,7 @@ export default async function (pi: ExtensionAPI) {
 				case "output": {
 					const output = normalizeVoiceOutput(value);
 					if (!output) {
-						ctx.ui.notify("Usage: /voice output local|tcp://host:port", "error");
+						ctx.ui.notify("Usage: /voice output auto|local|tcp://host:port|unix:///path", "error");
 						return;
 					}
 					vocalizer.clear();
@@ -1740,7 +1824,7 @@ export default async function (pi: ExtensionAPI) {
 					}
 					await updateConfig({ ...config, talkShortcut: shortcut });
 					ctx.ui.notify(
-						`Phone microphone shortcut set to ${shortcut}. Run /reload to apply it.`,
+						`Voice microphone shortcut set to ${shortcut}. Run /reload to apply it.`,
 						"info",
 					);
 					return;
@@ -1748,7 +1832,7 @@ export default async function (pi: ExtensionAPI) {
 				case "input": {
 					const input = normalizeVoiceInput(value);
 					if (!input) {
-						ctx.ui.notify("Usage: /voice input disabled|tcp://host:port", "error");
+						ctx.ui.notify("Usage: /voice input auto|local|disabled|tcp://host:port|unix:///path", "error");
 						return;
 					}
 					phoneInput.cancel();
@@ -1764,7 +1848,11 @@ export default async function (pi: ExtensionAPI) {
 					const text = args.slice(action.length).trim() || "Pi voice mode is ready.";
 					vocalizer.clear();
 					narration.finish();
-					vocalizer.speak(text);
+					if (!acquireSpeech("replay", true, true)) return;
+					ownerContentExpected = true;
+					lastOwnerUtterance = vocalizer.speakUntracked(text);
+					ownerTurnEnded = true;
+					completeOwnerSpeech();
 					return;
 				}
 				case "timing":
@@ -1773,13 +1861,13 @@ export default async function (pi: ExtensionAPI) {
 				case "status":
 				case "":
 					ctx.ui.notify(
-						`Voice ${config.enabled ? "on" : "off"}; mode=${config.mode}; voice=${config.voice}; speed=${config.speed}; tts=${config.ttsModel}@${config.ttsDtype}; stt=${config.sttModel}@${config.sttDtype}; sttCandidates=${config.sttCandidates}; alignment=${config.alignmentModel}@${config.alignmentDtype}; editModel=${config.editModel}; highlight=${config.playbackHighlight ? "on" : "off"}; codeNarration=${config.codeNarration}; codePreprocess=${config.codeDescriptionPreprocessConcurrency}; timingPreprocess=${config.timingPreprocessConcurrency}; audioCache=${config.audioCache ? `${config.audioCacheBitrate}kbps` : "off"}; output=${config.output}; input=${config.input}; shortcut=${config.talkShortcut}; submit=${config.submitMode}; edit=${config.editMode}`,
+						`Voice ${config.enabled ? "on" : "off"}; mode=${config.mode}; voice=${config.voice}; speed=${config.speed}; tts=${config.ttsModel}@${config.ttsDtype}; stt=${config.sttModel}@${config.sttDtype}; sttCandidates=${config.sttCandidates}; alignment=${config.alignmentModel}@${config.alignmentDtype}; editModel=${config.editModel}; highlight=${config.playbackHighlight ? "on" : "off"}; codeNarration=${config.codeNarration}; codePreprocess=${config.codeDescriptionPreprocessConcurrency}; timingPreprocess=${config.timingPreprocessConcurrency}; audioCache=${config.audioCache ? `${config.audioCacheBitrate}kbps` : "off"}; device=${deviceSelection}${activeDeviceId ? `→${activeDeviceId}` : "→local"}; output=${config.output}; input=${config.input}; shortcut=${config.talkShortcut}; submit=${config.submitMode}; edit=${config.editMode}`,
 						"info",
 					);
 					return;
 				default:
 					ctx.ui.notify(
-						"Usage: /voice [on|off|toggle|status|stop|setup|test|talk|attention|mode|voice|speed|tts-model|tts-dtype|stt-model|stt-dtype|stt-candidates|alignment-model|alignment-dtype|edit-model|highlight|timing|code-narration|code-preprocess|timing-preprocess|audio-cache|audio-bitrate|output|input|shortcut|submit|edit]",
+						"Usage: /voice [on|off|toggle|status|stop|setup|test|talk|attention|mode|voice|speed|tts-model|tts-dtype|stt-model|stt-dtype|stt-candidates|alignment-model|alignment-dtype|edit-model|highlight|timing|code-narration|code-preprocess|timing-preprocess|audio-cache|audio-bitrate|device|output|input|shortcut|submit|edit]",
 						"error",
 					);
 			}
