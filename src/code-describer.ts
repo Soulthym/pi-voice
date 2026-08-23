@@ -34,7 +34,7 @@ Keep useful line groups active while describing related expressions, then remove
 
 // Bump when narration prompts or plan semantics change so stale generated plans
 // are never reused after a behavior change.
-const CODE_DESCRIPTION_PROMPT_VERSION = 1;
+const CODE_DESCRIPTION_PROMPT_VERSION = 2;
 
 const LANGUAGE_NAMES: Record<string, string> = {
 	bash: "shell",
@@ -60,6 +60,57 @@ const LANGUAGE_NAMES: Record<string, string> = {
 	yml: "YAML",
 };
 
+function unquoteShellPath(value: string): string {
+	return value.replace(/^(['"])(.*)\1$/, "$2").replace(/^\$HOME(?=\/|$)/, "~");
+}
+
+function fallbackShellDescription(code: string): string | undefined {
+	const lines = code
+		.split(/\r?\n/)
+		.map(line => line.trim())
+		.filter(line => line && !line.startsWith("#"));
+	const actions: string[] = [];
+	for (const line of lines) {
+		const cd = /^cd\s+([^;&|]+)/.exec(line);
+		if (cd) {
+			actions.push(`opens the ${unquoteShellPath(cd[1].trim())} checkout`);
+			continue;
+		}
+		if (/^git\s+pull(?:\s|$)/.test(line)) {
+			actions.push("downloads the latest repository changes");
+			continue;
+		}
+		const clone = /^git\s+clone(?:\s+\S+)*\s+(\S+)(?:\s+(\S+))?/.exec(line);
+		if (clone) {
+			actions.push(`clones a repository${clone[2] ? ` into ${unquoteShellPath(clone[2])}` : ""}`);
+			continue;
+		}
+		const mkdir = /^mkdir\s+(?:-[A-Za-z]*p[A-Za-z]*\s+)?([^;&|]+)/.exec(line);
+		if (mkdir) {
+			actions.push(`ensures ${unquoteShellPath(mkdir[1].trim())} exists`);
+			continue;
+		}
+		const install = /^install\s+(?:-[^\s]+\s+|\S+=\S+\s+)*(?:-m\s*)?(\d+\s+)?(.+?)\s+(\S+)\s*$/.exec(line);
+		if (install) {
+			const source = install[2].trim();
+			const destination = unquoteShellPath(install[3]);
+			const executable = /(?:^|\s)-m\s*755(?:\s|$)|(?:^|\s)-m755(?:\s|$)/.test(line);
+			actions.push(
+				`installs ${source.includes("pi-voice-") ? "the Pi voice client scripts" : unquoteShellPath(source)} into ${destination}${executable ? " with executable permissions" : ""}`,
+			);
+			continue;
+		}
+		if (/^(?:sudo\s+)?(?:apt(?:-get)?|dnf|yum|pacman|apk|pkg)\s+.*\binstall\b/.test(line)) {
+			actions.push("installs the required system packages");
+			continue;
+		}
+	}
+	if (actions.length === 0) return undefined;
+	const unique = actions.filter((action, index) => actions.indexOf(action) === index);
+	if (unique.length === 1) return `This shell command ${unique[0]}.`;
+	return `This shell sequence ${unique.slice(0, -1).join(", ")}, and ${unique[unique.length - 1]}.`;
+}
+
 export function fallbackCodeDescription(block: FencedCodeBlock): string {
 	const lines = block.code.split(/\r?\n/);
 	const isPatch = block.language === "diff" || block.language === "patch" || /^diff --git /m.test(block.code);
@@ -74,6 +125,10 @@ export function fallbackCodeDescription(block: FencedCodeBlock): string {
 		const deletions = lines.filter(line => line.startsWith("-") && !line.startsWith("---")).length;
 		const fileText = files.length > 0 ? ` ${files.slice(0, 3).join(", ")}` : "";
 		return `A patch updates${fileText}, with ${additions} addition${additions === 1 ? "" : "s"} and ${deletions} deletion${deletions === 1 ? "" : "s"}.`;
+	}
+	if (block.language === "bash" || block.language === "sh" || block.language === "shell" || block.language === "zsh") {
+		const description = fallbackShellDescription(block.code);
+		if (description) return description;
 	}
 	const language = (LANGUAGE_NAMES[block.language] ?? block.language) || "code";
 	return `A ${language} block contains ${lines.length} line${lines.length === 1 ? "" : "s"}.`;
