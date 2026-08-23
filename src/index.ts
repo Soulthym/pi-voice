@@ -598,7 +598,7 @@ export default async function (pi: ExtensionAPI) {
 
 	let timingPreprocessing: Promise<void> | undefined;
 	scheduleMissingTimings = (ctx: ExtensionContext): void => {
-		if (!config.enabled || timingPreprocessing) return;
+		if (timingPreprocessing) return;
 		const epoch = contextEpoch;
 		const messages = syncPlaybackMessages(ctx);
 		const ordered = prioritizeFromCurrent(messages, playbackHistory.status()?.messageId);
@@ -616,7 +616,7 @@ export default async function (pi: ExtensionAPI) {
 		const workers = ensureTimingWorkers(concurrency);
 		const measurementConfig = config;
 		timingPreprocessing = processConcurrently(missing, concurrency, async (message, lane) => {
-			if (epoch !== contextEpoch || workEpoch !== timingWorkEpoch || activeContext !== ctx || !config.enabled) return;
+			if (epoch !== contextEpoch || workEpoch !== timingWorkEpoch || activeContext !== ctx) return;
 			const checkpoints: PlaybackTimingSnapshot["checkpoints"] = [];
 			let time = 0;
 			try {
@@ -658,7 +658,7 @@ export default async function (pi: ExtensionAPI) {
 			timingPreprocessing = undefined;
 			timingPreprocessingProgress = undefined;
 			refreshPreprocessingProgress();
-			if (timingRescheduleRequested && epoch === contextEpoch && activeContext === ctx && config.enabled) {
+			if (timingRescheduleRequested && epoch === contextEpoch && activeContext === ctx) {
 				timingRescheduleRequested = false;
 				scheduleMissingTimings(ctx);
 			}
@@ -697,7 +697,7 @@ export default async function (pi: ExtensionAPI) {
 		if (activeContext) {
 			syncPlaybackMessages(activeContext);
 			scheduleMissingCodeDescriptions(activeContext);
-			if (config.enabled && !timingPreprocessing) {
+			if (!timingPreprocessing) {
 				timingRescheduleRequested = false;
 				scheduleMissingTimings(activeContext);
 			}
@@ -855,8 +855,8 @@ export default async function (pi: ExtensionAPI) {
 		playbackHistory.restore(playbackTimingSnapshots(ctx));
 		scheduleMissingCodeDescriptions(ctx);
 		refreshPlaybackTimeline();
+		scheduleMissingTimings(ctx);
 		if (config.enabled) {
-			scheduleMissingTimings(ctx);
 			void warmModels().catch(error =>
 				ctx.ui.notify(`Voice model warm-up failed: ${error instanceof Error ? error.message : String(error)}`, "warning"),
 			);
