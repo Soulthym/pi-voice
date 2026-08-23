@@ -950,7 +950,7 @@ export default async function (pi: ExtensionAPI) {
 			ctx.ui.notify("There is no completed assistant message to replay yet", "warning");
 			return;
 		}
-		playTarget(target, !playbackHistory.hasTimings());
+		playTarget(target, true);
 	};
 
 	pi.registerShortcut("f6", {
@@ -959,7 +959,7 @@ export default async function (pi: ExtensionAPI) {
 			if (!canNavigatePlayback(ctx)) return;
 			syncPlaybackMessages(ctx);
 			const message = playbackHistory.move(-1);
-			if (message) playTarget({ ...message, time: 0, sourceOffset: 0 }, !playbackHistory.hasTimings());
+			if (message) playTarget({ ...message, time: 0, sourceOffset: 0 }, true);
 		},
 	});
 
@@ -1017,7 +1017,7 @@ export default async function (pi: ExtensionAPI) {
 			if (!canNavigatePlayback(ctx)) return;
 			syncPlaybackMessages(ctx);
 			const message = playbackHistory.move(1);
-			if (message) playTarget({ ...message, time: 0, sourceOffset: 0 }, !playbackHistory.hasTimings());
+			if (message) playTarget({ ...message, time: 0, sourceOffset: 0 }, true);
 		},
 	});
 

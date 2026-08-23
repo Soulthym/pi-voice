@@ -61,6 +61,31 @@ test("maps playback time to approximate source checkpoints without audio storage
 	});
 });
 
+test("invalidates and replaces timing checkpoints for a full rerender", () => {
+	const text = "x".repeat(80);
+	const history = new PlaybackHistory();
+	history.sync([{ id: "message", text }], true);
+	history.restore([
+		{
+			version: 1,
+			messageId: "message",
+			duration: 9,
+			checkpoints: [{ time: 0, duration: 9, sourceOffset: 0 }],
+		},
+	]);
+	assert.equal(history.status()?.duration, 9);
+
+	history.beginCapture("message", text, 0, true);
+	assert.equal(history.status()?.hasTimings, false);
+	history.registerSegment(segment(10, 3, 0));
+	history.setSegmentAudio(10, 0, 4);
+	history.finishUtterance(3);
+	const replacement = history.snapshotForUtterance(3);
+	assert.ok(replacement);
+	assert.equal(replacement.duration, 4);
+	assert.deepEqual(replacement.checkpoints, [{ time: 0, duration: 4, sourceOffset: 0 }]);
+});
+
 test("navigates session messages and preserves a live record when it receives its session id", () => {
 	const history = new PlaybackHistory();
 	history.sync(
