@@ -238,12 +238,16 @@ export default async function (pi: ExtensionAPI) {
 	const refreshPreprocessingProgress = (): void => {
 		const ctx = activeContext;
 		if (!ctx) return;
-		const lines = [codePreprocessingProgress, timingPreprocessingProgress]
-			.filter((progress): progress is PreprocessingProgress => progress !== undefined)
-			.map(progress =>
-				ctx.ui.theme.fg("dim", `${progress.label}: ${progress.processed}/${progress.total} processed`),
-			);
-		ctx.ui.setWidget("pi-voice-preprocessing", lines.length > 0 ? lines : undefined, { placement: "belowEditor" });
+		try {
+			const lines = [codePreprocessingProgress, timingPreprocessingProgress]
+				.filter((progress): progress is PreprocessingProgress => progress !== undefined)
+				.map(progress =>
+					ctx.ui.theme.fg("dim", `${progress.label}: ${progress.processed}/${progress.total} processed`),
+				);
+			ctx.ui.setWidget("pi-voice-preprocessing", lines.length > 0 ? lines : undefined, { placement: "belowEditor" });
+		} catch {
+			// The active context can become stale just before session shutdown runs.
+		}
 	};
 
 	const descriptionText = (plan: CodeNarrationPlan): string =>
@@ -253,35 +257,41 @@ export default async function (pi: ExtensionAPI) {
 			.replace(/\s+/g, " ")
 			.trim();
 
-	const requestCodeDescription = (ctx: ExtensionContext, block: FencedCodeBlock): Promise<CodeNarrationPlan> => {
-		const editModel = config.editModel;
-		const narrationMode = config.codeNarration;
-		const key = codeDescriptionCacheKey(ctx, block, editModel, narrationMode);
-		return codeDescriptionCache
-			.getOrCreate(
-				key,
-				() => {
-					const generate = () =>
-						describeCodeBlock(ctx, block, editModel, narrationMode).catch(() =>
-							plainCodeNarration(fallbackCodeDescription(block)),
-						);
-					return coordinator
-						? coordinator.withResource("code", config.codeDescriptionPreprocessConcurrency, generate)
-						: generate();
-				},
-				snapshot => {
-					if (activeContext !== ctx) return;
-					if (ctx.isIdle()) pi.appendEntry(CODE_DESCRIPTION_CACHE_ENTRY, snapshot);
-					else pendingCodeDescriptions.set(snapshot.key, snapshot);
-				},
-			)
-			.then(plan => {
-				if (activeContext === ctx) {
-					codeDescriptionText.set(key, descriptionText(plan));
-					requestNarrationRender();
-				}
-				return plan;
-			});
+	const requestCodeDescription = async (ctx: ExtensionContext, block: FencedCodeBlock): Promise<CodeNarrationPlan> => {
+		const fallback = plainCodeNarration(fallbackCodeDescription(block));
+		try {
+			const editModel = config.editModel;
+			const narrationMode = config.codeNarration;
+			const key = codeDescriptionCacheKey(ctx, block, editModel, narrationMode);
+			return await codeDescriptionCache
+				.getOrCreate(
+					key,
+					() => {
+						const generate = () => describeCodeBlock(ctx, block, editModel, narrationMode).catch(() => fallback);
+						return coordinator
+							? coordinator.withResource("code", config.codeDescriptionPreprocessConcurrency, generate)
+							: generate();
+					},
+					snapshot => {
+						if (activeContext !== ctx) return;
+						try {
+							if (ctx.isIdle()) pi.appendEntry(CODE_DESCRIPTION_CACHE_ENTRY, snapshot);
+							else pendingCodeDescriptions.set(snapshot.key, snapshot);
+						} catch {
+							// Session replacement invalidates captured contexts before background work settles.
+						}
+					},
+				)
+				.then(plan => {
+					if (activeContext === ctx) {
+						codeDescriptionText.set(key, descriptionText(plan));
+						requestNarrationRender();
+					}
+					return plan;
+				});
+		} catch {
+			return fallback;
+		}
 	};
 
 	const timingItemsFor = async (
@@ -339,7 +349,10 @@ export default async function (pi: ExtensionAPI) {
 		const concurrency = config.codeDescriptionPreprocessConcurrency;
 		codeDescriptionPreprocessing = processConcurrently(queuedMessages, concurrency, async blocks => {
 			if (epoch !== contextEpoch || workEpoch !== codeWorkEpoch || activeContext !== ctx) return;
-			for (const block of blocks) await requestCodeDescription(ctx, block);
+			for (const block of blocks) {
+				if (epoch !== contextEpoch || workEpoch !== codeWorkEpoch || activeContext !== ctx) return;
+				await requestCodeDescription(ctx, block);
+			}
 			if (workEpoch !== codeWorkEpoch) return;
 			processedMessages += 1;
 			codePreprocessingProgress = {
@@ -348,14 +361,18 @@ export default async function (pi: ExtensionAPI) {
 				total: totalMessages,
 			};
 			refreshPreprocessingProgress();
-		}).finally(() => {
-			codeDescriptionPreprocessing = undefined;
-			codePreprocessingProgress = undefined;
-			refreshPreprocessingProgress();
-			if (epoch === contextEpoch && workEpoch !== codeWorkEpoch && activeContext === ctx) {
-				scheduleMissingCodeDescriptions(ctx);
-			}
-		});
+		})
+			.catch(() => {
+				// Reload/session replacement cancels captured-context preprocessing.
+			})
+			.finally(() => {
+				codeDescriptionPreprocessing = undefined;
+				codePreprocessingProgress = undefined;
+				refreshPreprocessingProgress();
+				if (epoch === contextEpoch && workEpoch !== codeWorkEpoch && activeContext === ctx) {
+					scheduleMissingCodeDescriptions(ctx);
+				}
+			});
 	};
 
 	const scheduleCodeDescriptionsInText = (ctx: ExtensionContext, text: string): void => {
@@ -863,7 +880,12 @@ export default async function (pi: ExtensionAPI) {
 		const epoch = contextEpoch;
 		const timer = setTimeout(
 			() => {
-				if (epoch === contextEpoch && activeContext === ctx) finalizePlaybackMessage(ctx, playbackId, text, attempt + 1);
+				if (epoch !== contextEpoch || activeContext !== ctx) return;
+				try {
+					finalizePlaybackMessage(ctx, playbackId, text, attempt + 1);
+				} catch {
+					// Ignore a timer that races session replacement.
+				}
 			},
 			[0, 20, 100, 250, 500][attempt] ?? 500,
 		);
@@ -907,43 +929,51 @@ export default async function (pi: ExtensionAPI) {
 					// Live speech and microphone actions preempt low-priority timing work.
 					return;
 				}
-				if (checkpoints.length === 0) return;
-				const resolvedRenderKey = renderKeyFor(ctx, message.text);
-				if (resolvedRenderKey !== message.renderKey) {
-					message.renderKey = resolvedRenderKey;
-					playbackHistory.sync(playbackMessages(ctx));
+				if (checkpoints.length === 0 || epoch !== contextEpoch || activeContext !== ctx) return;
+				try {
+					const resolvedRenderKey = renderKeyFor(ctx, message.text);
+					if (resolvedRenderKey !== message.renderKey) {
+						message.renderKey = resolvedRenderKey;
+						playbackHistory.sync(playbackMessages(ctx));
+					}
+					const snapshot: PlaybackTimingSnapshot = {
+						version: 2,
+						messageId: message.id,
+						renderKey: resolvedRenderKey,
+						duration: time,
+						checkpoints,
+					};
+					playbackHistory.restore([snapshot]);
+					requestPlaybackTimeline();
+					pi.appendEntry(PLAYBACK_TIMING_ENTRY, snapshot);
+					processedMessages += 1;
+					timingPreprocessingProgress = {
+						label: "Speech timing",
+						processed: processedMessages,
+						total: messages.length,
+					};
+					refreshPreprocessingProgress();
+				} catch {
+					// Session replacement can invalidate ctx between the epoch check and access.
 				}
-				const snapshot: PlaybackTimingSnapshot = {
-					version: 2,
-					messageId: message.id,
-					renderKey: resolvedRenderKey,
-					duration: time,
-					checkpoints,
-				};
-				playbackHistory.restore([snapshot]);
-				requestPlaybackTimeline();
-				pi.appendEntry(PLAYBACK_TIMING_ENTRY, snapshot);
-				processedMessages += 1;
-				timingPreprocessingProgress = {
-					label: "Speech timing",
-					processed: processedMessages,
-					total: messages.length,
-				};
-				refreshPreprocessingProgress();
 			};
 			if (coordinator) await coordinator.withResource("timing", concurrency, processMessage);
 			else await processMessage();
-		}).finally(() => {
-			timingPreprocessing = undefined;
-			timingPreprocessingProgress = undefined;
-			const completedWorkers = timingWorkers.splice(0);
-			void Promise.all(completedWorkers.map(worker => worker.terminate())).catch(() => {});
-			refreshPreprocessingProgress();
-			if (timingRescheduleRequested && epoch === contextEpoch && activeContext === ctx) {
-				timingRescheduleRequested = false;
-				scheduleMissingTimings(ctx);
-			}
-		});
+		})
+			.catch(() => {
+				// Reload/session replacement cancels captured-context preprocessing.
+			})
+			.finally(() => {
+				timingPreprocessing = undefined;
+				timingPreprocessingProgress = undefined;
+				const completedWorkers = timingWorkers.splice(0);
+				void Promise.all(completedWorkers.map(worker => worker.terminate())).catch(() => {});
+				refreshPreprocessingProgress();
+				if (timingRescheduleRequested && epoch === contextEpoch && activeContext === ctx) {
+					timingRescheduleRequested = false;
+					scheduleMissingTimings(ctx);
+				}
+			});
 	};
 
 	const warmModels = async (): Promise<void> => {
