@@ -2,7 +2,7 @@
 
 Bidirectional, local-first voice input and output for the [Pi coding agent](https://github.com/earendil-works/pi). Pi Voice combines streaming Kokoro speech synthesis, local Whisper dictation, synchronized playback highlighting, narrated code, replay controls, and automatic Linux/Termux device routing.
 
-Kokoro, Whisper, Wav2Vec2 alignment, and audio-cache processing run on the machine hosting Pi. With the managed `pi-voice-ssh` topology, bridge endpoints stay on loopback or private Unix sockets and audio travels inside SSH. A remote `editModel` may still receive ASR alternatives, drafts, bounded dictation context, and the compaction-aware conversation transcript through a fenced block for language-model-assisted features; see [Models and privacy](docs/models-and-privacy.md).
+Kokoro, Whisper, Wav2Vec2 alignment, and audio-cache processing run on the machine hosting Pi. With the managed `pi-voice-ssh` topology, bridge endpoints stay on loopback or private Unix sockets and audio travels inside SSH. A remote `editModel` may still receive ASR alternatives, drafts, bounded dictation context, and—when explicitly enabled—compaction-aware conversation context for fenced blocks; see [Models and privacy](docs/models-and-privacy.md).
 
 ## Features
 
@@ -11,13 +11,15 @@ Kokoro, Whisper, Wav2Vec2 alignment, and audio-cache processing run on the machi
 - Stops dictation on silence, displays revisable Whisper previews, and leaves the final prompt editable by default.
 - Resolves multiple ASR hypotheses against recent session context; smart mode also performs spoken corrections.
 - Dims unread prose, highlights the active sentence, and reveals words against the client player's real playback position.
-- Reads prose fences and Markdown tables naturally; describes code and patches using the compaction-aware discussion through each block.
+- Reads prose fences and Markdown tables naturally; can describe code and patches using the compaction-aware discussion through each block.
 - Supports guided code focus with synchronized line groups, bold ranges, and exact Tree-sitter targets for JavaScript/TypeScript families.
 - Replays historical messages with previous/next, seek, native pause/resume, and persisted timing controls.
 - Reuses content-addressed 32 kbps VBR Opus segments by default; raw PCM is never retained.
 - Incrementally preprocesses missing code descriptions and speech timing from the selected message forward, then backward.
 - Routes multiple clients and Pi sessions safely with explicit device selection, speech ownership, attention requests, and manual preemption.
 - Keeps synthesis, alignment, playback, and preprocessing outside Pi's TUI event loop.
+
+> **Best contextual narration:** set `"codeDescriptionContext": "conversation"` to let `editModel` explain code using the discussion that led to it. The privacy-safe default, `"block-only"`, sends only the concerned fence. Conversation mode may send user/assistant text, compaction summaries, and retained textual tool results to a remote `editModel`; see [Models and privacy](docs/models-and-privacy.md).
 
 > Short demonstration videos will be added alongside the relevant features.
 
@@ -97,6 +99,7 @@ Pi Voice reads `~/.pi/agent/pi-voice.json`. Missing settings use these defaults;
   "editMode": "smart",
   "playbackHighlight": true,
   "codeNarration": "guided",
+  "codeDescriptionContext": "block-only",
   "codeDescriptionPreprocessConcurrency": 4,
   "timingPreprocessConcurrency": "auto",
   "audioCache": true,

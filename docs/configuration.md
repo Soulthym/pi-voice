@@ -27,6 +27,7 @@ Pi Voice reads `~/.pi/agent/pi-voice.json` by default. Unknown or invalid values
 | `editMode` | `smart` | `smart` or `append`. |
 | `playbackHighlight` | `true` | Enables progressive prose/code highlighting. |
 | `codeNarration` | `guided` | `guided` synchronized focus or plain `summary`. |
+| `codeDescriptionContext` | `block-only` | `block-only` sends only the concerned fence; `conversation` also sends its resolved historical discussion. |
 | `codeDescriptionPreprocessConcurrency` | `4` | Parallel model requests, `1..8`. |
 | `timingPreprocessConcurrency` | `auto` | `auto` or CPU workers `1..8`. Auto caps at four and considers RAM/CPU. |
 | `audioCache` | `true` | Enables content-addressed Opus segment caching. |
@@ -67,7 +68,9 @@ Use `/voice voice` for an interactive picker or `/voice voice <id>` directly.
 - smart spoken editing;
 - code and patch descriptions.
 
-`current` follows Pi's active model without assuming a provider or model family. A remote model receives the text needed for that isolated operation; see [Models and privacy](models-and-privacy.md).
+`current` follows Pi's active model without assuming a provider or model family.
+
+For the best discussion-aware code narration, set `codeDescriptionContext` to `conversation`. This allows `editModel` to receive Pi's resolved text discussion before each fence, potentially including compaction summaries and retained textual tool results. Keep the privacy-safe `block-only` default if that context should not be sent to a remote provider. See [Models and privacy](models-and-privacy.md).
 
 ## Persistent data
 

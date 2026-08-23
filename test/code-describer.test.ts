@@ -16,6 +16,10 @@ test("keys identical blocks by their transcript context", () => {
 	const different = codeDescriptionCacheKey(ctx, block, "current", "guided", "Disable voice here.\n```json\n{ \"enabled\": true }\n```");
 	assert.equal(first, same);
 	assert.notEqual(first, different);
+	assert.notEqual(
+		codeDescriptionCacheKey(ctx, block, "current", "guided", "", "block-only"),
+		codeDescriptionCacheKey(ctx, block, "current", "guided", "", "conversation"),
+	);
 });
 
 test("sends prior discussion and the concerned block exactly once", async () => {

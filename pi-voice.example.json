@@ -18,6 +18,7 @@
   "editMode": "smart",
   "playbackHighlight": true,
   "codeNarration": "guided",
+  "codeDescriptionContext": "block-only",
   "codeDescriptionPreprocessConcurrency": 4,
   "timingPreprocessConcurrency": "auto",
   "audioCache": true,

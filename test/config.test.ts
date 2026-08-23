@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+	DEFAULT_VOICE_CONFIG,
 	normalizeAudioCacheBitrate,
+	normalizeCodeDescriptionContext,
 	normalizeEditModel,
 	normalizeModelDtype,
 	normalizeModelId,
@@ -12,6 +14,10 @@ import {
 	normalizeVoiceOutput,
 	normalizeWorkerCount,
 } from "../src/config.js";
+
+test("defaults code descriptions to block-only context", () => {
+	assert.equal(DEFAULT_VOICE_CONFIG.codeDescriptionContext, "block-only");
+});
 
 test("accepts local playback and SSH tunnel endpoints", () => {
 	assert.equal(normalizeVoiceOutput("auto"), "auto");
@@ -38,6 +44,9 @@ test("normalizes configurable model selections", () => {
 	assert.equal(normalizeEditModel("current"), "current");
 	assert.equal(normalizeEditModel("openai-codex/gpt-5.6-sol"), "openai-codex/gpt-5.6-sol");
 	assert.equal(normalizeEditModel("missing-provider"), undefined);
+	assert.equal(normalizeCodeDescriptionContext("block-only"), "block-only");
+	assert.equal(normalizeCodeDescriptionContext("conversation"), "conversation");
+	assert.equal(normalizeCodeDescriptionContext("session"), undefined);
 	assert.equal(normalizeSttCandidates(3), 3);
 	assert.equal(normalizeSttCandidates(0), undefined);
 	assert.equal(normalizeSttCandidates(9), undefined);

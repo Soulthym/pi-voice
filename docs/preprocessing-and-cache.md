@@ -24,11 +24,11 @@ Preprocessing · speech timing: 109/284 ready
 
 ## Code descriptions
 
-Missing descriptions use `editModel` and are content-addressed by prompt version, model, mode, language, source code, and Pi's compaction-aware conversation transcript through the closing fence. Future turns do not change that historical prefix, so later preprocessing and replay hit the same entry; identical code appearing later in a different discussion gets a different description. Live narration, written callouts, timing preprocessing, and concurrent workers share in-flight requests and persisted results.
+Missing descriptions use `editModel` and are content-addressed by prompt version, model, narration mode, context mode, language, and source code. With `codeDescriptionContext: "conversation"`, the key also includes Pi's compaction-aware conversation transcript through the closing fence. Future turns do not change that historical prefix, so later preprocessing and replay hit the same entry; identical code appearing later in a different discussion gets a different description. With the default `block-only`, identical blocks share descriptions without including discussion context. Live narration, written callouts, timing preprocessing, and concurrent workers share in-flight requests and persisted results.
 
 `codeDescriptionPreprocessConcurrency` controls parallel model requests from 1 to 8; the default is 4. It is explicit because API-backed model capacity is not derived from local hardware. Global coordinator slots enforce the limit across Pi processes.
 
-Failed model requests use local structural narration. Before inference, Pi Voice supplies the discussion prefix and numbered concerned block once and conservatively checks the complete request against the selected model's context window. Oversized requests are reported and use the same local fallback instead of truncating historical context. Completed fallback or model plans remain usable after reload. Prompt-version changes invalidate stale narration plans.
+Failed model requests use local structural narration. Before inference, Pi Voice supplies the numbered concerned block once, adds the discussion prefix only in `conversation` mode, and conservatively checks the complete request against the selected model's context window. Oversized requests are reported and use the same local fallback instead of truncating historical context. Completed fallback or model plans remain usable after reload. Prompt-version changes invalidate stale narration plans.
 
 ## Speech timing
 

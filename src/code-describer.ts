@@ -3,6 +3,7 @@ import type { Message } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { parseCodeNarration, plainCodeNarration, type CodeNarrationPlan } from "./code-narration.js";
 import { buildCodeTargetCatalog } from "./code-targets.js";
+import type { VoiceCodeDescriptionContext } from "./config.js";
 import type { FencedCodeBlock } from "./speakable.js";
 import { cleanRevisedPrompt, parseEditModelSelector } from "./prompt-editor.js";
 
@@ -161,6 +162,7 @@ export function codeDescriptionCacheKey(
 	modelSelector = "current",
 	mode: "guided" | "summary" = "guided",
 	transcript = "",
+	contextMode: VoiceCodeDescriptionContext = "conversation",
 ): string {
 	const model = resolveDescriptionModel(ctx, modelSelector);
 	return createHash("sha256")
@@ -170,6 +172,7 @@ export function codeDescriptionCacheKey(
 				model.provider,
 				model.id,
 				mode,
+				contextMode,
 				transcript,
 				block.language,
 				block.code,

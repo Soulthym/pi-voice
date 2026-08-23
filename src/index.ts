@@ -329,6 +329,19 @@ export default async function (pi: ExtensionAPI) {
 			.replace(/\s+/g, " ")
 			.trim();
 
+	const contextualCodeDescription = (context: string): string =>
+		config.codeDescriptionContext === "conversation" ? context : "";
+
+	const descriptionCacheKey = (ctx: ExtensionContext, block: FencedCodeBlock, identityContext: string): string =>
+		codeDescriptionCacheKey(
+			ctx,
+			block,
+			config.editModel,
+			config.codeNarration,
+			contextualCodeDescription(identityContext),
+			config.codeDescriptionContext,
+		);
+
 	const requestCodeDescription = async (
 		ctx: ExtensionContext,
 		block: FencedCodeBlock,
@@ -339,13 +352,29 @@ export default async function (pi: ExtensionAPI) {
 		try {
 			const editModel = config.editModel;
 			const narrationMode = config.codeNarration;
-			const key = codeDescriptionCacheKey(ctx, block, editModel, narrationMode, identityContext);
+			const contextMode = config.codeDescriptionContext;
+			const contextualIdentity = contextMode === "conversation" ? identityContext : "";
+			const contextualDiscussion = contextMode === "conversation" ? discussionBeforeBlock : "";
+			const key = codeDescriptionCacheKey(
+				ctx,
+				block,
+				editModel,
+				narrationMode,
+				contextualIdentity,
+				contextMode,
+			);
 			return await codeDescriptionCache
 				.getOrCreate(
 					key,
 					() => {
 						const generate = () =>
-							describeCodeBlock(ctx, block, editModel, narrationMode, discussionBeforeBlock).catch(error => {
+							describeCodeBlock(
+								ctx,
+								block,
+								editModel,
+								narrationMode,
+								contextualDiscussion,
+							).catch(error => {
 								if (error instanceof CodeDescriptionContextOverflowError) {
 									const overflowId = `${editModel}:${error.contextWindow}`;
 									if (!reportedDescriptionOverflows.has(overflowId)) {
@@ -433,7 +462,7 @@ export default async function (pi: ExtensionAPI) {
 				try {
 					const identityContext = contextualTranscript(message.conversationBefore, item.throughBlock);
 					const discussionBeforeBlock = contextualTranscript(message.conversationBefore, item.beforeBlock);
-					const key = codeDescriptionCacheKey(ctx, item.block, config.editModel, config.codeNarration, identityContext);
+					const key = descriptionCacheKey(ctx, item.block, identityContext);
 					keyedBlocks.set(key, { block: item.block, identityContext, discussionBeforeBlock });
 				} catch {
 					// A missing edit model is handled by the local fallback when requested directly.
@@ -507,7 +536,7 @@ export default async function (pi: ExtensionAPI) {
 				try {
 					const completed = completedAssistantMessages(ctx, "assistant").findLast(message => message.text === markdown);
 					const transcript = contextualTranscript(completed?.conversationBefore ?? speechConversationBefore, messageThroughBlock);
-					const key = codeDescriptionCacheKey(ctx, block, config.editModel, config.codeNarration, transcript);
+					const key = descriptionCacheKey(ctx, block, transcript);
 					const existing = codeDescriptionText.get(key);
 					if (existing !== undefined) return existing;
 					const plan = codeDescriptionCache.get(key);
@@ -966,10 +995,10 @@ export default async function (pi: ExtensionAPI) {
 		for (const item of describableCodeItems(message.text)) {
 			const transcript = contextualTranscript(message.conversationBefore, item.throughBlock);
 			try {
-				const key = codeDescriptionCacheKey(ctx, item.block, config.editModel, config.codeNarration, transcript);
+				const key = descriptionCacheKey(ctx, item.block, transcript);
 				codeDependencies.push(JSON.stringify([key, codeDescriptionCache.get(key) ?? "missing"]));
 			} catch {
-				codeDependencies.push(`fallback:${item.block.language}:${transcript}`);
+				codeDependencies.push(`fallback:${item.block.language}:${contextualCodeDescription(transcript)}`);
 			}
 		}
 		return narrationRenderKey(message.text, config, codeDependencies);
@@ -2187,7 +2216,7 @@ export default async function (pi: ExtensionAPI) {
 				case "status":
 				case "":
 					ctx.ui.notify(
-						`Voice ${config.enabled ? "on" : "off"}; mode=${config.mode}; voice=${config.voice}; speed=${config.speed}; tts=${config.ttsModel}@${config.ttsDtype}; stt=${config.sttModel}@${config.sttDtype}; sttCandidates=${config.sttCandidates}; alignment=${config.alignmentModel}@${config.alignmentDtype}; editModel=${config.editModel}; highlight=${config.playbackHighlight ? "on" : "off"}; codeNarration=${config.codeNarration}; codePreprocess=${config.codeDescriptionPreprocessConcurrency}; timingPreprocess=${config.timingPreprocessConcurrency}; audioCache=${config.audioCache ? `${config.audioCacheBitrate}kbps` : "off"}; device=${deviceSelection}${activeDeviceId ? `→${activeDeviceId}` : "→local"}; output=${config.output}; input=${config.input}; shortcut=${config.talkShortcut}; submit=${config.submitMode}; edit=${config.editMode}`,
+						`Voice ${config.enabled ? "on" : "off"}; mode=${config.mode}; voice=${config.voice}; speed=${config.speed}; tts=${config.ttsModel}@${config.ttsDtype}; stt=${config.sttModel}@${config.sttDtype}; sttCandidates=${config.sttCandidates}; alignment=${config.alignmentModel}@${config.alignmentDtype}; editModel=${config.editModel}; highlight=${config.playbackHighlight ? "on" : "off"}; codeNarration=${config.codeNarration}; codeContext=${config.codeDescriptionContext}; codePreprocess=${config.codeDescriptionPreprocessConcurrency}; timingPreprocess=${config.timingPreprocessConcurrency}; audioCache=${config.audioCache ? `${config.audioCacheBitrate}kbps` : "off"}; device=${deviceSelection}${activeDeviceId ? `→${activeDeviceId}` : "→local"}; output=${config.output}; input=${config.input}; shortcut=${config.talkShortcut}; submit=${config.submitMode}; edit=${config.editMode}`,
 						"info",
 					);
 					return;

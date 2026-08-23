@@ -7,6 +7,7 @@ export type VoiceMode = "all" | "assistant" | "yield";
 export type VoiceSubmitMode = "auto" | "review";
 export type VoiceEditMode = "append" | "smart";
 export type VoiceCodeNarration = "guided" | "summary";
+export type VoiceCodeDescriptionContext = "block-only" | "conversation";
 export type VoiceModelDtype = "fp32" | "q8" | "q4";
 export type VoicePreprocessConcurrency = "auto" | number;
 
@@ -42,6 +43,8 @@ export interface VoiceConfig {
 	playbackHighlight: boolean;
 	/** Narrate code with synchronized focus groups, or use a plain summary. */
 	codeNarration: VoiceCodeNarration;
+	/** Send only the concerned block, or also its resolved historical discussion. */
+	codeDescriptionContext: VoiceCodeDescriptionContext;
 	/** Parallel model requests used to fill missing written code descriptions. */
 	codeDescriptionPreprocessConcurrency: number;
 	/** Parallel CPU Kokoro workers used to fill missing playback timings. */
@@ -72,6 +75,7 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
 	editModel: "current",
 	playbackHighlight: true,
 	codeNarration: "guided",
+	codeDescriptionContext: "block-only",
 	codeDescriptionPreprocessConcurrency: 4,
 	timingPreprocessConcurrency: "auto",
 	audioCache: true,
@@ -96,6 +100,10 @@ function isEditMode(value: unknown): value is VoiceEditMode {
 
 function isCodeNarration(value: unknown): value is VoiceCodeNarration {
 	return value === "guided" || value === "summary";
+}
+
+export function normalizeCodeDescriptionContext(value: unknown): VoiceCodeDescriptionContext | undefined {
+	return value === "block-only" || value === "conversation" ? value : undefined;
 }
 
 export function normalizeModelDtype(value: unknown): VoiceModelDtype | undefined {
@@ -256,6 +264,8 @@ export async function loadVoiceConfig(): Promise<VoiceConfig> {
 			codeNarration: isCodeNarration(parsed.codeNarration)
 				? parsed.codeNarration
 				: DEFAULT_VOICE_CONFIG.codeNarration,
+			codeDescriptionContext:
+				normalizeCodeDescriptionContext(parsed.codeDescriptionContext) ?? DEFAULT_VOICE_CONFIG.codeDescriptionContext,
 			codeDescriptionPreprocessConcurrency:
 				normalizeWorkerCount(parsed.codeDescriptionPreprocessConcurrency) ??
 				DEFAULT_VOICE_CONFIG.codeDescriptionPreprocessConcurrency,
