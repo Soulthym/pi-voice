@@ -109,6 +109,11 @@ test("shows a code description below its block and reveals it with playback", ()
 		text: description,
 		source: { start: 0, end: 0 },
 		revealAtEnd: true,
+		code: {
+			blockSource: { start: 0, end: markdown.length },
+			code: "for (const value of values) console.log(value);",
+			cues: [],
+		},
 		codeDescription: {
 			blockSource: { start: 0, end: markdown.length },
 			text: description,
@@ -118,6 +123,7 @@ test("shows a code description below its block and reveals it with playback", ()
 	progress.setSegmentAudio(14, 0, 2);
 
 	const pending = progress.transform(markdown, "assistant", dim, background, () => description);
+	assert.match(pending, /```ts\u200c\n/);
 	assert.match(pending, /```\n\n> \*\*Code description\*\*/);
 	assert.match(pending, /> <dim>The<\/dim> <dim>loop<\/dim>/);
 
@@ -126,7 +132,9 @@ test("shows a code description below its block and reveals it with playback", ()
 	assert.match(active, /> <bg>The <dim>loop<\/dim>/);
 
 	progress.finish();
-	assert.match(progress.transform(markdown, "assistant", dim, background, () => description), /> The loop prints each value\./);
+	const finished = progress.transform(markdown, "assistant", dim, background, () => description);
+	assert.match(finished, /> The loop prints each value\./);
+	assert.doesNotMatch(finished, /\u200c/);
 });
 
 test("shows cached descriptions for every fenced code block", () => {

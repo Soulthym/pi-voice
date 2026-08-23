@@ -324,6 +324,9 @@ function styleNarrationMarkdown(
 const DIM_ON = "\x1b[2m";
 const INTENSITY_OFF = "\x1b[22m";
 const BOLD_ON = "\x1b[1m";
+// An invisible addition makes the transient fence language unknown to Pi's
+// syntax highlighter while leaving its displayed label unchanged.
+const NO_SYNTAX_HIGHLIGHT = "\u200c";
 
 function mergeSpans(spans: Array<{ start: number; end: number }>): Array<{ start: number; end: number }> {
 	const sorted = spans.filter(span => span.end > span.start).sort((left, right) => left.start - right.start);
@@ -368,6 +371,20 @@ function styleCodeBlock(code: string, block: CodeFocusBlock): string {
 		.split("\n")
 		.map((line, index) => styleCodeLine(line, index + 1, block))
 		.join("\n");
+}
+
+function suppressFenceSyntaxHighlight(markdown: string, codeAt: number): { markdown: string; codeAt: number } {
+	const openingEnd = markdown.lastIndexOf("\n", codeAt);
+	if (openingEnd < 0) return { markdown, codeAt };
+	const openingStart = markdown.lastIndexOf("\n", openingEnd - 1) + 1;
+	const opening = markdown.slice(openingStart, openingEnd);
+	const match = /^(\s*(?:`{3,}|~{3,})\s*)(\S+)(.*)$/.exec(opening);
+	if (!match || match[2].includes(NO_SYNTAX_HIGHLIGHT)) return { markdown, codeAt };
+	const replacement = `${match[1]}${match[2]}${NO_SYNTAX_HIGHLIGHT}${match[3]}`;
+	return {
+		markdown: markdown.slice(0, openingStart) + replacement + markdown.slice(openingEnd),
+		codeAt: codeAt + NO_SYNTAX_HIGHLIGHT.length,
+	};
 }
 
 /** Tracks synthesized segment timing and transforms the active Markdown block. */
@@ -590,8 +607,11 @@ export class NarrationProgress {
 			.sort((left, right) => left.source.start - right.source.start);
 		let searchFrom = 0;
 		for (const codeBlock of focused) {
-			const codeAt = transformed.indexOf(codeBlock.code, searchFrom);
+			let codeAt = transformed.indexOf(codeBlock.code, searchFrom);
 			if (codeAt < 0) continue;
+			const suppressed = suppressFenceSyntaxHighlight(transformed, codeAt);
+			transformed = suppressed.markdown;
+			codeAt = suppressed.codeAt;
 			const styled = styleCodeBlock(codeBlock.code, codeBlock);
 			transformed = transformed.slice(0, codeAt) + styled + transformed.slice(codeAt + codeBlock.code.length);
 			searchFrom = codeAt + styled.length;
