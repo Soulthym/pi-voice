@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+set -u
+
+runtime_dir="${TMPDIR:-/data/data/com.termux/files/usr/tmp}"
+stop_file="$runtime_dir/pi-voice-stop-recording"
+active_file="$runtime_dir/pi-voice-recording-active"
+
+encode_message() {
+  printf '%s' "$1" | base64 | tr -d '\n'
+}
+
+IFS= read -r command || exit 1
+if [[ "$command" == "stop" ]]; then
+  if [[ -e "$active_file" ]]; then
+    : > "$stop_file"
+    printf 'ok %s\n' "$(encode_message "stopping")"
+  else
+    printf 'error %s\n' "$(encode_message "The phone microphone is not recording")"
+  fi
+  exit 0
+fi
+if [[ "$command" != "record" ]]; then
+  printf 'error %s\n' "$(encode_message "Unsupported phone voice command: $command")"
+  exit 0
+fi
+
+if ! command -v termux-microphone-record >/dev/null 2>&1; then
+  message="termux-microphone-record is unavailable; install the Termux:API app and run pkg install termux-api"
+  printf 'error %s\n' "$(encode_message "$message")"
+  exit 0
+fi
+
+max_record_seconds=${PI_VOICE_MAX_RECORD_SECONDS:-120}
+recording="$runtime_dir/pi-voice-recording-${BASHPID}.ogg"
+rm -f "$recording" "$stop_file"
+printf '%s\n' "$BASHPID" > "$active_file"
+cleanup() {
+  rm -f "$active_file" "$stop_file" "$recording"
+}
+trap cleanup EXIT
+
+# Everything after this header is a live Ogg/Opus byte stream.
+printf 'stream\n'
+
+# On some Android 15 builds the callback socket fails even though recording
+# starts correctly. Run the client briefly in the background; MediaRecorder
+# continues writing Ogg/Opus after that client exits.
+timeout 2s termux-microphone-record \
+  -f "$recording" \
+  -l "$max_record_seconds" \
+  -e opus \
+  -r 16000 \
+  -c 1 >/dev/null 2>&1 &
+starter_pid=$!
+
+# Wait for Android to create and begin writing the Ogg stream.
+for _ in {1..100}; do
+  [[ -s "$recording" ]] && break
+  sleep 0.05
+done
+if [[ ! -s "$recording" ]]; then
+  wait "$starter_pid" 2>/dev/null || true
+  exit 1
+fi
+
+# Follow the growing regular file because Termux:API rejects FIFO output paths.
+tail -c +1 -f -s 0.05 "$recording" &
+tail_pid=$!
+
+# A second Alt+M or desktop-side silence detection creates stop_file.
+for (( tick = 0; tick < max_record_seconds * 10; tick++ )); do
+  [[ -e "$stop_file" ]] && break
+  sleep 0.1
+done
+
+# The callback may hang on Android 15 while the stop itself succeeds.
+timeout 2s termux-microphone-record -q >/dev/null 2>&1 || true
+wait "$starter_pid" 2>/dev/null || true
+
+# Let MediaRecorder append the final Ogg page and let tail forward it.
+previous_size=-1
+stable=0
+for _ in {1..40}; do
+  current_size=$(stat -c %s "$recording" 2>/dev/null || printf 0)
+  if [[ "$current_size" == "$previous_size" ]]; then
+    (( stable += 1 ))
+  else
+    stable=0
+    previous_size=$current_size
+  fi
+  (( stable >= 3 )) && break
+  sleep 0.1
+done
+sleep 0.15
+kill "$tail_pid" 2>/dev/null || true
+wait "$tail_pid" 2>/dev/null || true

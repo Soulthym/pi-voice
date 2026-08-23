@@ -3,7 +3,7 @@ set -u
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 if [[ ${PREFIX:-} == *com.termux* ]] || command -v termux-microphone-record >/dev/null 2>&1; then
-  exec "$SCRIPT_DIR/../termux/pi-voice-stt-session"
+  exec "$SCRIPT_DIR/pi-voice-termux-stt-session"
 fi
 
 runtime_dir=${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}
