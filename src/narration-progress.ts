@@ -17,6 +17,8 @@ export interface NarrationSegment {
 	id: number;
 	utterance: number;
 	text: string;
+	/** Absolute source offset of this message within a continued multi-message narration. */
+	sourceBase?: number;
 	source: NarrationSourceRange;
 	/** Code descriptions reveal their source block only after narration finishes. */
 	revealAtEnd?: boolean;
@@ -343,6 +345,7 @@ export class NarrationProgress {
 	#active = false;
 	#activeSource: NarrationSourceRange | undefined;
 	#playback = new Map<number, number>();
+	#forceNextBlock = false;
 	#onChange: () => void;
 
 	constructor(onChange: () => void = () => {}) {
@@ -359,13 +362,22 @@ export class NarrationProgress {
 		this.#active = true;
 		this.#activeSource = undefined;
 		this.#playback.clear();
+		this.#forceNextBlock = false;
+	}
+
+	/** Starts another assistant message without discarding queued playback progress. */
+	startMessage(): number {
+		if (!this.#active) this.begin();
+		this.#forceNextBlock = true;
+		return this.#raw.length;
 	}
 
 	pushDelta(type: NarrationMessageType, contentIndex: number, delta: string): void {
 		if (!this.#active || !delta) return;
 		let block = this.#blocks[this.#blocks.length - 1];
-		if (!block || block.type !== type || block.contentIndex !== contentIndex) {
+		if (this.#forceNextBlock || !block || block.type !== type || block.contentIndex !== contentIndex) {
 			block = { type, contentIndex, text: "", start: this.#raw.length };
+			this.#forceNextBlock = false;
 			this.#blocks.push(block);
 		}
 		block.text += delta;
@@ -464,10 +476,28 @@ export class NarrationProgress {
 	finishUtterance(utterance: number | undefined): void {
 		// Unscoped idle events come from cancellation. A replacement replay may
 		// already be registered by the time that event arrives, so only a matching
-		// completed utterance may finish narration progress.
+		// completed utterance may advance narration progress.
 		if (utterance === undefined) return;
-		if (![...this.#segments.values()].some(segment => segment.utterance === utterance)) return;
-		this.finish();
+		const completed = [...this.#segments.values()].filter(segment => segment.utterance === utterance);
+		if (completed.length === 0) return;
+		for (const segment of completed) {
+			this.#cursor = Math.max(this.#cursor, segment.source.end);
+			if (segment.code) {
+				const block = this.#codeBlocks.get(this.#codeKey(segment.code.blockSource));
+				if (block) block.complete = true;
+			}
+			if (segment.codeDescription) {
+				const description = this.#codeDescriptions.get(this.#codeKey(segment.codeDescription.blockSource));
+				if (description) {
+					description.cursor = description.text.length;
+					description.active = undefined;
+				}
+			}
+		}
+		if (completed.some(segment => segment.source.start === this.#activeSource?.start && segment.source.end === this.#activeSource.end)) {
+			this.#activeSource = undefined;
+		}
+		this.#onChange();
 	}
 
 	transform(

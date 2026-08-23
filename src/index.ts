@@ -194,6 +194,7 @@ export default async function (pi: ExtensionAPI) {
 	let narrationTui: { invalidate(): void; requestRender(force?: boolean): void } | null = null;
 	let narrationRenderTimer: NodeJS.Timeout | null = null;
 	let livePlaybackId: string | undefined;
+	let liveTurnNarrationActive = false;
 	let nextLivePlaybackId = 0;
 	let playbackPaused = false;
 	let playbackPositionEstimated = false;
@@ -518,7 +519,11 @@ export default async function (pi: ExtensionAPI) {
 					const snapshot = playbackHistory.snapshotForUtterance(event.utterance);
 					if (snapshot) pi.appendEntry(PLAYBACK_TIMING_ENTRY, snapshot);
 				}
-				narration.finishUtterance(event.utterance);
+				if (ownerTurnEnded && event.utterance !== undefined && event.utterance === lastOwnerUtterance) {
+					narration.finish();
+				} else {
+					narration.finishUtterance(event.utterance);
+				}
 				handleCoordinatedIdle(event.utterance);
 				if (event.utterance !== undefined && activeContext) scheduleMissingTimings(activeContext);
 				break;
@@ -584,7 +589,29 @@ export default async function (pi: ExtensionAPI) {
 				ownerContentExpected = true;
 			}
 			narration.registerSegment(segment);
-			playbackHistory.registerSegment(segment);
+			const base = segment.sourceBase ?? 0;
+			playbackHistory.registerSegment({
+				...segment,
+				source: { start: segment.source.start - base, end: segment.source.end - base },
+				code: segment.code
+					? {
+						...segment.code,
+						blockSource: {
+							start: segment.code.blockSource.start - base,
+							end: segment.code.blockSource.end - base,
+						},
+					}
+					: undefined,
+				codeDescription: segment.codeDescription
+					? {
+						...segment.codeDescription,
+						blockSource: {
+							start: segment.codeDescription.blockSource.start - base,
+							end: segment.codeDescription.blockSource.end - base,
+						},
+					}
+					: undefined,
+			});
 		},
 	);
 	const phoneInput = new PhoneInputClient();
@@ -605,6 +632,7 @@ export default async function (pi: ExtensionAPI) {
 	const relinquishSpeech = (): void => {
 		coordinator?.releaseSpeech();
 		ownsSpeech = false;
+		liveTurnNarrationActive = false;
 		speechPurpose = undefined;
 		ownerTurnEnded = false;
 		lastOwnerUtterance = undefined;
@@ -1180,14 +1208,23 @@ export default async function (pi: ExtensionAPI) {
 			"role" in event.message &&
 			event.message.role === "assistant"
 		) {
-			if (!acquireSpeech("turn")) {
+			const continuingTurn =
+				liveTurnNarrationActive && ownsSpeech && speechPurpose === "turn" && (coordinator?.ownsSpeech() ?? true);
+			if (!continuingTurn && !acquireSpeech("turn")) {
 				pausedForAttention = true;
 				livePlaybackId = undefined;
 				refreshStatus();
 				return;
 			}
-			narration.finish();
-			narration.begin();
+			ownerTurnEnded = false;
+			completedOwnerUtterance = undefined;
+			const sourceOffset = continuingTurn ? narration.startMessage() : 0;
+			if (!continuingTurn) {
+				narration.finish();
+				narration.begin();
+				liveTurnNarrationActive = true;
+			}
+			vocalizer.setNarrationSourceOffset(sourceOffset);
 			playbackPaused = false;
 			livePlaybackId = `live:${++nextLivePlaybackId}`;
 			playbackHistory.beginCapture(livePlaybackId, "", 0, true);

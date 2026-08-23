@@ -55,6 +55,28 @@ test("ignores completion from an older utterance", () => {
 	assert.equal(progress.transform("Still queued.", "assistant", dim), "<dim>Still</dim> <dim>queued</dim>.");
 });
 
+test("keeps highlighting an earlier message when a later assistant message appears", () => {
+	const progress = new NarrationProgress();
+	progress.begin();
+	progress.pushDelta("assistant", 0, "First queued.");
+	progress.registerSegment({ id: 10, utterance: 4, text: "First queued.", source: { start: 0, end: 13 } });
+	progress.setSegmentAudio(10, 0, 2);
+	progress.setPlayback(4, 0);
+
+	const secondOffset = progress.startMessage();
+	assert.equal(secondOffset, 13);
+	progress.pushDelta("assistant", 0, "Second active.");
+	progress.registerSegment({ id: 11, utterance: 5, text: "Second active.", source: { start: 13, end: 27 } });
+	progress.setSegmentAudio(11, 0, 2);
+
+	assert.match(progress.transform("First queued.", "assistant", dim, background), /<bg>First<\/bg>/);
+	assert.equal(progress.transform("Second active.", "assistant", dim), "<dim>Second</dim> <dim>active</dim>.");
+
+	progress.finishUtterance(4);
+	progress.setPlayback(5, 0);
+	assert.match(progress.transform("Second active.", "assistant", dim, background), /<bg>Second<\/bg>/);
+});
+
 test("styles spoken text fences while preserving their Markdown markers", () => {
 	const markdown = "```text\nRead this sentence.\n```";
 	const progress = new NarrationProgress();

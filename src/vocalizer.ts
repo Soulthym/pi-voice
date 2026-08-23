@@ -39,6 +39,7 @@ export class Vocalizer {
 	#descriptionControllers = new Set<AbortController>();
 	#generation = 0;
 	#sourceOffset = 0;
+	#nextSourceOffset = 0;
 	#trackNarration = true;
 
 	constructor(
@@ -54,11 +55,15 @@ export class Vocalizer {
 		this.#onNarrationSegment = onNarrationSegment;
 	}
 
+	setNarrationSourceOffset(offset: number): void {
+		this.#nextSourceOffset = Math.max(0, offset);
+	}
+
 	pushDelta(text: string): void {
 		if (!this.#getConfig().enabled || text.length === 0) return;
 		if (!this.#speakable) {
 			this.#speakable = new SpeakableStream();
-			this.#sourceOffset = 0;
+			this.#sourceOffset = this.#nextSourceOffset;
 		}
 		const current = this.#speakable;
 		this.#pushItems(current.push(text));
@@ -108,6 +113,7 @@ export class Vocalizer {
 		if (!this.#getConfig().enabled) return;
 		this.#speakable = new SpeakableStream();
 		this.#sourceOffset = Math.max(0, sourceOffset);
+		this.#nextSourceOffset = this.#sourceOffset;
 		this.#pushItems(this.#speakable.push(text));
 		this.flush();
 	}
@@ -119,6 +125,7 @@ export class Vocalizer {
 		this.#utterance = null;
 		this.#deliveryBarrier = null;
 		this.#sourceOffset = 0;
+		this.#nextSourceOffset = 0;
 		for (const controller of this.#descriptionControllers) controller.abort();
 		this.#descriptionControllers.clear();
 		this.#worker.cancel();
@@ -165,20 +172,22 @@ export class Vocalizer {
 	}
 
 	#scheduleSpeech(text: string, source: SpeakableSourceRange): void {
+		const sourceBase = this.#sourceOffset;
 		if (!this.#deliveryBarrier) {
-			this.#sendSegments([text], undefined, source);
+			this.#sendSegments([text], undefined, source, false, undefined, undefined, sourceBase);
 			return;
 		}
 		const generation = this.#generation;
 		const utterance = this.#ensureUtterance();
 		this.#deliveryBarrier = this.#deliveryBarrier.then(() => {
-			if (generation === this.#generation) this.#sendSegments([text], utterance, source);
+			if (generation === this.#generation) this.#sendSegments([text], utterance, source, false, undefined, undefined, sourceBase);
 		});
 	}
 
 	#scheduleCodeDescription(block: FencedCodeBlock, source: SpeakableSourceRange): void {
 		const utterance = this.#ensureUtterance();
 		const generation = this.#generation;
+		const sourceBase = this.#sourceOffset;
 		const controller = new AbortController();
 		this.#descriptionControllers.add(controller);
 		let description: Promise<CodeNarrationPlan>;
@@ -196,7 +205,7 @@ export class Vocalizer {
 		this.#deliveryBarrier = before.then(async () => {
 			const spoken = await ready;
 			if (generation !== this.#generation) return;
-			this.#sendDescription(spoken, block, source, utterance);
+			this.#sendDescription(spoken, block, source, utterance, sourceBase);
 		});
 	}
 
@@ -205,6 +214,7 @@ export class Vocalizer {
 		block: FencedCodeBlock,
 		source: SpeakableSourceRange,
 		utterance: number,
+		sourceBase: number,
 	): void {
 		let chunks = chunkCodeNarration(plan);
 		if (chunks.length === 0) chunks = chunkCodeNarration(plainCodeNarration(fallbackCodeDescription(block)));
@@ -218,6 +228,7 @@ export class Vocalizer {
 				true,
 				plan.guided ? { blockSource: source, code: block.code, cues: chunk.cues } : undefined,
 				{ blockSource: source, text: description, offset: descriptionOffset },
+				sourceBase,
 			);
 			descriptionOffset += chunk.text.length + 1;
 		}
@@ -235,6 +246,7 @@ export class Vocalizer {
 		revealAtEnd = false,
 		code?: NarrationSegment["code"],
 		codeDescription?: NarrationSegment["codeDescription"],
+		sourceBase = this.#sourceOffset,
 	): void {
 		if (segments.length === 0) return;
 		const config = this.#getConfig();
@@ -246,7 +258,16 @@ export class Vocalizer {
 					: source
 				: { start: 0, end: 0 };
 			if (this.#trackNarration) {
-				this.#onNarrationSegment?.({ id, utterance, text, source: narrationSource, revealAtEnd, code, codeDescription });
+				this.#onNarrationSegment?.({
+					id,
+					utterance,
+					text,
+					sourceBase,
+					source: narrationSource,
+					revealAtEnd,
+					code,
+					codeDescription,
+				});
 			}
 			this.#worker.sendSegment(utterance, id, text, config);
 		});
