@@ -11,7 +11,16 @@ import { VoiceWorkerClient, type WorkerEvent } from "./worker-client.js";
 
 const IDLE_FLUSH_MS = 1_000;
 
-type CodeDescriber = (block: FencedCodeBlock, transcript: string, signal: AbortSignal) => Promise<CodeNarrationPlan>;
+export interface CodeDescriptionSourceContext {
+	beforeBlock: string;
+	throughBlock: string;
+}
+
+type CodeDescriber = (
+	block: FencedCodeBlock,
+	context: CodeDescriptionSourceContext,
+	signal: AbortSignal,
+) => Promise<CodeNarrationPlan>;
 type VoiceWorker = Pick<
 	VoiceWorkerClient,
 	| "sendSegment"
@@ -176,7 +185,12 @@ export class Vocalizer {
 				end: item.source.end + this.#sourceOffset,
 			};
 			if (item.kind === "speech") this.#scheduleSpeech(item.text, source);
-			else this.#scheduleCodeDescription(item.block, source, this.#sourceText.slice(0, item.source.end));
+			else {
+				this.#scheduleCodeDescription(item.block, source, {
+					beforeBlock: this.#sourceText.slice(0, item.source.start),
+					throughBlock: this.#sourceText.slice(0, item.source.end),
+				});
+			}
 		}
 	}
 
@@ -193,7 +207,11 @@ export class Vocalizer {
 		});
 	}
 
-	#scheduleCodeDescription(block: FencedCodeBlock, source: SpeakableSourceRange, transcript: string): void {
+	#scheduleCodeDescription(
+		block: FencedCodeBlock,
+		source: SpeakableSourceRange,
+		context: CodeDescriptionSourceContext,
+	): void {
 		const utterance = this.#ensureUtterance();
 		const generation = this.#generation;
 		const sourceBase = this.#sourceOffset;
@@ -202,7 +220,7 @@ export class Vocalizer {
 		let description: Promise<CodeNarrationPlan>;
 		try {
 			description = this.#describeCode
-				? this.#describeCode(block, transcript, controller.signal)
+				? this.#describeCode(block, context, controller.signal)
 				: Promise.resolve(plainCodeNarration(fallbackCodeDescription(block)));
 		} catch (error) {
 			description = Promise.reject(error);

@@ -2,7 +2,12 @@ import { highlightCode, type ExtensionAPI, type ExtensionContext } from "@earend
 import { hasSpeakableAudio, requiresVoiceAttention } from "./attention.js";
 import { contextualTranscript, sessionContextTranscript } from "./code-context.js";
 import { CodeDescriptionCache, type CodeDescriptionCacheSnapshot } from "./code-description-cache.js";
-import { codeDescriptionCacheKey, describeCodeBlock, fallbackCodeDescription } from "./code-describer.js";
+import {
+	codeDescriptionCacheKey,
+	CodeDescriptionContextOverflowError,
+	describeCodeBlock,
+	fallbackCodeDescription,
+} from "./code-describer.js";
 import {
 	loadVoiceConfig,
 	normalizeAudioCacheBitrate,
@@ -150,11 +155,21 @@ function codeDescriptionSnapshots(ctx: ExtensionContext): unknown[] {
 	return snapshots;
 }
 
-function describableCodeItems(text: string): Array<{ block: FencedCodeBlock; context: string }> {
+interface DescribableCodeItem {
+	block: FencedCodeBlock;
+	beforeBlock: string;
+	throughBlock: string;
+}
+
+function describableCodeItems(text: string): DescribableCodeItem[] {
 	const stream = new SpeakableStream();
 	return [...stream.push(text), ...stream.flush()]
 		.filter(item => item.kind === "code")
-		.map(item => ({ block: item.block, context: text.slice(0, item.source.end) }));
+		.map(item => ({
+			block: item.block,
+			beforeBlock: text.slice(0, item.source.start),
+			throughBlock: text.slice(0, item.source.end),
+		}));
 }
 
 function parseMode(value: string): VoiceMode | undefined {
@@ -243,6 +258,7 @@ export default async function (pi: ExtensionAPI) {
 	const codeDescriptionCache = new CodeDescriptionCache();
 	const codeDescriptionText = new Map<string, string>();
 	const pendingCodeDescriptions = new Map<string, CodeDescriptionCacheSnapshot>();
+	const reportedDescriptionOverflows = new Set<string>();
 	let scheduleMissingTimings: (ctx: ExtensionContext) => void = () => {};
 
 	const requestNarrationRender = (): void => {
@@ -316,18 +332,38 @@ export default async function (pi: ExtensionAPI) {
 	const requestCodeDescription = async (
 		ctx: ExtensionContext,
 		block: FencedCodeBlock,
-		context: string,
+		identityContext: string,
+		discussionBeforeBlock: string,
 	): Promise<CodeNarrationPlan> => {
 		const fallback = plainCodeNarration(fallbackCodeDescription(block));
 		try {
 			const editModel = config.editModel;
 			const narrationMode = config.codeNarration;
-			const key = codeDescriptionCacheKey(ctx, block, editModel, narrationMode, context);
+			const key = codeDescriptionCacheKey(ctx, block, editModel, narrationMode, identityContext);
 			return await codeDescriptionCache
 				.getOrCreate(
 					key,
 					() => {
-						const generate = () => describeCodeBlock(ctx, block, editModel, narrationMode, context).catch(() => fallback);
+						const generate = () =>
+							describeCodeBlock(ctx, block, editModel, narrationMode, discussionBeforeBlock).catch(error => {
+								if (error instanceof CodeDescriptionContextOverflowError) {
+									const overflowId = `${editModel}:${error.contextWindow}`;
+									if (!reportedDescriptionOverflows.has(overflowId)) {
+										reportedDescriptionOverflows.add(overflowId);
+										try {
+											if (activeContext === ctx) {
+												ctx.ui.notify(
+													`Voice used local code narration because ${editModel} has insufficient context (${error.estimatedInputTokens} estimated input tokens; ${error.availableInputTokens} available)`,
+													"warning",
+												);
+											}
+										} catch {
+											// Session replacement can invalidate the captured UI before generation settles.
+										}
+									}
+								}
+								return fallback;
+							});
 						return coordinator
 							? coordinator.withResource("code", config.codeDescriptionPreprocessConcurrency, generate)
 							: generate();
@@ -366,8 +402,9 @@ export default async function (pi: ExtensionAPI) {
 				result.push({ text: item.text, source: item.source });
 				continue;
 			}
-			const transcript = contextualTranscript(conversationBefore, text.slice(0, item.source.end));
-			const plan = await requestCodeDescription(ctx, item.block, transcript);
+			const identityContext = contextualTranscript(conversationBefore, text.slice(0, item.source.end));
+			const discussionBeforeBlock = contextualTranscript(conversationBefore, text.slice(0, item.source.start));
+			const plan = await requestCodeDescription(ctx, item.block, identityContext, discussionBeforeBlock);
 			let chunks = chunkCodeNarration(plan);
 			if (chunks.length === 0) chunks = chunkCodeNarration(plainCodeNarration(fallbackCodeDescription(item.block)));
 			for (const chunk of chunks) result.push({ text: chunk.text, source: item.source });
@@ -381,17 +418,23 @@ export default async function (pi: ExtensionAPI) {
 		if (codeDescriptionPreprocessing) return;
 		const epoch = contextEpoch;
 		const workEpoch = codeWorkEpoch;
-		const queuedMessages: Array<Array<{ block: FencedCodeBlock; context: string }>> = [];
+		const queuedMessages: Array<
+			Array<{ block: FencedCodeBlock; identityContext: string; discussionBeforeBlock: string }>
+		> = [];
 		let totalMessages = 0;
 		let processedMessages = 0;
 		const currentId = playbackHistory.status()?.messageId;
 		for (const message of prioritizeFromCurrent(completedAssistantMessages(ctx, "assistant"), currentId)) {
-			const keyedBlocks = new Map<string, { block: FencedCodeBlock; context: string }>();
+			const keyedBlocks = new Map<
+				string,
+				{ block: FencedCodeBlock; identityContext: string; discussionBeforeBlock: string }
+			>();
 			for (const item of describableCodeItems(message.text)) {
 				try {
-					const transcript = contextualTranscript(message.conversationBefore, item.context);
-					const key = codeDescriptionCacheKey(ctx, item.block, config.editModel, config.codeNarration, transcript);
-					keyedBlocks.set(key, { block: item.block, context: transcript });
+					const identityContext = contextualTranscript(message.conversationBefore, item.throughBlock);
+					const discussionBeforeBlock = contextualTranscript(message.conversationBefore, item.beforeBlock);
+					const key = codeDescriptionCacheKey(ctx, item.block, config.editModel, config.codeNarration, identityContext);
+					keyedBlocks.set(key, { block: item.block, identityContext, discussionBeforeBlock });
 				} catch {
 					// A missing edit model is handled by the local fallback when requested directly.
 				}
@@ -414,7 +457,7 @@ export default async function (pi: ExtensionAPI) {
 			if (epoch !== contextEpoch || workEpoch !== codeWorkEpoch || activeContext !== ctx) return;
 			for (const item of items) {
 				if (epoch !== contextEpoch || workEpoch !== codeWorkEpoch || activeContext !== ctx) return;
-				await requestCodeDescription(ctx, item.block, item.context);
+				await requestCodeDescription(ctx, item.block, item.identityContext, item.discussionBeforeBlock);
 			}
 			if (workEpoch !== codeWorkEpoch) return;
 			processedMessages += 1;
@@ -442,7 +485,12 @@ export default async function (pi: ExtensionAPI) {
 		const message = completedAssistantMessages(ctx, "assistant").findLast(candidate => candidate.text === text);
 		if (!message) return; // agent_settled retries after the session entry is committed
 		for (const item of describableCodeItems(text)) {
-			void requestCodeDescription(ctx, item.block, contextualTranscript(message.conversationBefore, item.context));
+			void requestCodeDescription(
+				ctx,
+				item.block,
+				contextualTranscript(message.conversationBefore, item.throughBlock),
+				contextualTranscript(message.conversationBefore, item.beforeBlock),
+			);
 		}
 	};
 
@@ -639,11 +687,18 @@ export default async function (pi: ExtensionAPI) {
 	const vocalizer = new Vocalizer(
 		() => routedVoiceConfig(),
 		handleWorkerEvent,
-		(block, messageThroughBlock, _signal) => {
+		(block, sourceContext, _signal) => {
 			const ctx = activeContext;
 			if (!ctx) return Promise.reject(new Error("No active Pi context for code description"));
-			const transcript = contextualTranscript(speechConversationBefore, `${speechSourcePrefix}${messageThroughBlock}`);
-			return requestCodeDescription(ctx, block, transcript);
+			const identityContext = contextualTranscript(
+				speechConversationBefore,
+				`${speechSourcePrefix}${sourceContext.throughBlock}`,
+			);
+			const discussionBeforeBlock = contextualTranscript(
+				speechConversationBefore,
+				`${speechSourcePrefix}${sourceContext.beforeBlock}`,
+			);
+			return requestCodeDescription(ctx, block, identityContext, discussionBeforeBlock);
 		},
 		segment => {
 			if (ownsSpeech) {
@@ -909,7 +964,7 @@ export default async function (pi: ExtensionAPI) {
 	const renderKeyFor = (ctx: ExtensionContext, message: ContextualPlaybackMessage): string => {
 		const codeDependencies: string[] = [];
 		for (const item of describableCodeItems(message.text)) {
-			const transcript = contextualTranscript(message.conversationBefore, item.context);
+			const transcript = contextualTranscript(message.conversationBefore, item.throughBlock);
 			try {
 				const key = codeDescriptionCacheKey(ctx, item.block, config.editModel, config.codeNarration, transcript);
 				codeDependencies.push(JSON.stringify([key, codeDescriptionCache.get(key) ?? "missing"]));
@@ -1252,6 +1307,7 @@ export default async function (pi: ExtensionAPI) {
 		attentionPollTimer.unref?.();
 		pendingCodeDescriptions.clear();
 		codeDescriptionText.clear();
+		reportedDescriptionOverflows.clear();
 		codeDescriptionCache.restore(codeDescriptionSnapshots(ctx));
 		syncPlaybackMessages(ctx, true);
 		playbackHistory.restore(playbackTimingSnapshots(ctx));

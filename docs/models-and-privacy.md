@@ -47,9 +47,9 @@ The model receives isolated requests for:
 - ASR alternatives;
 - the editor draft present when recording started;
 - a bounded text-only excerpt of recent user/assistant/compaction context for dictation;
-- for fenced-code descriptions, Pi's full text transcript at that historical point—including the applicable compaction summary—through the closing fence.
+- for fenced-code descriptions, Pi's resolved historical discussion—including the applicable compaction summary—before the concerned fence, followed by the concerned block itself exactly once.
 
-Tool output is excluded from candidate-resolution context. Code-description context follows Pi's resolved model context and may include textual tool results retained at that point. Requests do not become conversation messages.
+Tool output is excluded from candidate-resolution context. Code-description context follows Pi's resolved model context and may include textual tool results retained at that point. Its stable cache identity still covers the complete transcript through the closing fence. Requests do not become conversation messages. Pi Voice checks the isolated request against the selected model's context window; if the complete request cannot fit, it reports the condition and uses local structural narration rather than silently truncating context.
 
 If `editModel` is remote, this text is sent to its provider. Pin a local Pi-registered model to keep model-assisted text operations local. Kokoro, Whisper, and Wav2Vec2 remain local regardless.
 
