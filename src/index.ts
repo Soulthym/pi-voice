@@ -242,6 +242,7 @@ export default async function (pi: ExtensionAPI) {
 	let pausedForAttention = false;
 	let speechBlocked = false;
 	let blockedMessageHasSpeech = false;
+	let blockedWarningIssued = false;
 	let blockedSpeechText = "";
 	let ownedSpeechText = "";
 	let speechConversationMessages: Message[] = [];
@@ -1502,6 +1503,7 @@ export default async function (pi: ExtensionAPI) {
 		if (!interactiveVoiceSession) return;
 		speechBlocked = false;
 		blockedMessageHasSpeech = false;
+		blockedWarningIssued = false;
 		blockedSpeechText = "";
 		cancelTimingWorkers();
 		vocalizer.clear();
@@ -1519,6 +1521,7 @@ export default async function (pi: ExtensionAPI) {
 			"role" in event.message &&
 			event.message.role === "assistant"
 		) {
+			blockedWarningIssued = false;
 			if (activeContext) {
 				const before = liveConversationBefore(activeContext);
 				speechConversationMessages = before.messages;
@@ -1643,13 +1646,13 @@ export default async function (pi: ExtensionAPI) {
 				ownerTurnEnded = true;
 				completeOwnerSpeech();
 			} else if (blockedMessageHasSpeech) {
-				const alreadyWaiting = coordinator?.isWaiting() ?? false;
 				coordinator?.markWaiting();
 				pausedForAttention = true;
 				speechBlocked = false;
 				blockedMessageHasSpeech = false;
 				blockedSpeechText = "";
-				if (!alreadyWaiting) {
+				if (!blockedWarningIssued) {
+					blockedWarningIssued = true;
 					ctx.ui.notify("Voice response paused behind another project; run /voice attention or press F11 to play it", "warning");
 				}
 				refreshStatus();

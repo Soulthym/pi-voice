@@ -131,7 +131,7 @@ async function streamBlockedResponse(host: FakeVoiceHost, text: string, stopReas
 	await host.emit("turn_end", { type: "turn_end", message: complete, toolResults: [] });
 }
 
-test("extension attention ignores tool-only turns, avoids repeated warnings, and announces after owner release", async t => {
+test("extension attention ignores tool-only turns, warns once per response, and announces after owner release", async t => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-voice-index-attention-"));
 	const previous = {
 		config: process.env.PI_VOICE_CONFIG,
@@ -188,7 +188,7 @@ test("extension attention ignores tool-only turns, avoids repeated warnings, and
 
 	await streamBlockedResponse(host, "A completed response that should request attention.");
 	await streamBlockedResponse(host, "Another update while the same project is waiting.");
-	assert.equal(host.notices.filter(item => item.message.includes("paused behind another project")).length, 1);
+	assert.equal(host.notices.filter(item => item.message.includes("paused behind another project")).length, 2);
 	assert.equal(spoken.length, 0);
 
 	owner.releaseSpeech();
