@@ -43,6 +43,22 @@ test("grants speech to only the first session and records waiting attention", ()
 	}
 });
 
+test("lets a waiting session announce itself after the previous owner releases", () => {
+	const { root, first, second } = coordinators();
+	try {
+		assert.equal(first.tryAcquireSpeech(), true);
+		second.markWaiting();
+		assert.equal(second.tryAcquireWaitingAnnouncement(), undefined);
+		first.releaseSpeech();
+		assert.equal(second.tryAcquireWaitingAnnouncement()?.instanceId, second.instanceId);
+		assert.equal(second.ownsSpeech(), true);
+	} finally {
+		first.shutdown();
+		second.shutdown();
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("announces project attention only when the active session changes", () => {
 	const { root, first, second } = coordinators();
 	try {

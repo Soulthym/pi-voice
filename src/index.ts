@@ -816,8 +816,11 @@ export default async function (pi: ExtensionAPI) {
 		}
 		if (!owner && activeContext && !timingPreprocessing) scheduleMissingTimings(activeContext);
 		if (!config.enabled || ownsSpeech) return;
-		const waiting = coordinator.nextUnannouncedWaiting();
-		if (!waiting || waiting.instanceId === coordinator.instanceId || !coordinator.tryAcquireSpeech()) return;
+		// The waiting session may be the only process polling after the previous
+		// owner releases. Let it announce its own wait rather than leaving the
+		// response silent until manual interaction.
+		const waiting = coordinator.tryAcquireWaitingAnnouncement();
+		if (!waiting) return;
 		claimOutputDevice();
 		if (voiceWorkerIdleTimer) clearTimeout(voiceWorkerIdleTimer);
 		voiceWorkerIdleTimer = null;

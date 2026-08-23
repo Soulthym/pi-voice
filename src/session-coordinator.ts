@@ -191,6 +191,13 @@ export class SessionCoordinator {
 		return this.waitingSessions().find(waiting => !waiting.announced);
 	}
 
+	/** Claims the free speech channel to announce the next wait, including this session's own wait. */
+	tryAcquireWaitingAnnouncement(): WaitingSession | undefined {
+		const waiting = this.nextUnannouncedWaiting();
+		if (!waiting || !this.tryAcquireSpeech()) return undefined;
+		return waiting;
+	}
+
 	markAnnounced(instanceId: string): void {
 		const file = this.#waitingFile(instanceId);
 		const waiting = readJson<WaitingSession>(file);
