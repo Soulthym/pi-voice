@@ -65,7 +65,7 @@ See [Narration and highlighting](narration-and-highlighting.md) and [Preprocessi
 
 Only interactive Pi TUI sessions participate in voice coordination. The first project with speakable output owns playback. Other projects record attention only when they produce content that would actually be spoken; tool-only responses, raw tool results, and headless child/subagent sessions do not request attention.
 
-When the owner finishes, Pi announces the oldest waiting project. Waiting audio never starts automatically. In the waiting project, press F11 or run `/voice attention`. Running either action in another project sends a cross-process request to the waiting session and force-preempts current playback.
+When the owner finishes, Pi announces the oldest waiting project. Waiting audio never starts automatically. When user-audible playback actually switches sessions, Pi announces the newly active project once; reacquiring, seeking, pausing, or replaying again in the same session does not repeat its name. In the waiting project, press F11 or run `/voice attention`. Running either action in another project sends a cross-process request to the waiting session and force-preempts current playback.
 
 Manual prompt submission, replay controls, F11, and `/voice attention` take priority. A displaced response is paused and returned to the attention queue rather than automatically resumed.
 

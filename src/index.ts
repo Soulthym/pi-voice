@@ -743,7 +743,7 @@ export default async function (pi: ExtensionAPI) {
 		if (voiceWorkerIdleTimer) clearTimeout(voiceWorkerIdleTimer);
 		voiceWorkerIdleTimer = null;
 		cancelTimingWorkers();
-		const shouldAnnounce = announceProject && (!alreadyOwned || projectAnnouncementPending);
+		const shouldAnnounce = announceProject && (!coordinator.attentionIsCurrent() || projectAnnouncementPending);
 		ownsSpeech = true;
 		speechPurpose = purpose;
 		ownerTurnEnded = false;
@@ -766,7 +766,12 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	const announceProjectForSpeech = (): void => {
-		if (!projectAnnouncementPending || !coordinator) return;
+		if (!coordinator) return;
+		const changed = coordinator.claimAttention();
+		if (!projectAnnouncementPending || !changed) {
+			projectAnnouncementPending = false;
+			return;
+		}
 		projectAnnouncementPending = false;
 		projectPrefixUtterance = vocalizer.speakUntracked(`Project ${coordinator.projectLabel()}.`);
 	};
@@ -775,7 +780,7 @@ export default async function (pi: ExtensionAPI) {
 		if (!config.enabled || !coordinator) return;
 		if (!acquireSpeech("turn", false, true)) return;
 		speechReservedForInput = true;
-		projectAnnouncementPending = true;
+		projectAnnouncementPending = !coordinator.attentionIsCurrent();
 	};
 
 	const handleSpeechPreemption = (): void => {

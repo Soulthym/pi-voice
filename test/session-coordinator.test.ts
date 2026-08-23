@@ -43,6 +43,24 @@ test("grants speech to only the first session and records waiting attention", ()
 	}
 });
 
+test("announces project attention only when the active session changes", () => {
+	const { root, first, second } = coordinators();
+	try {
+		assert.equal(first.attentionIsCurrent(), false);
+		assert.equal(first.claimAttention(), true);
+		assert.equal(first.attentionIsCurrent(), true);
+		assert.equal(first.claimAttention(), false);
+		assert.equal(second.attentionIsCurrent(), false);
+		assert.equal(second.claimAttention(), true);
+		assert.equal(second.attentionIsCurrent(), true);
+		assert.equal(first.attentionIsCurrent(), false);
+	} finally {
+		first.shutdown();
+		second.shutdown();
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("routes an explicit attention request to the waiting session", () => {
 	const { root, first, second } = coordinators();
 	try {

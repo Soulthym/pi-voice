@@ -146,6 +146,20 @@ export class SessionCoordinator {
 		this.#speechLease = false;
 	}
 
+	attentionIsCurrent(): boolean {
+		const current = readJson<SessionPresence>(this.#attentionCurrentFile());
+		if (current?.instanceId !== this.instanceId) return false;
+		const presence = readJson<SessionPresence>(this.#presenceFile(this.instanceId));
+		return Boolean(presence && this.#isLive(presence));
+	}
+
+	/** Records that this session actually began user-audible project speech. */
+	claimAttention(): boolean {
+		const changed = !this.attentionIsCurrent();
+		writeJson(this.#attentionCurrentFile(), this.#presence());
+		return changed;
+	}
+
 	markWaiting(): WaitingSession {
 		const file = this.#waitingFile(this.instanceId);
 		const existing = readJson<WaitingSession>(file);
@@ -341,5 +355,9 @@ export class SessionCoordinator {
 
 	#attentionFile(instanceId: string): string {
 		return path.join(this.#attentionDir(), `${instanceId}.json`);
+	}
+
+	#attentionCurrentFile(): string {
+		return path.join(this.root, "attention-current.json");
 	}
 }
