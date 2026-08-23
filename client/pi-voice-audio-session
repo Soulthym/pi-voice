@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -u
 
-runtime_dir=${TMPDIR:-/data/data/com.termux/files/usr/tmp}
+runtime_dir=${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}
 session_id=${BASHPID:-$$}
 ipc_socket="$runtime_dir/pi-voice-mpv-$session_id.sock"
 header_file="$runtime_dir/pi-voice-header-$session_id.bin"
