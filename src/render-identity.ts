@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
 import type { VoiceConfig } from "./config.js";
 
-const RENDER_IDENTITY_VERSION = 1;
+// Version 2 invalidates maps recorded by the old live fenced-code path, which
+// could time literal source lines even when replay used semantic narration.
+const RENDER_IDENTITY_VERSION = 2;
 
 /** Identifies every input that can change rendered segment audio or boundaries. */
 export function narrationRenderKey(text: string, config: VoiceConfig, codeDependencies: readonly string[]): string {
