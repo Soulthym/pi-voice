@@ -36,6 +36,7 @@ import { SpeakableStream, type FencedCodeBlock, type SpeakableSourceRange } from
 import { applySpokenEdit, resolveDictationCandidates } from "./prompt-editor.js";
 import { narrationRenderKey } from "./render-identity.js";
 import { SessionCoordinator, type WaitingSession } from "./session-coordinator.js";
+import { supportsInteractiveVoice } from "./session-mode.js";
 import { Vocalizer } from "./vocalizer.js";
 import { isVoice, VOICES } from "./voices.js";
 import { VoiceWorkerClient, type WorkerEvent } from "./worker-client.js";
@@ -158,6 +159,7 @@ function playbackBar(position: number, duration: number, width = 24): string {
 export default async function (pi: ExtensionAPI) {
 	let config = await loadVoiceConfig();
 	let activeContext: ExtensionContext | null = null;
+	let interactiveVoiceSession = false;
 	let coordinator: SessionCoordinator | null = null;
 	const deviceRouter = new DeviceRouter();
 	let deviceSelection: VoiceDeviceSelection = "auto";
@@ -1167,8 +1169,13 @@ export default async function (pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		contextEpoch += 1;
-		activeContext = ctx;
+		interactiveVoiceSession = supportsInteractiveVoice(ctx.mode);
+		activeContext = interactiveVoiceSession ? ctx : null;
 		coordinator?.shutdown();
+		if (!interactiveVoiceSession) {
+			coordinator = null;
+			return;
+		}
 		coordinator = new SessionCoordinator(ctx.cwd, ctx.sessionManager.getSessionId());
 		coordinator.start();
 		deviceSelection = sessionDeviceSelection(ctx);
@@ -1201,6 +1208,11 @@ export default async function (pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async (_event, ctx) => {
 		contextEpoch += 1;
+		if (!interactiveVoiceSession) {
+			activeContext = null;
+			return;
+		}
+		interactiveVoiceSession = false;
 		pendingCodeDescriptions.clear();
 		ctx.ui.setStatus("pi-voice", undefined);
 		ctx.ui.setWidget("pi-voice-render-driver", undefined);
@@ -1230,6 +1242,7 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	pi.on("input", () => {
+		if (!interactiveVoiceSession) return;
 		coordinator?.clearWaiting();
 		pausedForAttention = false;
 		speechBlocked = false;
@@ -1242,6 +1255,7 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	pi.on("before_agent_start", () => {
+		if (!interactiveVoiceSession) return;
 		speechBlocked = false;
 		blockedSpeechText = "";
 		cancelTimingWorkers();
@@ -1252,6 +1266,7 @@ export default async function (pi: ExtensionAPI) {
 
 	pi.on("message_start", event => {
 		if (
+			interactiveVoiceSession &&
 			config.enabled &&
 			config.mode !== "yield" &&
 			typeof event.message === "object" &&
@@ -1286,7 +1301,7 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	pi.on("message_update", event => {
-		if (!config.enabled || config.mode === "yield") return;
+		if (!interactiveVoiceSession || !config.enabled || config.mode === "yield") return;
 		const delta = event.assistantMessageEvent;
 		const speakableDelta =
 			delta.type === "text_delta" || (delta.type === "thinking_delta" && config.mode === "all")
@@ -1316,6 +1331,7 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	pi.on("message_end", event => {
+		if (!interactiveVoiceSession) return;
 		const completedText = assistantText(event.message);
 		const stopReason = assistantStopReason(event.message);
 		if (completedText && stopReason !== undefined && stopReason !== "aborted" && stopReason !== "error" && activeContext) {
@@ -1341,6 +1357,7 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	pi.on("turn_end", (event, ctx) => {
+		if (!interactiveVoiceSession) return;
 		const stopReason = assistantStopReason(event.message);
 		const completedTurn = stopReason !== "aborted" && stopReason !== "error" && stopReason !== undefined;
 		if (config.enabled && config.mode === "yield" && completedTurn) {
@@ -1381,7 +1398,7 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	pi.on("agent_settled", (_event, ctx) => {
-		if (activeContext !== ctx) return;
+		if (!interactiveVoiceSession || activeContext !== ctx) return;
 		for (const snapshot of pendingCodeDescriptions.values()) {
 			pi.appendEntry(CODE_DESCRIPTION_CACHE_ENTRY, snapshot);
 		}

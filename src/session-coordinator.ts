@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 export interface SessionPresence {
+	interactive: true;
 	instanceId: string;
 	pid: number;
 	cwd: string;
@@ -230,7 +231,7 @@ export class SessionCoordinator {
 	}
 
 	#presence(): SessionPresence {
-		return { instanceId: this.instanceId, pid: process.pid, cwd: this.cwd, updatedAt: Date.now() };
+		return { interactive: true, instanceId: this.instanceId, pid: process.pid, cwd: this.cwd, updatedAt: Date.now() };
 	}
 
 	#writePresence(): void {
@@ -291,7 +292,7 @@ export class SessionCoordinator {
 	}
 
 	#isLive(session: SessionPresence): boolean {
-		return Date.now() - session.updatedAt <= STALE_MS && processIsAlive(session.pid);
+		return session.interactive === true && Date.now() - session.updatedAt <= STALE_MS && processIsAlive(session.pid);
 	}
 
 	#jsonFiles<T>(directory: string): T[] {
