@@ -57,7 +57,7 @@ Use `/voice voice` for an interactive picker or `/voice voice <id>` directly.
 
 `auto` prefers the device inherited from `pi-voice-ssh`, then the most recently active registered client, then local devices. Explicit `local`, `disabled`, TCP, and Unix values bypass automatic endpoint selection.
 
-`/voice device` is a per-session preference persisted as a context-free Pi custom entry. It does not change the global JSON endpoint settings. See [Devices and SSH](devices-and-ssh.md).
+`/voice device` is a per-session preference persisted as a non-context-injecting Pi custom entry. It does not change the global JSON endpoint settings. See [Devices and SSH](devices-and-ssh.md).
 
 ## Model-assisted features
 

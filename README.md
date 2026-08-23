@@ -11,7 +11,7 @@ Kokoro, Whisper, Wav2Vec2 alignment, and audio-cache processing run on the machi
 - Stops dictation on silence, displays revisable Whisper previews, and leaves the final prompt editable by default.
 - Resolves multiple ASR hypotheses against recent session context; smart mode also performs spoken corrections.
 - Dims unread prose, highlights the active sentence, and reveals words against the client player's real playback position.
-- Reads prose fences and Markdown tables naturally; semantically describes code and patches.
+- Reads prose fences and Markdown tables naturally; describes code and patches using the compaction-aware discussion through each block.
 - Supports guided code focus with synchronized line groups, bold ranges, and exact Tree-sitter targets for JavaScript/TypeScript families.
 - Replays historical messages with previous/next, seek, native pause/resume, and persisted timing controls.
 - Reuses content-addressed 32 kbps VBR Opus segments by default; raw PCM is never retained.

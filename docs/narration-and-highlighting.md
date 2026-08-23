@@ -21,7 +21,7 @@ The generated description:
 - explains purpose and meaningful behavior rather than reading punctuation;
 - is rendered in a bordered callout below the original fence;
 - is keyed by the compaction-aware conversation transcript through that block and stored in a non-context-injecting Pi custom entry;
-- is reused for unchanged code and by timing/audio preprocessing;
+- is reused for an unchanged block at the same historical context prefix and by timing/audio preprocessing;
 - falls back to a local structural description if the model is unavailable or returns an invalid plan.
 
 Shell installation/update blocks and patches have semantic local fallbacks. Generic unsupported code may fall back to language and structure information.
@@ -34,7 +34,7 @@ Descriptions are generated for fenced blocks in completed assistant text, not ra
 
 - `L+`/`L-` add and remove independent bright line groups.
 - `B+`/`B-` add and remove independent bold ranges.
-- unrelated code remains dim.
+- unrelated code remains dim while normal language syntax colors remain visible;
 - all original code returns to normal when narration completes.
 
 JavaScript/TypeScript-family fences use Tree-sitter target IDs so the model selects validated syntax nodes instead of guessing coordinates. Supported aliases include JavaScript, JSX, TypeScript, TSX, `js`, `jsx`, `ts`, `tsx`, `mjs`, `cjs`, `mts`, and `cts`. Other languages use validated line/column coordinates.

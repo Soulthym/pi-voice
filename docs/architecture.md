@@ -34,7 +34,7 @@ Pi Voice persists non-context-injecting custom entries for:
 - code-description cache snapshots;
 - per-session device preference.
 
-These entries are excluded from model context. Content-addressed Opus lives outside the session under the audio cache.
+These entries are excluded from model context. Code-description keys still hash Pi's resolved historical text context through each block, including preceding compaction summaries. Content-addressed Opus lives outside the session under the audio cache.
 
 ## Cross-session coordination
 
