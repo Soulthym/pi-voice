@@ -180,6 +180,7 @@ export default async function (pi: ExtensionAPI) {
 	let attentionPollTimer: NodeJS.Timeout | null = null;
 	let voiceWorkerIdleTimer: NodeJS.Timeout | null = null;
 	let handleCoordinatedIdle: (utterance: number | undefined) => void = () => {};
+	let playRequestedAttention: (ctx: ExtensionContext) => void = () => {};
 	let releaseSpeechOwnership: (announceNext?: boolean) => void = () => {};
 	let state: VoiceState = "idle";
 	let downloadPercent: number | undefined;
@@ -789,6 +790,16 @@ export default async function (pi: ExtensionAPI) {
 
 	const pollWaitingAttention = (): void => {
 		if (!coordinator) return;
+		if (coordinator.hasAttentionRequest() && activeContext) {
+			try {
+				if (activeContext.isIdle() && coordinator.consumeAttentionRequest()) {
+					playRequestedAttention(activeContext);
+					return;
+				}
+			} catch {
+				// Session replacement will create a fresh coordinator and discard this request.
+			}
+		}
 		const owner = coordinator.speechOwner();
 		if (ownsSpeech && owner?.instanceId !== coordinator.instanceId) handleSpeechPreemption();
 		if (owner && owner.instanceId !== coordinator.instanceId) {
@@ -798,7 +809,7 @@ export default async function (pi: ExtensionAPI) {
 		if (!owner && activeContext && !timingPreprocessing) scheduleMissingTimings(activeContext);
 		if (!config.enabled || ownsSpeech) return;
 		const waiting = coordinator.nextUnannouncedWaiting();
-		if (!waiting || !coordinator.tryAcquireSpeech()) return;
+		if (!waiting || waiting.instanceId === coordinator.instanceId || !coordinator.tryAcquireSpeech()) return;
 		claimOutputDevice();
 		if (voiceWorkerIdleTimer) clearTimeout(voiceWorkerIdleTimer);
 		voiceWorkerIdleTimer = null;
@@ -1408,6 +1419,34 @@ export default async function (pi: ExtensionAPI) {
 		playTarget(target, !playbackHistory.hasTimings());
 	};
 
+	playRequestedAttention = ctx => {
+		pausedForAttention = true;
+		replaySelected(ctx);
+	};
+
+	const attendNextProject = (ctx: ExtensionContext): void => {
+		if (!coordinator) {
+			replaySelected(ctx);
+			return;
+		}
+		const waiting = coordinator.waitingSessions();
+		const own = waiting.find(session => session.instanceId === coordinator?.instanceId);
+		if (own) {
+			playRequestedAttention(ctx);
+			return;
+		}
+		const next = waiting[0];
+		if (!next) {
+			replaySelected(ctx);
+			return;
+		}
+		vocalizer.clear();
+		narration.finish();
+		releaseSpeechOwnership(false);
+		coordinator.requestAttention(next.instanceId);
+		ctx.ui.notify(`Switching voice attention to project ${coordinator.projectLabel(next.cwd)}`, "info");
+	};
+
 	pi.registerShortcut("f6", {
 		description: "Play the previous assistant message",
 		handler: ctx => {
@@ -1492,8 +1531,8 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	pi.registerShortcut("f11", {
-		description: "Restart the selected assistant message from the beginning",
-		handler: replaySelected,
+		description: "Play this or the next waiting project's response",
+		handler: attendNextProject,
 	});
 
 	if (config.talkShortcut !== "disabled") {
@@ -1710,7 +1749,7 @@ export default async function (pi: ExtensionAPI) {
 					void talk(ctx);
 					return;
 				case "attention":
-					replaySelected(ctx);
+					attendNextProject(ctx);
 					return;
 				case "setup":
 					ctx.ui.notify("Preparing speech synthesis and alignment models…", "info");

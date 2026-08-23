@@ -73,6 +73,7 @@ export class SessionCoordinator {
 		this.#stopped = false;
 		fs.mkdirSync(this.#presenceDir(), { recursive: true });
 		fs.mkdirSync(this.#waitingDir(), { recursive: true });
+		fs.mkdirSync(this.#attentionDir(), { recursive: true });
 		fs.mkdirSync(this.#resourceDir(), { recursive: true });
 		this.#writePresence();
 		this.#heartbeat = setInterval(() => {
@@ -177,6 +178,23 @@ export class SessionCoordinator {
 		if (waiting) writeJson(file, { ...waiting, announced: true, updatedAt: Date.now() });
 	}
 
+	requestAttention(instanceId: string): void {
+		const waiting = this.waitingSessions().find(session => session.instanceId === instanceId);
+		if (!waiting) return;
+		writeJson(this.#attentionFile(instanceId), { requestedAt: Date.now(), requestedBy: this.instanceId });
+	}
+
+	hasAttentionRequest(): boolean {
+		return fs.existsSync(this.#attentionFile(this.instanceId));
+	}
+
+	consumeAttentionRequest(): boolean {
+		const file = this.#attentionFile(this.instanceId);
+		if (!fs.existsSync(file)) return false;
+		remove(file);
+		return true;
+	}
+
 	async withResource<T>(kind: "code" | "timing", limit: number, operation: () => Promise<T>): Promise<T> {
 		let lease: string | undefined;
 		while (!lease) {
@@ -207,6 +225,7 @@ export class SessionCoordinator {
 		for (const lease of this.#resourceLeases) this.#releaseLease(lease);
 		this.#resourceLeases.clear();
 		this.clearWaiting();
+		remove(this.#attentionFile(this.instanceId));
 		remove(this.#presenceFile(this.instanceId));
 	}
 
@@ -295,6 +314,10 @@ export class SessionCoordinator {
 		return path.join(this.root, "waiting");
 	}
 
+	#attentionDir(): string {
+		return path.join(this.root, "attention");
+	}
+
 	#resourceDir(): string {
 		return path.join(this.root, "resources");
 	}
@@ -309,5 +332,9 @@ export class SessionCoordinator {
 
 	#waitingFile(instanceId: string): string {
 		return path.join(this.#waitingDir(), `${instanceId}.json`);
+	}
+
+	#attentionFile(instanceId: string): string {
+		return path.join(this.#attentionDir(), `${instanceId}.json`);
 	}
 }

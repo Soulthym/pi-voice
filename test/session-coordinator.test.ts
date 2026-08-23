@@ -40,6 +40,22 @@ test("grants speech to only the first session and records waiting attention", ()
 	}
 });
 
+test("routes an explicit attention request to the waiting session", () => {
+	const { root, first, second } = coordinators();
+	try {
+		second.markWaiting();
+		first.requestAttention(second.instanceId);
+		assert.equal(first.hasAttentionRequest(), false);
+		assert.equal(second.hasAttentionRequest(), true);
+		assert.equal(second.consumeAttentionRequest(), true);
+		assert.equal(second.consumeAttentionRequest(), false);
+	} finally {
+		first.shutdown();
+		second.shutdown();
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("uses parent directories only to disambiguate equal project names", () => {
 	const { root, first, second } = coordinators();
 	try {
