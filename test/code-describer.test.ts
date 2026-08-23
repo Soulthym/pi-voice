@@ -22,15 +22,25 @@ test("keys identical blocks by their transcript context", () => {
 	);
 });
 
-test("sends prior discussion and the concerned block exactly once", async () => {
+test("extends the normal prompt prefix and sends the concerned block exactly once", async () => {
 	const model = { provider: "test", id: "model", contextWindow: 8_192, maxTokens: 1_024 };
-	let request = "";
+	const prior = { role: "user", content: [{ type: "text", text: "Explain this example." }], timestamp: 1 };
+	const normalTool = { name: "read", description: "Read a file", parameters: { type: "object", properties: {} } };
+	let submitted:
+		| { systemPrompt?: string; messages: Array<{ content: Array<{ text: string }> }>; tools?: unknown[] }
+		| undefined;
+	let options: { cacheRetention?: string; sessionId?: string } | undefined;
 	const ctx = {
 		model,
 		modelRegistry: {
 			find: () => model,
-			complete: async (_model: unknown, context: { messages: Array<{ content: Array<{ text: string }> }> }) => {
-				request = context.messages[0].content[0].text;
+			complete: async (
+				_model: unknown,
+				context: { systemPrompt?: string; messages: Array<{ content: Array<{ text: string }> }>; tools?: unknown[] },
+				requestOptions: { cacheRetention?: string; sessionId?: string },
+			) => {
+				submitted = context;
+				options = requestOptions;
 				return {
 					role: "assistant",
 					content: [{ type: "text", text: "It demonstrates the relevant behavior." }],
@@ -41,11 +51,56 @@ test("sends prior discussion and the concerned block exactly once", async () => 
 	} as never;
 	const body = "UNIQUE_CONCERNED_BODY";
 
-	await describeCodeBlock(ctx, { language: "ts", code: body }, "current", "summary", "User:\nExplain this example.");
+	await describeCodeBlock(ctx, { language: "ts", code: body }, "current", "summary", {
+		messages: [prior] as never,
+		normalPrompt: { systemPrompt: "NORMAL PI SYSTEM PROMPT", tools: [normalTool] as never, sessionId: "pi-session" },
+	});
 
-	assert.match(request, /<discussion_before_block>[\s\S]*Explain this example\.[\s\S]*<\/discussion_before_block>/);
-	assert.equal(request.split(body).length - 1, 1);
-	assert.doesNotMatch(request, /transcript_through_block/);
+	assert.equal(submitted?.systemPrompt, "NORMAL PI SYSTEM PROMPT");
+	assert.equal(submitted?.messages[0], prior);
+	assert.deepEqual(submitted?.tools, [normalTool]);
+	const serialized = JSON.stringify(submitted);
+	assert.equal(serialized.split(body).length - 1, 1);
+	assert.match(serialized, /code_narration_request/);
+	assert.equal(options?.sessionId, "pi-session");
+	assert.equal(options?.cacheRetention, undefined);
+});
+
+test("does not forward the active system prompt or tools to a different pinned model", async () => {
+	const current = { provider: "current", id: "main", contextWindow: 8_192, maxTokens: 1_024 };
+	const pinned = { provider: "remote", id: "narrator", contextWindow: 8_192, maxTokens: 1_024 };
+	let submitted: { systemPrompt?: string; messages: unknown[]; tools?: unknown[] } | undefined;
+	let options: { cacheRetention?: string; sessionId?: string } | undefined;
+	const ctx = {
+		model: current,
+		modelRegistry: {
+			find: () => pinned,
+			complete: async (
+				_model: unknown,
+				context: { systemPrompt?: string; messages: unknown[]; tools?: unknown[] },
+				requestOptions: { cacheRetention?: string; sessionId?: string },
+			) => {
+				submitted = context;
+				options = requestOptions;
+				return { role: "assistant", content: [{ type: "text", text: "A concise description." }], stopReason: "stop" };
+			},
+		},
+	} as never;
+
+	await describeCodeBlock(ctx, { language: "ts", code: "run();" }, "remote/narrator", "summary", {
+		messages: [{ role: "user", content: [{ type: "text", text: "Prior discussion." }], timestamp: 1 }] as never,
+		normalPrompt: {
+			systemPrompt: "PRIVATE ACTIVE SYSTEM PROMPT",
+			tools: [{ name: "private_tool", description: "Private", parameters: { type: "object" } }] as never,
+			sessionId: "normal-session",
+		},
+	});
+
+	assert.notEqual(submitted?.systemPrompt, "PRIVATE ACTIVE SYSTEM PROMPT");
+	assert.equal(submitted?.tools, undefined);
+	assert.equal((submitted?.messages[0] as { role: string }).role, "user");
+	assert.equal(options?.cacheRetention, "none");
+	assert.notEqual(options?.sessionId, "normal-session");
 });
 
 test("rejects requests that cannot fit the selected model context", async () => {
@@ -68,7 +123,11 @@ test("rejects requests that cannot fit the selected model context", async () => 
 			{ language: "ts", code: "const value = 1;" },
 			"current",
 			"summary",
-			"A".repeat(200),
+			{
+				messages: [
+					{ role: "user", content: [{ type: "text", text: "A".repeat(200) }], timestamp: 1 },
+				] as never,
+			},
 		),
 		CodeDescriptionContextOverflowError,
 	);

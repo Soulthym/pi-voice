@@ -1,6 +1,12 @@
+import type { Message, Tool } from "@earendil-works/pi-ai";
 import { highlightCode, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { hasSpeakableAudio, requiresVoiceAttention } from "./attention.js";
-import { contextualTranscript, sessionContextTranscript } from "./code-context.js";
+import {
+	contextualMessages,
+	contextualTranscript,
+	resolvedSessionContext,
+	type ResolvedCodeContext,
+} from "./code-context.js";
 import { CodeDescriptionCache, type CodeDescriptionCacheSnapshot } from "./code-description-cache.js";
 import {
 	codeDescriptionCacheKey,
@@ -80,11 +86,14 @@ function assistantStopReason(message: unknown): string | undefined {
 	return "stopReason" in message && typeof message.stopReason === "string" ? message.stopReason : undefined;
 }
 
-type ContextualPlaybackMessage = PlaybackMessage & { conversationBefore: string };
+type ContextualPlaybackMessage = PlaybackMessage & {
+	conversationBefore: string;
+	conversationMessages: Message[];
+};
 
-const conversationBeforeCache = new WeakMap<object, Map<string, string>>();
+const conversationBeforeCache = new WeakMap<object, Map<string, ResolvedCodeContext>>();
 
-function contextBeforeEntry(ctx: ExtensionContext, parentId: string | null): string {
+function contextBeforeEntry(ctx: ExtensionContext, parentId: string | null): ResolvedCodeContext {
 	let cache = conversationBeforeCache.get(ctx.sessionManager);
 	if (!cache) {
 		cache = new Map();
@@ -93,12 +102,12 @@ function contextBeforeEntry(ctx: ExtensionContext, parentId: string | null): str
 	const key = parentId ?? "<root>";
 	const existing = cache.get(key);
 	if (existing !== undefined) return existing;
-	const transcript = sessionContextTranscript(ctx.sessionManager.getEntries(), parentId);
-	cache.set(key, transcript);
-	return transcript;
+	const resolved = resolvedSessionContext(ctx.sessionManager.getEntries(), parentId);
+	cache.set(key, resolved);
+	return resolved;
 }
 
-function liveConversationBefore(ctx: ExtensionContext): string {
+function liveConversationBefore(ctx: ExtensionContext): ResolvedCodeContext {
 	const branch = ctx.sessionManager.getBranch();
 	const leaf = branch.at(-1);
 	const leafId =
@@ -106,7 +115,7 @@ function liveConversationBefore(ctx: ExtensionContext): string {
 		typeof leaf.message === "object" && leaf.message !== null && "role" in leaf.message && leaf.message.role === "assistant"
 			? leaf.parentId
 			: (leaf?.id ?? null);
-	return sessionContextTranscript(ctx.sessionManager.getEntries(), leafId);
+	return resolvedSessionContext(ctx.sessionManager.getEntries(), leafId);
 }
 
 function completedAssistantMessages(ctx: ExtensionContext, mode: VoiceMode): ContextualPlaybackMessage[] {
@@ -118,7 +127,15 @@ function completedAssistantMessages(ctx: ExtensionContext, mode: VoiceMode): Con
 		// Yield mode only speaks the final response, not intermediate text attached to tool/edit calls.
 		if (mode === "yield" && stopReason === "toolUse") continue;
 		const text = assistantText(entry.message);
-		if (text) messages.push({ id: entry.id, text, conversationBefore: contextBeforeEntry(ctx, entry.parentId) });
+		if (text) {
+			const before = contextBeforeEntry(ctx, entry.parentId);
+			messages.push({
+				id: entry.id,
+				text,
+				conversationBefore: before.transcript,
+				conversationMessages: before.messages,
+			});
+		}
 	}
 	return messages;
 }
@@ -226,6 +243,7 @@ export default async function (pi: ExtensionAPI) {
 	let blockedSpeechText = "";
 	let ownedSpeechText = "";
 	let speechConversationBefore = "";
+	let speechConversationMessages: Message[] = [];
 	let speechSourcePrefix = "";
 	let completingOwnerSpeech = false;
 	let attentionPollTimer: NodeJS.Timeout | null = null;
@@ -342,11 +360,19 @@ export default async function (pi: ExtensionAPI) {
 			config.codeDescriptionContext,
 		);
 
+	const activePromptTools = (): Tool[] => {
+		const available = new Map(pi.getAllTools().map(tool => [tool.name, tool]));
+		return pi.getActiveTools().flatMap(name => {
+			const tool = available.get(name);
+			return tool ? [{ name: tool.name, description: tool.description, parameters: tool.parameters }] : [];
+		});
+	};
+
 	const requestCodeDescription = async (
 		ctx: ExtensionContext,
 		block: FencedCodeBlock,
 		identityContext: string,
-		discussionBeforeBlock: string,
+		discussionBeforeBlock: readonly Message[],
 	): Promise<CodeNarrationPlan> => {
 		const fallback = plainCodeNarration(fallbackCodeDescription(block));
 		try {
@@ -354,7 +380,17 @@ export default async function (pi: ExtensionAPI) {
 			const narrationMode = config.codeNarration;
 			const contextMode = config.codeDescriptionContext;
 			const contextualIdentity = contextMode === "conversation" ? identityContext : "";
-			const contextualDiscussion = contextMode === "conversation" ? discussionBeforeBlock : "";
+			const conversation =
+				contextMode === "conversation"
+					? {
+							messages: discussionBeforeBlock,
+							normalPrompt: {
+								systemPrompt: ctx.getSystemPrompt(),
+								tools: activePromptTools(),
+								sessionId: ctx.sessionManager.getSessionId(),
+							},
+						}
+					: undefined;
 			const key = codeDescriptionCacheKey(
 				ctx,
 				block,
@@ -373,7 +409,7 @@ export default async function (pi: ExtensionAPI) {
 								block,
 								editModel,
 								narrationMode,
-								contextualDiscussion,
+								conversation,
 							).catch(error => {
 								if (error instanceof CodeDescriptionContextOverflowError) {
 									const overflowId = `${editModel}:${error.contextWindow}`;
@@ -423,6 +459,7 @@ export default async function (pi: ExtensionAPI) {
 		ctx: ExtensionContext,
 		text: string,
 		conversationBefore: string,
+		conversationMessages: readonly Message[],
 	): Promise<Array<{ text: string; source: SpeakableSourceRange }>> => {
 		const stream = new SpeakableStream();
 		const result: Array<{ text: string; source: SpeakableSourceRange }> = [];
@@ -432,7 +469,7 @@ export default async function (pi: ExtensionAPI) {
 				continue;
 			}
 			const identityContext = contextualTranscript(conversationBefore, text.slice(0, item.source.end));
-			const discussionBeforeBlock = contextualTranscript(conversationBefore, text.slice(0, item.source.start));
+			const discussionBeforeBlock = contextualMessages(conversationMessages, text.slice(0, item.source.start));
 			const plan = await requestCodeDescription(ctx, item.block, identityContext, discussionBeforeBlock);
 			let chunks = chunkCodeNarration(plan);
 			if (chunks.length === 0) chunks = chunkCodeNarration(plainCodeNarration(fallbackCodeDescription(item.block)));
@@ -448,7 +485,7 @@ export default async function (pi: ExtensionAPI) {
 		const epoch = contextEpoch;
 		const workEpoch = codeWorkEpoch;
 		const queuedMessages: Array<
-			Array<{ block: FencedCodeBlock; identityContext: string; discussionBeforeBlock: string }>
+			Array<{ block: FencedCodeBlock; identityContext: string; discussionBeforeBlock: Message[] }>
 		> = [];
 		let totalMessages = 0;
 		let processedMessages = 0;
@@ -456,12 +493,12 @@ export default async function (pi: ExtensionAPI) {
 		for (const message of prioritizeFromCurrent(completedAssistantMessages(ctx, "assistant"), currentId)) {
 			const keyedBlocks = new Map<
 				string,
-				{ block: FencedCodeBlock; identityContext: string; discussionBeforeBlock: string }
+				{ block: FencedCodeBlock; identityContext: string; discussionBeforeBlock: Message[] }
 			>();
 			for (const item of describableCodeItems(message.text)) {
 				try {
 					const identityContext = contextualTranscript(message.conversationBefore, item.throughBlock);
-					const discussionBeforeBlock = contextualTranscript(message.conversationBefore, item.beforeBlock);
+					const discussionBeforeBlock = contextualMessages(message.conversationMessages, item.beforeBlock);
 					const key = descriptionCacheKey(ctx, item.block, identityContext);
 					keyedBlocks.set(key, { block: item.block, identityContext, discussionBeforeBlock });
 				} catch {
@@ -518,7 +555,7 @@ export default async function (pi: ExtensionAPI) {
 				ctx,
 				item.block,
 				contextualTranscript(message.conversationBefore, item.throughBlock),
-				contextualTranscript(message.conversationBefore, item.beforeBlock),
+				contextualMessages(message.conversationMessages, item.beforeBlock),
 			);
 		}
 	};
@@ -723,8 +760,8 @@ export default async function (pi: ExtensionAPI) {
 				speechConversationBefore,
 				`${speechSourcePrefix}${sourceContext.throughBlock}`,
 			);
-			const discussionBeforeBlock = contextualTranscript(
-				speechConversationBefore,
+			const discussionBeforeBlock = contextualMessages(
+				speechConversationMessages,
 				`${speechSourcePrefix}${sourceContext.beforeBlock}`,
 			);
 			return requestCodeDescription(ctx, block, identityContext, discussionBeforeBlock);
@@ -978,6 +1015,7 @@ export default async function (pi: ExtensionAPI) {
 			? completedAssistantMessages(activeContext, config.mode).find(message => message.id === target.id)
 			: undefined;
 		speechConversationBefore = contextual?.conversationBefore ?? "";
+		speechConversationMessages = contextual?.conversationMessages ?? [];
 		speechSourcePrefix = target.text.slice(0, sourceOffset);
 		playbackPaused = false;
 		pausedOwnerUtterance = undefined;
@@ -1077,7 +1115,12 @@ export default async function (pi: ExtensionAPI) {
 				const checkpoints: PlaybackTimingSnapshot["checkpoints"] = [];
 				let time = 0;
 				try {
-					for (const item of await timingItemsFor(ctx, message.text, contextual.conversationBefore)) {
+					for (const item of await timingItemsFor(
+						ctx,
+						message.text,
+						contextual.conversationBefore,
+						contextual.conversationMessages,
+					)) {
 						const duration = await workers[lane].measureSegment(item.text, measurementConfig);
 						if (epoch !== contextEpoch || workEpoch !== timingWorkEpoch || activeContext !== ctx) return;
 						if (!Number.isFinite(duration) || duration <= 0) continue;
@@ -1431,7 +1474,9 @@ export default async function (pi: ExtensionAPI) {
 			event.message.role === "assistant"
 		) {
 			if (activeContext) {
-				speechConversationBefore = liveConversationBefore(activeContext);
+				const before = liveConversationBefore(activeContext);
+				speechConversationBefore = before.transcript;
+				speechConversationMessages = before.messages;
 			}
 			speechSourcePrefix = "";
 			const continuingTurn =
@@ -1534,6 +1579,7 @@ export default async function (pi: ExtensionAPI) {
 					playbackHistory.beginCapture(completed.id, completed.text, 0, true);
 				}
 				speechConversationBefore = contextual?.conversationBefore ?? "";
+				speechConversationMessages = contextual?.conversationMessages ?? [];
 				speechSourcePrefix = "";
 				narration.setCompletedText(text);
 				ownerContentExpected = hasSpeakableAudio(text);

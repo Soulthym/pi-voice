@@ -70,7 +70,7 @@ Use `/voice voice` for an interactive picker or `/voice voice <id>` directly.
 
 `current` follows Pi's active model without assuming a provider or model family.
 
-For the best discussion-aware code narration, set `codeDescriptionContext` to `conversation`. This allows `editModel` to receive Pi's resolved text discussion before each fence, potentially including compaction summaries and retained textual tool results. Keep the privacy-safe `block-only` default if that context should not be sent to a remote provider. See [Models and privacy](models-and-privacy.md).
+For the best discussion-aware code narration, set `codeDescriptionContext` to `conversation`. This allows `editModel` to receive Pi's resolved provider-compatible history before each fence, potentially including images, compaction summaries, tool calls, and tool results. With `editModel: "current"`, Pi Voice also preserves the effective system prompt and active tool schemas to make the normal request prefix provider-cache eligible. Keep the privacy-safe `block-only` default if that context should not be sent to a remote provider. See [Models and privacy](models-and-privacy.md).
 
 ## Persistent data
 

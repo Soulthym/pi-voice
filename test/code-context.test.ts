@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
-import { contextualTranscript, sessionContextTranscript } from "../src/code-context.js";
+import {
+	contextualMessages,
+	contextualTranscript,
+	resolvedSessionContext,
+	sessionContextTranscript,
+} from "../src/code-context.js";
 
 const message = (id: string, parentId: string | null, role: "user" | "assistant", text: string): SessionEntry =>
 	({
@@ -29,11 +34,22 @@ test("reconstructs an older block context through its preceding compaction", () 
 		message("current-user", "compaction", "user", "Current prompt"),
 	];
 
+	const resolved = resolvedSessionContext(entries, "current-user");
 	const transcript = sessionContextTranscript(entries, "current-user");
+	assert.equal(transcript, resolved.transcript);
 	assert.match(transcript, /Earlier discussion summary/);
 	assert.match(transcript, /Kept prompt/);
 	assert.match(transcript, /Current prompt/);
 	assert.doesNotMatch(transcript, /Old prompt that should be summarized/);
+	assert.deepEqual(resolved.messages.map(item => item.role), ["user", "user", "user"]);
+	assert.match(JSON.stringify(resolved.messages[0]), /Earlier discussion summary/);
+});
+
+test("extends structured context with an assistant prefix without flattening roles", () => {
+	const before = [{ role: "user", content: [{ type: "text", text: "Explain it." }], timestamp: 1 }] as never;
+	const messages = contextualMessages(before, "Answer prefix.\n");
+	assert.deepEqual(messages.map(message => message.role), ["user", "assistant"]);
+	assert.equal((messages[1].content[0] as { text: string }).text, "Answer prefix.\n");
 });
 
 test("extends a stable conversation prefix only through the concerned block", () => {

@@ -19,7 +19,7 @@ Kokoro, Whisper, Wav2Vec2 alignment, and audio-cache processing run on the machi
 - Routes multiple clients and Pi sessions safely with explicit device selection, speech ownership, attention requests, and manual preemption.
 - Keeps synthesis, alignment, playback, and preprocessing outside Pi's TUI event loop.
 
-> **Best contextual narration:** set `"codeDescriptionContext": "conversation"` to let `editModel` explain code using the discussion that led to it. The privacy-safe default, `"block-only"`, sends only the concerned fence. Conversation mode may send user/assistant text, compaction summaries, and retained textual tool results to a remote `editModel`; see [Models and privacy](docs/models-and-privacy.md).
+> **Best contextual narration:** set `"codeDescriptionContext": "conversation"` to let `editModel` explain code using the discussion that led to it. The privacy-safe default, `"block-only"`, sends only the concerned fence. Conversation mode sends Pi's provider-compatible history and may include user/assistant content, images, compaction summaries, tool calls, and tool results. With `editModel: "current"`, it also reuses Pi's effective system prompt and active tool schemas so supported providers can reuse the normal conversation's prompt cache. See [Models and privacy](docs/models-and-privacy.md) before enabling it with a remote model.
 
 > Short demonstration videos will be added alongside the relevant features.
 

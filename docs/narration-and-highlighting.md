@@ -28,7 +28,7 @@ Shell installation/update blocks and patches have semantic local fallbacks. Gene
 
 Descriptions are generated for fenced blocks in completed assistant text, not raw tool result patches. Description preprocessing itself does not acquire speech ownership or request attention. Written descriptions continue to be filled while spoken output is disabled.
 
-Set `codeDescriptionContext` to `conversation` for the best discussion-specific descriptions. This opt-in can send resolved conversation text and retained textual tool results to a remote `editModel`; the privacy-safe default is `block-only`.
+Set `codeDescriptionContext` to `conversation` for the best discussion-specific descriptions. This opt-in can send Pi's provider-compatible history—including images, tool calls, and tool results—to a remote `editModel`; when that is the active model, the normal system prompt and tool-schema prefix is also reused for provider caching. The privacy-safe default is `block-only`.
 
 ## Guided mode
 
