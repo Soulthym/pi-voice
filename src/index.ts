@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { hasSpeakableAudio, requiresVoiceAttention } from "./attention.js";
 import { CodeDescriptionCache, type CodeDescriptionCacheSnapshot } from "./code-description-cache.js";
 import { codeDescriptionCacheKey, describeCodeBlock, fallbackCodeDescription } from "./code-describer.js";
 import {
@@ -124,11 +125,6 @@ function describableCodeBlocks(text: string): FencedCodeBlock[] {
 		.map(item => item.block);
 }
 
-function hasSpeakableAudio(text: string): boolean {
-	const stream = new SpeakableStream();
-	return [...stream.push(text), ...stream.flush()].some(item => item.kind === "code" || item.text.trim().length > 0);
-}
-
 function parseMode(value: string): VoiceMode | undefined {
 	return value === "all" || value === "assistant" || value === "yield" ? value : undefined;
 }
@@ -177,6 +173,9 @@ export default async function (pi: ExtensionAPI) {
 	let projectAnnouncementPending = false;
 	let pendingNotification: WaitingSession | undefined;
 	let pausedForAttention = false;
+	let speechBlocked = false;
+	let blockedSpeechText = "";
+	let ownedSpeechText = "";
 	let completingOwnerSpeech = false;
 	let attentionPollTimer: NodeJS.Timeout | null = null;
 	let voiceWorkerIdleTimer: NodeJS.Timeout | null = null;
@@ -685,15 +684,13 @@ export default async function (pi: ExtensionAPI) {
 
 	const completeOwnerSpeech = (): void => {
 		const expectedUtterance = ownerContentExpected ? lastOwnerUtterance : projectPrefixUtterance;
-		if (
-			!ownsSpeech ||
-			!ownerTurnEnded ||
-			expectedUtterance === undefined ||
-			completedOwnerUtterance !== expectedUtterance ||
-			completingOwnerSpeech
-		) {
+		if (!ownsSpeech || !ownerTurnEnded || completingOwnerSpeech) return;
+		if (expectedUtterance === undefined) {
+			projectAnnouncementPending = false;
+			releaseSpeechOwnership(true);
 			return;
 		}
+		if (completedOwnerUtterance !== expectedUtterance) return;
 		completingOwnerSpeech = true;
 		if (speechPurpose === "notification") {
 			if (pendingNotification) coordinator?.markAnnounced(pendingNotification.instanceId);
@@ -734,16 +731,22 @@ export default async function (pi: ExtensionAPI) {
 		completedOwnerUtterance = undefined;
 		ownerContentExpected = false;
 		speechReservedForInput = false;
-		projectAnnouncementPending = false;
+		projectAnnouncementPending = shouldAnnounce;
+		ownedSpeechText = "";
 		pendingNotification = undefined;
 		completingOwnerSpeech = false;
 		pausedForAttention = false;
+		speechBlocked = false;
+		blockedSpeechText = "";
 		coordinator.clearWaiting();
 		refreshStatus();
-		if (shouldAnnounce) {
-			projectPrefixUtterance = vocalizer.speakUntracked(`Project ${coordinator.projectLabel()}.`);
-		}
 		return true;
+	};
+
+	const announceProjectForSpeech = (): void => {
+		if (!projectAnnouncementPending || !coordinator) return;
+		projectAnnouncementPending = false;
+		projectPrefixUtterance = vocalizer.speakUntracked(`Project ${coordinator.projectLabel()}.`);
 	};
 
 	const reserveSpeechForInput = (): void => {
@@ -809,6 +812,7 @@ export default async function (pi: ExtensionAPI) {
 		playbackPositionEstimated = false;
 		refreshPlaybackTimeline();
 		ownerContentExpected = hasSpeakableAudio(suffix);
+		if (ownerContentExpected) announceProjectForSpeech();
 		vocalizer.speakFrom(suffix, sourceOffset);
 		ownerTurnEnded = true;
 		completeOwnerSpeech();
@@ -1185,6 +1189,8 @@ export default async function (pi: ExtensionAPI) {
 	pi.on("input", () => {
 		coordinator?.clearWaiting();
 		pausedForAttention = false;
+		speechBlocked = false;
+		blockedSpeechText = "";
 		cancelTimingWorkers();
 		vocalizer.clear();
 		narration.finish();
@@ -1193,6 +1199,8 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	pi.on("before_agent_start", () => {
+		speechBlocked = false;
+		blockedSpeechText = "";
 		cancelTimingWorkers();
 		vocalizer.clear();
 		narration.finish();
@@ -1211,13 +1219,15 @@ export default async function (pi: ExtensionAPI) {
 			const continuingTurn =
 				liveTurnNarrationActive && ownsSpeech && speechPurpose === "turn" && (coordinator?.ownsSpeech() ?? true);
 			if (!continuingTurn && !acquireSpeech("turn")) {
-				pausedForAttention = true;
+				speechBlocked = true;
+				blockedSpeechText = "";
 				livePlaybackId = undefined;
 				refreshStatus();
 				return;
 			}
 			ownerTurnEnded = false;
 			completedOwnerUtterance = undefined;
+			ownedSpeechText = "";
 			const sourceOffset = continuingTurn ? narration.startMessage() : 0;
 			if (!continuingTurn) {
 				narration.finish();
@@ -1233,8 +1243,26 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	pi.on("message_update", event => {
-		if (!config.enabled || config.mode === "yield" || !ownsSpeech) return;
+		if (!config.enabled || config.mode === "yield") return;
 		const delta = event.assistantMessageEvent;
+		const speakableDelta =
+			delta.type === "text_delta" || (delta.type === "thinking_delta" && config.mode === "all")
+				? delta.delta
+				: undefined;
+		if (!ownsSpeech) {
+			if (speechBlocked && speakableDelta !== undefined) {
+				blockedSpeechText += speakableDelta;
+				if (hasSpeakableAudio(blockedSpeechText)) {
+					pausedForAttention = true;
+					refreshStatus();
+				}
+			}
+			return;
+		}
+		if (speakableDelta !== undefined) {
+			ownedSpeechText += speakableDelta;
+			if (hasSpeakableAudio(ownedSpeechText)) announceProjectForSpeech();
+		}
 		if (delta.type === "text_delta") {
 			narration.pushDelta("assistant", delta.contentIndex, delta.delta);
 			vocalizer.pushDelta(delta.delta);
@@ -1252,6 +1280,10 @@ export default async function (pi: ExtensionAPI) {
 			if (livePlaybackId) finalizePlaybackMessage(activeContext, livePlaybackId, completedText);
 			livePlaybackId = undefined;
 		}
+		if (config.enabled && speechBlocked && requiresVoiceAttention(completedText, config.mode, stopReason)) {
+			pausedForAttention = true;
+			refreshStatus();
+		}
 		if (!config.enabled || stopReason === undefined || !ownsSpeech) return;
 		if (stopReason === "aborted" || stopReason === "error") {
 			vocalizer.clear();
@@ -1260,6 +1292,7 @@ export default async function (pi: ExtensionAPI) {
 			releaseSpeechOwnership(true);
 		} else if (config.mode !== "yield") {
 			ownerContentExpected = ownerContentExpected || hasSpeakableAudio(completedText);
+			if (ownerContentExpected) announceProjectForSpeech();
 			vocalizer.flush();
 		}
 	});
@@ -1278,8 +1311,11 @@ export default async function (pi: ExtensionAPI) {
 				}
 				narration.setCompletedText(text);
 				ownerContentExpected = hasSpeakableAudio(text);
+				if (ownerContentExpected) announceProjectForSpeech();
 				vocalizer.speak(text);
-			} else if (text) {
+			} else if (requiresVoiceAttention(text, config.mode, stopReason)) {
+				speechBlocked = true;
+				blockedSpeechText = text;
 				pausedForAttention = true;
 			}
 		}
@@ -1290,6 +1326,11 @@ export default async function (pi: ExtensionAPI) {
 			} else if (pausedForAttention) {
 				coordinator?.markWaiting();
 				ctx.ui.notify("Voice response paused behind another project; run /voice attention or press F11 to play it", "warning");
+				refreshStatus();
+			} else if (speechBlocked) {
+				speechBlocked = false;
+				blockedSpeechText = "";
+				coordinator?.clearWaiting();
 				refreshStatus();
 			}
 		}
@@ -1887,6 +1928,7 @@ export default async function (pi: ExtensionAPI) {
 					narration.finish();
 					if (!acquireSpeech("replay", true, true)) return;
 					ownerContentExpected = true;
+					announceProjectForSpeech();
 					lastOwnerUtterance = vocalizer.speakUntracked(text);
 					ownerTurnEnded = true;
 					completeOwnerSpeech();
