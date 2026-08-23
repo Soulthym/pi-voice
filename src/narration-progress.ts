@@ -248,6 +248,19 @@ function excludedMarkdownRanges(markdown: string): NarrationSourceRange[] {
 			excluded.push({ start: match.index, end: match.index + match[0].length });
 		}
 	}
+	// ANSI styling inside structural markers changes how the Markdown lexer
+	// recognizes them. In particular, styling the number in a nested `1.` list
+	// marker turns it into paragraph text and loses continuation indentation.
+	for (const match of markdown.matchAll(/^[ \t]*(\d{1,9})(?=[.)][ \t]+)/gm)) {
+		const number = match[1];
+		const start = match.index + match[0].lastIndexOf(number);
+		excluded.push({ start, end: start + number.length });
+	}
+	for (const match of markdown.matchAll(/^[ \t]*(?:[-+*]|\d{1,9}[.)])[ \t]+\[([xX])\](?=[ \t]+)/gm)) {
+		const marker = match[1];
+		const start = match.index + match[0].lastIndexOf(marker);
+		excluded.push({ start, end: start + marker.length });
+	}
 	return excluded;
 }
 
@@ -266,21 +279,44 @@ function styleNarrationMarkdown(
 		return (unread || speaking) && !excluded.some(range => word.start >= range.start && word.end <= range.end);
 	});
 	if (ranges.length === 0) return markdown;
+	const isActiveRange = (range: NarrationSourceRange): boolean =>
+		active ? range.end > active.start && range.start < active.end : false;
+	const crossesExcludedSyntax = (start: number, end: number): boolean =>
+		excluded.some(range => range.start < end && range.end > start);
 	let output = "";
 	let offset = 0;
-	let previousWasActive = false;
-	for (const range of ranges) {
-		const isActive = active ? range.end > active.start && range.start < active.end : false;
-		const gap = markdown.slice(offset, range.start);
-		// Keep the sentence background visually continuous without putting ANSI
-		// escapes around Markdown punctuation or line-start syntax.
-		output += previousWasActive && isActive && /^[ \t]+$/.test(gap) ? styleActive(gap) : gap;
-		let styled = markdown.slice(range.start, range.end);
-		if (range.end > cursor) styled = styleUnread(styled);
-		if (isActive) styled = styleActive(styled);
-		output += styled;
-		offset = range.end;
-		previousWasActive = isActive;
+	for (let index = 0; index < ranges.length; index += 1) {
+		const range = ranges[index];
+		output += markdown.slice(offset, range.start);
+		if (!isActiveRange(range)) {
+			const text = markdown.slice(range.start, range.end);
+			output += range.end > cursor ? styleUnread(text) : text;
+			offset = range.end;
+			continue;
+		}
+
+		// Keep each active same-line phrase in one ANSI span. Closing and reopening
+		// a style around every word makes the terminal wrapper retain a separator
+		// space at the start of wrapped list lines, changing their indentation.
+		let last = index;
+		while (last + 1 < ranges.length && isActiveRange(ranges[last + 1])) {
+			const gapStart = ranges[last].end;
+			const gapEnd = ranges[last + 1].start;
+			if (markdown.slice(gapStart, gapEnd).includes("\n") || crossesExcludedSyntax(gapStart, gapEnd)) break;
+			last += 1;
+		}
+		let phrase = "";
+		let phraseOffset = range.start;
+		for (let current = index; current <= last; current += 1) {
+			const word = ranges[current];
+			phrase += markdown.slice(phraseOffset, word.start);
+			const text = markdown.slice(word.start, word.end);
+			phrase += word.end > cursor ? styleUnread(text) : text;
+			phraseOffset = word.end;
+		}
+		output += styleActive(phrase);
+		offset = ranges[last].end;
+		index = last;
 	}
 	return output + markdown.slice(offset);
 }

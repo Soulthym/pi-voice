@@ -21,7 +21,7 @@ test("dims unread prose and reveals words from playback progress", () => {
 	progress.setPlayback(1, 0);
 	assert.equal(
 		progress.transform("First second.", "assistant", dim, background),
-		"<bg>First</bg><bg> </bg><bg><dim>second</dim></bg>.",
+		"<bg>First <dim>second</dim></bg>.",
 	);
 	progress.setPlayback(1, 1.9);
 	assert.equal(progress.transform("First second.", "assistant", dim), "First second.");
@@ -69,12 +69,12 @@ test("keeps highlighting an earlier message when a later assistant message appea
 	progress.registerSegment({ id: 11, utterance: 5, text: "Second active.", source: { start: 13, end: 27 } });
 	progress.setSegmentAudio(11, 0, 2);
 
-	assert.match(progress.transform("First queued.", "assistant", dim, background), /<bg>First<\/bg>/);
+	assert.match(progress.transform("First queued.", "assistant", dim, background), /<bg>First /);
 	assert.equal(progress.transform("Second active.", "assistant", dim), "<dim>Second</dim> <dim>active</dim>.");
 
 	progress.finishUtterance(4);
 	progress.setPlayback(5, 0);
-	assert.match(progress.transform("Second active.", "assistant", dim, background), /<bg>Second<\/bg>/);
+	assert.match(progress.transform("Second active.", "assistant", dim, background), /<bg>Second /);
 });
 
 test("styles spoken text fences while preserving their Markdown markers", () => {
@@ -95,7 +95,7 @@ test("styles spoken text fences while preserving their Markdown markers", () => 
 		"```text\n<dim>Read</dim> <dim>this</dim> <dim>sentence</dim>.\n```",
 	);
 	progress.setPlayback(4, 0);
-	assert.match(progress.transform(markdown, "assistant", dim, background), /<bg>Read<\/bg>/);
+	assert.match(progress.transform(markdown, "assistant", dim, background), /<bg>Read /);
 });
 
 test("shows a code description below its block and reveals it with playback", () => {
@@ -123,7 +123,7 @@ test("shows a code description below its block and reveals it with playback", ()
 
 	progress.setPlayback(6, 0);
 	const active = progress.transform(markdown, "assistant", dim, background, () => description);
-	assert.match(active, /> <bg>The<\/bg><bg> <\/bg><bg><dim>loop<\/dim><\/bg>/);
+	assert.match(active, /> <bg>The <dim>loop<\/dim>/);
 
 	progress.finish();
 	assert.match(progress.transform(markdown, "assistant", dim, background, () => description), /> The loop prints each value\./);
@@ -145,6 +145,17 @@ test("shows cached descriptions for every fenced code block", () => {
 
 	assert.equal(transformed.match(/\*\*Code description\*\*/g)?.length, 2);
 	assert.match(transformed, /TypeScript defines one\.[\s\S]*Between\.[\s\S]*Python defines two\./);
+});
+
+test("keeps nested ordered-list markers outside narration styling", () => {
+	const markdown = "Changes:\n- Ordered work:\n    1. First nested item\n    2. Second nested item\n- Finished.";
+	const progress = new NarrationProgress();
+	progress.setCompletedText(markdown);
+
+	const transformed = progress.transform(markdown, "assistant", dim, background);
+	assert.match(transformed, /\n    1\. <dim>First<\/dim>/);
+	assert.match(transformed, /\n    2\. <dim>Second<\/dim>/);
+	assert.doesNotMatch(transformed, /<dim>[12]<\/dim>\./);
 });
 
 test("tracks table cells as independent active sentences", () => {
