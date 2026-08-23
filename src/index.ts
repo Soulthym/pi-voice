@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { highlightCode, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { hasSpeakableAudio, requiresVoiceAttention } from "./attention.js";
 import { CodeDescriptionCache, type CodeDescriptionCacheSnapshot } from "./code-description-cache.js";
 import { codeDescriptionCacheKey, describeCodeBlock, fallbackCodeDescription } from "./code-describer.js";
@@ -429,6 +429,7 @@ export default async function (pi: ExtensionAPI) {
 				}
 			},
 			config.enabled && config.playbackHighlight,
+			(code, language) => highlightCode(code, language),
 		);
 	});
 

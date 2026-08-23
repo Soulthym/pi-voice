@@ -112,6 +112,7 @@ test("shows a code description below its block and reveals it with playback", ()
 		code: {
 			blockSource: { start: 0, end: markdown.length },
 			code: "for (const value of values) console.log(value);",
+			language: "ts",
 			cues: [],
 		},
 		codeDescription: {
@@ -122,8 +123,10 @@ test("shows a code description below its block and reveals it with playback", ()
 	});
 	progress.setSegmentAudio(14, 0, 2);
 
-	const pending = progress.transform(markdown, "assistant", dim, background, () => description);
+	const syntax = (code: string): string[] => code.split("\n").map(line => `\x1b[31m${line}\x1b[39m`);
+	const pending = progress.transform(markdown, "assistant", dim, background, () => description, true, syntax);
 	assert.match(pending, /```ts\u200c\n/);
+	assert.match(pending, /\x1b\[2m\x1b\[31mfor/);
 	assert.match(pending, /```\n\n> \*\*Code description\*\*/);
 	assert.match(pending, /> <dim>The<\/dim> <dim>loop<\/dim>/);
 

@@ -86,6 +86,7 @@ test("dims code, reveals line groups, bolds spans, and restores the block", () =
 		code: {
 			blockSource: { start: 0, end: markdown.length },
 			code,
+			language: "ts",
 			cues: [
 				{
 					offset: 0,
@@ -104,9 +105,10 @@ test("dims code, reveals line groups, bolds spans, and restores the block", () =
 	});
 	progress.setSegmentAudio(1, 0, 2);
 	progress.setPlayback(1, 0);
-	const focused = progress.transform(markdown, "assistant", text => text);
-	assert.match(focused, /const \u001b\[1mtotal\u001b\[22m = price/);
-	assert.match(focused, /\u001b\[2mreturn total;\u001b\[22m/);
+	const syntax = (source: string): string[] => source.split("\n").map(line => `\x1b[31m${line}\x1b[39m`);
+	const focused = progress.transform(markdown, "assistant", text => text, text => text, () => undefined, true, syntax);
+	assert.match(focused, /\x1b\[31mconst \x1b\[1mtotal\x1b\[22m = price/);
+	assert.match(focused, /\x1b\[2m\x1b\[31mreturn total;\x1b\[39m\x1b\[22m/);
 
 	progress.setPlayback(1, 2.1);
 	assert.equal(progress.transform(markdown, "assistant", text => text), markdown);

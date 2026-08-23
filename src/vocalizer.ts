@@ -230,7 +230,7 @@ export class Vocalizer {
 				utterance,
 				{ start: source.start, end: source.start },
 				true,
-				plan.guided ? { blockSource: source, code: block.code, cues: chunk.cues } : undefined,
+				plan.guided ? { blockSource: source, code: block.code, language: block.language, cues: chunk.cues } : undefined,
 				{ blockSource: source, text: description, offset: descriptionOffset },
 				sourceBase,
 			);

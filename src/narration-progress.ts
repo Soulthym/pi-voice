@@ -25,6 +25,7 @@ export interface NarrationSegment {
 	code?: {
 		blockSource: NarrationSourceRange;
 		code: string;
+		language?: string;
 		cues: CodeNarrationCue[];
 	};
 	codeDescription?: {
@@ -73,6 +74,7 @@ type TrackedSegment = NarrationSegment & {
 type CodeFocusBlock = {
 	source: NarrationSourceRange;
 	code: string;
+	language?: string;
 	lineGroups: Map<string, CodeLineRange[]>;
 	boldGroups: Map<string, CodeSpanRange[]>;
 	complete: boolean;
@@ -339,7 +341,24 @@ function mergeSpans(spans: Array<{ start: number; end: number }>): Array<{ start
 	return merged;
 }
 
-function styleCodeLine(line: string, lineNumber: number, block: CodeFocusBlock): string {
+function styledIndexAtSourceOffset(styled: string, sourceOffset: number): number {
+	let index = 0;
+	let source = 0;
+	while (index < styled.length) {
+		if (source >= sourceOffset) return index;
+		if (styled[index] === "\x1b" && styled[index + 1] === "[") {
+			index += 2;
+			while (index < styled.length && !/[@-~]/.test(styled[index])) index += 1;
+			if (index < styled.length) index += 1;
+			continue;
+		}
+		index += 1;
+		source += 1;
+	}
+	return index;
+}
+
+function styleCodeLine(sourceLine: string, styledLine: string, lineNumber: number, block: CodeFocusBlock): string {
 	const lineActive = [...block.lineGroups.values()]
 		.flat()
 		.some(range => lineNumber >= range.startLine && lineNumber <= range.endLine);
@@ -349,27 +368,33 @@ function styleCodeLine(line: string, lineNumber: number, block: CodeFocusBlock):
 			.filter(range => lineNumber >= range.startLine && lineNumber <= range.endLine)
 			.map(range => ({
 				start: lineNumber === range.startLine ? Math.max(0, range.startColumn - 1) : 0,
-				end: lineNumber === range.endLine ? Math.min(line.length, range.endColumn) : line.length,
+				end: lineNumber === range.endLine ? Math.min(sourceLine.length, range.endColumn) : sourceLine.length,
 			})),
 	);
-	let output = lineActive ? "" : DIM_ON;
-	let offset = 0;
-	for (const span of bold) {
-		output += line.slice(offset, span.start);
-		if (!lineActive) output += INTENSITY_OFF;
-		output += BOLD_ON + line.slice(span.start, span.end) + INTENSITY_OFF;
-		if (!lineActive && span.end < line.length) output += DIM_ON;
-		offset = span.end;
+	let output = styledLine;
+	const insertions = bold.flatMap(span => {
+		const start = styledIndexAtSourceOffset(styledLine, span.start);
+		const end = styledIndexAtSourceOffset(styledLine, span.end);
+		return [
+			{ at: end, text: `${INTENSITY_OFF}${lineActive ? "" : DIM_ON}` },
+			{ at: start, text: `${lineActive ? "" : INTENSITY_OFF}${BOLD_ON}` },
+		];
+	});
+	for (const insertion of insertions.sort((left, right) => right.at - left.at)) {
+		output = output.slice(0, insertion.at) + insertion.text + output.slice(insertion.at);
 	}
-	output += line.slice(offset);
-	if (!lineActive && (bold.length === 0 || offset < line.length)) output += INTENSITY_OFF;
-	return output;
+	return lineActive ? output : `${DIM_ON}${output}${INTENSITY_OFF}`;
 }
 
-function styleCodeBlock(code: string, block: CodeFocusBlock): string {
-	return code
-		.split("\n")
-		.map((line, index) => styleCodeLine(line, index + 1, block))
+function styleCodeBlock(
+	code: string,
+	block: CodeFocusBlock,
+	highlightSyntax?: (code: string, language?: string) => string[],
+): string {
+	const sourceLines = code.split("\n");
+	const highlighted = highlightSyntax?.(code, block.language);
+	return sourceLines
+		.map((line, index) => styleCodeLine(line, highlighted?.[index] ?? line, index + 1, block))
 		.join("\n");
 }
 
@@ -459,6 +484,7 @@ export class NarrationProgress {
 				this.#codeBlocks.set(key, {
 					source: segment.code.blockSource,
 					code: segment.code.code,
+					language: segment.code.language,
 					lineGroups: new Map(),
 					boldGroups: new Map(),
 					complete: false,
@@ -560,6 +586,7 @@ export class NarrationProgress {
 		styleActive: (text: string) => string = text => text,
 		descriptionFor: (block: FencedCodeBlock) => string | undefined = () => undefined,
 		highlightProgress = true,
+		highlightSyntax?: (code: string, language?: string) => string[],
 	): string {
 		if (!markdown) return markdown;
 		const candidates = this.#blocks.filter(block => block.type === type && block.text.trim() === markdown);
@@ -612,7 +639,7 @@ export class NarrationProgress {
 			const suppressed = suppressFenceSyntaxHighlight(transformed, codeAt);
 			transformed = suppressed.markdown;
 			codeAt = suppressed.codeAt;
-			const styled = styleCodeBlock(codeBlock.code, codeBlock);
+			const styled = styleCodeBlock(codeBlock.code, codeBlock, highlightSyntax);
 			transformed = transformed.slice(0, codeAt) + styled + transformed.slice(codeAt + codeBlock.code.length);
 			searchFrom = codeAt + styled.length;
 		}
