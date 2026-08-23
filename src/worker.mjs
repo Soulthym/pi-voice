@@ -7,6 +7,7 @@ import * as readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import { env as transformersEnv, pipeline } from "@huggingface/transformers";
 import { KokoroTTS } from "kokoro-js";
+import { createPlaybackController } from "./playback-controller.mjs";
 
 const DEFAULT_TTS_MODEL = "onnx-community/Kokoro-82M-v1.0-ONNX";
 const DEFAULT_TTS_DTYPE = "q8";
@@ -30,15 +31,14 @@ const sttModels = new Map();
 let epoch = 0;
 let queue = [];
 let pumping = false;
-let player = null;
-let playerUtterance = null;
-let playerOutput = null;
 let alignmentChild = null;
 let shuttingDown = false;
 
 function send(message) {
 	process.stdout.write(`${JSON.stringify(message)}\n`);
 }
+
+const playback = createPlaybackController({ send });
 
 function ensureAlignmentChild() {
 	if (alignmentChild && alignmentChild.exitCode === null) return alignmentChild;
@@ -484,10 +484,10 @@ function createLocalSink(sampleRate, utterance) {
 		},
 	}, sampleRate, utterance);
 	child.stdin.on("error", error => {
-		if (player === sink && !shuttingDown) send({ type: "error", message: error.message });
+		if (playback.currentPlayer === sink && !shuttingDown) send({ type: "error", message: error.message });
 	});
 	child.on("exit", code => {
-		if (player === sink) clearCurrentPlayer();
+		if (playback.currentPlayer === sink) playback.clearCurrentPlayer();
 		if (code !== 0 && code !== null && !shuttingDown) {
 			send({ type: "error", message: stderr.trim() || `Audio player exited with code ${code}` });
 		}
@@ -567,7 +567,7 @@ function createNetworkSink(output, sampleRate, utterance) {
 		},
 	};
 	child.stdin.on("error", error => {
-		if (player === sink && !shuttingDown) send({ type: "error", message: error.message });
+		if (playback.currentPlayer === sink && !shuttingDown) send({ type: "error", message: error.message });
 	});
 	child.on("exit", code => {
 		if (!readySettled) {
@@ -575,67 +575,37 @@ function createNetworkSink(output, sampleRate, utterance) {
 			if (intentionallyStopped) resolveReady();
 			else rejectReady(new Error(stderr.trim() || `TCP playback helper exited with code ${code ?? "unknown"}`));
 		}
-		if (player === sink) clearCurrentPlayer();
+		if (playback.currentPlayer === sink) playback.clearCurrentPlayer();
 	});
 	return sink;
 }
 
 function clearCurrentPlayer() {
-	player = null;
-	playerUtterance = null;
-	playerOutput = null;
+	playback.clearCurrentPlayer();
 }
 
 function startPlayer(sampleRate, utterance, output) {
-	if (player && playerUtterance === utterance && playerOutput === output) return player;
-	if (player) stopPlayer();
-	const sink = output.startsWith("tcp://") || output.startsWith("unix://")
-		? createNetworkSink(output, sampleRate, utterance)
-		: createLocalSink(sampleRate, utterance);
-	player = sink;
-	playerUtterance = utterance;
-	playerOutput = output;
-	send({ type: "speaking" });
-	return sink;
+	return playback.startPlayer(sampleRate, utterance, output, (sinkOutput, sinkRate, sinkUtterance) =>
+		sinkOutput.startsWith("tcp://") || sinkOutput.startsWith("unix://")
+			? createNetworkSink(sinkOutput, sinkRate, sinkUtterance)
+			: createLocalSink(sinkRate, sinkUtterance),
+	);
 }
 
 function setPlayerPaused(paused) {
-	try {
-		player?.setPaused?.(paused);
-	} catch {
-		// Best-effort transport control.
-	}
+	playback.setPlayerPaused(paused);
 }
 
 function stopPlayer() {
-	const sink = player;
-	clearCurrentPlayer();
-	if (!sink) return;
-	try {
-		sink.stop();
-	} catch {
-		// Best-effort interruption.
-	}
+	playback.stopPlayer();
 }
 
 async function writeAudio(sink, pcm) {
-	if (!(pcm instanceof Float32Array) || pcm.length === 0 || sink.stopped) return;
-	await sink.ready;
-	if (sink.stopped) return;
-	sink.noteAudio(pcm.length);
-	const bytes = Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength);
-	if (!sink.writable.write(bytes)) await new Promise(resolve => sink.writable.once("drain", resolve));
+	return playback.writeAudio(sink, pcm);
 }
 
 async function closePlayer(utterance) {
-	const sink = player;
-	if (!sink || playerUtterance !== utterance) return;
-	// Keep the draining sink addressable until the client player actually exits.
-	// PCM is usually written much faster than it is heard; clearing here made F8
-	// unable to pause the remaining buffered playback.
-	await sink.close();
-	if (player === sink) clearCurrentPlayer();
-	send({ type: "idle", utterance });
+	return playback.closePlayer(utterance);
 }
 
 async function runOperation(operation) {
