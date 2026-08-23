@@ -38,6 +38,40 @@ test("shifts narration source ranges when regenerating a message suffix", () => 
 	assert.deepEqual(sources, [{ start: 40, end: 61 }]);
 });
 
+test("speaks coordinator prompts without registering message narration", () => {
+	const spoken: string[] = [];
+	const narration: string[] = [];
+	const worker = {
+		sendSegment(_utterance: number, _segmentId: number, text: string): void {
+			spoken.push(text);
+		},
+		endUtterance(): void {},
+		async measureSegment(): Promise<number> {
+			return 1;
+		},
+		cancel(): void {},
+		async transcribe(): Promise<string[]> {
+			return [];
+		},
+		async transcribePcm(): Promise<string> {
+			return "";
+		},
+		async preload(): Promise<void> {},
+		async preloadAlignment(): Promise<void> {},
+		async terminate(): Promise<void> {},
+	};
+	const vocalizer = new Vocalizer(
+		() => ({ ...DEFAULT_VOICE_CONFIG, enabled: true }),
+		() => {},
+		undefined,
+		segment => narration.push(segment.text),
+		worker,
+	);
+	assert.equal(vocalizer.speakUntracked("Project alpha."), 1);
+	assert.deepEqual(spoken, ["Project alpha."]);
+	assert.deepEqual(narration, []);
+});
+
 test("starts code description early while preserving spoken order", async () => {
 	const events: string[] = [];
 	const worker = {

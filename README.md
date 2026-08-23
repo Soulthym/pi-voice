@@ -17,6 +17,8 @@ Both tunnel endpoints bind only to loopback, and phone audio stays inside the en
 - Omits tables and most other Markdown noise from speech.
 - Starts with a short first segment, then synthesizes bounded sentence/clause segments.
 - Cancels queued speech when you send another prompt.
+- Coordinates concurrent Pi sessions through `~/.cache/pi-voice/coordinator`: only the first project to begin speaking owns phone playback. It announces its project name before the response; other projects remain paused until explicitly played. After the owner reaches end-of-turn and finishes or pauses audio, it announces the oldest project needing attention without automatically playing that project's response. Equal project directory names are disambiguated with the shortest necessary parent suffix.
+- Shares global code-description and timing-preprocessing concurrency slots across Pi processes. Idle timing pools terminate after each preprocessing pass, and main voice models are loaded lazily rather than warmed independently by every session.
 - Supports server-local playback or raw PCM over TCP/SSH.
 - Slightly dims unread assistant prose, gives the currently spoken sentence or clause a subtle background, and restores each word as it is heard, using fast local CTC forced alignment plus live `mpv` playback-position feedback from the phone.
 - Shows a classic playback timeline below the editor with play/pause/idle state, the current phone position, total narrated duration, and selected-message index. A `~` marks fallback clock estimates.
@@ -27,7 +29,7 @@ Both tunnel endpoints bind only to loopback, and phone audio stays inside the en
 - Generates multiple final hypotheses with the same ASR model and lets any configured Pi model resolve technical ambiguities from recent context.
 - Resolves candidates in both edit modes; `smart` additionally applies spoken corrections to the existing draft.
 
-With voice mode enabled, model warm-up starts in the background when the extension loads. Kokoro setup downloads approximately 100 MB from Hugging Face. The first microphone transcription downloads approximately 150 MB of Whisper weights, and spoken-word alignment downloads approximately 100 MB of q8 Wav2Vec2 weights. Later synthesis, transcription, and alignment are local.
+Voice models load lazily when their coordinated work begins; `/voice setup` remains available for an explicit warm-up. Timing preprocessing can load Kokoro even while playback is disabled. Kokoro setup downloads approximately 100 MB from Hugging Face. The first microphone transcription downloads approximately 150 MB of Whisper weights, and spoken-word alignment downloads approximately 100 MB of q8 Wav2Vec2 weights. Later synthesis, transcription, and alignment are local.
 
 ## Highlighting and worker architecture
 
@@ -149,7 +151,7 @@ The symmetric layout is phone voice input, previous assistant message, rewind 10
 ## Usage
 
 - Press the configured microphone shortcut (**Alt+M** by default) or **F5** and speak for as long as needed. Recording stops automatically after about 1.35 seconds of silence.
-- Press **F6**/**F10** to replay the previous/next completed assistant message, or **F11** to restart the selected message. Navigation is available while Pi is idle and restores message text from session history after `/reload` or session resume.
+- Press **F6**/**F10** to replay the previous/next completed assistant message, or **F11** to restart the selected message. In a project whose live response was paused by another Pi session, **F11** (or `/voice attention`) claims the free speech slot and plays the newest waiting response; it never resumes automatically. Navigation is available while Pi is idle and restores message text from session history after `/reload` or session resume.
 - Press **F7**/**F9** to move approximately 10 seconds backward/forward using recorded segment-to-source timing checkpoints. Press **F8** to pause and regenerate from the nearest checkpoint when resuming. The timeline's authoritative position variable is updated from the phone's live `mpv` clock and is also used by these controls. Timing is persisted in Pi's session after playback or silent preprocessing completes; PCM audio is never cached. Consequently, seeks remain approximate. Replay uses matching Opus segments when audio caching is enabled and invokes Kokoro only for cache misses. Replay preserves a valid timing map for unchanged audio. Each timing snapshot carries a render identity derived from message text, TTS model and dtype, voice, speed, code-narration dependencies, and PCM/Opus bitrate settings. Text or dependency changes invalidate only affected messages; unchanged messages and cached segments are reused. Missing code descriptions and audio segments are filled individually, and an interrupted message timing job resumes by decoding completed segment files while synthesizing only cache misses before atomically persisting the completed timing map. Older timing metadata without a render identity is treated as missing and incrementally rebuilt once. Missing historical annotations are generated silently when a session loads, without playing audio through the phone. The background indexer uses local structural text for code blocks to avoid historical `editModel` calls; when fenced code is actually replayed, its persisted narration is reused if one was generated previously.
 - Press the shortcut again to stop manually. Pi displays a live, revisable transcript in the prompt editor.
 - In the default `review` submit mode, correct or extend the final prompt and press Enter yourself.
@@ -168,6 +170,7 @@ Commands:
 /voice setup
 /voice test [optional text]
 /voice talk
+/voice attention
 /voice mode assistant|all|yield
 /voice voice [voice id]
 /voice speed <0.5..2>
@@ -181,6 +184,10 @@ Commands:
 /voice edit-model current|provider/model-id
 /voice highlight on|off
 /voice code-narration guided|summary
+/voice code-preprocess <1..8>
+/voice timing-preprocess auto|<1..8>
+/voice audio-cache on|off
+/voice audio-bitrate <12..128>
 /voice timing
 /voice output local|tcp://host:port
 /voice input disabled|tcp://host:port
@@ -215,6 +222,7 @@ Modes:
 - `PI_VOICE_CONFIG`: alternate server config path
 - `PI_VOICE_CACHE_DIR`: alternate model cache (default `~/.cache/pi-voice/models`)
 - `PI_VOICE_AUDIO_CACHE_DIR`: alternate Opus audio cache (default `~/.cache/pi-voice/audio`)
+- `PI_VOICE_COORDINATOR_DIR`: alternate cross-session lease/attention directory (default `~/.cache/pi-voice/coordinator`)
 - `PI_VOICE_PLAYER`: alternate `pw-play`-compatible local player executable
 - `PI_VOICE_AUDIO_PORT`: phone audio-listener port (default `8765`)
 - `PI_VOICE_CONTROL_PORT`: phone microphone-control port (default `8766`)

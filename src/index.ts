@@ -33,6 +33,7 @@ import { prioritizeFromCurrent, processConcurrently, resolveTimingConcurrency } 
 import { SpeakableStream, type FencedCodeBlock, type SpeakableSourceRange } from "./speakable.js";
 import { applySpokenEdit, resolveDictationCandidates } from "./prompt-editor.js";
 import { narrationRenderKey } from "./render-identity.js";
+import { SessionCoordinator, type WaitingSession } from "./session-coordinator.js";
 import { Vocalizer } from "./vocalizer.js";
 import { isVoice, VOICES } from "./voices.js";
 import { VoiceWorkerClient, type WorkerEvent } from "./worker-client.js";
@@ -40,6 +41,7 @@ import { VoiceWorkerClient, type WorkerEvent } from "./worker-client.js";
 type VoiceState = "downloading" | "error" | "idle" | "listening" | "loading" | "speaking";
 type InputPhase = "idle" | "recording" | "transcribing";
 type PreprocessingProgress = { label: string; processed: number; total: number };
+type SpeechPurpose = "turn" | "replay" | "notification";
 
 const PLAYBACK_TIMING_ENTRY = "pi-voice.playback-timing";
 const CODE_DESCRIPTION_CACHE_ENTRY = "pi-voice.code-description";
@@ -107,6 +109,11 @@ function describableCodeBlocks(text: string): FencedCodeBlock[] {
 		.map(item => item.block);
 }
 
+function hasSpeakableAudio(text: string): boolean {
+	const stream = new SpeakableStream();
+	return [...stream.push(text), ...stream.flush()].some(item => item.kind === "code" || item.text.trim().length > 0);
+}
+
 function parseMode(value: string): VoiceMode | undefined {
 	return value === "all" || value === "assistant" || value === "yield" ? value : undefined;
 }
@@ -140,6 +147,21 @@ function playbackBar(position: number, duration: number, width = 24): string {
 export default async function (pi: ExtensionAPI) {
 	let config = await loadVoiceConfig();
 	let activeContext: ExtensionContext | null = null;
+	let coordinator: SessionCoordinator | null = null;
+	let ownsSpeech = false;
+	let speechPurpose: SpeechPurpose | undefined;
+	let ownerTurnEnded = false;
+	let lastOwnerUtterance: number | undefined;
+	let projectPrefixUtterance: number | undefined;
+	let completedOwnerUtterance: number | undefined;
+	let ownerContentExpected = false;
+	let pendingNotification: WaitingSession | undefined;
+	let pausedForAttention = false;
+	let completingOwnerSpeech = false;
+	let attentionPollTimer: NodeJS.Timeout | null = null;
+	let voiceWorkerIdleTimer: NodeJS.Timeout | null = null;
+	let handleCoordinatedIdle: (utterance: number | undefined) => void = () => {};
+	let releaseSpeechOwnership: (announceNext?: boolean) => void = () => {};
 	let state: VoiceState = "idle";
 	let downloadPercent: number | undefined;
 	let lastError = "";
@@ -199,10 +221,15 @@ export default async function (pi: ExtensionAPI) {
 		return codeDescriptionCache
 			.getOrCreate(
 				key,
-				() =>
-					describeCodeBlock(ctx, block, editModel, narrationMode).catch(() =>
-						plainCodeNarration(fallbackCodeDescription(block)),
-					),
+				() => {
+					const generate = () =>
+						describeCodeBlock(ctx, block, editModel, narrationMode).catch(() =>
+							plainCodeNarration(fallbackCodeDescription(block)),
+						);
+					return coordinator
+						? coordinator.withResource("code", config.codeDescriptionPreprocessConcurrency, generate)
+						: generate();
+				},
 				snapshot => {
 					if (activeContext !== ctx) return;
 					if (ctx.isIdle()) pi.appendEntry(CODE_DESCRIPTION_CACHE_ENTRY, snapshot);
@@ -397,7 +424,10 @@ export default async function (pi: ExtensionAPI) {
 		}
 		let label = `voice: ${config.voice}`;
 		let color: "accent" | "dim" | "error" | "success" | "warning" = "dim";
-		if (state === "loading") {
+		if (pausedForAttention) {
+			label = `voice: waiting (${coordinator?.projectLabel() ?? "project"})`;
+			color = "warning";
+		} else if (state === "loading") {
 			label = "voice: loading Kokoro";
 			color = "warning";
 		} else if (state === "downloading") {
@@ -451,6 +481,7 @@ export default async function (pi: ExtensionAPI) {
 					if (snapshot) pi.appendEntry(PLAYBACK_TIMING_ENTRY, snapshot);
 				}
 				narration.finishUtterance(event.utterance);
+				handleCoordinatedIdle(event.utterance);
 				if (event.utterance !== undefined && activeContext) scheduleMissingTimings(activeContext);
 				break;
 			case "speaking":
@@ -509,6 +540,10 @@ export default async function (pi: ExtensionAPI) {
 			return requestCodeDescription(ctx, block);
 		},
 		segment => {
+			if (ownsSpeech) {
+				lastOwnerUtterance = segment.utterance;
+				ownerContentExpected = true;
+			}
 			narration.registerSegment(segment);
 			playbackHistory.registerSegment(segment);
 		},
@@ -528,6 +563,128 @@ export default async function (pi: ExtensionAPI) {
 		for (const worker of timingWorkers) worker.cancel();
 	};
 
+	const relinquishSpeech = (): void => {
+		coordinator?.releaseSpeech();
+		ownsSpeech = false;
+		speechPurpose = undefined;
+		ownerTurnEnded = false;
+		lastOwnerUtterance = undefined;
+		projectPrefixUtterance = undefined;
+		completedOwnerUtterance = undefined;
+		ownerContentExpected = false;
+		pendingNotification = undefined;
+		completingOwnerSpeech = false;
+		if (!inputInProgress) state = "idle";
+		refreshStatus();
+		if (voiceWorkerIdleTimer) clearTimeout(voiceWorkerIdleTimer);
+		voiceWorkerIdleTimer = null;
+		if (!inputInProgress) {
+			voiceWorkerIdleTimer = setTimeout(() => {
+				voiceWorkerIdleTimer = null;
+				if (!ownsSpeech && !inputInProgress) void vocalizer.shutdown().catch(() => {});
+			}, 60_000);
+			voiceWorkerIdleTimer.unref?.();
+		}
+	};
+
+	const speakAttentionNotification = (waiting: WaitingSession): void => {
+		if (!coordinator) return;
+		speechPurpose = "notification";
+		ownerTurnEnded = true;
+		pendingNotification = waiting;
+		lastOwnerUtterance = undefined;
+		projectPrefixUtterance = undefined;
+		completedOwnerUtterance = undefined;
+		ownerContentExpected = true;
+		narration.finish();
+		lastOwnerUtterance = vocalizer.speakUntracked(
+			`Project ${coordinator.projectLabel(waiting.cwd)} requires attention next.`,
+		);
+	};
+
+	releaseSpeechOwnership = (announceNext = true): void => {
+		if (!ownsSpeech || !coordinator) return;
+		if (announceNext) {
+			const waiting = coordinator.nextUnannouncedWaiting();
+			if (waiting) {
+				speakAttentionNotification(waiting);
+				return;
+			}
+		}
+		relinquishSpeech();
+	};
+
+	const completeOwnerSpeech = (): void => {
+		const expectedUtterance = ownerContentExpected ? lastOwnerUtterance : projectPrefixUtterance;
+		if (
+			!ownsSpeech ||
+			!ownerTurnEnded ||
+			expectedUtterance === undefined ||
+			completedOwnerUtterance !== expectedUtterance ||
+			completingOwnerSpeech
+		) {
+			return;
+		}
+		completingOwnerSpeech = true;
+		if (speechPurpose === "notification") {
+			if (pendingNotification) coordinator?.markAnnounced(pendingNotification.instanceId);
+			relinquishSpeech();
+			return;
+		}
+		completingOwnerSpeech = false;
+		releaseSpeechOwnership(true);
+	};
+
+	handleCoordinatedIdle = utterance => {
+		if (!ownsSpeech || utterance === undefined) return;
+		completedOwnerUtterance = utterance;
+		completeOwnerSpeech();
+	};
+
+	const acquireSpeech = (purpose: "turn" | "replay", announceProject = true): boolean => {
+		if (!coordinator) return true;
+		if (!ownsSpeech && !coordinator.tryAcquireSpeech()) return false;
+		if (voiceWorkerIdleTimer) clearTimeout(voiceWorkerIdleTimer);
+		voiceWorkerIdleTimer = null;
+		cancelTimingWorkers();
+		const newlyAcquired = !ownsSpeech;
+		ownsSpeech = true;
+		speechPurpose = purpose;
+		ownerTurnEnded = false;
+		lastOwnerUtterance = undefined;
+		projectPrefixUtterance = undefined;
+		completedOwnerUtterance = undefined;
+		ownerContentExpected = false;
+		pendingNotification = undefined;
+		completingOwnerSpeech = false;
+		pausedForAttention = false;
+		coordinator.clearWaiting();
+		refreshStatus();
+		if (newlyAcquired && announceProject) {
+			projectPrefixUtterance = vocalizer.speakUntracked(`Project ${coordinator.projectLabel()}.`);
+		}
+		return true;
+	};
+
+	const pollWaitingAttention = (): void => {
+		if (!coordinator) return;
+		const owner = coordinator.speechOwner();
+		if (owner && owner.instanceId !== coordinator.instanceId) {
+			if (timingPreprocessing) cancelTimingWorkers();
+			return;
+		}
+		if (!owner && activeContext && !timingPreprocessing) scheduleMissingTimings(activeContext);
+		if (!config.enabled || ownsSpeech) return;
+		const waiting = coordinator.nextUnannouncedWaiting();
+		if (!waiting || !coordinator.tryAcquireSpeech()) return;
+		if (voiceWorkerIdleTimer) clearTimeout(voiceWorkerIdleTimer);
+		voiceWorkerIdleTimer = null;
+		cancelTimingWorkers();
+		ownsSpeech = true;
+		completingOwnerSpeech = false;
+		speakAttentionNotification(waiting);
+	};
+
 	const playTarget = (target: PlaybackTarget, recordTimings: boolean): void => {
 		const sourceOffset = Math.max(0, Math.min(target.text.length, target.sourceOffset));
 		const suffix = target.text.slice(sourceOffset);
@@ -537,13 +694,22 @@ export default async function (pi: ExtensionAPI) {
 		cancelTimingWorkers();
 		vocalizer.clear();
 		narration.finish();
+		if (!acquireSpeech("replay")) {
+			pausedForAttention = true;
+			refreshStatus();
+			activeContext?.ui.notify("Another Pi project currently owns voice playback; this replay remains paused", "warning");
+			return;
+		}
 		narration.begin();
 		narration.setCompletedText(target.text);
 		playbackHistory.beginCapture(target.id, target.text, target.time, recordTimings);
 		playbackPaused = false;
 		playbackPositionEstimated = false;
 		refreshPlaybackTimeline();
+		ownerContentExpected = hasSpeakableAudio(suffix);
 		vocalizer.speakFrom(suffix, sourceOffset);
+		ownerTurnEnded = true;
+		completeOwnerSpeech();
 	};
 
 	const renderKeyFor = (ctx: ExtensionContext, text: string): string => {
@@ -599,6 +765,7 @@ export default async function (pi: ExtensionAPI) {
 	let timingPreprocessing: Promise<void> | undefined;
 	scheduleMissingTimings = (ctx: ExtensionContext): void => {
 		if (timingPreprocessing) return;
+		if (coordinator?.speechOwner()) return;
 		const epoch = contextEpoch;
 		const messages = syncPlaybackMessages(ctx);
 		const ordered = prioritizeFromCurrent(messages, playbackHistory.status()?.messageId);
@@ -616,47 +783,53 @@ export default async function (pi: ExtensionAPI) {
 		const workers = ensureTimingWorkers(concurrency);
 		const measurementConfig = config;
 		timingPreprocessing = processConcurrently(missing, concurrency, async (message, lane) => {
-			if (epoch !== contextEpoch || workEpoch !== timingWorkEpoch || activeContext !== ctx) return;
-			const checkpoints: PlaybackTimingSnapshot["checkpoints"] = [];
-			let time = 0;
-			try {
-				for (const item of await timingItemsFor(ctx, message.text)) {
-					const duration = await workers[lane].measureSegment(item.text, measurementConfig);
-					if (epoch !== contextEpoch || workEpoch !== timingWorkEpoch || activeContext !== ctx) return;
-					if (!Number.isFinite(duration) || duration <= 0) continue;
-					checkpoints.push({ time, duration, sourceOffset: item.source.start });
-					time += duration;
+			const processMessage = async (): Promise<void> => {
+				if (epoch !== contextEpoch || workEpoch !== timingWorkEpoch || activeContext !== ctx) return;
+				const checkpoints: PlaybackTimingSnapshot["checkpoints"] = [];
+				let time = 0;
+				try {
+					for (const item of await timingItemsFor(ctx, message.text)) {
+						const duration = await workers[lane].measureSegment(item.text, measurementConfig);
+						if (epoch !== contextEpoch || workEpoch !== timingWorkEpoch || activeContext !== ctx) return;
+						if (!Number.isFinite(duration) || duration <= 0) continue;
+						checkpoints.push({ time, duration, sourceOffset: item.source.start });
+						time += duration;
+					}
+				} catch {
+					// Live speech and microphone actions preempt low-priority timing work.
+					return;
 				}
-			} catch {
-				// Live speech and microphone actions preempt low-priority timing work.
-				return;
-			}
-			if (checkpoints.length === 0) return;
-			const resolvedRenderKey = renderKeyFor(ctx, message.text);
-			if (resolvedRenderKey !== message.renderKey) {
-				message.renderKey = resolvedRenderKey;
-				playbackHistory.sync(playbackMessages(ctx));
-			}
-			const snapshot: PlaybackTimingSnapshot = {
-				version: 2,
-				messageId: message.id,
-				renderKey: resolvedRenderKey,
-				duration: time,
-				checkpoints,
+				if (checkpoints.length === 0) return;
+				const resolvedRenderKey = renderKeyFor(ctx, message.text);
+				if (resolvedRenderKey !== message.renderKey) {
+					message.renderKey = resolvedRenderKey;
+					playbackHistory.sync(playbackMessages(ctx));
+				}
+				const snapshot: PlaybackTimingSnapshot = {
+					version: 2,
+					messageId: message.id,
+					renderKey: resolvedRenderKey,
+					duration: time,
+					checkpoints,
+				};
+				playbackHistory.restore([snapshot]);
+				requestPlaybackTimeline();
+				pi.appendEntry(PLAYBACK_TIMING_ENTRY, snapshot);
+				processedMessages += 1;
+				timingPreprocessingProgress = {
+					label: "Speech timing",
+					processed: processedMessages,
+					total: messages.length,
+				};
+				refreshPreprocessingProgress();
 			};
-			playbackHistory.restore([snapshot]);
-			requestPlaybackTimeline();
-			pi.appendEntry(PLAYBACK_TIMING_ENTRY, snapshot);
-			processedMessages += 1;
-			timingPreprocessingProgress = {
-				label: "Speech timing",
-				processed: processedMessages,
-				total: messages.length,
-			};
-			refreshPreprocessingProgress();
+			if (coordinator) await coordinator.withResource("timing", concurrency, processMessage);
+			else await processMessage();
 		}).finally(() => {
 			timingPreprocessing = undefined;
 			timingPreprocessingProgress = undefined;
+			const completedWorkers = timingWorkers.splice(0);
+			void Promise.all(completedWorkers.map(worker => worker.terminate())).catch(() => {});
 			refreshPreprocessingProgress();
 			if (timingRescheduleRequested && epoch === contextEpoch && activeContext === ctx) {
 				timingRescheduleRequested = false;
@@ -690,6 +863,7 @@ export default async function (pi: ExtensionAPI) {
 		if (wasEnabled && !config.enabled) {
 			vocalizer.clear();
 			narration.finish();
+			releaseSpeechOwnership(false);
 		}
 		state = "idle";
 		refreshStatus();
@@ -701,18 +875,6 @@ export default async function (pi: ExtensionAPI) {
 				timingRescheduleRequested = false;
 				scheduleMissingTimings(activeContext);
 			}
-		}
-		if (
-			config.enabled &&
-			(!wasEnabled ||
-				previous.ttsModel !== config.ttsModel ||
-				previous.ttsDtype !== config.ttsDtype ||
-				previous.alignmentModel !== config.alignmentModel ||
-				previous.alignmentDtype !== config.alignmentDtype)
-		) {
-			void warmModels().catch(error =>
-				activeContext?.ui.notify(`Voice model warm-up failed: ${error instanceof Error ? error.message : String(error)}`, "warning"),
-			);
 		}
 	};
 
@@ -744,6 +906,7 @@ export default async function (pi: ExtensionAPI) {
 		cancelTimingWorkers();
 		vocalizer.clear();
 		narration.finish();
+		releaseSpeechOwnership(false);
 		state = "listening";
 		refreshStatus();
 		const editorBase = ctx.ui.getEditorText();
@@ -848,6 +1011,12 @@ export default async function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		contextEpoch += 1;
 		activeContext = ctx;
+		coordinator?.shutdown();
+		coordinator = new SessionCoordinator(ctx.cwd, ctx.sessionManager.getSessionId());
+		coordinator.start();
+		if (attentionPollTimer) clearInterval(attentionPollTimer);
+		attentionPollTimer = setInterval(pollWaitingAttention, 1_000);
+		attentionPollTimer.unref?.();
 		pendingCodeDescriptions.clear();
 		codeDescriptionText.clear();
 		codeDescriptionCache.restore(codeDescriptionSnapshots(ctx));
@@ -856,11 +1025,6 @@ export default async function (pi: ExtensionAPI) {
 		scheduleMissingCodeDescriptions(ctx);
 		refreshPlaybackTimeline();
 		scheduleMissingTimings(ctx);
-		if (config.enabled) {
-			void warmModels().catch(error =>
-				ctx.ui.notify(`Voice model warm-up failed: ${error instanceof Error ? error.message : String(error)}`, "warning"),
-			);
-		}
 		if (ctx.mode === "tui") {
 			ctx.ui.setWidget("pi-voice-render-driver", tui => {
 				narrationTui = tui;
@@ -885,6 +1049,14 @@ export default async function (pi: ExtensionAPI) {
 		ctx.ui.setWidget("pi-voice-preprocessing", undefined);
 		codePreprocessingProgress = undefined;
 		timingPreprocessingProgress = undefined;
+		if (attentionPollTimer) clearInterval(attentionPollTimer);
+		attentionPollTimer = null;
+		if (voiceWorkerIdleTimer) clearTimeout(voiceWorkerIdleTimer);
+		voiceWorkerIdleTimer = null;
+		coordinator?.shutdown();
+		coordinator = null;
+		ownsSpeech = false;
+		pausedForAttention = false;
 		clearInputProgress();
 		if (narrationRenderTimer) clearTimeout(narrationRenderTimer);
 		narrationRenderTimer = null;
@@ -899,15 +1071,19 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	pi.on("input", () => {
+		coordinator?.clearWaiting();
+		pausedForAttention = false;
 		cancelTimingWorkers();
 		vocalizer.clear();
 		narration.finish();
+		releaseSpeechOwnership(false);
 	});
 
 	pi.on("before_agent_start", () => {
 		cancelTimingWorkers();
 		vocalizer.clear();
 		narration.finish();
+		releaseSpeechOwnership(false);
 	});
 
 	pi.on("message_start", event => {
@@ -919,6 +1095,12 @@ export default async function (pi: ExtensionAPI) {
 			"role" in event.message &&
 			event.message.role === "assistant"
 		) {
+			if (!acquireSpeech("turn")) {
+				pausedForAttention = true;
+				livePlaybackId = undefined;
+				refreshStatus();
+				return;
+			}
 			narration.finish();
 			narration.begin();
 			playbackPaused = false;
@@ -929,7 +1111,7 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	pi.on("message_update", event => {
-		if (!config.enabled || config.mode === "yield") return;
+		if (!config.enabled || config.mode === "yield" || !ownsSpeech) return;
 		const delta = event.assistantMessageEvent;
 		if (delta.type === "text_delta") {
 			narration.pushDelta("assistant", delta.contentIndex, delta.delta);
@@ -948,31 +1130,45 @@ export default async function (pi: ExtensionAPI) {
 			if (livePlaybackId) finalizePlaybackMessage(activeContext, livePlaybackId, completedText);
 			livePlaybackId = undefined;
 		}
-		if (!config.enabled || stopReason === undefined) return;
+		if (!config.enabled || stopReason === undefined || !ownsSpeech) return;
 		if (stopReason === "aborted" || stopReason === "error") {
 			vocalizer.clear();
 			narration.finish();
 			livePlaybackId = undefined;
+			releaseSpeechOwnership(true);
 		} else if (config.mode !== "yield") {
+			ownerContentExpected = ownerContentExpected || hasSpeakableAudio(completedText);
 			vocalizer.flush();
 		}
 	});
 
 	pi.on("turn_end", (event, ctx) => {
-		if (config.enabled && config.mode === "yield") {
-			const stopReason = assistantStopReason(event.message);
-			if (stopReason !== "aborted" && stopReason !== "error" && stopReason !== undefined) {
-				const text = assistantText(event.message);
-				if (text) {
-					const messages = playbackMessages(ctx);
-					const completed = messages.findLast(message => message.text === text);
-					if (completed) {
-						playbackHistory.sync(messages, true);
-						playbackHistory.beginCapture(completed.id, completed.text, 0, true);
-					}
-					narration.setCompletedText(text);
-					vocalizer.speak(text);
+		const stopReason = assistantStopReason(event.message);
+		const completedTurn = stopReason !== "aborted" && stopReason !== "error" && stopReason !== undefined;
+		if (config.enabled && config.mode === "yield" && completedTurn) {
+			const text = assistantText(event.message);
+			if (text && acquireSpeech("turn")) {
+				const messages = playbackMessages(ctx);
+				const completed = messages.findLast(message => message.text === text);
+				if (completed) {
+					playbackHistory.sync(messages, true);
+					playbackHistory.beginCapture(completed.id, completed.text, 0, true);
 				}
+				narration.setCompletedText(text);
+				ownerContentExpected = hasSpeakableAudio(text);
+				vocalizer.speak(text);
+			} else if (text) {
+				pausedForAttention = true;
+			}
+		}
+		if (config.enabled && completedTurn) {
+			if (ownsSpeech && speechPurpose === "turn") {
+				ownerTurnEnded = true;
+				completeOwnerSpeech();
+			} else if (pausedForAttention) {
+				coordinator?.markWaiting();
+				ctx.ui.notify("Voice response paused behind another project; run /voice attention or press F11 to play it", "warning");
+				refreshStatus();
 			}
 		}
 		scheduleMissingTimings(ctx);
@@ -1008,7 +1204,7 @@ export default async function (pi: ExtensionAPI) {
 
 	const replaySelected = (ctx: ExtensionContext): void => {
 		if (!canNavigatePlayback(ctx)) return;
-		syncPlaybackMessages(ctx);
+		syncPlaybackMessages(ctx, pausedForAttention);
 		const target = playbackHistory.restartTarget();
 		if (!target) {
 			ctx.ui.notify("There is no completed assistant message to replay yet", "warning");
@@ -1056,6 +1252,7 @@ export default async function (pi: ExtensionAPI) {
 			vocalizer.clear();
 			narration.finish();
 			playbackPaused = true;
+			releaseSpeechOwnership(true);
 			state = "idle";
 			refreshStatus();
 			refreshPlaybackTimeline();
@@ -1115,6 +1312,7 @@ export default async function (pi: ExtensionAPI) {
 				"setup",
 				"test",
 				"talk",
+				"attention",
 				"mode",
 				"voice",
 				"speed",
@@ -1274,6 +1472,7 @@ export default async function (pi: ExtensionAPI) {
 				case "stop":
 					vocalizer.clear();
 					narration.finish();
+					releaseSpeechOwnership(true);
 					if (inputPhase === "recording") {
 						setInputProgress("🎙 Stopping phone recording…");
 						void phoneInput.stop(config.input).catch(error =>
@@ -1285,6 +1484,9 @@ export default async function (pi: ExtensionAPI) {
 					return;
 				case "talk":
 					void talk(ctx);
+					return;
+				case "attention":
+					replaySelected(ctx);
 					return;
 				case "setup":
 					ctx.ui.notify("Preparing speech synthesis and alignment models…", "info");
@@ -1540,7 +1742,7 @@ export default async function (pi: ExtensionAPI) {
 					return;
 				default:
 					ctx.ui.notify(
-						"Usage: /voice [on|off|toggle|status|stop|setup|test|talk|mode|voice|speed|tts-model|tts-dtype|stt-model|stt-dtype|stt-candidates|alignment-model|alignment-dtype|edit-model|highlight|timing|code-narration|code-preprocess|timing-preprocess|audio-cache|audio-bitrate|output|input|shortcut|submit|edit]",
+						"Usage: /voice [on|off|toggle|status|stop|setup|test|talk|attention|mode|voice|speed|tts-model|tts-dtype|stt-model|stt-dtype|stt-candidates|alignment-model|alignment-dtype|edit-model|highlight|timing|code-narration|code-preprocess|timing-preprocess|audio-cache|audio-bitrate|output|input|shortcut|submit|edit]",
 						"error",
 					);
 			}

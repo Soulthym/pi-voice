@@ -39,6 +39,7 @@ export class Vocalizer {
 	#descriptionControllers = new Set<AbortController>();
 	#generation = 0;
 	#sourceOffset = 0;
+	#trackNarration = true;
 
 	constructor(
 		getConfig: () => VoiceConfig,
@@ -89,6 +90,18 @@ export class Vocalizer {
 
 	speak(text: string): void {
 		this.speakFrom(text, 0);
+	}
+
+	/** Speaks a coordinator prompt without attaching it to message highlighting or timing metadata. */
+	speakUntracked(text: string): number | undefined {
+		const before = this.#nextUtterance;
+		this.#trackNarration = false;
+		try {
+			this.speakFrom(text, 0);
+		} finally {
+			this.#trackNarration = true;
+		}
+		return this.#nextUtterance > before ? this.#nextUtterance : undefined;
 	}
 
 	speakFrom(text: string, sourceOffset: number): void {
@@ -232,7 +245,9 @@ export class Vocalizer {
 					? { start: source.start, end: source.start }
 					: source
 				: { start: 0, end: 0 };
-			this.#onNarrationSegment?.({ id, utterance, text, source: narrationSource, revealAtEnd, code, codeDescription });
+			if (this.#trackNarration) {
+				this.#onNarrationSegment?.({ id, utterance, text, source: narrationSource, revealAtEnd, code, codeDescription });
+			}
 			this.#worker.sendSegment(utterance, id, text, config);
 		});
 	}
