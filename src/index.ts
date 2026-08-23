@@ -33,6 +33,7 @@ import {
 import { PhoneInputClient } from "./phone-input.js";
 import { prioritizeFromCurrent, processConcurrently, resolveTimingConcurrency } from "./preprocessing.js";
 import { SpeakableStream, type FencedCodeBlock, type SpeakableSourceRange } from "./speakable.js";
+import { pendingPlaybackTiming, preprocessingStatus } from "./status-text.js";
 import { applySpokenEdit, resolveDictationCandidates } from "./prompt-editor.js";
 import { narrationRenderKey } from "./render-identity.js";
 import { SessionCoordinator, type WaitingSession } from "./session-coordinator.js";
@@ -244,9 +245,7 @@ export default async function (pi: ExtensionAPI) {
 		try {
 			const lines = [codePreprocessingProgress, timingPreprocessingProgress]
 				.filter((progress): progress is PreprocessingProgress => progress !== undefined)
-				.map(progress =>
-					ctx.ui.theme.fg("dim", `${progress.label}: ${progress.processed}/${progress.total} processed`),
-				);
+				.map(progress => ctx.ui.theme.fg("dim", preprocessingStatus(progress)));
 			ctx.ui.setWidget("pi-voice-preprocessing", lines.length > 0 ? lines : undefined, { placement: "belowEditor" });
 		} catch {
 			// The active context can become stale just before session shutdown runs.
@@ -427,7 +426,7 @@ export default async function (pi: ExtensionAPI) {
 		if (!playback.hasTimings || playback.duration <= 0) {
 			ctx.ui.setWidget(
 				"pi-voice-playback",
-				[ctx.ui.theme.fg("dim", `○ timing preprocessing${messageLabel}`)],
+				[ctx.ui.theme.fg("dim", `○ ${pendingPlaybackTiming(playback.messageIndex, playback.messageCount)}`)],
 				{ placement: "belowEditor" },
 			);
 			return;
