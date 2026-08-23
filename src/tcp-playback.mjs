@@ -5,7 +5,7 @@ const [output, sampleRateValue, utteranceValue] = process.argv.slice(2);
 const sampleRate = Number(sampleRateValue);
 const utterance = Number(utteranceValue);
 const control = fs.createWriteStream(null, { fd: 3, autoClose: false });
-const controlInput = fs.createReadStream(null, { fd: 3, autoClose: false });
+const controlInput = fs.createReadStream(null, { fd: 3, autoClose: true });
 let stopped = false;
 let startedAt = null;
 let pausedAt = null;
@@ -150,7 +150,7 @@ socket.on("data", chunk => {
 socket.on("error", fail);
 socket.on("close", () => {
 	clearInterval(timer);
-	process.stdin.destroy();
-	control.end();
-	if (!stopped) process.exitCode = 0;
+	// fd 3 is a live duplex control pipe; destroying its pending read can block.
+	// The network session is complete, so terminate the dedicated helper directly.
+	process.kill(process.pid, "SIGTERM");
 });
