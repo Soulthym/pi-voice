@@ -107,7 +107,22 @@ export class SessionCoordinator {
 	}
 
 	tryAcquireSpeech(): boolean {
-		if (this.#speechLease) return true;
+		if (this.ownsSpeech()) {
+			this.#speechLease = true;
+			return true;
+		}
+		const lease = this.#acquireLease(this.#speechPath(), "speech");
+		this.#speechLease = lease;
+		return lease;
+	}
+
+	/** Manual user action preempts the current lease instead of waiting behind it. */
+	forceAcquireSpeech(): boolean {
+		if (this.ownsSpeech()) {
+			this.#speechLease = true;
+			return true;
+		}
+		remove(this.#speechPath());
 		const lease = this.#acquireLease(this.#speechPath(), "speech");
 		this.#speechLease = lease;
 		return lease;

@@ -155,6 +155,8 @@ export default async function (pi: ExtensionAPI) {
 	let projectPrefixUtterance: number | undefined;
 	let completedOwnerUtterance: number | undefined;
 	let ownerContentExpected = false;
+	let speechReservedForInput = false;
+	let projectAnnouncementPending = false;
 	let pendingNotification: WaitingSession | undefined;
 	let pausedForAttention = false;
 	let completingOwnerSpeech = false;
@@ -572,6 +574,8 @@ export default async function (pi: ExtensionAPI) {
 		projectPrefixUtterance = undefined;
 		completedOwnerUtterance = undefined;
 		ownerContentExpected = false;
+		speechReservedForInput = false;
+		projectAnnouncementPending = false;
 		pendingNotification = undefined;
 		completingOwnerSpeech = false;
 		if (!inputInProgress) state = "idle";
@@ -641,13 +645,21 @@ export default async function (pi: ExtensionAPI) {
 		completeOwnerSpeech();
 	};
 
-	const acquireSpeech = (purpose: "turn" | "replay", announceProject = true): boolean => {
+	const acquireSpeech = (
+		purpose: "turn" | "replay",
+		announceProject = true,
+		force = false,
+	): boolean => {
 		if (!coordinator) return true;
-		if (!ownsSpeech && !coordinator.tryAcquireSpeech()) return false;
+		const alreadyOwned = ownsSpeech && coordinator.ownsSpeech();
+		if (!alreadyOwned) {
+			const acquired = force ? coordinator.forceAcquireSpeech() : coordinator.tryAcquireSpeech();
+			if (!acquired) return false;
+		}
 		if (voiceWorkerIdleTimer) clearTimeout(voiceWorkerIdleTimer);
 		voiceWorkerIdleTimer = null;
 		cancelTimingWorkers();
-		const newlyAcquired = !ownsSpeech;
+		const shouldAnnounce = announceProject && (!alreadyOwned || projectAnnouncementPending);
 		ownsSpeech = true;
 		speechPurpose = purpose;
 		ownerTurnEnded = false;
@@ -655,20 +667,43 @@ export default async function (pi: ExtensionAPI) {
 		projectPrefixUtterance = undefined;
 		completedOwnerUtterance = undefined;
 		ownerContentExpected = false;
+		speechReservedForInput = false;
+		projectAnnouncementPending = false;
 		pendingNotification = undefined;
 		completingOwnerSpeech = false;
 		pausedForAttention = false;
 		coordinator.clearWaiting();
 		refreshStatus();
-		if (newlyAcquired && announceProject) {
+		if (shouldAnnounce) {
 			projectPrefixUtterance = vocalizer.speakUntracked(`Project ${coordinator.projectLabel()}.`);
 		}
 		return true;
 	};
 
+	const reserveSpeechForInput = (): void => {
+		if (!config.enabled || !coordinator) return;
+		if (!acquireSpeech("turn", false, true)) return;
+		speechReservedForInput = true;
+		projectAnnouncementPending = true;
+	};
+
+	const handleSpeechPreemption = (): void => {
+		const interruptedPurpose = speechPurpose;
+		const wasComplete = ownerTurnEnded;
+		vocalizer.clear();
+		narration.finish();
+		relinquishSpeech();
+		if (interruptedPurpose === "turn" || interruptedPurpose === "replay") {
+			pausedForAttention = true;
+			if (wasComplete || interruptedPurpose === "replay") coordinator?.markWaiting();
+			refreshStatus();
+		}
+	};
+
 	const pollWaitingAttention = (): void => {
 		if (!coordinator) return;
 		const owner = coordinator.speechOwner();
+		if (ownsSpeech && owner?.instanceId !== coordinator.instanceId) handleSpeechPreemption();
 		if (owner && owner.instanceId !== coordinator.instanceId) {
 			if (timingPreprocessing) cancelTimingWorkers();
 			return;
@@ -694,7 +729,7 @@ export default async function (pi: ExtensionAPI) {
 		cancelTimingWorkers();
 		vocalizer.clear();
 		narration.finish();
-		if (!acquireSpeech("replay")) {
+		if (!acquireSpeech("replay", true, true)) {
 			pausedForAttention = true;
 			refreshStatus();
 			activeContext?.ui.notify("Another Pi project currently owns voice playback; this replay remains paused", "warning");
@@ -1015,7 +1050,7 @@ export default async function (pi: ExtensionAPI) {
 		coordinator = new SessionCoordinator(ctx.cwd, ctx.sessionManager.getSessionId());
 		coordinator.start();
 		if (attentionPollTimer) clearInterval(attentionPollTimer);
-		attentionPollTimer = setInterval(pollWaitingAttention, 1_000);
+		attentionPollTimer = setInterval(pollWaitingAttention, 200);
 		attentionPollTimer.unref?.();
 		pendingCodeDescriptions.clear();
 		codeDescriptionText.clear();
@@ -1077,13 +1112,14 @@ export default async function (pi: ExtensionAPI) {
 		vocalizer.clear();
 		narration.finish();
 		releaseSpeechOwnership(false);
+		reserveSpeechForInput();
 	});
 
 	pi.on("before_agent_start", () => {
 		cancelTimingWorkers();
 		vocalizer.clear();
 		narration.finish();
-		releaseSpeechOwnership(false);
+		if (!speechReservedForInput) releaseSpeechOwnership(false);
 	});
 
 	pi.on("message_start", event => {
