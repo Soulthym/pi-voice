@@ -630,8 +630,11 @@ async function writeAudio(sink, pcm) {
 async function closePlayer(utterance) {
 	const sink = player;
 	if (!sink || playerUtterance !== utterance) return;
-	clearCurrentPlayer();
+	// Keep the draining sink addressable until the client player actually exits.
+	// PCM is usually written much faster than it is heard; clearing here made F8
+	// unable to pause the remaining buffered playback.
 	await sink.close();
+	if (player === sink) clearCurrentPlayer();
 	send({ type: "idle", utterance });
 }
 
