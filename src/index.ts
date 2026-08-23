@@ -196,6 +196,7 @@ export default async function (pi: ExtensionAPI) {
 	let liveTurnNarrationActive = false;
 	let nextLivePlaybackId = 0;
 	let playbackPaused = false;
+	let pausedOwnerUtterance: number | undefined;
 	let playbackPositionEstimated = false;
 	let playbackTimelineTimer: NodeJS.Timeout | null = null;
 	let codePreprocessingProgress: PreprocessingProgress | undefined;
@@ -809,6 +810,7 @@ export default async function (pi: ExtensionAPI) {
 		narration.setCompletedText(target.text);
 		playbackHistory.beginCapture(target.id, target.text, target.time, recordTimings);
 		playbackPaused = false;
+		pausedOwnerUtterance = undefined;
 		playbackPositionEstimated = false;
 		refreshPlaybackTimeline();
 		ownerContentExpected = hasSpeakableAudio(suffix);
@@ -1403,19 +1405,33 @@ export default async function (pi: ExtensionAPI) {
 		description: "Pause or resume regenerated voice playback",
 		handler: ctx => {
 			if (!canNavigatePlayback(ctx)) return;
-			if (playbackPaused) {
-				const target = playbackHistory.resumeTarget();
-				if (target) playTarget(target, false);
+				if (playbackPaused) {
+				if (pausedOwnerUtterance === undefined) {
+					const target = playbackHistory.resumeTarget();
+					if (target) playTarget(target, false);
+					return;
+				}
+				if (!acquireSpeech("replay", false, true)) return;
+				lastOwnerUtterance = pausedOwnerUtterance;
+				ownerContentExpected = true;
+				ownerTurnEnded = true;
+				completedOwnerUtterance = undefined;
+				vocalizer.setPlaybackPaused(false);
+				playbackPaused = false;
+				pausedOwnerUtterance = undefined;
+				state = "speaking";
+				refreshStatus();
+				refreshPlaybackTimeline();
 				return;
 			}
 			if (!playbackHistory.selected()) {
 				ctx.ui.notify("There is no assistant message playing", "warning");
 				return;
 			}
-			vocalizer.clear();
-			narration.finish();
+			pausedOwnerUtterance = lastOwnerUtterance;
+			vocalizer.setPlaybackPaused(true);
 			playbackPaused = true;
-			releaseSpeechOwnership(true);
+			releaseSpeechOwnership(false);
 			state = "idle";
 			refreshStatus();
 			refreshPlaybackTimeline();

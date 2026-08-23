@@ -4,6 +4,7 @@ set -u
 runtime_dir=${TMPDIR:-/data/data/com.termux/files/usr/tmp}
 session_id=${BASHPID:-$$}
 ipc_socket="$runtime_dir/pi-voice-mpv-$session_id.sock"
+header_file="$runtime_dir/pi-voice-header-$session_id.bin"
 audio_fifo="$runtime_dir/pi-voice-mpv-$session_id.pcm"
 mpv_pid=
 feeder_pid=
@@ -14,9 +15,28 @@ cleanup() {
   [[ -n "$mpv_pid" ]] && kill "$mpv_pid" 2>/dev/null || true
   [[ -n "$feeder_pid" ]] && wait "$feeder_pid" 2>/dev/null || true
   [[ -n "$mpv_pid" ]] && wait "$mpv_pid" 2>/dev/null || true
-  rm -f "$ipc_socket" "$audio_fifo"
+  rm -f "$ipc_socket" "$audio_fifo" "$header_file"
 }
 trap cleanup EXIT INT TERM
+
+# A short control connection can pause a specific existing player without
+# framing or modifying the raw Float32 audio stream.
+exec 3<&0
+dd iflag=fullblock bs=16 count=1 of="$header_file" status=none <&3 2>/dev/null || true
+if cmp -s "$header_file" <(printf 'PI_VOICE_CONTROL'); then
+  command=
+  target_id=
+  IFS=' ' read -r command target_id <&3 || true
+  [[ $target_id =~ ^[0-9]+$ ]] || exit 0
+  target_socket="$runtime_dir/pi-voice-mpv-$target_id.sock"
+  if [[ $command == pause || $command == resume ]] && [[ -S $target_socket ]]; then
+    paused=false
+    [[ $command == pause ]] && paused=true
+    printf '{"command":["set_property","pause",%s]}\n' "$paused" |
+      socat -T 1 - "UNIX-CONNECT:$target_socket" >/dev/null 2>&1 || true
+  fi
+  exit 0
+fi
 
 rm -f "$ipc_socket" "$audio_fifo"
 mkfifo "$audio_fifo"
@@ -32,10 +52,8 @@ mpv_pid=$!
 
 # stdin is the TCP audio direction. stdout is deliberately kept free for JSON
 # playback-position feedback over the reverse direction of the same socket.
-# Bash redirects stdin of asynchronous commands to /dev/null when job control is
-# disabled, so preserve the socket on an explicit descriptor before backgrounding.
-exec 3<&0
-cat <&3 >"$audio_fifo" &
+# Preserve bytes consumed during control-header detection, then stream the rest.
+{ cat "$header_file"; cat <&3; } >"$audio_fifo" &
 feeder_pid=$!
 
 for _ in {1..50}; do
@@ -44,6 +62,7 @@ for _ in {1..50}; do
   sleep 0.02
 done
 [[ -S "$ipc_socket" ]] || exit 1
+printf '{"type":"session","id":"%s"}\n' "$session_id" || exit 0
 
 request_id=0
 while kill -0 "$mpv_pid" 2>/dev/null; do

@@ -23,7 +23,7 @@ type VoiceWorker = Pick<
 	| "preload"
 	| "preloadAlignment"
 	| "terminate"
->;
+> & { setPlaybackPaused?(paused: boolean): void };
 
 export class Vocalizer {
 	#worker: VoiceWorker;
@@ -116,6 +116,10 @@ export class Vocalizer {
 		this.#nextSourceOffset = this.#sourceOffset;
 		this.#pushItems(this.#speakable.push(text));
 		this.flush();
+	}
+
+	setPlaybackPaused(paused: boolean): void {
+		this.#worker.setPlaybackPaused?.(paused);
 	}
 
 	clear(): void {

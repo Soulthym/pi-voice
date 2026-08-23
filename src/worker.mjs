@@ -416,6 +416,8 @@ function playerCommand(sampleRate) {
 
 function attachPlaybackClock(sink, sampleRate, utterance, expectFeedback = false) {
 	let startedAt = null;
+	let pausedAt = null;
+	let pausedDuration = 0;
 	let lastFeedbackAt = expectFeedback ? performance.now() : 0;
 	sink.samplesWritten = 0;
 	sink.noteAudio = samples => {
@@ -429,10 +431,20 @@ function attachPlaybackClock(sink, sampleRate, utterance, expectFeedback = false
 	};
 	const timer = setInterval(() => {
 		if (startedAt === null || performance.now() - lastFeedbackAt < 750) return;
-		const elapsed = (performance.now() - startedAt) / 1_000;
+		const now = performance.now();
+		const paused = pausedDuration + (pausedAt === null ? 0 : now - pausedAt);
+		const elapsed = (now - startedAt - paused) / 1_000;
 		sink.reportPlayback(Math.min(elapsed, sink.samplesWritten / sampleRate), true);
 	}, 125);
 	timer.unref?.();
+	sink.setPlaybackClockPaused = paused => {
+		const now = performance.now();
+		if (paused && pausedAt === null) pausedAt = now;
+		else if (!paused && pausedAt !== null) {
+			pausedDuration += now - pausedAt;
+			pausedAt = null;
+		}
+	};
 	sink.stopPlaybackClock = () => clearInterval(timer);
 	return sink;
 }
@@ -465,6 +477,10 @@ function createLocalSink(sampleRate, utterance) {
 			this.stopPlaybackClock();
 			child.stdin.destroy();
 			child.kill("SIGKILL");
+		},
+		setPaused(paused) {
+			this.setPlaybackClockPaused(paused);
+			child.kill(paused ? "SIGSTOP" : "SIGCONT");
 		},
 	}, sampleRate, utterance);
 	child.stdin.on("error", error => {
@@ -546,6 +562,9 @@ function createNetworkSink(output, sampleRate, utterance) {
 			child.stdin.destroy();
 			child.kill("SIGKILL");
 		},
+		setPaused(paused) {
+			control.write(`${paused ? "pause" : "resume"}\n`);
+		},
 	};
 	child.stdin.on("error", error => {
 		if (player === sink && !shuttingDown) send({ type: "error", message: error.message });
@@ -578,6 +597,14 @@ function startPlayer(sampleRate, utterance, output) {
 	playerOutput = output;
 	send({ type: "speaking" });
 	return sink;
+}
+
+function setPlayerPaused(paused) {
+	try {
+		player?.setPaused?.(paused);
+	} catch {
+		// Best-effort transport control.
+	}
 }
 
 function stopPlayer() {
@@ -805,6 +832,9 @@ lines.on("line", line => {
 				model: message.model ?? DEFAULT_STT_MODEL,
 				dtype: message.dtype ?? DEFAULT_STT_DTYPE,
 			});
+			break;
+		case "pause":
+			setPlayerPaused(message.paused === true);
 			break;
 		case "cancel":
 			cancel();

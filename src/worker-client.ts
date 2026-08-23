@@ -72,6 +72,11 @@ export class VoiceWorkerClient {
 		this.#send({ type: "end", utterance });
 	}
 
+	setPlaybackPaused(paused: boolean): void {
+		if (!this.#child) return;
+		this.#send({ type: "pause", paused });
+	}
+
 	cancel(): void {
 		for (const pending of this.#pendingMeasurements.values()) {
 			clearTimeout(pending.timer);

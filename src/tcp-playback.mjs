@@ -5,8 +5,13 @@ const [output, sampleRateValue, utteranceValue] = process.argv.slice(2);
 const sampleRate = Number(sampleRateValue);
 const utterance = Number(utteranceValue);
 const control = fs.createWriteStream(null, { fd: 3, autoClose: false });
+const controlInput = fs.createReadStream(null, { fd: 3, autoClose: false });
 let stopped = false;
 let startedAt = null;
+let pausedAt = null;
+let pausedDuration = 0;
+let clientSessionId;
+let pendingControl;
 let lastFeedbackAt = performance.now();
 let samplesWritten = 0;
 let feedback = "";
@@ -49,18 +54,54 @@ try {
 	process.exit(1);
 }
 
-const socket =
-	endpoint.protocol === "unix:"
+function connectEndpoint() {
+	return endpoint.protocol === "unix:"
 		? net.createConnection({ path: decodeURIComponent(endpoint.pathname) })
 		: net.createConnection({
 				host: endpoint.hostname.replace(/^\[|\]$/g, ""),
 				port: Number(endpoint.port),
 			});
+}
+
+function sendPlaybackControl(command) {
+	if (!clientSessionId) {
+		pendingControl = command;
+		return;
+	}
+	const commandSocket = connectEndpoint();
+	commandSocket.on("connect", () => {
+		commandSocket.end(`PI_VOICE_CONTROL${command} ${clientSessionId}\n`);
+	});
+	commandSocket.on("error", () => {});
+}
+
+let controlCommands = "";
+controlInput.on("data", chunk => {
+	controlCommands += String(chunk);
+	for (;;) {
+		const newline = controlCommands.indexOf("\n");
+		if (newline < 0) break;
+		const command = controlCommands.slice(0, newline).trim();
+		controlCommands = controlCommands.slice(newline + 1);
+		if (command !== "pause" && command !== "resume") continue;
+		const now = performance.now();
+		if (command === "pause" && pausedAt === null) pausedAt = now;
+		if (command === "resume" && pausedAt !== null) {
+			pausedDuration += now - pausedAt;
+			pausedAt = null;
+		}
+		sendPlaybackControl(command);
+	}
+});
+
+const socket = connectEndpoint();
 socket.setNoDelay(true);
 
 const timer = setInterval(() => {
 	if (startedAt === null || performance.now() - lastFeedbackAt < 750) return;
-	const position = Math.min((performance.now() - startedAt) / 1_000, samplesWritten / sampleRate);
+	const now = performance.now();
+	const paused = pausedDuration + (pausedAt === null ? 0 : now - pausedAt);
+	const position = Math.min((now - startedAt - paused) / 1_000, samplesWritten / sampleRate);
 	send({ type: "playback", utterance, position, estimated: true });
 }, 125);
 timer.unref?.();
@@ -86,6 +127,15 @@ socket.on("data", chunk => {
 		feedback = feedback.slice(newline + 1);
 		try {
 			const event = JSON.parse(line);
+			if (event.type === "session" && typeof event.id === "string") {
+				clientSessionId = event.id;
+				if (pendingControl) {
+					const command = pendingControl;
+					pendingControl = undefined;
+					sendPlaybackControl(command);
+				}
+				continue;
+			}
 			const position = Number(event.position);
 			if (event.type === "playback" && Number.isFinite(position) && position >= 0) {
 				lastFeedbackAt = performance.now();

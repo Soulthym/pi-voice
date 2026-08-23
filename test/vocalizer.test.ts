@@ -38,6 +38,30 @@ test("shifts narration source ranges when regenerating a message suffix", () => 
 	assert.deepEqual(sources, [{ start: 40, end: 61 }]);
 });
 
+test("passes pause and resume through without cancelling queued narration", () => {
+	const pauses: boolean[] = [];
+	let cancellations = 0;
+	const worker = {
+		sendSegment(): void {},
+		endUtterance(): void {},
+		setPlaybackPaused(paused: boolean): void {
+			pauses.push(paused);
+		},
+		async measureSegment(): Promise<number> { return 1; },
+		cancel(): void { cancellations += 1; },
+		async transcribe(): Promise<string[]> { return []; },
+		async transcribePcm(): Promise<string> { return ""; },
+		async preload(): Promise<void> {},
+		async preloadAlignment(): Promise<void> {},
+		async terminate(): Promise<void> {},
+	};
+	const vocalizer = new Vocalizer(() => ({ ...DEFAULT_VOICE_CONFIG, enabled: true }), () => {}, undefined, undefined, worker);
+	vocalizer.setPlaybackPaused(true);
+	vocalizer.setPlaybackPaused(false);
+	assert.deepEqual(pauses, [true, false]);
+	assert.equal(cancellations, 0);
+});
+
 test("speaks coordinator prompts without registering message narration", () => {
 	const spoken: string[] = [];
 	const narration: string[] = [];
