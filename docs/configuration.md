@@ -75,6 +75,6 @@ Use `/voice voice` for an interactive picker or `/voice voice <id>` directly.
 - Cached Opus: `~/.cache/pi-voice/audio`
 - Coordinator state: `~/.cache/pi-voice/coordinator`
 - Device registrations: `~/.cache/pi-voice/devices`
-- Timing maps, code descriptions, and per-session device choice: context-free Pi custom session entries
+- Timing maps, code descriptions, and per-session device choice: non-context-injecting Pi custom session entries
 
 No raw PCM is persisted.

@@ -2,7 +2,7 @@
 
 Bidirectional, local-first voice input and output for the [Pi coding agent](https://github.com/earendil-works/pi). Pi Voice combines streaming Kokoro speech synthesis, local Whisper dictation, synchronized playback highlighting, narrated code, replay controls, and automatic Linux/Termux device routing.
 
-Kokoro, Whisper, Wav2Vec2 alignment, and audio-cache processing run on the machine hosting Pi. With the managed `pi-voice-ssh` topology, bridge endpoints stay on loopback or private Unix sockets and audio travels inside SSH. A remote `editModel` may still receive bounded text context, ASR alternatives, drafts, and fenced code for language-model-assisted features; see [Models and privacy](docs/models-and-privacy.md).
+Kokoro, Whisper, Wav2Vec2 alignment, and audio-cache processing run on the machine hosting Pi. With the managed `pi-voice-ssh` topology, bridge endpoints stay on loopback or private Unix sockets and audio travels inside SSH. A remote `editModel` may still receive ASR alternatives, drafts, bounded dictation context, and the compaction-aware conversation transcript through a fenced block for language-model-assisted features; see [Models and privacy](docs/models-and-privacy.md).
 
 ## Features
 

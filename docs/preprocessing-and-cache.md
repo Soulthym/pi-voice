@@ -24,7 +24,7 @@ Preprocessing · speech timing: 109/284 ready
 
 ## Code descriptions
 
-Missing descriptions use `editModel` and are content-addressed by prompt version, model, mode, language, and source code. Live narration, written callouts, timing preprocessing, and concurrent workers share in-flight requests and persisted results.
+Missing descriptions use `editModel` and are content-addressed by prompt version, model, mode, language, source code, and Pi's compaction-aware conversation transcript through the closing fence. Future turns do not change that historical prefix, so later preprocessing and replay hit the same entry; identical code appearing later in a different discussion gets a different description. Live narration, written callouts, timing preprocessing, and concurrent workers share in-flight requests and persisted results.
 
 `codeDescriptionPreprocessConcurrency` controls parallel model requests from 1 to 8; the default is 4. It is explicit because API-backed model capacity is not derived from local hardware. Global coordinator slots enforce the limit across Pi processes.
 
@@ -70,6 +70,6 @@ No raw PCM is persisted. Disabling caching prevents new reads/writes but does no
 
 ## Session persistence
 
-Timing maps and code descriptions are stored as context-free Pi custom entries. They do not enter model context. Cached audio stays in the external cache and is addressed by render dependencies rather than session entry IDs.
+Timing maps and code descriptions are stored as non-context-injecting Pi custom entries. The entries themselves do not enter model context, although description cache identities include a hash of the resolved conversation prefix. Cached audio stays in the external cache and is addressed by render dependencies rather than session entry IDs.
 
 Global preprocessing leases and crash recovery state live under `~/.cache/pi-voice/coordinator`. Idle timing workers terminate after a pass; the primary voice worker also shuts down after an idle period when no session owns speech or microphone input.

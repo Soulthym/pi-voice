@@ -11,7 +11,7 @@ import { VoiceWorkerClient, type WorkerEvent } from "./worker-client.js";
 
 const IDLE_FLUSH_MS = 1_000;
 
-type CodeDescriber = (block: FencedCodeBlock, signal: AbortSignal) => Promise<CodeNarrationPlan>;
+type CodeDescriber = (block: FencedCodeBlock, transcript: string, signal: AbortSignal) => Promise<CodeNarrationPlan>;
 type VoiceWorker = Pick<
 	VoiceWorkerClient,
 	| "sendSegment"
@@ -41,6 +41,7 @@ export class Vocalizer {
 	#sourceOffset = 0;
 	#nextSourceOffset = 0;
 	#trackNarration = true;
+	#sourceText = "";
 
 	constructor(
 		getConfig: () => VoiceConfig,
@@ -64,8 +65,10 @@ export class Vocalizer {
 		if (!this.#speakable) {
 			this.#speakable = new SpeakableStream();
 			this.#sourceOffset = this.#nextSourceOffset;
+			this.#sourceText = "";
 		}
 		const current = this.#speakable;
+		this.#sourceText += text;
 		this.#pushItems(current.push(text));
 		this.#armIdle(() => {
 			if (this.#speakable !== current) return;
@@ -112,6 +115,7 @@ export class Vocalizer {
 	speakFrom(text: string, sourceOffset: number): void {
 		if (!this.#getConfig().enabled) return;
 		this.#speakable = new SpeakableStream();
+		this.#sourceText = text;
 		this.#sourceOffset = Math.max(0, sourceOffset);
 		this.#nextSourceOffset = this.#sourceOffset;
 		this.#pushItems(this.#speakable.push(text));
@@ -130,6 +134,7 @@ export class Vocalizer {
 		this.#deliveryBarrier = null;
 		this.#sourceOffset = 0;
 		this.#nextSourceOffset = 0;
+		this.#sourceText = "";
 		for (const controller of this.#descriptionControllers) controller.abort();
 		this.#descriptionControllers.clear();
 		this.#worker.cancel();
@@ -171,7 +176,7 @@ export class Vocalizer {
 				end: item.source.end + this.#sourceOffset,
 			};
 			if (item.kind === "speech") this.#scheduleSpeech(item.text, source);
-			else this.#scheduleCodeDescription(item.block, source);
+			else this.#scheduleCodeDescription(item.block, source, this.#sourceText.slice(0, item.source.end));
 		}
 	}
 
@@ -188,7 +193,7 @@ export class Vocalizer {
 		});
 	}
 
-	#scheduleCodeDescription(block: FencedCodeBlock, source: SpeakableSourceRange): void {
+	#scheduleCodeDescription(block: FencedCodeBlock, source: SpeakableSourceRange, transcript: string): void {
 		const utterance = this.#ensureUtterance();
 		const generation = this.#generation;
 		const sourceBase = this.#sourceOffset;
@@ -197,7 +202,7 @@ export class Vocalizer {
 		let description: Promise<CodeNarrationPlan>;
 		try {
 			description = this.#describeCode
-				? this.#describeCode(block, controller.signal)
+				? this.#describeCode(block, transcript, controller.signal)
 				: Promise.resolve(plainCodeNarration(fallbackCodeDescription(block)));
 		} catch (error) {
 			description = Promise.reject(error);

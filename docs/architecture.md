@@ -28,7 +28,7 @@ Assistant messages separated by tool calls retain distinct source bases inside o
 
 ## Session data
 
-Pi Voice persists context-free custom entries for:
+Pi Voice persists non-context-injecting custom entries for:
 
 - complete playback timing snapshots;
 - code-description cache snapshots;

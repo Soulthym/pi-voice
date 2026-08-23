@@ -584,7 +584,7 @@ export class NarrationProgress {
 		type: NarrationMessageType,
 		styleUnread: (text: string) => string,
 		styleActive: (text: string) => string = text => text,
-		descriptionFor: (block: FencedCodeBlock) => string | undefined = () => undefined,
+		descriptionFor: (block: FencedCodeBlock, transcript: string) => string | undefined = () => undefined,
 		highlightProgress = true,
 		highlightSyntax?: (code: string, language?: string) => string[],
 	): string {
@@ -671,7 +671,7 @@ export class NarrationProgress {
 	#injectCodeDescriptions(
 		markdown: string,
 		blockStart: number | undefined,
-		descriptionFor: (block: FencedCodeBlock) => string | undefined,
+		descriptionFor: (block: FencedCodeBlock, transcript: string) => string | undefined,
 		styleUnread: (text: string) => string,
 		styleActive: (text: string) => string,
 	): {
@@ -688,7 +688,7 @@ export class NarrationProgress {
 				? undefined
 				: { start: blockStart + item.source.start, end: blockStart + item.source.end };
 			const tracked = source ? this.#codeDescriptions.get(this.#codeKey(source)) : undefined;
-			const description = tracked?.text ?? descriptionFor(item.block);
+			const description = tracked?.text ?? descriptionFor(item.block, markdown.slice(0, item.source.end));
 			if (!description) continue;
 			const styled = styleNarrationMarkdown(
 				description,

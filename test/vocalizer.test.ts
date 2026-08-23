@@ -121,11 +121,13 @@ test("starts code description early while preserving spoken order", async () => 
 	};
 	const deferred = Promise.withResolvers<CodeNarrationPlan>();
 	let descriptionStarted = false;
+	let descriptionTranscript = "";
 	const vocalizer = new Vocalizer(
 		() => ({ ...DEFAULT_VOICE_CONFIG, enabled: true }),
 		() => {},
-		async () => {
+		async (_block, transcript) => {
 			descriptionStarted = true;
+			descriptionTranscript = transcript;
 			return deferred.promise;
 		},
 		undefined,
@@ -136,6 +138,7 @@ test("starts code description early while preserving spoken order", async () => 
 	vocalizer.flush();
 
 	assert.equal(descriptionStarted, true);
+	assert.equal(descriptionTranscript, "Before.\n```ts\nconst value = 1;\n```\n");
 	assert.deepEqual(events, ["speech:Before."]);
 
 	deferred.resolve(plainCodeNarration("The code defines a constant value."));

@@ -20,7 +20,7 @@ The generated description:
 
 - explains purpose and meaningful behavior rather than reading punctuation;
 - is rendered in a bordered callout below the original fence;
-- is stored as a context-free Pi custom entry;
+- is keyed by the compaction-aware conversation transcript through that block and stored in a non-context-injecting Pi custom entry;
 - is reused for unchanged code and by timing/audio preprocessing;
 - falls back to a local structural description if the model is unavailable or returns an invalid plan.
 

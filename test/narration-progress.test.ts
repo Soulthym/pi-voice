@@ -169,6 +169,26 @@ test("keeps nested ordered-list markers outside narration styling", () => {
 	assert.doesNotMatch(transformed, /<dim>[12]<\/dim>\./);
 });
 
+test("looks up repeated code blocks with their transcript prefix", () => {
+	const markdown = "First use.\n```ts\nrun();\n```\nSecond use.\n```ts\nrun();\n```";
+	const contexts: string[] = [];
+	const transformed = new NarrationProgress().transform(
+		markdown,
+		"assistant",
+		dim,
+		background,
+		(_block, transcript) => {
+			contexts.push(transcript);
+			return transcript.includes("Second use.") ? "The second use." : "The first use.";
+		},
+	);
+
+	assert.equal(contexts.length, 2);
+	assert.doesNotMatch(contexts[0], /Second use/);
+	assert.match(contexts[1], /Second use/);
+	assert.match(transformed, /The first use\.[\s\S]*The second use\./);
+});
+
 test("tracks table cells as independent active sentences", () => {
 	const markdown = "| Name | Status |";
 	const progress = new NarrationProgress();

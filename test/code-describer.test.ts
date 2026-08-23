@@ -1,6 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { fallbackCodeDescription } from "../src/code-describer.js";
+import { codeDescriptionCacheKey, fallbackCodeDescription } from "../src/code-describer.js";
+
+test("keys identical blocks by their transcript context", () => {
+	const model = { provider: "test", id: "model" };
+	const ctx = { model, modelRegistry: { find: () => model } } as never;
+	const block = { language: "json", code: '{ "enabled": true }' };
+	const first = codeDescriptionCacheKey(ctx, block, "current", "guided", "Enable voice here.\n```json\n{ \"enabled\": true }\n```");
+	const same = codeDescriptionCacheKey(ctx, block, "current", "guided", "Enable voice here.\n```json\n{ \"enabled\": true }\n```");
+	const different = codeDescriptionCacheKey(ctx, block, "current", "guided", "Disable voice here.\n```json\n{ \"enabled\": true }\n```");
+	assert.equal(first, same);
+	assert.notEqual(first, different);
+});
 
 test("describes patch structure when model summarization is unavailable", () => {
 	const description = fallbackCodeDescription({
