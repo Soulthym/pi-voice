@@ -1,50 +1,41 @@
 # pi-voice
 
-A bidirectional phone voice-mode extension for the [Pi coding agent](https://github.com/earendil-works/pi), modeled after Oh My Pi's Kokoro vocalizer.
+Bidirectional, local-first voice input and output for the [Pi coding agent](https://github.com/earendil-works/pi). Pi Voice combines streaming Kokoro speech synthesis, local Whisper dictation, synchronized playback highlighting, narrated code, replay controls, and automatic Linux/Termux device routing.
 
-- **Pi host → selected device:** Pi runs Kokoro-82M locally and plays through local Linux/Termux audio or streams through an SSH reverse tunnel to `mpv` on a selected Linux or Termux client.
-- **Selected device → Pi host:** The configured shortcut streams Ogg/Opus from the selected local or SSH-client microphone. Host-side voice activity detection stops on natural silence, Whisper transcribes locally, and Pi places the result in the prompt editor for review.
-
-Network bridge endpoints bind only to loopback or private per-device Unix sockets, and audio stays inside the encrypted SSH connection. The audio connection is full-duplex: the client returns only `mpv` playback timestamps, not microphone data. Kokoro synthesis, Whisper transcription, and Wav2Vec2 alignment run locally on the desktop. Final ASR hypotheses are resolved against a bounded excerpt of the current session by Pi's configured editing model in both `append` and `smart` modes. The same model describes fenced code and patches for speech. If that model is remote, ASR hypotheses, existing drafts, recent session text, and fenced code being described are sent to its provider. Pin `editModel` to a local Pi-registered model to keep these requests local.
+Kokoro, Whisper, Wav2Vec2 alignment, and audio-cache processing run on the machine hosting Pi. With the managed `pi-voice-ssh` topology, bridge endpoints stay on loopback or private Unix sockets and audio travels inside SSH. A remote `editModel` may still receive bounded text context, ASR alternatives, drafts, and fenced code for language-model-assisted features; see [Models and privacy](docs/models-and-privacy.md).
 
 ## Features
 
-- Speaks assistant output while it streams.
-- Runs `onnx-community/Kokoro-82M-v1.0-ONNX` locally with q8 weights.
-- Keeps ONNX inference in child processes so Pi's TUI remains responsive. Phone playback and alignment events bypass the synthesis loop, so Kokoro cannot delay highlighting updates.
-- Speaks `text`-like fenced blocks directly and applies the same sentence background and word-by-word playback progression used for normal prose. Markdown tables are narrated cell by cell: each `|` ends a spoken sentence, separator cells stay silent, and highlighting advances through the rendered row. In guided mode, code and patches stay visible but dim while a model-generated walkthrough reveals related line groups and bolds exact ranges in sync with narration. JavaScript and TypeScript fences use exact Tree-sitter syntax-node targets instead of model-guessed columns.
-- Starts each code-description request as soon as its closing fence streams, using already queued speech as lead time while preserving spoken order; falls back to a local structural description if the request fails. Generated narrations are content-addressed and persisted as context-free Pi session entries, so replaying unchanged code does not spend more model tokens. Each narration is always shown in a bordered callout directly below its code block—even when voice mode is disabled—with the same dim/current/revealed playback progression as prose when spoken. Opening or loading a session schedules missing code descriptions from the currently selected playback message forward to the session end, then backward toward the start; live narration and the written callout share the same in-flight request. A below-editor progress widget reports cumulative persisted progress, such as `Code descriptions: 24/61 processed`, so reloads visibly resume instead of restarting at one. Missing descriptions use four parallel model requests by default; configure `codeDescriptionPreprocessConcurrency` as `1..8` (`/voice code-preprocess 1..8`). Since description models are normally API-backed, this setting is explicit rather than hardware-derived.
-- Omits tables and most other Markdown noise from speech.
-- Starts with a short first segment, then synthesizes bounded sentence/clause segments.
-- Cancels queued speech when you send another prompt.
-- Coordinates concurrent Pi sessions through `~/.cache/pi-voice/coordinator`: only the first project to begin speaking owns phone playback. It announces its project name before the response; other projects remain paused until explicitly played. After the owner reaches end-of-turn and finishes or pauses audio, it announces the oldest project needing attention without automatically playing that project's response. Explicit user input, F11, and `/voice attention` can force-preempt ownership at any time; the displaced project is paused and queued again. Equal project directory names are disambiguated with the shortest necessary parent suffix.
-- Shares global code-description and timing-preprocessing concurrency slots across Pi processes. Idle timing pools terminate after each preprocessing pass, and main voice models are loaded lazily rather than warmed independently by every session.
-- Supports server-local playback or raw PCM over TCP/SSH.
-- Slightly dims unread assistant prose, gives the currently spoken sentence or clause a subtle background, and restores each word as it is heard, using fast local CTC forced alignment plus live `mpv` playback-position feedback from the phone.
-- Shows a classic playback timeline below the editor with play/pause/idle state, the current phone position, total narrated duration, and selected-message index. A `~` marks fallback clock estimates.
-- Streams local or SSH-client microphone audio in near real time and stops automatically after natural silence.
-- Shows a revisable Whisper preview directly in Pi's editor while you speak.
-- Supports a second `Alt+M` as a manual stop for long pauses or noisy environments.
-- Leaves reviewed dictation in the editor by default; press Enter after correcting or extending it.
-- Generates multiple final hypotheses with the same ASR model and lets any configured Pi model resolve technical ambiguities from recent context.
-- Resolves candidates in both edit modes; `smart` additionally applies spoken corrections to the existing draft.
+- Speaks assistant text while it streams, with `assistant`, `all`, and strict final-response `yield` modes.
+- Records from local Linux, local Termux, or an SSH-connected Linux/Termux client.
+- Stops dictation on silence, displays revisable Whisper previews, and leaves the final prompt editable by default.
+- Resolves multiple ASR hypotheses against recent session context; smart mode also performs spoken corrections.
+- Dims unread prose, highlights the active sentence, and reveals words against the client player's real playback position.
+- Reads prose fences and Markdown tables naturally; semantically describes code and patches.
+- Supports guided code focus with synchronized line groups, bold ranges, and exact Tree-sitter targets for JavaScript/TypeScript families.
+- Replays historical messages with previous/next, seek, native pause/resume, and persisted timing controls.
+- Reuses content-addressed 32 kbps VBR Opus segments by default; raw PCM is never retained.
+- Incrementally preprocesses missing code descriptions and speech timing from the selected message forward, then backward.
+- Routes multiple clients and Pi sessions safely with explicit device selection, speech ownership, attention requests, and manual preemption.
+- Keeps synthesis, alignment, playback, and preprocessing outside Pi's TUI event loop.
 
-Voice models load lazily when their coordinated work begins; `/voice setup` remains available for an explicit warm-up. Timing preprocessing can load Kokoro even while playback is disabled. Kokoro setup downloads approximately 100 MB from Hugging Face. The first microphone transcription downloads approximately 150 MB of Whisper weights, and spoken-word alignment downloads approximately 100 MB of q8 Wav2Vec2 weights. Later synthesis, transcription, and alignment are local.
+> Short demonstration videos will be added alongside the relevant features.
 
-## Highlighting and worker architecture
+## Supported setups
 
-The two recognition models have separate roles:
+| Pi host and connection | Automatic microphone and output |
+| --- | --- |
+| Linux desktop, normal `pi` | Desktop defaults |
+| Server, `pi-voice-ssh` from Linux | Linux client defaults |
+| Server, `pi-voice-ssh` from Termux | Termux client |
+| Linux desktop, `pi-voice-ssh` from Termux | Termux client |
+| Termux, normal `pi` | Termux microphone and `mpv` |
 
-- **Whisper** transcribes microphone recordings and generates final dictation candidates.
-- **Wav2Vec2 CTC** force-aligns known Kokoro text to synthesized audio; it is not used for microphone dictation.
+Native macOS and Windows client backends are planned. Voice ownership and attention are limited to interactive Pi TUI sessions; headless child/subagent sessions stay silent.
 
-For every spoken segment, Pi retains its source-text range and timing metadata. Audio caching is enabled by default: synthesized segments are content-addressed and stored locally as 32 kbps VBR Opus under `~/.cache/pi-voice/audio`, while uncompressed PCM is never retained. Replays decode matching cached segments instead of rerunning Kokoro. Set `audioCache` to `false` (`/voice audio-cache off`) to restore regeneration-only behavior, and configure `audioCacheBitrate` from 12 to 128 kbps (`/voice audio-bitrate 32`). Changing model, dtype, voice, speed, text, or bitrate creates a distinct cache key; disabling caching does not delete existing files. Completed timing maps are persisted as Pi custom session entries, which are excluded from model context, so approximate seeking survives reloads and session resumes. When Pi opens or loads a session, missing timing annotations for speech-eligible assistant prose are scheduled even while voice playback is disabled, from the currently selected playback message forward to the session end, then backward toward the start for silent, low-priority Kokoro preprocessing. The same progress widget reports cumulative timing progress, such as `Speech timing: 18/61 processed`. Timing preprocessing uses a pool of independent CPU Kokoro workers because the native runtime does not batch or execute concurrent jobs in one process; configure `timingPreprocessConcurrency` as `auto` or `1..8` (`/voice timing-preprocess auto|1..8`). Timing `auto` caps the worker pool at four and additionally limits it using available system RAM and CPU parallelism. Kokoro is currently forced to CPU, so VRAM is not part of this calculation. Thinking content, tool results, and pure edit/tool-call messages are not scheduled; `yield` mode indexes only final responses. Normal speech and microphone actions preempt this work; unfinished indexing resumes after a later turn. Wav2Vec2 supplies word timestamps, while the Termux audio session queries `mpv` for the position actually being played. The active sentence or clause receives a continuous subtle background, including inter-word whitespace. Words already reached by playback return to the normal foreground; later prose remains dim.
+## Quick start
 
-The segment background depends only on PCM boundaries and `mpv` position, so it remains reliable if word alignment is late or fails. Word progression falls back to duration-weighted estimates when necessary. Synthesis never waits for alignment and no artificial playback delay is added.
-
-Kokoro synthesis and microphone Whisper inference share the main voice worker. Wav2Vec2 runs in a dedicated alignment worker, and each TCP utterance uses a lightweight playback helper. Alignment and playback helpers write progress events directly to Pi instead of routing them through the potentially busy Kokoro loop. This keeps highlighting responsive while the next segment is being synthesized. Prose styling leaves fence syntax and link destinations untouched; guided code styling uses terminal intensity markers only inside validated fence bodies.
-
-## Server installation
+Install the extension on the Pi host:
 
 ```bash
 git clone https://github.com/Soulthym/pi-voice.git
@@ -53,13 +44,41 @@ npm install
 pi install .
 ```
 
-Install `ffmpeg` on the Pi host to encode/decode the Opus cache and microphone streams. Linux-local playback prefers PipeWire's `pw-play`, then `mpv`, then `ffplay`; microphone capture prefers `pw-record`, then PulseAudio's `parec`. Install `pipewire-utils` or `pulseaudio-utils` as appropriate.
+Install `ffmpeg`. For local Linux audio, also install PipeWire utilities or PulseAudio utilities plus `mpv` or `ffplay`.
 
-Configuration is stored in `~/.pi/agent/pi-voice.json`. Automatic device routing is the default:
+For a Linux or Termux SSH client, install the bridge scripts from the checkout:
+
+```bash
+mkdir -p "$HOME/.local/bin"
+install -m755 client/pi-voice-* "$HOME/.local/bin/"
+```
+
+Termux additionally requires the Termux:API Android app and:
+
+```bash
+pkg install openssh socat mpv ffmpeg termux-api
+```
+
+Connect with the wrapper, start Pi remotely, and enable spoken output:
+
+```bash
+pi-voice-ssh YOUR_HOST
+pi
+```
+
+```text
+/voice on
+```
+
+See [Installation](docs/installation.md) for permissions, dependencies, upgrades, SSH server settings, and local-only setups.
+
+## Default configuration
+
+Pi Voice reads `~/.pi/agent/pi-voice.json`. Missing settings use these defaults; spoken output starts disabled:
 
 ```json
 {
-  "enabled": true,
+  "enabled": false,
   "mode": "assistant",
   "voice": "af_heart",
   "speed": 1,
@@ -85,174 +104,53 @@ Configuration is stored in `~/.pi/agent/pi-voice.json`. Automatic device routing
 }
 ```
 
-With `auto`, a connected `pi-voice-ssh` client wins; otherwise Pi uses the host's local Linux or Termux microphone and speakers. Explicit `local`, `disabled`, `tcp://…`, and `unix:///…` values bypass automatic routing. `/voice device auto|local|<id>` stores a per-session preference. Output-producing keybindings and voice commands claim that session's device and update most-recently-active routing.
+See [Configuration](docs/configuration.md) for valid values and setting behavior, or copy [`pi-voice.example.json`](pi-voice.example.json).
 
-| Pi host and connection | Automatic microphone and output |
+## Everyday controls
+
+| Key | Action |
 | --- | --- |
-| Linux desktop, normal `pi` | Desktop defaults |
-| Server, `pi-voice-ssh` from Linux | Linux client defaults |
-| Server, `pi-voice-ssh` from Termux | Termux client |
-| Linux desktop, `pi-voice-ssh` from Termux | Termux client |
-| Termux, normal `pi` | Termux microphone and `mpv` |
+| `Alt+M` or `F5` | Start/stop microphone dictation |
+| `F6` | Previous assistant message |
+| `F7` | Seek about 10 seconds backward |
+| `F8` | Pause/resume audio and highlighting |
+| `F9` | Seek about 10 seconds forward |
+| `F10` | Next assistant message |
+| `F11` | Play this or the next waiting project's response |
+| `Ctrl+Shift+V` | Toggle spoken output |
 
-## Linux and Termux client setup
+Speak after pressing the microphone key. Recording normally stops after about 1.35 seconds of silence. In the default review mode, edit the resulting prompt and press Enter yourself.
 
-On a Linux laptop/desktop used as the SSH client:
-
-```bash
-git clone https://github.com/Soulthym/pi-voice.git
-cd pi-voice
-mkdir -p "$HOME/.local/bin"
-install -m755 client/pi-voice-* "$HOME/.local/bin/"
-```
-
-Install `openssh`, `socat`, `mpv`, `ffmpeg`, and either PipeWire or PulseAudio recording utilities.
-
-For Termux, install Termux and the **Termux:API Android app from the same source** (normally F-Droid), then:
-
-```bash
-pkg update
-pkg install git openssh mpv socat ffmpeg termux-api
-git clone https://github.com/Soulthym/pi-voice.git
-cd pi-voice
-mkdir -p "$HOME/.local/bin"
-install -m755 client/pi-voice-* "$HOME/.local/bin/"
-```
-
-Repeat the appropriate `install` command and restart `pi-voice-ssh` after upgrading.
-
-Ensure `~/.local/bin` is included in Termux's `PATH`. For Bash:
-
-```bash
-grep -qxF 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.bashrc" || echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-Grant microphone permission with a short test recording:
-
-```bash
-rm -f "$HOME/pi-voice-test.ogg"; timeout 2s termux-microphone-record -f "$HOME/pi-voice-test.ogg" -l 5 -e opus
-```
-
-Speak for five seconds. Some Android 15 builds leave the API client waiting even though recording works; the timeout is intentional and Android continues recording to its five-second limit.
-
-Connect using the wrapper instead of plain `ssh`:
-
-```bash
-pi-voice-ssh YOUR_DESKTOP
-```
-
-Then start `pi` in the remote shell. The wrapper detects Linux versus Termux, exports a persistent device identity into the remote session, and creates per-device Unix-socket reverse forwards. Multiple wrappers from the same device to the same target multiplex through one SSH ControlMaster, one audio bridge, and one microphone bridge. The last wrapper to exit closes the master and client bridge immediately. Multiple devices may connect simultaneously; automatic routing prefers the current session's inherited device and otherwise the most recently active client.
-
-```text
-Pi host ~/.cache/pi-voice/devices/<id>.audio.sock → SSH → client player
-Pi host ~/.cache/pi-voice/devices/<id>.input.sock → SSH → client microphone
-```
-
-If forwarding is rejected, enable `AllowTcpForwarding yes` and `AllowStreamLocalForwarding yes` in the target SSH server. Plain local Pi needs no wrapper: `auto` falls back to local devices on Linux and Termux.
-
-> **TODO:** add native macOS and Windows client capture/playback backends after the Linux implementation has stabilized.
-
-### Optional one-tap voice control key row
-
-Sticky `Alt` combinations in Termux's extra-key row are inconvenient for controls that may be pressed repeatedly. Termux can instead expose dedicated function keys, which pass cleanly through SSH and are unbound by Pi by default. Replace the final `]]` of `extra-keys` in `~/.termux/termux.properties` with this third-row suffix:
-
-```properties
-  ], [\
-    {key: 'F5',  display: '🎙'},\
-    {key: 'F6',  display: '⏮'},\
-    {key: 'F7',  display: '↶10'},\
-    {key: 'F8',  display: '⏯'},\
-    {key: 'F9',  display: '10↷'},\
-    {key: 'F10', display: '⏭'},\
-    {key: 'F11', display: '↺'}\
-  ]]
-```
-
-The symmetric layout is phone voice input, previous assistant message, rewind 10 seconds, pause/resume, forward 10 seconds, next assistant message, and restart the selected message. Pause occupies the center key. Pi Voice registers all seven shortcuts; `F5` remains a one-tap alternative alongside the configured microphone shortcut (`Alt+M` by default). Run `termux-reload-settings` after editing the file.
-
-## Usage
-
-- Press the configured microphone shortcut (**Alt+M** by default) or **F5** and speak for as long as needed. Recording stops automatically after about 1.35 seconds of silence.
-- Press **F6**/**F10** to replay the previous/next completed assistant message, or **F11** to restart the selected message. In a project whose live response was paused by another Pi session, **F11** (or `/voice attention`) force-claims speech priority and plays the newest waiting response; it never resumes automatically. Manual replay or submitted user input always preempts the current owner, which is paused and returned to the attention queue. Navigation is available while Pi is idle and restores message text from session history after `/reload` or session resume.
-- Press **F7**/**F9** to move approximately 10 seconds backward/forward using recorded segment-to-source timing checkpoints. Press **F8** to pause and regenerate from the nearest checkpoint when resuming. The timeline's authoritative position variable is updated from the phone's live `mpv` clock and is also used by these controls. Timing is persisted in Pi's session after playback or silent preprocessing completes; PCM audio is never cached. Consequently, seeks remain approximate. Replay uses matching Opus segments when audio caching is enabled and invokes Kokoro only for cache misses. Replay preserves a valid timing map for unchanged audio. Each timing snapshot carries a render identity derived from message text, TTS model and dtype, voice, speed, code-narration dependencies, and PCM/Opus bitrate settings. Text or dependency changes invalidate only affected messages; unchanged messages and cached segments are reused. Missing code descriptions and audio segments are filled individually, and an interrupted message timing job resumes by decoding completed segment files while synthesizing only cache misses before atomically persisting the completed timing map. Older timing metadata without a render identity is treated as missing and incrementally rebuilt once. Missing historical annotations are generated silently when a session loads, without playing audio through the phone. The background indexer uses local structural text for code blocks to avoid historical `editModel` calls; when fenced code is actually replayed, its persisted narration is reused if one was generated previously.
-- Press the shortcut again to stop manually. Pi displays a live, revisable transcript in the prompt editor.
-- In the default `review` submit mode, correct or extend the final prompt and press Enter yourself.
-- Final transcription requests up to `sttCandidates` hypotheses from the same ASR model. The configured editing model resolves them using the existing draft and a bounded, text-only excerpt of recent session context. This isolated request does not enter conversation history.
-- With `editMode: "smart"`, text that is already in the editor when recording starts becomes the existing draft. Another dictation can continue or revise it naturally: “Actually replace port 8000 with 8080,” “scratch the last sentence,” or “make the second paragraph shorter.” Start recording only after placing the text to revise in the editor. With an empty editor there is nothing to revise, so Pi resolves the new utterance as fresh dictation. In `append`, the model still resolves ASR ambiguity but preserves correction phrases literally instead of executing them.
-- Fences tagged `text`, `txt`, `plain`, `plaintext`, `md`, `markdown`, or `mdown` are read as prose. Other fenced blocks are sent to `editModel`. In `guided` mode it returns compact `operations|speech` records: `L+`/`L-` maintain independent bright line groups and `B+`/`B-` maintain independent bold ranges. For JavaScript, JSX, TypeScript, and TSX, `web-tree-sitter` assigns compact handles to statements and expressions and resolves the model's choices back to exact source ranges. Unsupported languages retain the coordinate protocol. Everything else stays dim until narration ends, when the complete original block returns to normal. Requests still begin as soon as closing fences arrive and preserve spoken order.
-- Assistant speech automatically plays through the phone. While it plays, unread prose is dimmed, the current speech segment gets a subtle continuous background, and words return to normal near their actual playback time.
-- A configurable Wav2Vec2 CTC model aligns clean Kokoro audio in a separate worker whose events flow directly to Pi, independently of ongoing synthesis. When voice mode is enabled, Kokoro and the aligner warm concurrently in the background and remain resident in RAM until Pi exits or reloads. If alignment is late or unavailable, duration-weighted word timing is used; if phone feedback is unavailable, the desktop playback clock is estimated.
-- `Ctrl+Shift+V` toggles spoken output.
-
-Commands:
+Useful commands:
 
 ```text
 /voice status
 /voice on|off|toggle|stop
-/voice setup
-/voice test [optional text]
 /voice talk
 /voice attention
-/voice mode assistant|all|yield
-/voice voice [voice id]
-/voice speed <0.5..2>
-/voice tts-model <huggingface-repo>
-/voice tts-dtype fp32|q8|q4
-/voice stt-model <huggingface-repo>
-/voice stt-dtype fp32|q8|q4
-/voice stt-candidates <1..8>
-/voice alignment-model <huggingface-repo>
-/voice alignment-dtype fp32|q8|q4
-/voice edit-model current|provider/model-id
-/voice highlight on|off
-/voice code-narration guided|summary
-/voice code-preprocess <1..8>
-/voice timing-preprocess auto|<1..8>
-/voice audio-cache on|off
-/voice audio-bitrate <12..128>
-/voice device auto|local|<connected-device-id>
-/voice timing
-/voice output auto|local|tcp://host:port|unix:///path
-/voice input auto|local|disabled|tcp://host:port|unix:///path
-/voice shortcut <key|disabled>
-/voice submit review|auto
-/voice edit smart|append
+/voice device auto|local|<device-id>
+/voice setup
 ```
 
-`/voice timing` reports segment-metadata-to-background and background-to-redraw latency for the most recent narrated response without logging its text. It is intended for diagnosing delayed phone feedback or TUI rendering. Shortcut names use Pi's key format, such as `alt+m`, `ctrl+shift+m`, or `f8`. Run `/reload` after changing the shortcut. `review` leaves dictation in the editor for confirmation; `auto` immediately submits it. `smart` applies subsequent dictation to the existing draft; `append` only appends the model-resolved utterance and does not execute spoken corrections.
+See [Usage](docs/usage.md) for dictation, editing, playback, highlighting, session attention, and the optional Termux function-key row. See [Command reference](docs/commands.md) for every `/voice` command.
 
-## Models
+## Documentation
 
-- `ttsModel` must be a `kokoro-js`-compatible Kokoro ONNX repository. Kokoro is a speech-synthesis model only; it cannot perform speech-to-text.
-- `sttModel` must be a Transformers.js-compatible automatic-speech-recognition repository. Tested defaults use Whisper ONNX models from `onnx-community`.
-- `alignmentModel` must be a Transformers.js-compatible English CTC acoustic model. The default `onnx-community/wav2vec2-base-960h-ONNX` is an Apache-2.0 conversion of `facebook/wav2vec2-base-960h`; its q8 weights are approximately 100 MB. Unsupported architectures fall back to duration-weighted timing.
-- `sttCandidates` defaults to 3. Live previews remain single-pass; only final Whisper transcription generates alternatives. Candidate 1 is deterministic and additional candidates are low-temperature samples because Transformers.js 3.x does not expose multiple beam-search outputs. Duplicate hypotheses are removed, so fewer than the requested count may be returned. Other ASR architectures may return only one candidate.
-- `editModel: "current"` follows whichever model is active in Pi, without assuming a particular model family. Set `provider/model-id` to pin candidate resolution, smart editing, and fenced-code narration to another model registered and authenticated in Pi.
-- `codeNarration: "guided"` requests synchronized line and bold groups using a compact line-record protocol. `summary` preserves the previous plain spoken description with no code dimming. Invalid guided plans safely fall back to the plain local structural description and leave code visible.
-- Model and precision changes apply on the next synthesis, transcription, or alignment. Missing weights download lazily into the configured cache.
-- A repository must actually provide the selected `fp32`, `q8`, or `q4` ONNX variant. If loading fails, choose a precision shipped by that repository.
+- [Installation and upgrades](docs/installation.md)
+- [Usage and keybindings](docs/usage.md)
+- [Configuration](docs/configuration.md)
+- [Command reference](docs/commands.md)
+- [Devices and SSH routing](docs/devices-and-ssh.md)
+- [Narration and highlighting](docs/narration-and-highlighting.md)
+- [Preprocessing, timing, and audio cache](docs/preprocessing-and-cache.md)
+- [Models and privacy](docs/models-and-privacy.md)
+- [Architecture](docs/architecture.md)
+- [Custom endpoint protocol](docs/endpoint-protocol.md)
+- [Environment variables](docs/environment.md)
+- [Troubleshooting](docs/troubleshooting.md)
 
-Suggested STT repositories, from lighter to heavier, include `onnx-community/whisper-tiny.en`, `onnx-community/whisper-base.en`, and `onnx-community/whisper-small.en`. Remove `.en` for multilingual recognition.
+See [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for dependency and model attribution.
 
-Modes:
+## License
 
-- `assistant`: speak assistant text as it streams (default)
-- `all`: speak assistant text and thinking
-- `yield`: speak completed assistant output only
-
-## Environment overrides
-
-- `PI_VOICE_CONFIG`: alternate server config path
-- `PI_VOICE_CACHE_DIR`: alternate model cache (default `~/.cache/pi-voice/models`)
-- `PI_VOICE_AUDIO_CACHE_DIR`: alternate Opus audio cache (default `~/.cache/pi-voice/audio`)
-- `PI_VOICE_COORDINATOR_DIR`: alternate cross-session lease/attention directory (default `~/.cache/pi-voice/coordinator`)
-- `PI_VOICE_DEVICE_DIR`: alternate connected-device registry (default `~/.cache/pi-voice/devices`)
-- `PI_VOICE_DEVICE_NAME`: client name advertised by `pi-voice-ssh` (default: short hostname)
-- `PI_VOICE_CLIENT_COMMAND`: alternate client bridge executable used by `pi-voice-ssh`
-- `PI_VOICE_PLAYER`: alternate `pw-play`-compatible local player executable
-- `PI_VOICE_AUDIO_PORT`: client audio-listener port (default `8765`)
-- `PI_VOICE_CONTROL_PORT`: phone microphone-control port (default `8766`)
-- `PI_VOICE_MAX_RECORD_SECONDS`: safety limit for one client recording (default `120`; export it before running `pi-voice-ssh`)
-
-See `THIRD_PARTY_NOTICES.md` for attribution and model/runtime licensing.
+[MIT](LICENSE)
