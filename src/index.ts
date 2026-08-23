@@ -33,7 +33,7 @@ import {
 import { PhoneInputClient } from "./phone-input.js";
 import { prioritizeFromCurrent, processConcurrently, resolveTimingConcurrency } from "./preprocessing.js";
 import { SpeakableStream, type FencedCodeBlock, type SpeakableSourceRange } from "./speakable.js";
-import { pendingPlaybackTiming, preprocessingStatus } from "./status-text.js";
+import { pendingPlaybackTiming, voiceProgressLines } from "./status-text.js";
 import { applySpokenEdit, resolveDictationCandidates } from "./prompt-editor.js";
 import { narrationRenderKey } from "./render-identity.js";
 import { SessionCoordinator, type WaitingSession } from "./session-coordinator.js";
@@ -193,6 +193,7 @@ export default async function (pi: ExtensionAPI) {
 	let activeInputEndpoint: string | undefined;
 	let inputPhase: InputPhase = "idle";
 	let inputProgressTimer: NodeJS.Timeout | null = null;
+	let inputProgressMessage: string | undefined;
 	let inputStartedAt = 0;
 	let contextEpoch = 0;
 	let narrationTui: { invalidate(): void; requestRender(force?: boolean): void } | null = null;
@@ -240,18 +241,38 @@ export default async function (pi: ExtensionAPI) {
 		return routed;
 	};
 
-	const refreshPreprocessingProgress = (): void => {
+	const refreshProgressWidget = (): void => {
 		const ctx = activeContext;
 		if (!ctx) return;
 		try {
-			const lines = [codePreprocessingProgress, timingPreprocessingProgress]
-				.filter((progress): progress is PreprocessingProgress => progress !== undefined)
-				.map(progress => ctx.ui.theme.fg("dim", preprocessingStatus(progress)));
-			ctx.ui.setWidget("pi-voice-preprocessing", lines.length > 0 ? lines : undefined, { placement: "belowEditor" });
+			const playback = config.enabled ? playbackHistory.status() : undefined;
+			let playbackLine: string | undefined;
+			if (playback) {
+				if (!playback.hasTimings || playback.duration <= 0) {
+					playbackLine = `○ ${pendingPlaybackTiming(playback.messageIndex, playback.messageCount)}`;
+				} else {
+					const messageLabel =
+						playback.messageIndex >= 0 ? ` · message ${playback.messageIndex + 1}/${playback.messageCount}` : " · current response";
+					const icon = playbackPaused ? "⏸" : state === "speaking" ? "▶" : "■";
+					const estimate = playbackPositionEstimated ? "~" : "";
+					playbackLine = `${icon} ${playbackBar(playback.position, playback.duration)} ${estimate}${formatPlaybackTime(playback.position)} / ${formatPlaybackTime(playback.duration)}${messageLabel}`;
+				}
+			}
+			const preprocessing = [codePreprocessingProgress, timingPreprocessingProgress].filter(
+				(progress): progress is PreprocessingProgress => progress !== undefined,
+			);
+			const lines = voiceProgressLines(inputProgressMessage, playbackLine, preprocessing).map(line =>
+				line.kind === "input"
+					? line.text
+					: ctx.ui.theme.fg(line.kind === "playback" && state === "speaking" ? "accent" : "dim", line.text),
+			);
+			ctx.ui.setWidget("pi-voice-progress", lines.length > 0 ? lines : undefined, { placement: "belowEditor" });
 		} catch {
 			// The active context can become stale just before session shutdown runs.
 		}
 	};
+
+	const refreshPreprocessingProgress = refreshProgressWidget;
 
 	const descriptionText = (plan: CodeNarrationPlan): string =>
 		chunkCodeNarration(plan)
@@ -411,34 +432,7 @@ export default async function (pi: ExtensionAPI) {
 		);
 	});
 
-	const refreshPlaybackTimeline = (): void => {
-		const ctx = activeContext;
-		if (!ctx || !config.enabled) {
-			ctx?.ui.setWidget("pi-voice-playback", undefined);
-			return;
-		}
-		const playback = playbackHistory.status();
-		if (!playback) {
-			ctx.ui.setWidget("pi-voice-playback", undefined);
-			return;
-		}
-		const messageLabel =
-			playback.messageIndex >= 0 ? ` · message ${playback.messageIndex + 1}/${playback.messageCount}` : "";
-		if (!playback.hasTimings || playback.duration <= 0) {
-			ctx.ui.setWidget(
-				"pi-voice-playback",
-				[ctx.ui.theme.fg("dim", `○ ${pendingPlaybackTiming(playback.messageIndex, playback.messageCount)}`)],
-				{ placement: "belowEditor" },
-			);
-			return;
-		}
-		const icon = playbackPaused ? "⏸" : state === "speaking" ? "▶" : "■";
-		const estimate = playbackPositionEstimated ? "~" : "";
-		const timeline = `${icon} ${playbackBar(playback.position, playback.duration)} ${estimate}${formatPlaybackTime(playback.position)} / ${formatPlaybackTime(playback.duration)}${messageLabel}`;
-		ctx.ui.setWidget("pi-voice-playback", [ctx.ui.theme.fg(state === "speaking" ? "accent" : "dim", timeline)], {
-			placement: "belowEditor",
-		});
-	};
+	const refreshPlaybackTimeline = refreshProgressWidget;
 
 	const requestPlaybackTimeline = (): void => {
 		if (playbackTimelineTimer) return;
@@ -450,7 +444,8 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	const setInputProgress = (message: string | undefined): void => {
-		activeContext?.ui.setWidget("pi-voice-input", message ? [message] : undefined, { placement: "belowEditor" });
+		inputProgressMessage = message;
+		refreshProgressWidget();
 	};
 
 	const clearInputProgress = (): void => {
@@ -1189,6 +1184,11 @@ export default async function (pi: ExtensionAPI) {
 		coordinator.start();
 		deviceSelection = sessionDeviceSelection(ctx);
 		activeDeviceId = deviceRouter.resolve(deviceSelection)?.id;
+		inputProgressMessage = undefined;
+		// Remove progress widgets from versions before the unified, ordered display.
+		ctx.ui.setWidget("pi-voice-input", undefined);
+		ctx.ui.setWidget("pi-voice-playback", undefined);
+		ctx.ui.setWidget("pi-voice-preprocessing", undefined);
 		if (attentionPollTimer) clearInterval(attentionPollTimer);
 		attentionPollTimer = setInterval(pollWaitingAttention, 200);
 		attentionPollTimer.unref?.();
@@ -1223,8 +1223,11 @@ export default async function (pi: ExtensionAPI) {
 		}
 		interactiveVoiceSession = false;
 		pendingCodeDescriptions.clear();
+		clearInputProgress();
 		ctx.ui.setStatus("pi-voice", undefined);
 		ctx.ui.setWidget("pi-voice-render-driver", undefined);
+		ctx.ui.setWidget("pi-voice-progress", undefined);
+		ctx.ui.setWidget("pi-voice-input", undefined);
 		ctx.ui.setWidget("pi-voice-playback", undefined);
 		ctx.ui.setWidget("pi-voice-preprocessing", undefined);
 		codePreprocessingProgress = undefined;
@@ -1237,7 +1240,6 @@ export default async function (pi: ExtensionAPI) {
 		coordinator = null;
 		ownsSpeech = false;
 		pausedForAttention = false;
-		clearInputProgress();
 		if (narrationRenderTimer) clearTimeout(narrationRenderTimer);
 		narrationRenderTimer = null;
 		if (playbackTimelineTimer) clearTimeout(playbackTimelineTimer);
