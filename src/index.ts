@@ -377,7 +377,7 @@ export default async function (pi: ExtensionAPI) {
 		ctx: ExtensionContext,
 		block: FencedCodeBlock,
 		identityContext: string,
-		discussionBeforeBlock: readonly Message[],
+		providerMessagesThroughBlock: readonly Message[],
 	): Promise<CodeNarrationPlan> => {
 		const fallback = plainCodeNarration(fallbackCodeDescription(block));
 		try {
@@ -397,7 +397,7 @@ export default async function (pi: ExtensionAPI) {
 			const conversation =
 				contextMode === "conversation"
 					? {
-							messages: discussionBeforeBlock,
+							messages: providerMessagesThroughBlock,
 							...(reusesActivePrompt
 								? {
 										normalPrompt: {
@@ -511,7 +511,7 @@ export default async function (pi: ExtensionAPI) {
 		const epoch = contextEpoch;
 		const workEpoch = codeWorkEpoch;
 		const queuedMessages: Array<
-			Array<{ block: FencedCodeBlock; identityContext: string; discussionBeforeBlock: Message[] }>
+			Array<{ block: FencedCodeBlock; identityContext: string; providerMessagesThroughBlock: Message[] }>
 		> = [];
 		let totalMessages = 0;
 		let processedMessages = 0;
@@ -519,7 +519,7 @@ export default async function (pi: ExtensionAPI) {
 		for (const message of prioritizeFromCurrent(completedAssistantMessages(ctx, "assistant"), currentId)) {
 			const keyedBlocks = new Map<
 				string,
-				{ block: FencedCodeBlock; identityContext: string; discussionBeforeBlock: Message[] }
+				{ block: FencedCodeBlock; identityContext: string; providerMessagesThroughBlock: Message[] }
 			>();
 			for (const item of describableCodeItems(message.text)) {
 				try {
@@ -530,7 +530,7 @@ export default async function (pi: ExtensionAPI) {
 					);
 					const identityContext = structuredContextIdentity(providerMessages);
 					const key = descriptionCacheKey(ctx, item.block, identityContext);
-					keyedBlocks.set(key, { block: item.block, identityContext, discussionBeforeBlock: providerMessages });
+					keyedBlocks.set(key, { block: item.block, identityContext, providerMessagesThroughBlock: providerMessages });
 				} catch {
 					// A missing edit model is handled by the local fallback when requested directly.
 				}
@@ -553,7 +553,7 @@ export default async function (pi: ExtensionAPI) {
 			if (epoch !== contextEpoch || workEpoch !== codeWorkEpoch || activeContext !== ctx) return;
 			for (const item of items) {
 				if (epoch !== contextEpoch || workEpoch !== codeWorkEpoch || activeContext !== ctx) return;
-				await requestCodeDescription(ctx, item.block, item.identityContext, item.discussionBeforeBlock);
+				await requestCodeDescription(ctx, item.block, item.identityContext, item.providerMessagesThroughBlock);
 			}
 			if (workEpoch !== codeWorkEpoch) return;
 			processedMessages += 1;
