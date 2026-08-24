@@ -19,10 +19,12 @@ import {
 import {
 	loadVoiceConfig,
 	normalizeAudioCacheBitrate,
+	normalizeBackfillBudget,
 	normalizeEditModel,
 	normalizeModelDtype,
 	normalizeModelId,
 	normalizePreprocessConcurrency,
+	normalizePreprocessScope,
 	normalizeSttCandidates,
 	normalizeWorkerCount,
 	normalizeTalkShortcut,
@@ -30,6 +32,7 @@ import {
 	normalizeVoiceOutput,
 	saveVoiceConfig,
 	type VoiceConfig,
+	type VoiceBackfillBudget,
 	type VoiceEditMode,
 	type VoiceMode,
 	type VoiceSubmitMode,
@@ -378,7 +381,8 @@ export default async function (pi: ExtensionAPI) {
 		block: FencedCodeBlock,
 		identityContext: string,
 		providerMessagesThroughBlock: readonly Message[],
-	): Promise<CodeNarrationPlan> => {
+		options?: { chargeBackfill?: () => boolean },
+): Promise<CodeNarrationPlan> => {
 		const fallback = plainCodeNarration(fallbackCodeDescription(block));
 		try {
 			const editModel = config.editModel;
@@ -421,14 +425,18 @@ export default async function (pi: ExtensionAPI) {
 				.getOrCreate(
 					key,
 					() => {
-						const generate = () =>
-							describeCodeBlock(
+						const generate = () => {
+							// Reserve a backfill unit only when real generation is about to run;
+							// cache hits and coalesced duplicates never reach this point.
+							if (options?.chargeBackfill && !options.chargeBackfill()) throw BACKFILL_EXHAUSTED;
+							return describeCodeBlock(
 								ctx,
 								block,
 								editModel,
 								narrationMode,
 								conversation,
 							).catch(error => {
+								if (error === BACKFILL_EXHAUSTED) throw error;
 								if (error instanceof CodeDescriptionContextOverflowError) {
 									const overflowId = `${editModel}:${error.contextWindow}`;
 									if (!reportedDescriptionOverflows.has(overflowId)) {
@@ -444,9 +452,10 @@ export default async function (pi: ExtensionAPI) {
 											// Session replacement can invalidate the captured UI before generation settles.
 										}
 									}
-								}
-								return fallback;
-							});
+							}
+							return fallback;
+						});
+						};
 						return coordinator
 							? coordinator.withResource("code", config.codeDescriptionPreprocessConcurrency, generate)
 							: generate();
@@ -468,7 +477,8 @@ export default async function (pi: ExtensionAPI) {
 					}
 					return plan;
 				});
-		} catch {
+		} catch (outerError) {
+			if (outerError === BACKFILL_EXHAUSTED) throw outerError;
 			return fallback;
 		}
 	};
@@ -496,6 +506,7 @@ export default async function (pi: ExtensionAPI) {
 				item.block,
 				structuredContextIdentity(providerMessages),
 				providerMessages,
+				{ chargeBackfill: chargeBackfillUnit },
 			);
 			let chunks = chunkCodeNarration(plan);
 			if (chunks.length === 0) chunks = chunkCodeNarration(plainCodeNarration(fallbackCodeDescription(item.block)));
@@ -506,17 +517,55 @@ export default async function (pi: ExtensionAPI) {
 
 	let codeDescriptionPreprocessing: Promise<void> | undefined;
 	let codeWorkEpoch = 0;
+	/** Session-runtime backfill allowance; defaults from config until topped up. */
+	let backfillAllowance: VoiceBackfillBudget = config.codeDescriptionPreprocessBudget;
+	let backfillUsed = 0;
+	let backfillExhaustionReported = false;
+	/** Sentinel that stops a backfill batch without caching filler. */
+	const BACKFILL_EXHAUSTED = Symbol("pi-voice.backfill-exhausted");
+
+	/** Reserves one historical-backfill unit; live and replay requests never call this. */
+const chargeBackfillUnit = (): boolean => {
+		if (backfillAllowance === "unlimited") return true;
+		if (backfillUsed >= backfillAllowance) return false;
+		backfillUsed += 1;
+		backfillExhaustionReported = false;
+		return true;
+	};
+
+	/** Message ids retained by the latest compaction, or null when nothing was compacted. */
+	const retainedMessageIds = (ctx: ExtensionContext): Set<string> | null => {
+		const branch = ctx.sessionManager.getBranch();
+		let lastCompactionIndex = -1;
+		branch.forEach((entry, index) => {
+			if (entry.type === "compaction") lastCompactionIndex = index;
+		});
+		if (lastCompactionIndex < 0) return null;
+		return new Set(branch.slice(lastCompactionIndex).map(entry => entry.id));
+	};
+
+	/** Background work honors the scope; playback and replay always see everything. */
+	const scopedCompletedMessages = (ctx: ExtensionContext, mode: VoiceMode): ContextualPlaybackMessage[] => {
+		const all = completedAssistantMessages(ctx, mode);
+		if (config.codeDescriptionPreprocessScope !== "since-compaction") return all;
+		const retained = retainedMessageIds(ctx);
+		return retained ? all.filter(message => retained.has(message.id)) : all;
+	};
+
 	const scheduleMissingCodeDescriptions = (ctx: ExtensionContext): void => {
 		if (codeDescriptionPreprocessing) return;
 		const epoch = contextEpoch;
 		const workEpoch = codeWorkEpoch;
+		backfillUsed = 0;
+		backfillExhaustionReported = false;
 		const queuedMessages: Array<
 			Array<{ block: FencedCodeBlock; identityContext: string; providerMessagesThroughBlock: Message[] }>
 		> = [];
 		let totalMessages = 0;
 		let processedMessages = 0;
+		let missingBlocks = 0;
 		const currentId = playbackHistory.status()?.messageId;
-		for (const message of prioritizeFromCurrent(completedAssistantMessages(ctx, "assistant"), currentId)) {
+		for (const message of prioritizeFromCurrent(scopedCompletedMessages(ctx, "assistant"), currentId)) {
 			const keyedBlocks = new Map<
 				string,
 				{ block: FencedCodeBlock; identityContext: string; providerMessagesThroughBlock: Message[] }
@@ -538,12 +587,16 @@ export default async function (pi: ExtensionAPI) {
 			if (keyedBlocks.size === 0) continue;
 			totalMessages += 1;
 			const missing = [...keyedBlocks].filter(([key]) => !codeDescriptionCache.get(key)).map(([, item]) => item);
+			missingBlocks += missing.length;
 			if (missing.length === 0) processedMessages += 1;
 			else queuedMessages.push(missing);
 		}
 		if (queuedMessages.length === 0) return;
 		codePreprocessingProgress = {
-			label: "Code descriptions",
+			label:
+				backfillAllowance === "unlimited"
+					? "Code descriptions"
+					: `Code descriptions (${backfillUsed}/${backfillAllowance} budget)`,
 			processed: processedMessages,
 			total: totalMessages,
 		};
@@ -553,12 +606,29 @@ export default async function (pi: ExtensionAPI) {
 			if (epoch !== contextEpoch || workEpoch !== codeWorkEpoch || activeContext !== ctx) return;
 			for (const item of items) {
 				if (epoch !== contextEpoch || workEpoch !== codeWorkEpoch || activeContext !== ctx) return;
-				await requestCodeDescription(ctx, item.block, item.identityContext, item.providerMessagesThroughBlock);
+				try {
+					await requestCodeDescription(ctx, item.block, item.identityContext, item.providerMessagesThroughBlock, { chargeBackfill: chargeBackfillUnit });
+				} catch (error) {
+					if (error === BACKFILL_EXHAUSTED) {
+						if (!backfillExhaustionReported) {
+							backfillExhaustionReported = true;
+							ctx.ui.notify(
+								`Voice code-description backfill stopped at its budget of ${backfillAllowance} requests; run /voice code-budget unlimited for this session`,
+								"warning",
+							);
+						}
+						return;
+					}
+					throw error;
+				}
 			}
 			if (workEpoch !== codeWorkEpoch) return;
 			processedMessages += 1;
 			codePreprocessingProgress = {
-				label: "Code descriptions",
+				label:
+					backfillAllowance === "unlimited"
+						? "Code descriptions"
+						: `Code descriptions (${backfillUsed}/${backfillAllowance} budget)`,
 				processed: processedMessages,
 				total: totalMessages,
 			};
@@ -1137,10 +1207,13 @@ export default async function (pi: ExtensionAPI) {
 		if (timingPreprocessing) return;
 		if (coordinator?.speechOwner()) return;
 		const epoch = contextEpoch;
-		const contextualMessages = completedAssistantMessages(ctx, config.mode);
-		const contextualById = new Map(contextualMessages.map(message => [message.id, message]));
+		const scoped = scopedCompletedMessages(ctx, config.mode);
+		const contextualById = new Map(scoped.map(message => [message.id, message]));
+		const scopedIds = new Set(scoped.map(message => message.id));
 		const messages = syncPlaybackMessages(ctx);
-		const ordered = prioritizeFromCurrent(messages, playbackHistory.status()?.messageId);
+		const ordered = prioritizeFromCurrent(messages, playbackHistory.status()?.messageId).filter(message =>
+			scopedIds.has(message.id),
+		);
 		const missing = ordered.filter(message => !playbackHistory.hasTimingFor(message.id));
 		if (missing.length === 0) return;
 		let processedMessages = messages.length - missing.length;
@@ -1247,6 +1320,9 @@ export default async function (pi: ExtensionAPI) {
 			timingRescheduleRequested = true;
 			cancelTimingWorkers();
 		}
+		backfillAllowance = config.codeDescriptionPreprocessBudget;
+		backfillUsed = 0;
+		backfillExhaustionReported = false;
 		if (wasEnabled && !config.enabled) {
 			vocalizer.clear();
 			narration.finish();
@@ -1865,6 +1941,7 @@ export default async function (pi: ExtensionAPI) {
 				"highlight",
 				"timing",
 				"code-narration",
+				"code-budget",
 				"code-preprocess",
 				"timing-preprocess",
 				"audio-cache",
@@ -1922,6 +1999,11 @@ export default async function (pi: ExtensionAPI) {
 				return ["24", "32", "48", "64"]
 					.filter(value => value.startsWith(parts[1] ?? ""))
 					.map(value => ({ value: `audio-bitrate ${value}`, label: `${value} kbps` }));
+			}
+			if (parts[0] === "code-budget") {
+				return ["unlimited"]
+					.filter(value => value.startsWith(parts[1] ?? ""))
+					.map(value => ({ value: `code-budget ${value}`, label: value }));
 			}
 			if (parts[0] === "code-preprocess" || parts[0] === "timing-preprocess") {
 				const choices = ["1", "2", "3", "4", "5", "6", "7", "8"];
@@ -2138,6 +2220,28 @@ export default async function (pi: ExtensionAPI) {
 					ctx.ui.notify(`code-preprocess concurrency set to ${concurrency}`, "info");
 					return;
 				}
+				case "code-budget": {
+					if (!value) {
+						const used = backfillUsed;
+						ctx.ui.notify(
+							`code-description backfill: scope=${config.codeDescriptionPreprocessScope}; budget=${backfillAllowance}; used=${used}; set /voice code-budget <0..n|unlimited> for this session`,
+							"info",
+						);
+						return;
+					}
+					const parsed = normalizeBackfillBudget(value.toLowerCase() === "unlimited" ? "unlimited" : Number(value));
+					if (parsed === undefined) {
+						ctx.ui.notify("Usage: /voice code-budget [unlimited|<0..n>]", "error");
+						return;
+					}
+					// Session-runtime only; the persisted config keeps its own budget.
+					backfillAllowance = parsed;
+					backfillUsed = 0;
+					backfillExhaustionReported = false;
+					if (activeContext) scheduleMissingCodeDescriptions(activeContext);
+					ctx.ui.notify(`code-description backfill budget set to ${parsed} for this session`, "info");
+					return;
+				}
 				case "timing-preprocess": {
 					const concurrency = normalizePreprocessConcurrency(value.toLowerCase() === "auto" ? "auto" : Number(value));
 					if (concurrency === undefined) {
@@ -2310,7 +2414,7 @@ export default async function (pi: ExtensionAPI) {
 				case "status":
 				case "":
 					ctx.ui.notify(
-						`Voice ${config.enabled ? "on" : "off"}; mode=${config.mode}; voice=${config.voice}; speed=${config.speed}; tts=${config.ttsModel}@${config.ttsDtype}; stt=${config.sttModel}@${config.sttDtype}; sttCandidates=${config.sttCandidates}; alignment=${config.alignmentModel}@${config.alignmentDtype}; editModel=${config.editModel}; highlight=${config.playbackHighlight ? "on" : "off"}; codeNarration=${config.codeNarration}; codeContext=${config.codeDescriptionContext}; codePreprocess=${config.codeDescriptionPreprocessConcurrency}; timingPreprocess=${config.timingPreprocessConcurrency}; audioCache=${config.audioCache ? `${config.audioCacheBitrate}kbps` : "off"}; device=${deviceSelection}${activeDeviceId ? `→${activeDeviceId}` : "→local"}; output=${config.output}; input=${config.input}; shortcut=${config.talkShortcut}; submit=${config.submitMode}; edit=${config.editMode}`,
+						`Voice ${config.enabled ? "on" : "off"}; mode=${config.mode}; voice=${config.voice}; speed=${config.speed}; tts=${config.ttsModel}@${config.ttsDtype}; stt=${config.sttModel}@${config.sttDtype}; sttCandidates=${config.sttCandidates}; alignment=${config.alignmentModel}@${config.alignmentDtype}; editModel=${config.editModel}; highlight=${config.playbackHighlight ? "on" : "off"}; codeNarration=${config.codeNarration}; codeContext=${config.codeDescriptionContext}; codePreprocess=${config.codeDescriptionPreprocessConcurrency}; codeScope=${config.codeDescriptionPreprocessScope}; codeBudget=${backfillAllowance}; timingPreprocess=${config.timingPreprocessConcurrency}; audioCache=${config.audioCache ? `${config.audioCacheBitrate}kbps` : "off"}; device=${deviceSelection}${activeDeviceId ? `→${activeDeviceId}` : "→local"}; output=${config.output}; input=${config.input}; shortcut=${config.talkShortcut}; submit=${config.submitMode}; edit=${config.editMode}`,
 						"info",
 					);
 					return;

@@ -3,6 +3,8 @@ import test from "node:test";
 import {
 	DEFAULT_VOICE_CONFIG,
 	normalizeAudioCacheBitrate,
+	normalizeBackfillBudget,
+	normalizePreprocessScope,
 	normalizeCodeDescriptionContext,
 	normalizeEditModel,
 	normalizeModelDtype,
@@ -14,6 +16,18 @@ import {
 	normalizeVoiceOutput,
 	normalizeWorkerCount,
 } from "../src/config.js";
+
+test("normalizes preprocessing scope and backfill budget", () => {
+	assert.equal(normalizePreprocessScope("since-compaction"), "since-compaction");
+	assert.equal(normalizePreprocessScope("all"), "all");
+	assert.equal(normalizePreprocessScope("branch"), undefined);
+	assert.equal(normalizeBackfillBudget("unlimited"), "unlimited");
+	assert.equal(normalizeBackfillBudget(0), 0);
+	assert.equal(normalizeBackfillBudget(25), 25);
+	assert.equal(normalizeBackfillBudget(-1), undefined);
+	assert.equal(normalizeBackfillBudget(2.5), undefined);
+	assert.equal(normalizeBackfillBudget("25"), undefined);
+});
 
 test("defaults code descriptions to block-only context", () => {
 	assert.equal(DEFAULT_VOICE_CONFIG.codeDescriptionContext, "block-only");

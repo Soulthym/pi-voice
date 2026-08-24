@@ -144,7 +144,7 @@ test("unified progress widget orders input, playback, and preprocessing and clea
 
 	let lines = await waitForWidgetLines(host, candidate => candidate.length >= 3);
 	assert.match(lines[0], /Playback · message 1\/1: speech timing pending/);
-	assert.match(lines[1], /Preprocessing · code descriptions: 0\/1 ready/);
+	assert.match(lines[1], /Preprocessing · code descriptions \(0\/25 budget\): 0\/1 ready/);
 	assert.match(lines[2], /Preprocessing · speech timing: 0\/1 ready/);
 
 	void host.command("talk");

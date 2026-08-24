@@ -28,6 +28,8 @@ Pi Voice reads `~/.pi/agent/pi-voice.json` by default. Unknown or invalid values
 | `playbackHighlight` | `true` | Enables progressive prose/code highlighting. |
 | `codeNarration` | `guided` | `guided` synchronized focus or plain `summary`. |
 | `codeDescriptionContext` | `block-only` | `block-only` sends only the concerned fence; `conversation` also sends its resolved historical discussion. |
+| `codeDescriptionPreprocessScope` | `since-compaction` | Background preprocessing covers only messages retained by the latest compaction (`all` revisits the entire branch). |
+| `codeDescriptionPreprocessBudget` | `25` | Historical backfill requests per session load: `0` disables, a positive integer caps, `unlimited` removes the cap. Live narration and replay never consume it. |
 | `codeDescriptionPreprocessConcurrency` | `4` | Parallel model requests, `1..8`. |
 | `timingPreprocessConcurrency` | `auto` | `auto` or CPU workers `1..8`. Auto caps at four and considers RAM/CPU. |
 | `audioCache` | `true` | Enables content-addressed Opus segment caching. |
@@ -71,6 +73,16 @@ Use `/voice voice` for an interactive picker or `/voice voice <id>` directly.
 `current` follows Pi's active model without assuming a provider or model family.
 
 For the best discussion-aware code narration, set `codeDescriptionContext` to `conversation`. This allows `editModel` to receive Pi's resolved provider-compatible history before each fence, potentially including images, compaction summaries, tool calls, and tool results. With `editModel: "current"`, Pi Voice also preserves the effective system prompt and active tool schemas to make the normal request prefix provider-cache eligible. Keep the privacy-safe `block-only` default if that context should not be sent to a remote provider. See [Models and privacy](models-and-privacy.md).
+
+## Preprocessing scope and budget
+
+Background description work is split from live work:
+
+- **Live descriptions** for newly completed messages always run on demand and never consume budget.
+- **Historical backfill** (startup catch-up after reload, compaction, or dependency changes) is bounded twice:
+  - `codeDescriptionPreprocessScope`: `since-compaction` processes only messages the latest compaction retained; sessions without compaction process everything.
+  - `codeDescriptionPreprocessBudget`: maximum backfill model requests per session load. Cache hits, local fallbacks, and live/replay requests are free.
+- When the budget is exhausted, remaining blocks stay missing and Pi Voice notifies once. `/voice code-budget unlimited` (or a number) raises the allowance for the current session only and resumes skipped blocks; `/voice code-budget` reports scope, allowance, and usage.
 
 ## Persistent data
 

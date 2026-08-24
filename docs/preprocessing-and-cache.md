@@ -28,6 +28,8 @@ Missing descriptions use `editModel` and are content-addressed by prompt version
 
 `codeDescriptionPreprocessConcurrency` controls parallel model requests from 1 to 8; the default is 4. It is explicit because API-backed model capacity is not derived from local hardware. Global coordinator slots enforce the limit across Pi processes.
 
+Background preprocessing is scoped and budgeted separately from live narration: `codeDescriptionPreprocessScope` defaults to `since-compaction`, covering only messages the latest compaction retained, and `codeDescriptionPreprocessBudget` (default 25) caps historical backfill requests per session load. Cache hits are free; newly completed messages always describe themselves without consuming budget. `/voice code-budget <n|unlimited>` raises the current session's allowance and resumes skipped blocks.
+
 Failed model requests use local structural narration. Before inference, `block-only` supplies the concerned block as numbered source, while `conversation` preserves that fence in the structured assistant context and references it without resending the body. Pi Voice conservatively checks the complete request—including system prompt and tools when reused—against the selected model's context window. With the active model, the request extends the normal conversation prefix and uses the Pi session ID with provider-default cache retention, allowing supported providers to reuse a still-live prompt cache. Oversized requests are reported and use the same local fallback instead of truncating historical context. Completed fallback or model plans remain usable after reload. Prompt-version changes invalidate stale narration plans.
 
 ## Speech timing

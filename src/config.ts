@@ -8,6 +8,9 @@ export type VoiceSubmitMode = "auto" | "review";
 export type VoiceEditMode = "append" | "smart";
 export type VoiceCodeNarration = "guided" | "summary";
 export type VoiceCodeDescriptionContext = "block-only" | "conversation";
+export type VoicePreprocessScope = "all" | "since-compaction";
+/** Historical backfill allowance per session load; live and replay stay on demand. */
+export type VoiceBackfillBudget = "unlimited" | number;
 export type VoiceModelDtype = "fp32" | "q8" | "q4";
 export type VoicePreprocessConcurrency = "auto" | number;
 
@@ -47,6 +50,10 @@ export interface VoiceConfig {
 	codeDescriptionContext: VoiceCodeDescriptionContext;
 	/** Parallel model requests used to fill missing written code descriptions. */
 	codeDescriptionPreprocessConcurrency: number;
+	/** How much historical branch history background preprocessing may revisit. */
+	codeDescriptionPreprocessScope: VoicePreprocessScope;
+	/** Historical backfill request budget per session load. */
+	codeDescriptionPreprocessBudget: VoiceBackfillBudget;
 	/** Parallel CPU Kokoro workers used to fill missing playback timings. */
 	timingPreprocessConcurrency: VoicePreprocessConcurrency;
 	/** Persist synthesized speech as local Opus segment files for reuse. */
@@ -77,6 +84,8 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
 	codeNarration: "guided",
 	codeDescriptionContext: "block-only",
 	codeDescriptionPreprocessConcurrency: 4,
+	codeDescriptionPreprocessScope: "since-compaction",
+	codeDescriptionPreprocessBudget: 25,
 	timingPreprocessConcurrency: "auto",
 	audioCache: true,
 	audioCacheBitrate: 32,
@@ -116,6 +125,16 @@ export function normalizeSttCandidates(value: unknown): number | undefined {
 
 export function normalizeWorkerCount(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 8 ? value : undefined;
+}
+
+export function normalizePreprocessScope(value: unknown): VoicePreprocessScope | undefined {
+	return value === "all" || value === "since-compaction" ? value : undefined;
+}
+
+export function normalizeBackfillBudget(value: unknown): VoiceBackfillBudget | undefined {
+	if (value === "unlimited") return "unlimited";
+	if (typeof value === "number" && Number.isInteger(value) && value >= 0) return value;
+	return undefined;
 }
 
 export function normalizeAudioCacheBitrate(value: unknown): number | undefined {
@@ -269,6 +288,12 @@ export async function loadVoiceConfig(): Promise<VoiceConfig> {
 			codeDescriptionPreprocessConcurrency:
 				normalizeWorkerCount(parsed.codeDescriptionPreprocessConcurrency) ??
 				DEFAULT_VOICE_CONFIG.codeDescriptionPreprocessConcurrency,
+			codeDescriptionPreprocessScope:
+				normalizePreprocessScope(parsed.codeDescriptionPreprocessScope) ??
+				DEFAULT_VOICE_CONFIG.codeDescriptionPreprocessScope,
+			codeDescriptionPreprocessBudget:
+				normalizeBackfillBudget(parsed.codeDescriptionPreprocessBudget) ??
+				DEFAULT_VOICE_CONFIG.codeDescriptionPreprocessBudget,
 			timingPreprocessConcurrency:
 				normalizePreprocessConcurrency(parsed.timingPreprocessConcurrency) ??
 				DEFAULT_VOICE_CONFIG.timingPreprocessConcurrency,

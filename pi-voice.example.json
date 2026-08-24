@@ -20,6 +20,8 @@
   "codeNarration": "guided",
   "codeDescriptionContext": "block-only",
   "codeDescriptionPreprocessConcurrency": 4,
+  "codeDescriptionPreprocessScope": "since-compaction",
+  "codeDescriptionPreprocessBudget": 25,
   "timingPreprocessConcurrency": "auto",
   "audioCache": true,
   "audioCacheBitrate": 32

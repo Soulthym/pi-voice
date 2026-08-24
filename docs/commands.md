@@ -72,9 +72,12 @@ Shortcut names follow Pi's format, for example `alt+m`, `ctrl+shift+m`, or `f8`.
 
 ```text
 /voice code-preprocess <1..8>
+/voice code-budget [unlimited|<n>]
 /voice timing-preprocess auto|<1..8>
 /voice audio-cache on|off
 /voice audio-bitrate <12..128>
 ```
+
+`code-budget` reports or raises the session-only historical backfill allowance (`scope` and default budget come from the config) and resumes skipped blocks.
 
 Code concurrency controls parallel `editModel` requests and is explicit. Timing `auto` derives a CPU worker limit from available RAM and CPU, capped at four. Disabling audio caching does not delete existing Opus files.
