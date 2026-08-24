@@ -389,6 +389,7 @@ export default async function (pi: ExtensionAPI) {
 ): Promise<CodeNarrationPlan> => {
 		const fallback = plainCodeNarration(fallbackCodeDescription(block));
 		let resolvedKey: string | undefined;
+		let lastOverflowModel = "";
 		try {
 			const editModel = config.editModel;
 			const narrationMode = config.codeNarration;
@@ -427,6 +428,7 @@ export default async function (pi: ExtensionAPI) {
 				contextMode,
 			);
 			resolvedKey = key;
+			lastOverflowModel = editModel;
 			return await codeDescriptionCache
 				.getOrCreate(
 					key,
@@ -450,22 +452,6 @@ export default async function (pi: ExtensionAPI) {
 								},
 							).catch(error => {
 								if (error instanceof CodeDescriptionBudgetExhaustedError) throw BACKFILL_EXHAUSTED;
-								if (error instanceof CodeDescriptionContextOverflowError) {
-									const overflowId = `${editModel}:${error.contextWindow}`;
-									if (!reportedDescriptionOverflows.has(overflowId)) {
-										reportedDescriptionOverflows.add(overflowId);
-										try {
-											if (activeContext === ctx) {
-												ctx.ui.notify(
-													`Voice used local code narration because ${editModel} has insufficient context (${error.estimatedInputTokens} estimated input tokens; ${error.availableInputTokens} available)`,
-													"warning",
-												);
-											}
-										} catch {
-											// Session replacement can invalidate the captured UI before generation settles.
-										}
-									}
-								}
 								throw error;
 							});
 						return coordinator
@@ -491,7 +477,25 @@ export default async function (pi: ExtensionAPI) {
 				});
 		} catch (outerError) {
 			if (outerError === BACKFILL_EXHAUSTED || outerError instanceof CodeDescriptionBudgetExhaustedError) throw BACKFILL_EXHAUSTED;
-			if (!resolvedKey || outerError instanceof CodeDescriptionContextOverflowError) return fallback;
+			if (!resolvedKey) return fallback;
+			if (outerError instanceof CodeDescriptionContextOverflowError) {
+				// Isolated compaction could not fit anything either; fall back locally.
+				const overflowId = `${lastOverflowModel}:${outerError.contextWindow}`;
+				if (!reportedDescriptionOverflows.has(overflowId)) {
+					reportedDescriptionOverflows.add(overflowId);
+					try {
+						if (activeContext === ctx) {
+							ctx.ui.notify(
+								`Voice used local code narration because ${lastOverflowModel} has insufficient context`,
+								"warning",
+							);
+						}
+					} catch {
+						// Session replacement can invalidate the captured UI before generation settles.
+					}
+				}
+				return fallback;
+			}
 			// Cache the omission so neither speech nor preprocessing repeats the cost.
 			const reason = classifyCodeDescriptionFailure(outerError) === "quality" ? "quality" : "provider";
 			codeDescriptionOmissions.set(resolvedKey, {

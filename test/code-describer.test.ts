@@ -250,3 +250,51 @@ test("transient failures retry once; quota failures never retry", async () => {
 	await assert.rejects(describeCodeBlock(quota.ctx, { language: "ts", code: "run();" }, "current", "summary"), /credits/);
 	assert.equal(quota.calls(), 1);
 });
+
+import { compactForDescription } from "../src/code-describer.js";
+import type { Message } from "@earendil-works/pi-ai";
+
+test("isolated compaction keeps the summary head and the concerned tail", () => {
+	const estimate = (message: Message) => Math.ceil(JSON.stringify(message).length / 4);
+	const messages: any[] = [
+		{ role: "user", content: [{ type: "text", text: "SUMMARY " + "x".repeat(80) }], timestamp: 1 },
+		...Array.from({ length: 20 }, (_, i): Message => ({
+			role: "user",
+			content: [{ type: "text", text: `filler ${i} `.repeat(20) }],
+			timestamp: i + 2,
+		})),
+		{ role: "assistant", content: [{ type: "text", text: "final answer with the concerned fence" }], timestamp: 99 },
+	];
+	const compacted = compactForDescription(messages as Message[], 400, estimate);
+	assert.equal(compacted[0], messages[0], "the compaction summary head must be preserved");
+	assert.equal(compacted.at(-1), messages.at(-1), "the concerned assistant partial is always retained");
+	const totalTokens = compacted.reduce((total, item) => total + estimate(item), 0);
+	assert.ok(totalTokens <= 400 + estimate(messages[0]) - estimate(messages[0]), `compacted set must fit: ${totalTokens}`);
+});
+
+test("compaction that cannot fit anything reports the overflow", async () => {
+	const model = { provider: "t", id: "tiny", contextWindow: 120, maxTokens: 16 };
+	let completions = 0;
+	const ctx = {
+		model,
+		modelRegistry: {
+			find: () => model,
+			complete: async () => {
+				completions += 1;
+				throw new Error("unreachable");
+			},
+		},
+	} as never;
+
+	await assert.rejects(
+		describeCodeBlock(
+			ctx,
+			{ language: "ts", code: "run();" },
+			"current",
+			"summary",
+			{ messages: [{ role: "user", content: [{ type: "text", text: "y".repeat(600) }], timestamp: 1 }] as never },
+		),
+		CodeDescriptionContextOverflowError,
+	);
+	assert.equal(completions, 0);
+});

@@ -262,6 +262,36 @@ export interface CodeDescriptionAttemptOptions {
 	onAttempt?: () => void;
 }
 
+/**
+ * Isolated description-context compaction: keeps the leading compaction summary
+ * (when present) plus the longest suffix that fits, always preserving the final
+ * assistant partial that contains the concerned fence. Purely local; the Pi
+ * session itself is never modified.
+ */
+export function compactForDescription(
+	messages: readonly Message[],
+	fitTokens: number,
+	estimate: (message: Message) => number,
+): Message[] {
+	if (messages.length === 0) return [];
+	const head = messages[0];
+	const headCost = estimate(head);
+	const rest = messages.slice(1);
+	let budget = Math.max(0, fitTokens - headCost);
+	const kept: Message[] = [];
+	for (let index = rest.length - 1; index >= 0; index -= 1) {
+		const cost = estimate(rest[index]);
+		// The final message holds the concerned fence and is always retained.
+		if (index === rest.length - 1 || cost <= budget) {
+			kept.unshift(rest[index]);
+			budget -= cost;
+		} else if (kept.length > 0) {
+			break;
+		}
+	}
+	return headCost <= fitTokens ? [head, ...kept] : kept;
+}
+
 const QUALITY_ATTEMPTS = 3;
 const TRANSIENT_ATTEMPTS = 2;
 
@@ -295,6 +325,8 @@ export async function describeCodeBlock(
 	const systemPrompt = reusesNormalPrompt ? conversation.normalPrompt!.systemPrompt : narrationPrompt;
 	const tools = reusesNormalPrompt ? [...conversation.normalPrompt!.tools] : undefined;
 	let priorRejection: string | undefined;
+	let useCompaction = false;
+	const maxOutputTokens = mode === "guided" ? 512 : 384;
 
 	const attemptOnce = async (rejection?: string): Promise<CodeNarrationPlan> => {
 		options?.onAttempt?.();
@@ -304,12 +336,23 @@ export async function describeCodeBlock(
 		const request = `${reusesNormalPrompt
 			? `<code_narration_request>\n${narrationPrompt}\n\n${baseRequest}\n</code_narration_request>`
 			: baseRequest}${corrective}`;
-		const messages = [...(conversation?.messages ?? []), {
+		const source = conversation?.messages ?? [];
+		const effectiveMessages = useCompaction
+			? compactForDescription(
+					source,
+					Math.max(0, model.contextWindow - maxOutputTokens - CODE_DESCRIPTION_INPUT_SAFETY_TOKENS - Math.ceil(systemPrompt.length / 4)),
+					item => estimateTokens(item),
+			  )
+			: source;
+		if (useCompaction && effectiveMessages.length === 0) {
+			// Even isolated compaction cannot fit anything; surface the overflow.
+			throw new CodeDescriptionContextOverflowError(Number.POSITIVE_INFINITY, 0, model.contextWindow);
+		}
+		const messages = [...effectiveMessages, {
 			role: "user" as const,
 			content: [{ type: "text" as const, text: request }],
 			timestamp: Date.now(),
 		}];
-		const maxOutputTokens = mode === "guided" ? 512 : 384;
 
 		// Recheck the window on every attempt; corrective nudges grow the request.
 		const estimatedInputTokens =
@@ -370,6 +413,11 @@ export async function describeCodeBlock(
 		try {
 			return await attemptOnce(priorRejection);
 		} catch (error) {
+			if (error instanceof CodeDescriptionContextOverflowError && conversation && !useCompaction) {
+				// Retry once against the isolated compacted context before failing.
+				useCompaction = true;
+				continue;
+			}
 			const kind = classifyCodeDescriptionFailure(error);
 			if (kind === "fatal") throw error;
 			const limit = kind === "quality" ? QUALITY_ATTEMPTS : TRANSIENT_ATTEMPTS;
