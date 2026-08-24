@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { VoiceWorkerClient } from "../src/worker-client.js";
-import { FakeVoiceHost, assistant, type ModelRequest } from "./helpers/fake-voice-host.js";
+import { FakeVoiceHost, assistant, streamCompletedResponse, type ModelRequest } from "./helpers/fake-voice-host.js";
 
 async function settle(): Promise<void> {
 	for (let index = 0; index < 8; index += 1) await new Promise(resolve => setImmediate(resolve));
@@ -74,27 +74,6 @@ function modelResponse(text = "A contextual description of the concerned block."
 	return { role: "assistant", content: [{ type: "text", text }], stopReason: "stop" };
 }
 
-async function streamCompletedResponse(
-	host: FakeVoiceHost,
-	id: string,
-	parentId: string,
-	text: string,
-): Promise<void> {
-	const partial = assistant(text, "pending");
-	const complete = assistant(text, "stop");
-	await host.emit("before_agent_start", { type: "before_agent_start" });
-	await host.emit("message_start", { type: "message_start", message: partial });
-	await host.emit("message_update", {
-		type: "message_update",
-		message: partial,
-		assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: text, partial },
-	});
-	host.addMessage(id, parentId, complete);
-	await host.emit("message_end", { type: "message_end", message: complete });
-	await host.emit("turn_end", { type: "turn_end", message: complete, toolResults: [] });
-	await host.emit("agent_settled", { type: "agent_settled" });
-	await settle();
-}
 
 function requestText(request: ModelRequest): string {
 	const text: string[] = [];

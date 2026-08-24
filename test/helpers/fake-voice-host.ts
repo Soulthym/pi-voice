@@ -32,6 +32,8 @@ export class FakeVoiceHost {
 	readonly sessionManager: any;
 	readonly ctx: any;
 	readonly api: any;
+	/** Toggled by tests to simulate Pi generating a response. */
+	idle = true;
 	#nextEntry = 0;
 
 	constructor(
@@ -88,7 +90,7 @@ export class FakeVoiceHost {
 			},
 			model: this.model,
 			scopedModels: [],
-			isIdle: () => true,
+			isIdle: () => this.idle,
 			isProjectTrusted: () => true,
 			signal: undefined,
 			abort: () => {},
@@ -197,4 +199,27 @@ export async function streamBlockedResponse(
 	}
 	await host.emit("message_end", { type: "message_end", message: complete });
 	await host.emit("turn_end", { type: "turn_end", message: complete, toolResults: [] });
+}
+
+/** Drives a full assistant turn through the real extension handlers and session. */
+export async function streamCompletedResponse(
+	host: FakeVoiceHost,
+	id: string,
+	parentId: string,
+	text: string,
+): Promise<void> {
+	const partial = assistant(text, "pending");
+	const complete = assistant(text, "stop");
+	await host.emit("before_agent_start", { type: "before_agent_start" });
+	await host.emit("message_start", { type: "message_start", message: partial });
+	await host.emit("message_update", {
+		type: "message_update",
+		message: partial,
+		assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: text, partial },
+	});
+	host.addMessage(id, parentId, complete);
+	await host.emit("message_end", { type: "message_end", message: complete });
+	await host.emit("turn_end", { type: "turn_end", message: complete, toolResults: [] });
+	await host.emit("agent_settled", { type: "agent_settled" });
+	for (let index = 0; index < 8; index += 1) await new Promise(resolve => setImmediate(resolve));
 }

@@ -1682,20 +1682,19 @@ export default async function (pi: ExtensionAPI) {
 		handler: async ctx => toggle(ctx),
 	});
 
-	const canNavigatePlayback = (ctx: ExtensionContext): boolean => {
+	// Playback controls act on completed assistant snapshots and never mutate a
+	// response that is still generating. Manual controls are also how users
+	// preempt speech ownership, so they must stay available while Pi streams.
+	const requireEnabledVoice = (ctx: ExtensionContext): boolean => {
 		if (!config.enabled) {
 			ctx.ui.notify("Voice mode is disabled", "warning");
-			return false;
-		}
-		if (!ctx.isIdle()) {
-			ctx.ui.notify("Wait for the current assistant response before navigating playback", "warning");
 			return false;
 		}
 		return true;
 	};
 
 	const replaySelected = (ctx: ExtensionContext): void => {
-		if (!canNavigatePlayback(ctx)) return;
+		if (!requireEnabledVoice(ctx)) return;
 		syncPlaybackMessages(ctx, pausedForAttention);
 		const target = playbackHistory.restartTarget();
 		if (!target) {
@@ -1736,7 +1735,7 @@ export default async function (pi: ExtensionAPI) {
 	pi.registerShortcut("f6", {
 		description: "Play the previous assistant message",
 		handler: ctx => {
-			if (!canNavigatePlayback(ctx)) return;
+			if (!requireEnabledVoice(ctx)) return;
 			syncPlaybackMessages(ctx);
 			const message = playbackHistory.move(-1);
 			if (message) playTarget({ ...message, time: 0, sourceOffset: 0 }, !playbackHistory.hasTimings());
@@ -1746,7 +1745,7 @@ export default async function (pi: ExtensionAPI) {
 	pi.registerShortcut("f7", {
 		description: "Regenerate playback from about 10 seconds earlier",
 		handler: ctx => {
-			if (!canNavigatePlayback(ctx)) return;
+			if (!requireEnabledVoice(ctx)) return;
 			const target = playbackHistory.seekTarget(-10);
 			if (target) playTarget(target, false);
 			else {
@@ -1759,7 +1758,7 @@ export default async function (pi: ExtensionAPI) {
 	pi.registerShortcut("f8", {
 		description: "Pause or resume regenerated voice playback",
 		handler: ctx => {
-			if (!canNavigatePlayback(ctx)) return;
+			if (!requireEnabledVoice(ctx)) return;
 				if (playbackPaused) {
 				if (pausedOwnerUtterance === undefined) {
 					const target = playbackHistory.resumeTarget();
@@ -1796,7 +1795,7 @@ export default async function (pi: ExtensionAPI) {
 	pi.registerShortcut("f9", {
 		description: "Regenerate playback from about 10 seconds later",
 		handler: ctx => {
-			if (!canNavigatePlayback(ctx)) return;
+			if (!requireEnabledVoice(ctx)) return;
 			const target = playbackHistory.seekTarget(10);
 			if (target) playTarget(target, false);
 			else {
@@ -1809,7 +1808,7 @@ export default async function (pi: ExtensionAPI) {
 	pi.registerShortcut("f10", {
 		description: "Play the next assistant message",
 		handler: ctx => {
-			if (!canNavigatePlayback(ctx)) return;
+			if (!requireEnabledVoice(ctx)) return;
 			syncPlaybackMessages(ctx);
 			const message = playbackHistory.move(1);
 			if (message) playTarget({ ...message, time: 0, sourceOffset: 0 }, !playbackHistory.hasTimings());
