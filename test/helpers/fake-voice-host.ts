@@ -1,5 +1,53 @@
 import type { Message } from "@earendil-works/pi-ai";
-import voiceExtension from "../../src/index.js";
+import type { WorkerEvent } from "../../src/worker-client.js";
+
+type VoiceExtensionModule = { default: (api: unknown) => Promise<void> };
+let extensionPromise: Promise<VoiceExtensionModule> | undefined;
+
+/**
+ * Loads the extension lazily. Test files that registered `mock.module` for
+ * `src/worker-client.js` must do so before the first call; Node resolves each
+ * test file in its own process, so per-file mocks stay isolated.
+ */
+export async function loadVoiceExtension(): Promise<VoiceExtensionModule> {
+	extensionPromise ??= import("../../src/index.js") as Promise<VoiceExtensionModule>;
+	return extensionPromise;
+}
+
+/** Minimal stand-in for VoiceWorkerClient that records its event pipeline. */
+export class MockedVoiceWorkerClient {
+	static instances: MockedVoiceWorkerClient[] = [];
+	#onEvent: (event: WorkerEvent) => void;
+	sent: unknown[] = [];
+
+	constructor(onEvent: (event: WorkerEvent) => void) {
+		this.#onEvent = onEvent;
+		MockedVoiceWorkerClient.instances.push(this);
+	}
+
+	emit(event: WorkerEvent): void {
+		this.#onEvent(event);
+	}
+
+	sendSegment(_utterance: number, _segmentId: number, text: string): void {
+		this.sent.push({ type: "segment", text });
+	}
+	measureSegment(): Promise<number> {
+		return Promise.resolve(1);
+	}
+	endUtterance(): void {}
+	setPlaybackPaused(): void {}
+	cancel(): void {}
+	async transcribe(): Promise<string[]> {
+		return [];
+	}
+	async transcribePcm(): Promise<string> {
+		return "";
+	}
+	async preload(): Promise<void> {}
+	async preloadAlignment(): Promise<void> {}
+	async terminate(): Promise<void> {}
+}
 
 export interface Notice {
 	message: string;
@@ -21,6 +69,7 @@ export class FakeVoiceHost {
 	readonly entries: any[] = [];
 	readonly modelRequests: ModelRequest[] = [];
 	/** Latest value per widget name, in update order. */
+	readonly styleCalls: Array<{ style: string; text: string }> = [];
 	readonly widgets = new Map<string, { lines?: string[]; placement?: string } | undefined>();	readonly widgetOperations: Array<{ name: string; value: { lines?: string[]; placement?: string } | undefined }> = [];
 	readonly model = {
 		provider: "test",
@@ -34,6 +83,7 @@ export class FakeVoiceHost {
 	readonly api: any;
 	/** Toggled by tests to simulate Pi generating a response. */
 	idle = true;
+	sessionName: string | undefined;
 	#nextEntry = 0;
 
 	constructor(
@@ -51,8 +101,12 @@ export class FakeVoiceHost {
 			getLeafEntry: () => this.entries.at(-1),
 			getSessionName: () => undefined,
 		};
+		const styleCalls: Array<{ style: string; text: string }> = [];
 		const theme = {
-			fg: (_name: string, text: string) => text,
+			fg: (name: string, text: string) => {
+				this.styleCalls.push({ style: name, text });
+				return text;
+			},
 			bg: (_name: string, text: string) => text,
 			bold: (text: string) => text,
 		};
@@ -129,12 +183,17 @@ export class FakeVoiceHost {
 				});
 			},
 			sendUserMessage: () => {},
+			getSessionName: () => this.sessionName,
+			setSessionName: (name: string) => {
+				this.sessionName = name;
+			},
 			getActiveTools: () => [],
 			getAllTools: () => [],
 		};
 	}
 
 	async start(): Promise<void> {
+		const { default: voiceExtension } = await loadVoiceExtension();
 		await voiceExtension(this.api);
 		await this.emit("session_start", { type: "session_start" });
 	}
@@ -170,6 +229,11 @@ export class FakeVoiceHost {
 			timestamp: new Date().toISOString(),
 			message,
 		});
+	}
+
+	/** First worker-client instance created by the extension (mocked builds only). */
+	firstWorkerClient(): MockedVoiceWorkerClient | undefined {
+		return MockedVoiceWorkerClient.instances.at(-1);
 	}
 
 	async shutdown(): Promise<void> {

@@ -9,6 +9,10 @@ export interface SessionPresence {
 	pid: number;
 	cwd: string;
 	updatedAt: number;
+	/** Stable Pi session id; older presences may omit it. */
+	sessionId?: string;
+	/** Human-readable Pi session title; used for spoken labels. */
+	sessionName?: string;
 }
 
 export interface WaitingSession extends SessionPresence {
@@ -63,7 +67,10 @@ export class SessionCoordinator {
 	#speechLease = false;
 	#resourceLeases = new Set<string>();
 
+	readonly sessionId: string;
+
 	constructor(cwd: string, sessionId: string, root = process.env.PI_VOICE_COORDINATOR_DIR ?? path.join(os.homedir(), ".cache", "pi-voice", "coordinator")) {
+		this.sessionId = sessionId;
 		this.cwd = path.resolve(cwd);
 		this.root = root;
 		const identity = createHash("sha256").update(`${process.pid}\0${sessionId}\0${this.cwd}\0${randomUUID()}`).digest("hex");
@@ -86,21 +93,40 @@ export class SessionCoordinator {
 		this.#heartbeat.unref?.();
 	}
 
-	projectLabel(cwd = this.cwd): string {
+	projectLabel(cwd = this.cwd, sessionId?: string, sessionName?: string): string {
 		const target = path.resolve(cwd);
-		const active = this.activeSessions().map(session => path.resolve(session.cwd));
+		const activePresences = this.activeSessions();
+		const active = activePresences.map(session => path.resolve(session.cwd));
 		if (!active.includes(target)) active.push(target);
 		const targetParts = target.split(path.sep).filter(Boolean);
+		let base: string | undefined;
 		for (let depth = 1; depth <= targetParts.length; depth += 1) {
-			const label = targetParts.slice(-depth).join("/");
+			const candidateLabel = targetParts.slice(-depth).join("/");
 			const ambiguous = active.some(candidate => {
 				if (candidate === target) return false;
 				const parts = candidate.split(path.sep).filter(Boolean);
-				return parts.slice(-depth).join("/") === label;
+				return parts.slice(-depth).join("/") === candidateLabel;
 			});
-			if (!ambiguous) return label;
+			if (!ambiguous) {
+				base = candidateLabel;
+				break;
+			}
 		}
-		return target;
+		base ??= target;
+
+		// Sessions sharing one directory stay distinguishable for humans via
+		// their Pi session title plus a small number instead of hashes.
+		const peers = activePresences
+			.filter(presence => path.resolve(presence.cwd) === target)
+				// Sort by the stable Pi session id so numbering survives restarts.
+				.sort((left, right) => (left.sessionId ?? left.instanceId).localeCompare(right.sessionId ?? right.instanceId));
+		if (peers.length <= 1) return base;
+		const requestedSessionId = sessionId ?? this.sessionId;
+		const number = peers.findIndex(presence => presence.sessionId === requestedSessionId) + 1
+			|| peers.findIndex(presence => presence.instanceId === this.instanceId && target === this.cwd) + 1
+			|| 1;
+		const name = (sessionName ?? peers.find(presence => presence.sessionId === requestedSessionId)?.sessionName ?? "").trim();
+		return name ? `${base} · ${name} ${number}` : `${base} ${number}`;
 	}
 
 	activeSessions(): SessionPresence[] {
@@ -255,8 +281,25 @@ export class SessionCoordinator {
 		remove(this.#presenceFile(this.instanceId));
 	}
 
+	#sessionName: string | undefined;
+
+	setSessionName(name: string | undefined): void {
+		const trimmed = name?.trim() || undefined;
+		if (trimmed === this.#sessionName) return;
+		this.#sessionName = trimmed;
+		if (!this.#stopped) this.#writePresence();
+	}
+
 	#presence(): SessionPresence {
-		return { interactive: true, instanceId: this.instanceId, pid: process.pid, cwd: this.cwd, updatedAt: Date.now() };
+		return {
+			interactive: true,
+			instanceId: this.instanceId,
+			pid: process.pid,
+			cwd: this.cwd,
+			updatedAt: Date.now(),
+			sessionId: this.sessionId,
+			...(this.#sessionName ? { sessionName: this.#sessionName } : {}),
+		};
 	}
 
 	#writePresence(): void {

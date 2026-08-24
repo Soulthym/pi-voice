@@ -22,7 +22,7 @@
   },
   "scripts": {
     "check": "tsc --noEmit",
-    "test": "node --import tsx --test test/*.test.ts"
+    "test": "node --import tsx --test --experimental-test-module-mocks test/*.test.ts"
   },
   "dependencies": {
     "@huggingface/transformers": "3.8.1",

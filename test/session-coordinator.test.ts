@@ -105,6 +105,56 @@ test("uses parent directories only to disambiguate equal project names", () => {
 	}
 });
 
+test("same-directory sessions get distinct human-readable labels", () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-voice-same-cwd-"));
+	const first = new SessionCoordinator("/work/dup/app", "session-one", root);
+	const second = new SessionCoordinator("/work/dup/app", "session-two", root);
+	first.setSessionName("Fix login flow");
+	second.setSessionName("Refactor parser");
+	first.start();
+	second.start();
+	try {
+		const firstLabel = first.projectLabel();
+		const secondLabel = second.projectLabel();
+
+		assert.notEqual(firstLabel, secondLabel, `labels must differ: ${firstLabel} vs ${secondLabel}`);
+		// Human-recognizable: directory, session title, and a small number.
+		assert.equal(firstLabel, "app · Fix login flow 1");
+		assert.equal(secondLabel, "app · Refactor parser 2");
+		assert.doesNotMatch(firstLabel, /#/);
+
+		// Stable across repeated calls.
+		assert.equal(first.projectLabel(), firstLabel);
+		assert.equal(second.projectLabel(), secondLabel);
+
+		// Describing another session (waiting announcement) uses its own title
+		// and number via the presence-recorded id and name.
+		const waiting = second.markWaiting();
+		assert.equal(
+			first.projectLabel(waiting.cwd, waiting.sessionId, waiting.sessionName),
+			secondLabel,
+		);
+
+		// A lone session in the directory keeps the clean historical label.
+		second.shutdown();
+		assert.equal(first.projectLabel(), "app");
+
+		// Without a title the numbered form still avoids hashes.
+		const third = new SessionCoordinator("/work/dup/app", "session-three", root);
+		third.start();
+		try {
+			assert.match(third.projectLabel(), /^app( · \S+)? \d$/);
+			assert.doesNotMatch(third.projectLabel(), /#/);
+		} finally {
+			third.shutdown();
+		}
+	} finally {
+		first.shutdown();
+		second.shutdown();
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("shares preprocessing concurrency slots across sessions", async () => {
 	const { root, first, second } = coordinators();
 	let active = 0;

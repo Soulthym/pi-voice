@@ -1026,7 +1026,7 @@ const chargeBackfillUnit = (): boolean => {
 		ownerContentExpected = true;
 		narration.finish();
 		lastOwnerUtterance = vocalizer.speakUntracked(
-			`Project ${coordinator.projectLabel(waiting.cwd)} requires attention next.`,
+			`Project ${coordinator.projectLabel(waiting.cwd, waiting.sessionId, waiting.sessionName)} requires attention next.`,
 		);
 	};
 
@@ -1555,6 +1555,7 @@ const chargeBackfillUnit = (): boolean => {
 			return;
 		}
 		coordinator = new SessionCoordinator(ctx.cwd, ctx.sessionManager.getSessionId());
+		coordinator.setSessionName(pi.getSessionName());
 		coordinator.start();
 		deviceSelection = sessionDeviceSelection(ctx);
 		activeDeviceId = deviceRouter.resolve(deviceSelection)?.id;
@@ -1627,6 +1628,11 @@ const chargeBackfillUnit = (): boolean => {
 		phoneInput.cancel();
 		const workers = timingWorkers.splice(0);
 		await Promise.all([...workers.map(worker => worker.terminate()), vocalizer.shutdown()]);
+	});
+
+	pi.on("session_info_changed", event => {
+		if (!interactiveVoiceSession || !coordinator) return;
+		coordinator.setSessionName(event.name ?? pi.getSessionName());
 	});
 
 	pi.on("input", () => {
@@ -1873,7 +1879,7 @@ const chargeBackfillUnit = (): boolean => {
 		narration.finish();
 		releaseSpeechOwnership(false);
 		coordinator.requestAttention(next.instanceId);
-		ctx.ui.notify(`Switching voice attention to project ${coordinator.projectLabel(next.cwd)}`, "info");
+		ctx.ui.notify(`Switching voice attention to project ${coordinator.projectLabel(next.cwd, next.sessionId, next.sessionName)}`, "info");
 	};
 
 	pi.registerShortcut("f6", {
