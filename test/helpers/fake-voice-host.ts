@@ -60,6 +60,9 @@ export class FakeVoiceHost {
 			ui: {
 				theme,
 				notify: (message: string, level: string) => this.notices.push({ message, level }),
+				select: async (_title: string, options: string[]) => options[0],
+				confirm: async () => true,
+				input: async () => undefined,
 				setStatus: () => {},
 				setWidget: (
 					name: string,

@@ -12,6 +12,7 @@ import { CodeDescriptionCache, type CodeDescriptionCacheSnapshot } from "./code-
 import {
 	codeDescriptionCacheKey,
 	CodeDescriptionBudgetExhaustedError,
+	classifyCodeDescriptionFailure,
 	CodeDescriptionContextOverflowError,
 	codeDescriptionUsesActivePrompt,
 	describeCodeBlock,
@@ -283,6 +284,8 @@ export default async function (pi: ExtensionAPI) {
 	const codeDescriptionText = new Map<string, string>();
 	const pendingCodeDescriptions = new Map<string, CodeDescriptionCacheSnapshot>();
 	const reportedDescriptionOverflows = new Set<string>();
+	/** Runtime-only failed-description records; retry commands clear them. */
+	const codeDescriptionOmissions = new Map<string, { reason: "quality" | "provider"; message: string }>();
 	let scheduleMissingTimings: (ctx: ExtensionContext) => void = () => {};
 
 	const requestNarrationRender = (): void => {
@@ -385,6 +388,7 @@ export default async function (pi: ExtensionAPI) {
 		options?: { chargeBackfill?: () => boolean },
 ): Promise<CodeNarrationPlan> => {
 		const fallback = plainCodeNarration(fallbackCodeDescription(block));
+		let resolvedKey: string | undefined;
 		try {
 			const editModel = config.editModel;
 			const narrationMode = config.codeNarration;
@@ -422,6 +426,7 @@ export default async function (pi: ExtensionAPI) {
 				contextualIdentity,
 				contextMode,
 			);
+			resolvedKey = key;
 			return await codeDescriptionCache
 				.getOrCreate(
 					key,
@@ -461,7 +466,7 @@ export default async function (pi: ExtensionAPI) {
 										}
 									}
 								}
-								return fallback;
+								throw error;
 							});
 						return coordinator
 							? coordinator.withResource("code", config.codeDescriptionPreprocessConcurrency, generate)
@@ -478,15 +483,22 @@ export default async function (pi: ExtensionAPI) {
 					},
 				)
 				.then(plan => {
-					if (activeContext === ctx) {
+					if (activeContext === ctx && !plan.omitted) {
 						codeDescriptionText.set(key, descriptionText(plan));
 						requestNarrationRender();
 					}
 					return plan;
 				});
 		} catch (outerError) {
-			if (outerError === BACKFILL_EXHAUSTED) throw outerError;
-			return fallback;
+			if (outerError === BACKFILL_EXHAUSTED || outerError instanceof CodeDescriptionBudgetExhaustedError) throw BACKFILL_EXHAUSTED;
+			if (!resolvedKey || outerError instanceof CodeDescriptionContextOverflowError) return fallback;
+			// Cache the omission so neither speech nor preprocessing repeats the cost.
+			const reason = classifyCodeDescriptionFailure(outerError) === "quality" ? "quality" : "provider";
+			codeDescriptionOmissions.set(resolvedKey, {
+				reason,
+				message: String(outerError instanceof Error ? outerError.message : outerError).slice(0, 200),
+			});
+			return { records: [], guided: false, omitted: true };
 		}
 	};
 
@@ -515,6 +527,7 @@ export default async function (pi: ExtensionAPI) {
 				providerMessages,
 				{ chargeBackfill: chargeBackfillUnit },
 			);
+			if (plan.omitted) continue;
 			let chunks = chunkCodeNarration(plan);
 			if (chunks.length === 0) chunks = chunkCodeNarration(plainCodeNarration(fallbackCodeDescription(item.block)));
 			for (const chunk of chunks) result.push({ text: chunk.text, source: item.source });
@@ -695,7 +708,12 @@ const chargeBackfillUnit = (): boolean => {
 					const key = descriptionCacheKey(ctx, block, structuredContextIdentity(providerMessages));
 					const existing = codeDescriptionText.get(key);
 					if (existing !== undefined) return existing;
-					const plan = codeDescriptionCache.get(key);
+					const omissionRecord = codeDescriptionOmissions.get(key);
+					if (omissionRecord || codeDescriptionCache.get(key)?.omitted) {
+						const omission = codeDescriptionOmissions.get(key);
+						return `⚠ No semantic description available (${omissionRecord?.reason ?? "failed"}). Run /voice code-retry current or /voice code-retry historical.`;
+					}
+						const plan = codeDescriptionCache.get(key);
 					if (!plan) return undefined;
 					const text = chunkCodeNarration(plan)
 						.map(chunk => chunk.text)
@@ -1158,7 +1176,8 @@ const chargeBackfillUnit = (): boolean => {
 			const identity = structuredContextIdentity(providerMessages);
 			try {
 				const key = descriptionCacheKey(ctx, item.block, identity);
-				codeDependencies.push(JSON.stringify([key, codeDescriptionCache.get(key) ?? "missing"]));
+				const omittedPlan = codeDescriptionCache.get(key);
+				codeDependencies.push(JSON.stringify([key, omittedPlan ? (omittedPlan.omitted ? "omitted" : "ready") : "missing"]));
 			} catch {
 				codeDependencies.push(`fallback:${item.block.language}:${contextualCodeDescription(ctx, identity)}`);
 			}
@@ -1510,6 +1529,7 @@ const chargeBackfillUnit = (): boolean => {
 		pendingCodeDescriptions.clear();
 		codeDescriptionText.clear();
 		reportedDescriptionOverflows.clear();
+		codeDescriptionOmissions.clear();
 		codeDescriptionCache.restore(codeDescriptionSnapshots(ctx));
 		syncPlaybackMessages(ctx, true);
 		playbackHistory.restore(playbackTimingSnapshots(ctx));
@@ -1539,6 +1559,7 @@ const chargeBackfillUnit = (): boolean => {
 		}
 		interactiveVoiceSession = false;
 		pendingCodeDescriptions.clear();
+		codeDescriptionOmissions.clear();
 		clearInputProgress();
 		ctx.ui.setStatus("pi-voice", undefined);
 		ctx.ui.setWidget("pi-voice-render-driver", undefined);
@@ -2093,7 +2114,7 @@ const chargeBackfillUnit = (): boolean => {
 		},
 		handler: async (rawArgs, ctx) => {
 			const args = rawArgs.trim();
-			const [action = "status", value = ""] = args.split(/\s+/, 2);
+			const [action = "status", value = "", ...restArgs] = args.split(/\s+/);
 			switch (action.toLowerCase()) {
 				case "on":
 					await updateConfig({ ...config, enabled: true });
@@ -2238,7 +2259,7 @@ const chargeBackfillUnit = (): boolean => {
 					}
 					const parsed = normalizeBackfillBudget(value.toLowerCase() === "unlimited" ? "unlimited" : Number(value));
 					if (parsed === undefined) {
-						ctx.ui.notify("Usage: /voice code-budget [unlimited|<0..n>]", "error");
+						ctx.ui.notify("Usage: /voice code-budget [unlimited|<0..n>] | code-retry current|historical [all|<id>]", "error");
 						return;
 					}
 					// Session-runtime only; the persisted config keeps its own budget.
@@ -2247,6 +2268,119 @@ const chargeBackfillUnit = (): boolean => {
 					backfillExhaustionReported = false;
 					if (activeContext) scheduleMissingCodeDescriptions(activeContext);
 					ctx.ui.notify(`code-description backfill budget set to ${parsed} for this session`, "info");
+					return;
+				}
+				case "code-retry": {
+					const retryCtx = activeContext;
+					if (!retryCtx) return;
+					const retryArgs = [value, ...restArgs].filter(Boolean);
+					const mode0 = retryArgs[0] ?? "";
+					const collectFailed = () => {
+						const found: Array<{ key: string; messageId: string; index: number; preview: string; block: FencedCodeBlock; providerMessages: Message[] }> = [];
+						scopedCompletedMessages(retryCtx, "assistant").forEach((message, index) => {
+							for (const item of describableCodeItems(message.text)) {
+								try {
+									const providerMessages = contextualAssistantMessagesThroughText(
+										message.conversationMessages,
+										message.assistantMessage,
+										item.throughBlock.length,
+									);
+									const key = descriptionCacheKey(retryCtx, item.block, structuredContextIdentity(providerMessages));
+									if (codeDescriptionOmissions.has(key) || codeDescriptionCache.get(key)?.omitted) {
+										found.push({ key, messageId: message.id, index, preview: item.block.code.replace(/\s+/g, " ").slice(0, 48), block: item.block, providerMessages });
+									}
+								} catch {
+									// Unkeyable blocks have nothing recorded to retry.
+								}
+							}
+						});
+						return found;
+					};
+					const retryKeys = (keys: Set<string>): number => {
+						let scheduled = 0;
+						for (const failed of collectFailed()) {
+							if (!keys.has(failed.key)) continue;
+							codeDescriptionOmissions.delete(failed.key);
+							codeDescriptionCache.invalidate(failed.key);
+							void requestCodeDescription(
+								retryCtx,
+								failed.block,
+								structuredContextIdentity(failed.providerMessages),
+								failed.providerMessages,
+								{ chargeBackfill: chargeBackfillUnit },
+							).catch(() => {});
+							scheduled += 1;
+						}
+						return scheduled;
+					};
+
+					if (mode0 === "current") {
+						const selectedId = playbackHistory.selected()?.id ?? playbackHistory.status()?.messageId;
+						const keys = new Set(collectFailed().filter(failed => failed.messageId === selectedId).map(failed => failed.key));
+						if (keys.size === 0) {
+							ctx.ui.notify("No failed descriptions on the currently selected message", "info");
+							return;
+						}
+						ctx.ui.notify(`Retrying ${retryKeys(keys)} description(s) on ${selectedId}`, "info");
+						return;
+					}
+					if (mode0 !== "historical") {
+						ctx.ui.notify("Usage: /voice code-retry current | historical [all|<message-id>]", "error");
+						return;
+					}
+					const arg1 = retryArgs[1];
+					if (!arg1 && ctx.hasUI) {
+						void (async () => {
+							try {
+								const failed = collectFailed();
+								if (failed.length === 0) {
+									ctx.ui.notify("No failed descriptions to retry", "info");
+									return;
+								}
+								// Chronological order; the entry nearest the current selection is
+								// surfaced first as the implicit default.
+								const currentIndex = playbackHistory.status()?.messageIndex ?? -1;
+								let nearestOffset = Number.POSITIVE_INFINITY;
+								let nearestKey: string | undefined;
+								for (const entry of failed) {
+									const offset = Math.abs(entry.index - currentIndex);
+									if (offset < nearestOffset) {
+										nearestOffset = offset;
+										nearestKey = entry.key;
+									}
+								}
+								const ordered = [...failed].sort((left, right) => {
+									if (left.key === nearestKey) return -1;
+									if (right.key === nearestKey) return 1;
+									return left.index - right.index;
+								});
+								const labels = ordered.map((entry, position) =>
+									`[${position === 0 ? "closest" : `#${entry.index + 1}`}] ${entry.messageId.slice(0, 10)} · ${entry.preview}`,
+								);
+								labels.push("Retry ALL failed descriptions");
+								const picked = await ctx.ui.select("Retry a failed code description", labels);
+								if (!picked) return;
+								if (picked === "Retry ALL failed descriptions") {
+									ctx.ui.notify(`Retrying ${retryKeys(new Set(failed.map(entry => entry.key)))} description(s)`, "info");
+									return;
+								}
+								const chosen = ordered[labels.indexOf(picked)];
+								if (chosen) ctx.ui.notify(`Retrying ${retryKeys(new Set([chosen.key]))} description(s)`, "info");
+							} catch {
+								// Dialog failures leave state untouched.
+							}
+						})();
+						return;
+					}
+					const failed = collectFailed();
+					const keys = new Set(
+						(arg1 === "all" ? failed : failed.filter(entry => entry.messageId.includes(arg1))).map(entry => entry.key),
+					);
+					if (keys.size === 0) {
+						ctx.ui.notify("No matching failed descriptions to retry", "info");
+						return;
+					}
+					ctx.ui.notify(`Retrying ${retryKeys(keys)} description(s)`, "info");
 					return;
 				}
 				case "timing-preprocess": {

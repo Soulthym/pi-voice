@@ -79,6 +79,12 @@ export class CodeDescriptionCache {
 		return this.#plans.get(key);
 	}
 
+	/** Drops a cached plan (e.g. an omission) so the next request generates anew. */
+	invalidate(key: string): void {
+		this.#plans.delete(key);
+		this.#pending.delete(key);
+	}
+
 	getOrCreate(
 		key: string,
 		create: () => Promise<CodeNarrationPlan>,

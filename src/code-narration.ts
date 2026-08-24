@@ -25,6 +25,8 @@ export interface CodeNarrationRecord {
 export interface CodeNarrationPlan {
 	records: CodeNarrationRecord[];
 	guided: boolean;
+	/** Set when no semantic description is available; nothing may be spoken. */
+	omitted?: boolean;
 }
 
 export interface CodeNarrationCue {
@@ -160,6 +162,7 @@ export function plainCodeNarration(speech: string): CodeNarrationPlan {
 
 export function chunkCodeNarration(plan: CodeNarrationPlan): CodeNarrationChunk[] {
 	const chunks: CodeNarrationChunk[] = [];
+	if (plan.omitted) return chunks;
 	let text = "";
 	let cues: CodeNarrationCue[] = [];
 	const flush = (): void => {

@@ -257,6 +257,7 @@ export class Vocalizer {
 		sourceBase: number,
 	): void {
 		let chunks = chunkCodeNarration(plan);
+		if (plan.omitted) return; // No semantic description: stay silent rather than speak filler.
 		if (chunks.length === 0) chunks = chunkCodeNarration(plainCodeNarration(fallbackCodeDescription(block)));
 		const description = chunks.map(chunk => chunk.text).join(" ");
 		let descriptionOffset = 0;
