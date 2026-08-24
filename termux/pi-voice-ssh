@@ -119,11 +119,25 @@ clean_all_sessions() {
 }
 
 bridge_pid_file=$runtime_root/client-bridge.pid
+# A pid file alone cannot be trusted: after a suspend the recorded pid may
+# belong to an unrelated process, which previously left playback pointing at a
+# dead reverse tunnel (ECONNREFUSED) until the client was restarted manually.
+bridge_alive() {
+  local pid=$1
+  [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null || return 1
+  if [[ -r /proc/$pid/cmdline ]] && grep -aq "pi-voice-client" /proc/$pid/cmdline 2>/dev/null; then
+    return 0
+  fi
+  # No /proc or unexpected cmdline: fall back to probing the audio port.
+  (exec 3<>"/dev/tcp/127.0.0.1/${AUDIO_PORT}") 2>/dev/null || return 1
+  exec 3>&- 3<&- 2>/dev/null || true
+}
+
 ensure_bridge() {
   local bridge_lock=$runtime_root/bridge.lock pid=
   while ! mkdir "$bridge_lock" 2>/dev/null; do sleep 0.05; done
   [[ -s $bridge_pid_file ]] && pid=$(<"$bridge_pid_file")
-  if [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null; then
+  if bridge_alive "$pid"; then
     rmdir "$bridge_lock"
     return
   fi
@@ -137,8 +151,19 @@ ensure_bridge() {
   "$bridge" >"$runtime_root/client-bridge.log" 2>&1 &
   pid=$!
   printf '%s\n' "$pid" >"$bridge_pid_file"
-  sleep 0.4
-  if ! kill -0 "$pid" 2>/dev/null; then
+  # Wait until the audio listener actually answers, not just until the pid exists.
+  local tick=0
+  while (( tick < 20 )); do
+    if (exec 3<>"/dev/tcp/127.0.0.1/${AUDIO_PORT}") 2>/dev/null; then
+      exec 3>&- 3<&- 2>/dev/null || true
+      break
+    fi
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    (( tick += 1 ))
+  done
+  if ! kill -0 "$pid" 2>/dev/null || ! (exec 3<>"/dev/tcp/127.0.0.1/${AUDIO_PORT}") 2>/dev/null; then
+    exec 3>&- 3<&- 2>/dev/null || true
     rmdir "$bridge_lock"
     cat "$runtime_root/client-bridge.log" >&2
     exit 1

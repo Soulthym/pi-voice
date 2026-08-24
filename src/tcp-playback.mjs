@@ -6,6 +6,7 @@ const sampleRate = Number(sampleRateValue);
 const utterance = Number(utteranceValue);
 const control = fs.createWriteStream(null, { fd: 3, autoClose: false });
 const controlInput = fs.createReadStream(null, { fd: 3, autoClose: true });
+control.on("error", () => {}); // fd 3 may be closed or read-only; control is best-effort.
 let stopped = false;
 let startedAt = null;
 let pausedAt = null;
@@ -31,7 +32,11 @@ function controlLine(line) {
 function fail(error) {
 	if (stopped) return;
 	stopped = true;
-	const message = error instanceof Error ? error.message : String(error);
+	let message = error instanceof Error ? error.message : String(error);
+	const code = (error ?? {}).code ?? "";
+	if (code === "ECONNREFUSED" || code === "ENOENT") {
+		message += " (device bridge unreachable; rerun pi-voice-ssh)";
+	}
 	controlLine(`error ${message}`);
 	send({ type: "error", message });
 	process.exitCode = 1;
@@ -94,8 +99,48 @@ controlInput.on("data", chunk => {
 	}
 });
 
-const socket = connectEndpoint();
+// The SSH reverse tunnel may still be coming back after a suspend or a
+// fresh pi-voice-ssh; retry refused/missing endpoints briefly instead of
+// failing the whole utterance immediately.
+const CONNECT_RETRY_MS = 250;
+const CONNECT_RETRY_LIMIT = 16;
+let connectAttempts = 0;
+
+let socket = connectEndpoint();
 socket.setNoDelay(true);
+
+function onSocketError(error) {
+	const retryable =
+		["ECONNREFUSED", "ENOENT", "ECONNRESET", "EHOSTUNREACH", "ENETUNREACH"].includes((error ?? {}).code) &&
+		!stopped &&
+		connectAttempts < CONNECT_RETRY_LIMIT;
+	if (!retryable) {
+		fail(error);
+		return;
+	}
+	connectAttempts += 1;
+	socket.removeAllListeners();
+	setTimeout(() => {
+		if (stopped) return;
+		socket = connectEndpoint();
+		socket.setNoDelay(true);
+		wireSocket(socket);
+	}, CONNECT_RETRY_MS);
+}
+
+function onSocketConnect() {
+	controlLine("ready");
+	process.stdin.pipe(socket, { end: false });
+}
+
+function wireSocket(active) {
+	active.on("connect", onSocketConnect);
+	active.on("error", onSocketError);
+	active.on("data", onSocketData);
+	active.on("close", onSocketClose);
+}
+
+wireSocket(socket);
 
 const timer = setInterval(() => {
 	if (startedAt === null || performance.now() - lastFeedbackAt < 750) return;
@@ -113,12 +158,7 @@ process.stdin.on("data", chunk => {
 process.stdin.on("error", fail);
 process.stdin.on("end", () => socket.end());
 
-socket.on("connect", () => {
-	controlLine("ready");
-	process.stdin.pipe(socket, { end: false });
-});
-
-socket.on("data", chunk => {
+function onSocketData(chunk) {
 	feedback = `${feedback}${String(chunk)}`.slice(-8_192);
 	for (;;) {
 		const newline = feedback.indexOf("\n");
@@ -145,12 +185,11 @@ socket.on("data", chunk => {
 			// Ignore malformed feedback from an interrupted phone session.
 		}
 	}
-});
+}
 
-socket.on("error", fail);
-socket.on("close", () => {
+function onSocketClose() {
 	clearInterval(timer);
 	// fd 3 is a live duplex control pipe; destroying its pending read can block.
 	// The network session is complete, so terminate the dedicated helper directly.
 	process.kill(process.pid, "SIGTERM");
-});
+}

@@ -74,10 +74,8 @@ test("failed descriptions render retry errors, stay silent, and recover via code
 	assert.ok(calls.length >= 3, `expected quality retries; got ${calls.length}`);
 
 	await new Promise(resolve => setTimeout(resolve, 200));
-	console.error("CALLS:", calls.length);
 	// The written callout is a retry error, not filler.
 	const rendered = host.render(text);
-	console.error("RENDER:", JSON.stringify(rendered.slice(0,300)));
 	assert.match(rendered, /No semantic description available \(quality\)/);
 	assert.doesNotMatch(rendered, /contains 4 lines/);
 
@@ -86,9 +84,7 @@ test("failed descriptions render retry errors, stay silent, and recover via code
 	const before = calls.length;
 	await host.command("code-retry historical all");
 	await new Promise(resolve => setTimeout(resolve, 150));
-	console.error("AFTER-RETRY calls:", calls.length, "before:", before, "requests:", host.modelRequests.length, "notices:", JSON.stringify(host.notices.map(n=>n.message)));
 	await settle();
-	console.error("AFTER-SETTLE calls:", calls.length);
 
 	const recovered = host.render(text);
 	assert.match(recovered, /toggle shortcuts/);

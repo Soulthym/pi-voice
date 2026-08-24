@@ -97,6 +97,12 @@ case $1 in
     printf 'hostname fakehost\\nuser fakeuser\\nport 22\\n'
     ;;
   *)
+    # The interactive session stays open briefly so a concurrent wrapper can
+    # observe bridge reuse while this one is still alive.
+    if [[ $* == *" -t "* ]]; then
+      sleep 2
+      exit 0
+    fi
     if [[ $* == *"printf %s"* ]]; then
       printf '/home/remote'
     fi
@@ -118,7 +124,10 @@ async function scenario(
 	const logFile = path.join(root, "ssh.log");
 	// The wrapper supervises a shared client bridge; a sleeping fake stands in.
 	const bridge = path.join(root, "fake-pi-voice-client");
-	fs.writeFileSync(bridge, "#!/usr/bin/env bash\nsleep 60\n");
+	fs.writeFileSync(
+		bridge,
+		"#!/usr/bin/env bash\nexec node -e 'const n=require(\"net\");const s=n.createServer(c=>c.end());s.listen(Number(process.env.PI_VOICE_AUDIO_PORT)||8765,\"127.0.0.1\")'",
+	);
 	fs.chmodSync(bridge, 0o755);
 	const result = await runScript(wrapper, args, {
 		XDG_RUNTIME_DIR: runtime,
@@ -184,6 +193,75 @@ test("dry run resolves device-dir precedence and rejects invalid values", async 
 		const optionsPreserved = await dry(CLIENT_WRAPPER, ["-p", "2222", "u@h", "echo", "hi"]);
 		assert.match(optionsPreserved.stdout, /deviceDir=default/);
 	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("stale bridge pid files are replaced; live bridges are reused", async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-voice-ssh-bridge-"));
+	const runtime = path.join(root, "runtime");
+	fs.mkdirSync(runtime, { recursive: true });
+	const bin = restrictedPath(root, { ssh: FAKE_SSH });
+	const audioPort = 20000 + (process.pid % 20000);
+	const env = {
+		XDG_RUNTIME_DIR: runtime,
+		PATH: bin,
+		HOME: root,
+		PI_VOICE_DEVICE_NAME: "t",
+		FAKE_SSH_LOG: path.join(root, "ssh.log"),
+	};
+
+	const bridgePath = path.join(root, "counting-bridge");
+	fs.writeFileSync(
+		bridgePath,
+		"#!/usr/bin/env bash\necho started >> " + JSON.stringify(path.join(root, "bridge-starts.log")) +
+			"\nexec node -e 'const n=require(\"net\");const s=n.createServer(c=>c.end());s.listen(Number(process.env.PI_VOICE_AUDIO_PORT)||8765,\"127.0.0.1\")'",
+	);
+	fs.chmodSync(bridgePath, 0o755);
+
+	// A stale pid file pointing at an unrelated live process must not satisfy
+	// the liveness probe.
+	const stalePidFile = path.join(runtime, `pi-voice-ssh-${process.getuid!()!}`, "client-bridge.pid");
+	fs.mkdirSync(path.dirname(stalePidFile), { recursive: true });
+	fs.writeFileSync(stalePidFile, `${process.pid}\n`);
+
+	const startsLog = () => (fs.existsSync(path.join(root, "bridge-starts.log"))
+		? fs.readFileSync(path.join(root, "bridge-starts.log"), "utf8").split("\n").filter(Boolean).length
+		: 0);
+
+	const { spawn } = await import("node:child_process");
+	const background = spawn("bash", [CLIENT_WRAPPER, "--device-dir", "/srv/d", "u@h"], {
+		env: { ...process.env, ...env, PI_VOICE_CLIENT_COMMAND: bridgePath, PI_VOICE_AUDIO_PORT: String(audioPort) },
+		detached: true,
+		stdio: "ignore",
+	});
+	try {
+		const deadline = Date.now() + 8_000;
+		while (startsLog() < 1 && Date.now() < deadline) await new Promise(r => setTimeout(r, 50));
+		assert.ok(startsLog() >= 1, "a dead bridge must be restarted");
+		// Wait until the first session finished its locked setup so the second
+		// runner does not spin behind the target lock.
+		while (Date.now() < deadline) {
+			const targetsDir = path.join(runtime, `pi-voice-ssh-${process.getuid!()}`, "targets");
+			const locks = fs.existsSync(targetsDir) ? (fs.readdirSync(targetsDir, { recursive: true }) as string[]).filter(e => e.endsWith("lock")) : [];
+			if (locks.length === 0) break;
+			await new Promise(r => setTimeout(r, 50));
+		}
+
+		// While that bridge is alive, another wrapper session must reuse it.
+		const second = await runScript(CLIENT_WRAPPER, ["--device-dir", "/srv/d", "u@h"], {
+			...env,
+			PI_VOICE_CLIENT_COMMAND: bridgePath,
+			PI_VOICE_AUDIO_PORT: String(audioPort),
+		});
+		assert.equal(second.code, 0, `run2 stderr: ${second.stderr}`);
+		assert.equal(startsLog(), 1, "a live bridge must not be restarted");
+	} finally {
+		try {
+			process.kill(-background.pid!, "SIGKILL");
+		} catch {
+			background.kill("SIGKILL");
+		}
 		fs.rmSync(root, { recursive: true, force: true });
 	}
 });
