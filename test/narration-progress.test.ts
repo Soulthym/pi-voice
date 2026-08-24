@@ -169,6 +169,23 @@ test("keeps nested ordered-list markers outside narration styling", () => {
 	assert.doesNotMatch(transformed, /<dim>[12]<\/dim>\./);
 });
 
+test("keeps checked task markers outside narration styling at every nesting level", () => {
+	for (const box of ["[ ]", "[x]", "[X]"]) {
+		const markdown = `Plan:\n- ${box} Top task\n    - ${box} Nested task\n      1. ${box} Ordered task inside`;
+		const progress = new NarrationProgress();
+		progress.setCompletedText(markdown);
+
+		const transformed = progress.transform(markdown, "assistant", dim, background);
+		const marker = box.replace(/[\[\]]/g, "\\$&");
+		assert.match(transformed, new RegExp(`^- ${marker} <dim>Top</dim>`, "m"), box);
+		assert.match(transformed, new RegExp(`^    - ${marker} <dim>Nested</dim>`, "m"), box);
+		assert.match(transformed, new RegExp(`^      1\\. ${marker} <dim>Ordered</dim>`, "m"), box);
+		// The structural checkbox itself must never be wrapped in narration styling.
+		assert.doesNotMatch(transformed, /<(?:dim|bg)>(?:x|X| |)\[?<\/?(?:dim|bg)>/, box);
+		assert.doesNotMatch(transformed, /<dim>\[[ xX]\]<\/dim>/, box);
+	}
+});
+
 test("looks up repeated code blocks with their transcript prefix", () => {
 	const markdown = "First use.\n```ts\nrun();\n```\nSecond use.\n```ts\nrun();\n```";
 	const contexts: string[] = [];
