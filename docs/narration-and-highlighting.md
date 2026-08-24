@@ -56,6 +56,10 @@ Wav2Vec2 forced alignment improves word timestamps but never delays synthesis. I
 
 Subsequent assistant messages do not reset earlier message styling while queued speech is still playing. Pause freezes audio and highlighting at the same position; resume continues both.
 
+## Auto-scroll
+
+While spoken narration plays, the terminal viewport follows the active highlight: it re-anchors only when the highlight leaves the 20–80 % band of visible lines (measured from the top) and places it back at the 20 % mark. Manual scrolling suspends the behavior until the next utterance or replay. The band math is covered by deterministic tests; anchor precision depends on the scroll view exposed by the terminal runtime.
+
 ## Timing diagnostics
 
 `/voice timing` reports two latency measurements for recent segments:

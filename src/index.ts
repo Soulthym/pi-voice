@@ -53,6 +53,7 @@ import { PhoneInputClient } from "./phone-input.js";
 import { prioritizeFromCurrent, processConcurrently, resolveTimingConcurrency } from "./preprocessing.js";
 import { SpeakableStream, type FencedCodeBlock, type SpeakableSourceRange } from "./speakable.js";
 import { pendingPlaybackTiming, voiceProgressLines } from "./status-text.js";
+import { computeAutoScrollTop, isManualScrollAway } from "./auto-scroll.js";
 import { applySpokenEdit, resolveDictationCandidates } from "./prompt-editor.js";
 import { narrationRenderKey } from "./render-identity.js";
 import { SessionCoordinator, type WaitingSession } from "./session-coordinator.js";
@@ -735,11 +736,44 @@ const chargeBackfillUnit = (): boolean => {
 
 	const refreshPlaybackTimeline = refreshProgressWidget;
 
+	/** Best-effort anchor for narration auto-scroll (see auto-scroll.ts). */
+	let lastAutoScrollTop: number | undefined;
+	let autoScrollSuspended = false;
+	const applyNarrationAutoScroll = (): void => {
+		if (!config.enabled || !ownsSpeech || playbackPaused || autoScrollSuspended) return;
+		const tuiAny = narrationTui as
+			| { primaryScrollView?: unknown; implicitScrollView?: unknown; getPrimaryScrollView?: () => unknown }
+			| undefined
+			| null;
+		if (!tuiAny) return;
+		const scrollView = (tuiAny.primaryScrollView ?? tuiAny.implicitScrollView ?? tuiAny.getPrimaryScrollView?.()) as
+			| {
+				scrollTop: number;
+				viewportHeight: number;
+				contentHeight: number;
+				scrollTo(top: number, options?: { disableFollow?: boolean }): void;
+			}
+			| undefined
+			| null;
+		if (!scrollView || typeof scrollView.scrollTo !== "function") return;
+		// While speaking, the active highlight lives near the transcript tail;
+		// anchor it a quarter viewport above the bottom so context stays visible.
+		const anchorLine = Math.max(0, scrollView.contentHeight - Math.ceil(scrollView.viewportHeight * 0.25));
+		const target = computeAutoScrollTop(scrollView, anchorLine);
+		if (target === null) {
+			autoScrollSuspended = isManualScrollAway(scrollView, lastAutoScrollTop ?? scrollView.scrollTop);
+			return;
+		}
+		lastAutoScrollTop = target;
+		scrollView.scrollTo(target, { disableFollow: true });
+	};
+
 	const requestPlaybackTimeline = (): void => {
 		if (playbackTimelineTimer) return;
 		playbackTimelineTimer = setTimeout(() => {
 			playbackTimelineTimer = null;
 			refreshPlaybackTimeline();
+			applyNarrationAutoScroll();
 		}, 80);
 		playbackTimelineTimer.unref?.();
 	};
@@ -1139,6 +1173,8 @@ const chargeBackfillUnit = (): boolean => {
 		const sourceOffset = Math.max(0, Math.min(target.text.length, target.sourceOffset));
 		const suffix = target.text.slice(sourceOffset);
 		if (!suffix.trim()) return;
+		autoScrollSuspended = false;
+		lastAutoScrollTop = undefined;
 		codeWorkEpoch += 1;
 		if (activeContext) scheduleMissingCodeDescriptions(activeContext);
 		cancelTimingWorkers();
