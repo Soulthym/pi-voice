@@ -59,10 +59,21 @@ The wrapper exports `PI_VOICE_DEVICE_ID` into the remote shell so Pi can prefer 
 The wrapper accepts ordinary SSH options before the target and an optional remote command:
 
 ```bash
-pi-voice-ssh [-p PORT] [-i KEY] [-o OPTION] USER@HOST [REMOTE_COMMAND ...]
+pi-voice-ssh [--device-dir <absolute-remote-path>] [-p PORT] [-i KEY] [-o OPTION] USER@HOST [REMOTE_COMMAND ...]
 ```
 
 If the target has a configured `RemoteCommand`, the wrapper preserves it while injecting the device environment. Otherwise it opens an interactive shell or runs the supplied command.
+
+### Custom device registries
+
+By default the wrapper registers the client into `~/.cache/pi-voice/devices` on the Pi host. When the remote Pi runs with a custom `PI_VOICE_DEVICE_DIR`, tell the wrapper so both sides agree:
+
+```bash
+pi-voice-ssh --device-dir /srv/pi-voice/devices u@host
+pi-voice-ssh --device-dir=/srv/pi-voice/devices u@host
+```
+
+The value must be an absolute remote path (`~` and relative paths are rejected). If `--device-dir` is omitted but the client's own `PI_VOICE_DEVICE_DIR` is set, that value is treated as the intended remote path. The chosen directory is used for registration, sockets, and cleanup, and is exported as `PI_VOICE_DEVICE_DIR` into the remote shell so a Pi started there scans the same registry.
 
 Set `PI_VOICE_SSH_DRY_RUN=1` to print resolved identity/platform/target information without connecting.
 

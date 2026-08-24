@@ -10,7 +10,7 @@
 | `PI_VOICE_CACHE_DIR` | `~/.cache/pi-voice/models` | Model-weight cache. |
 | `PI_VOICE_AUDIO_CACHE_DIR` | `~/.cache/pi-voice/audio` | Content-addressed Opus cache. |
 | `PI_VOICE_COORDINATOR_DIR` | `~/.cache/pi-voice/coordinator` | Cross-session presence, leases, and attention. |
-| `PI_VOICE_DEVICE_DIR` | `~/.cache/pi-voice/devices` | Device registry scanned by the extension. Managed wrappers must register/forward into the same path. |
+| `PI_VOICE_DEVICE_DIR` | `~/.cache/pi-voice/devices` | Device registry scanned by the extension. On clients it doubles as the intended remote registry for managed wrappers; on the Pi host pass the same absolute path to `pi-voice-ssh --device-dir`. |
 | `PI_VOICE_PLAYER` | automatic | Alternate executable accepting `pw-play`-compatible raw-player arguments. |
 
 ## Client bridge

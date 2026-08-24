@@ -2,12 +2,43 @@
 set -euo pipefail
 
 if (( $# == 0 )); then
-  printf 'Usage: pi-voice-ssh [ssh options] user@target [remote command]\n' >&2
+  printf 'Usage: pi-voice-ssh [--device-dir <absolute-remote-path>] [ssh options] user@target [remote command]\n' >&2
   exit 2
 fi
 
 AUDIO_PORT=${PI_VOICE_AUDIO_PORT:-8765}
 CONTROL_PORT=${PI_VOICE_CONTROL_PORT:-8766}
+
+# The registry directory lives on the Pi host. Operators point managed wrappers
+# at a non-default one explicitly; otherwise the local override doubles as the
+# intended remote path, and unset falls back to ~/.cache/pi-voice/devices.
+device_dir_override=${PI_VOICE_DEVICE_DIR:-}
+args=()
+while (($# > 0)); do
+  case $1 in
+    --device-dir)
+      if (($# < 2)); then
+        printf -- '--device-dir requires an absolute remote path\n' >&2
+        exit 2
+      fi
+      device_dir_override=$2
+      shift 2
+      ;;
+    --device-dir=*)
+      device_dir_override=${1#--device-dir=}
+      shift
+      ;;
+    *)
+      args+=("$1")
+      shift
+      ;;
+  esac
+done
+if [[ -n $device_dir_override && $device_dir_override != /* ]]; then
+  printf 'pi-voice-ssh device directory must be absolute: %s\n' "$device_dir_override" >&2
+  exit 2
+fi
+
 runtime_root=${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/pi-voice-ssh-${UID:-$(id -u)}
 config_root=${XDG_CONFIG_HOME:-$HOME/.config}/pi-voice
 mkdir -p "$runtime_root" "$config_root"
@@ -28,7 +59,6 @@ device_name=$(printf '%s' "$device_name" | tr -cd '[:alnum:] ._-')
 if [[ ${PREFIX:-} == *com.termux* ]]; then platform=termux; else platform=linux; fi
 
 # Find the SSH destination while preserving options and any remote command.
-args=("$@")
 target_index=-1
 index=0
 while (( index < ${#args[@]} )); do
@@ -56,7 +86,7 @@ configured_remote_command=$(awk '$1=="remotecommand" {$1=""; sub(/^ /, ""); prin
 canonical=${user}@${host}:${port}
 target_hash=$(printf '%s' "$canonical" | sha256sum | cut -c1-20)
 if [[ ${PI_VOICE_SSH_DRY_RUN:-0} == 1 ]]; then
-  printf 'device=%s platform=%s target=%s hash=%s\n' "$device_id" "$platform" "$canonical" "$target_hash"
+  printf 'device=%s platform=%s target=%s hash=%s deviceDir=%s\n' "$device_id" "$platform" "$canonical" "$target_hash" "${device_dir_override:-default}"
   exit 0
 fi
 target_state=$runtime_root/targets/$target_hash
@@ -136,7 +166,7 @@ if ! ssh -S "$control_socket" -O check "$target" >/dev/null 2>&1; then
     -S "$control_socket" -N -f "$target"
 fi
 remote_home=$(ssh "${ssh_options[@]}" -T -S "$control_socket" -o RemoteCommand=none "$target" 'printf %s "$HOME"')
-remote_device_dir=$remote_home/.cache/pi-voice/devices
+remote_device_dir=${device_dir_override:-$remote_home/.cache/pi-voice/devices}
 remote_audio_socket=$remote_device_dir/$device_id.audio.sock
 remote_input_socket=$remote_device_dir/$device_id.input.sock
 remote_registration=$remote_device_dir/$device_id.json
@@ -191,14 +221,18 @@ trap cleanup EXIT INT TERM
 
 export PI_VOICE_DEVICE_ID=$device_id
 export PI_VOICE_DEVICE_TARGET=$target_hash
+remote_env="PI_VOICE_DEVICE_ID=$(shell_quote "$device_id") PI_VOICE_DEVICE_TARGET=$(shell_quote "$target_hash")"
+if [[ -n $device_dir_override ]]; then
+  remote_env+=" PI_VOICE_DEVICE_DIR=$(shell_quote "$device_dir_override")"
+fi
 if (( ${#remote_command[@]} > 0 )); then
   quoted_command=
   for word in "${remote_command[@]}"; do quoted_command+="$(shell_quote "$word") "; done
   ssh "${ssh_options[@]}" -S "$control_socket" -o RemoteCommand=none -t "$target" \
-    "env PI_VOICE_DEVICE_ID=$(shell_quote "$device_id") PI_VOICE_DEVICE_TARGET=$(shell_quote "$target_hash") $quoted_command"
+    "env $remote_env $quoted_command"
 elif [[ -n $configured_remote_command && $configured_remote_command != none ]]; then
-  ssh "${ssh_options[@]}" -S "$control_socket" -o "RemoteCommand=env PI_VOICE_DEVICE_ID=$device_id PI_VOICE_DEVICE_TARGET=$target_hash $configured_remote_command" "$target"
+  ssh "${ssh_options[@]}" -S "$control_socket" -o "RemoteCommand=env $remote_env $configured_remote_command" "$target"
 else
   ssh "${ssh_options[@]}" -S "$control_socket" -o RemoteCommand=none -t "$target" \
-    "env PI_VOICE_DEVICE_ID=$(shell_quote "$device_id") PI_VOICE_DEVICE_TARGET=$(shell_quote "$target_hash") \"\${SHELL:-/bin/sh}\" -l"
+    "env $remote_env \"\${SHELL:-/bin/sh}\" -l"
 fi
