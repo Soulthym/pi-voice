@@ -158,6 +158,68 @@ export class CodeDescriptionContextOverflowError extends Error {
 	}
 }
 
+/** Raised when the historical-backfill allowance refuses another API attempt. */
+export class CodeDescriptionBudgetExhaustedError extends Error {
+	constructor() {
+		super("Code description backfill budget is exhausted");
+		this.name = "CodeDescriptionBudgetExhaustedError";
+	}
+}
+
+/** Fatal failures never retry: quota, billing, authentication, cancellation, overflow. */
+export type CodeDescriptionFailureKind = "fatal" | "quality" | "transient";
+
+export class CodeDescriptionQualityError extends Error {
+	constructor(readonly reason: string) {
+		super(`Code description was rejected as non-semantic: ${reason}`);
+		this.name = "CodeDescriptionQualityError";
+	}
+}
+
+const FATAL_PATTERNS = [
+	/402/,
+	/quota/i,
+	/billing/i,
+	/insufficient (?:funds|credit|balance)/i,
+	/unauthorized|forbidden|invalid api key|missing api key|authentication/i,
+	/not found.*model|model.*not (?:available|found)/i,
+];
+
+const TRANSIENT_PATTERNS = [
+	/network_error|econnreset|econnrefused|etimedout|enotfound|socket hang up/i,
+	/fetch failed|network(?: error)?|temporarily|try again/i,
+	/(?:5\d\d)/,
+	/rate.?limit|too many requests|429/i,
+	/timeout|timed out/i,
+];
+
+export function classifyCodeDescriptionFailure(error: unknown): CodeDescriptionFailureKind {
+	if (error instanceof CodeDescriptionContextOverflowError) return "fatal";
+	if (error instanceof CodeDescriptionBudgetExhaustedError) return "fatal";
+	const message = error instanceof Error ? error.message : String(error);
+	if (/aborted|cancelled|canceled|signal is aborted/i.test(message)) return "fatal";
+	if (FATAL_PATTERNS.some(pattern => pattern.test(message))) return "fatal";
+	if (error instanceof CodeDescriptionQualityError) return "quality";
+	if (TRANSIENT_PATTERNS.some(pattern => pattern.test(message))) return "transient";
+	return "transient";
+}
+
+/**
+ * Rejects filler that merely names the language or size instead of explaining
+ * purpose or behavior. Deliberately narrow so genuinely semantic short
+ * descriptions are never discarded.
+ */
+export function assessCodeDescriptionQuality(description: string): string | undefined {
+	const text = description.trim();
+	if (text.length < 20) return "too short to be meaningful";
+	if (/contains? \d+ lines?/i.test(text)) return "line counts are not semantics";
+	if (/^(?:a|an|the)?\s*[\w.-]*(?:script|code)?\s*(?:block|file|snippet)\b[^,.]*\.?$/i.test(text) && !/[a-z]{4,}\s+(?:the |this |that )?\w+/i.test(text)) {
+		return "only names the block";
+	}
+	if (/(?:this|the)\s+(?:\w+\s+){0,2}(?:code|block|file|snippet)\s+(?:is|exists|are|appears)\b/i.test(text)) return "existence without meaning";
+	return undefined;
+}
+
 function resolveDescriptionModel(ctx: ExtensionContext, modelSelector: string) {
 	const selected = parseEditModelSelector(modelSelector);
 	const model = selected ? ctx.modelRegistry.find(selected.provider, selected.modelId) : ctx.model;
@@ -195,6 +257,14 @@ export function codeDescriptionCacheKey(
 		.digest("hex");
 }
 
+export interface CodeDescriptionAttemptOptions {
+	/** Invoked before every provider attempt so callers can meter usage. */
+	onAttempt?: () => void;
+}
+
+const QUALITY_ATTEMPTS = 3;
+const TRANSIENT_ATTEMPTS = 2;
+
 export async function describeCodeBlock(
 	ctx: ExtensionContext,
 	block: FencedCodeBlock,
@@ -202,6 +272,7 @@ export async function describeCodeBlock(
 	mode: "guided" | "summary" = "guided",
 	conversation?: CodeDescriptionConversationContext,
 	signal?: AbortSignal,
+	options?: CodeDescriptionAttemptOptions,
 ): Promise<CodeNarrationPlan> {
 	const model = resolveDescriptionModel(ctx, modelSelector);
 	const numbered = block.code
@@ -210,7 +281,7 @@ export async function describeCodeBlock(
 		.join("\n");
 	const catalog = mode === "guided" ? await buildCodeTargetCatalog(block.language, block.code).catch(() => undefined) : undefined;
 	const targetSection = catalog ? `\n<tree_sitter_targets>\n${catalog.prompt}\n</tree_sitter_targets>` : "";
-	const blockRequest = conversation
+	const baseRequest = conversation
 		? `<concerned_fence language="${block.language || "code"}">Describe the fenced block immediately before this request.</concerned_fence>${targetSection}`
 		: `<fenced_block language="${block.language || "code"}">\n${numbered}\n</fenced_block>${targetSection}`;
 	const narrationPrompt =
@@ -222,60 +293,92 @@ export async function describeCodeBlock(
 	const reusesNormalPrompt =
 		conversation?.normalPrompt !== undefined && codeDescriptionUsesActivePrompt(ctx, modelSelector);
 	const systemPrompt = reusesNormalPrompt ? conversation.normalPrompt!.systemPrompt : narrationPrompt;
-	const request = reusesNormalPrompt
-		? `<code_narration_request>\n${narrationPrompt}\n\n${blockRequest}\n</code_narration_request>`
-		: blockRequest;
-	const messages = [...(conversation?.messages ?? []), {
-		role: "user" as const,
-		content: [{ type: "text" as const, text: request }],
-		timestamp: Date.now(),
-	}];
 	const tools = reusesNormalPrompt ? [...conversation.normalPrompt!.tools] : undefined;
-	const maxOutputTokens = mode === "guided" ? 512 : 384;
-	// Use Pi's own conversation estimator, plus equivalent estimates for the
-	// separately serialized system prompt and tool schemas.
-	const estimatedInputTokens =
-		messages.reduce((total, item) => total + estimateTokens(item), 0) +
-		Math.ceil(systemPrompt.length / 4) +
-		Math.ceil(JSON.stringify(tools ?? []).length / 4);
-	const availableInputTokens = Math.max(
-		0,
-		model.contextWindow - maxOutputTokens - CODE_DESCRIPTION_INPUT_SAFETY_TOKENS,
-	);
-	if (estimatedInputTokens > availableInputTokens) {
-		throw new CodeDescriptionContextOverflowError(estimatedInputTokens, availableInputTokens, model.contextWindow);
-	}
-	const timeout = AbortSignal.timeout(60_000);
-	const combinedSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
-	const response = await ctx.modelRegistry.complete(
-		model,
-		{
-			systemPrompt,
-			messages,
-			...(tools ? { tools } : {}),
-		},
-		{
-			signal: combinedSignal,
-			reasoningEffort: "minimal",
-			maxTokens: maxOutputTokens,
+	let priorRejection: string | undefined;
+
+	const attemptOnce = async (rejection?: string): Promise<CodeNarrationPlan> => {
+		options?.onAttempt?.();
+		const corrective = rejection
+			? `\nThe previous reply was rejected (${rejection}). Explain what the code does or why it matters instead.`
+			: "";
+		const request = `${reusesNormalPrompt
+			? `<code_narration_request>\n${narrationPrompt}\n\n${baseRequest}\n</code_narration_request>`
+			: baseRequest}${corrective}`;
+		const messages = [...(conversation?.messages ?? []), {
+			role: "user" as const,
+			content: [{ type: "text" as const, text: request }],
+			timestamp: Date.now(),
+		}];
+		const maxOutputTokens = mode === "guided" ? 512 : 384;
+
+		// Recheck the window on every attempt; corrective nudges grow the request.
+		const estimatedInputTokens =
+			messages.reduce((total, item) => total + estimateTokens(item), 0) +
+			Math.ceil(systemPrompt.length / 4) +
+			Math.ceil(JSON.stringify(tools ?? []).length / 4);
+		const availableInputTokens = Math.max(
+			0,
+			model.contextWindow - maxOutputTokens - CODE_DESCRIPTION_INPUT_SAFETY_TOKENS,
+		);
+		if (estimatedInputTokens > availableInputTokens) {
+			throw new CodeDescriptionContextOverflowError(estimatedInputTokens, availableInputTokens, model.contextWindow);
+		}
+		const timeout = AbortSignal.timeout(60_000);
+		const combinedSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
+		const response = await ctx.modelRegistry.complete(
+			model,
+			{
+				systemPrompt,
+				messages,
+				...(tools ? { tools } : {}),
+			},
+			{
+				signal: combinedSignal,
+				reasoningEffort: "minimal",
+				maxTokens: maxOutputTokens,
 			...(reusesNormalPrompt
 				? { sessionId: conversation.normalPrompt!.sessionId }
 				: { cacheRetention: "none" as const, sessionId: randomUUID() }),
 		},
 	);
-	if (response.stopReason === "aborted" || response.stopReason === "error") {
-		throw new Error(`Code description ${response.stopReason}`);
+		if (response.stopReason === "aborted") {
+			throw new Error("Code description aborted");
+		}
+		if (response.stopReason === "error") {
+			throw new Error(response.errorMessage || "Code description request failed");
+		}
+		const text = response.content
+			.filter((part): part is { type: "text"; text: string } => part.type === "text")
+			.map(part => part.text)
+			.join("\n");
+		if (mode === "guided") {
+			const plan = parseCodeNarration(text, block.code, catalog?.targets);
+			if (!plan) throw new CodeDescriptionQualityError("the reply was not a valid narration plan");
+			const spoken = plan.records.map(record => record.speech).filter(Boolean).join(" ").trim();
+			const spokenReason = assessCodeDescriptionQuality(spoken);
+			if (spokenReason) throw new CodeDescriptionQualityError(spokenReason);
+			return plan;
+		}
+		const description = cleanRevisedPrompt(text).replace(/\s+/g, " ").trim();
+		if (!description) throw new CodeDescriptionQualityError("the reply was empty");
+		const reason = assessCodeDescriptionQuality(description);
+		if (reason) throw new CodeDescriptionQualityError(reason);
+		return plainCodeNarration(description);
+	};
+
+	for (let attempt = 1; ; attempt += 1) {
+		try {
+			return await attemptOnce(priorRejection);
+		} catch (error) {
+			const kind = classifyCodeDescriptionFailure(error);
+			if (kind === "fatal") throw error;
+			const limit = kind === "quality" ? QUALITY_ATTEMPTS : TRANSIENT_ATTEMPTS;
+			if (attempt >= limit) throw error;
+			if (kind === "quality") {
+				priorRejection = error instanceof CodeDescriptionQualityError ? error.reason : "non-semantic reply";
+			} else {
+				await new Promise(resolve => setTimeout(resolve, 200 * attempt));
+			}
+		}
 	}
-	const text = response.content
-		.filter((part): part is { type: "text"; text: string } => part.type === "text")
-		.map(part => part.text)
-		.join("\n");
-	if (mode === "guided") {
-		const plan = parseCodeNarration(text, block.code, catalog?.targets);
-		if (!plan) throw new Error("The configured description model returned an invalid guided narration plan");
-		return plan;
-	}
-	const description = cleanRevisedPrompt(text).replace(/\s+/g, " ").trim();
-	if (!description) throw new Error("The configured description model returned an empty response");
-	return plainCodeNarration(description);
 }

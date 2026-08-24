@@ -11,6 +11,7 @@ import {
 import { CodeDescriptionCache, type CodeDescriptionCacheSnapshot } from "./code-description-cache.js";
 import {
 	codeDescriptionCacheKey,
+	CodeDescriptionBudgetExhaustedError,
 	CodeDescriptionContextOverflowError,
 	codeDescriptionUsesActivePrompt,
 	describeCodeBlock,
@@ -425,18 +426,25 @@ export default async function (pi: ExtensionAPI) {
 				.getOrCreate(
 					key,
 					() => {
-						const generate = () => {
-							// Reserve a backfill unit only when real generation is about to run;
-							// cache hits and coalesced duplicates never reach this point.
-							if (options?.chargeBackfill && !options.chargeBackfill()) throw BACKFILL_EXHAUSTED;
-							return describeCodeBlock(
+						// Every provider attempt is metered; cache hits and coalesced
+						// duplicates never reach describeCodeBlock at all.
+						const generate = () =>
+							describeCodeBlock(
 								ctx,
 								block,
 								editModel,
 								narrationMode,
 								conversation,
+								undefined,
+								{
+									onAttempt: () => {
+										if (options?.chargeBackfill && !options.chargeBackfill()) {
+											throw new CodeDescriptionBudgetExhaustedError();
+										}
+									},
+								},
 							).catch(error => {
-								if (error === BACKFILL_EXHAUSTED) throw error;
+								if (error instanceof CodeDescriptionBudgetExhaustedError) throw BACKFILL_EXHAUSTED;
 								if (error instanceof CodeDescriptionContextOverflowError) {
 									const overflowId = `${editModel}:${error.contextWindow}`;
 									if (!reportedDescriptionOverflows.has(overflowId)) {
@@ -452,10 +460,9 @@ export default async function (pi: ExtensionAPI) {
 											// Session replacement can invalidate the captured UI before generation settles.
 										}
 									}
-							}
-							return fallback;
-						});
-						};
+								}
+								return fallback;
+							});
 						return coordinator
 							? coordinator.withResource("code", config.codeDescriptionPreprocessConcurrency, generate)
 							: generate();
@@ -609,7 +616,7 @@ const chargeBackfillUnit = (): boolean => {
 				try {
 					await requestCodeDescription(ctx, item.block, item.identityContext, item.providerMessagesThroughBlock, { chargeBackfill: chargeBackfillUnit });
 				} catch (error) {
-					if (error === BACKFILL_EXHAUSTED) {
+					if (error === BACKFILL_EXHAUSTED || error instanceof CodeDescriptionBudgetExhaustedError) {
 						if (!backfillExhaustionReported) {
 							backfillExhaustionReported = true;
 							ctx.ui.notify(

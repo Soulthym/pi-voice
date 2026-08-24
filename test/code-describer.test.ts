@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+	assessCodeDescriptionQuality,
+	classifyCodeDescriptionFailure,
 	codeDescriptionCacheKey,
+	CodeDescriptionBudgetExhaustedError,
 	CodeDescriptionContextOverflowError,
+	CodeDescriptionQualityError,
 	describeCodeBlock,
 	fallbackCodeDescription,
 } from "../src/code-describer.js";
@@ -166,4 +170,83 @@ test("describes the language and size of a non-patch fallback", () => {
 		fallbackCodeDescription({ language: "ts", code: "const one = 1;\nconst two = 2;" }),
 		"A TypeScript block contains 2 lines.",
 	);
+});
+
+const GOOD = "It registers the keyboard shortcuts that toggle spoken output.";
+
+function scriptedCtx(replies: Array<{ text?: string; fail?: Error }>): {
+	ctx: never;
+	calls: () => number;
+} {
+	let index = 0;
+	const ctx = {
+		model: { provider: "test", id: "model", contextWindow: 8192, maxTokens: 1024 },
+		modelRegistry: {
+			find: () => ({ provider: "test", id: "model", contextWindow: 8192, maxTokens: 1024 }),
+			complete: async () => {
+				const next = replies[Math.min(index, replies.length - 1)];
+				index += 1;
+				if (next.fail) throw next.fail;
+				return { role: "assistant", content: [{ type: "text", text: next.text ?? "" }], stopReason: "stop" };
+			},
+		},
+	};
+	return { ctx: ctx as never, calls: () => index };
+}
+
+test("quality gate rejects filler but keeps semantic descriptions", () => {
+	assert.match(assessCodeDescriptionQuality("A JSON file contains 4 lines.") ?? "", /line counts/);
+	assert.ok(assessCodeDescriptionQuality("A TypeScript block."));
+	assert.ok(assessCodeDescriptionQuality("This code block is present."));
+	assert.equal(assessCodeDescriptionQuality(GOOD), undefined);
+});
+
+test("failure classification separates fatal, quality, and transient", () => {
+	const overflow = new CodeDescriptionContextOverflowError(10, 5, 100);
+	assert.equal(classifyCodeDescriptionFailure(overflow), "fatal");
+	assert.equal(classifyCodeDescriptionFailure(new CodeDescriptionBudgetExhaustedError()), "fatal");
+	assert.equal(classifyCodeDescriptionFailure(new Error("aborted")), "fatal");
+	assert.equal(classifyCodeDescriptionFailure(new Error("insufficient credits for provider")), "fatal");
+	assert.equal(classifyCodeDescriptionFailure(new Error("network_error while streaming")), "transient");
+	assert.equal(classifyCodeDescriptionFailure(new CodeDescriptionQualityError("too short")), "quality");
+});
+
+test("non-semantic replies are retried up to three times with a corrective nudge", async () => {
+	const { ctx, calls } = scriptedCtx([
+		{ text: "A JSON file contains 4 lines." },
+		{ text: "This code block is present." },
+		{ text: GOOD },
+	]);
+	let attempts = 0;
+	const plan = await describeCodeBlock(ctx, { language: "ts", code: "run();" }, "current", "summary", undefined, undefined, {
+		onAttempt: () => {
+			attempts += 1;
+		},
+	});
+	assert.match(JSON.stringify(plan), /keyboard shortcuts/);
+	assert.equal(calls(), 3);
+	assert.equal(attempts, 3);
+});
+
+test("persistently non-semantic replies fail after three attempts", async () => {
+	const { ctx, calls } = scriptedCtx([{ text: "A JSON file contains 4 lines." }]);
+	await assert.rejects(
+		describeCodeBlock(ctx, { language: "ts", code: "run();" }, "current", "summary"),
+		CodeDescriptionQualityError,
+	);
+	assert.equal(calls(), 3);
+});
+
+test("transient failures retry once; quota failures never retry", async () => {
+	const transient = scriptedCtx([{ fail: new Error("network_error") }, { text: GOOD }]);
+	assert.match(JSON.stringify(await describeCodeBlock(transient.ctx, { language: "ts", code: "run();" }, "current", "summary")), /keyboard/);
+	assert.equal(transient.calls(), 2);
+
+	const exhausted = scriptedCtx([{ fail: new Error("network_error") }]);
+	await assert.rejects(describeCodeBlock(exhausted.ctx, { language: "ts", code: "run();" }, "current", "summary"));
+	assert.equal(exhausted.calls(), 2);
+
+	const quota = scriptedCtx([{ fail: new Error("402 insufficient credits") }]);
+	await assert.rejects(describeCodeBlock(quota.ctx, { language: "ts", code: "run();" }, "current", "summary"), /credits/);
+	assert.equal(quota.calls(), 1);
 });
