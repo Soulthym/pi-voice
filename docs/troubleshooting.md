@@ -61,6 +61,24 @@ Check that no obsolete `tcp-playback.mjs` helper remains after reload. Current h
 
 The server and client must both include the pause-control protocol. Reinstall client scripts, exit all wrappers, reconnect, and reload Pi. F8 should pause mpv and leave highlighting at the same position.
 
+## No sound after suspend or network loss
+
+If the phone slept or the network dropped mid-session, one of the client
+listeners may have died silently. The client supervisor now restarts dead
+listeners automatically (up to 20 times) and `pi-voice-ssh` verifies bridge
+liveness via `/proc/<pid>/cmdline` plus an audio-port probe before trusting a
+pid file. If you still hear nothing after reconnecting:
+
+```bash
+pgrep -af "socat|mpv|pi-voice"   # expect two socat listeners while connected
+tail -5 "$XDG_RUNTIME_DIR"/pi-voice-ssh-*/client-bridge.log 2>/dev/null || \
+  tail -5 /tmp/pi-voice-ssh-*/client-bridge.log
+```
+
+Missing processes mean the bridge is not running; rerun `pi-voice-ssh`. If
+processes exist but audio is silent, check Android media volume (separate from
+the ringer) and Termux battery-optimization exemptions.
+
 ## SSH forwarding fails
 
 Run a dry resolution check:

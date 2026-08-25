@@ -23,15 +23,41 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-socat -t 5 \
-  "TCP4-LISTEN:${AUDIO_PORT},bind=127.0.0.1,reuseaddr,fork" \
-  EXEC:"${SCRIPT_DIR}/pi-voice-audio-session" &
-audio_pid=$!
+# Supervise both listeners for the lifetime of the bridge. A single dead
+# socat used to leave the tunnels black-holed: playback kept "working" from
+# the host's perspective while the phone stayed silent until a manual
+# reconnect. Restart whichever side exits, with a small backoff.
+start_listeners() {
+  socat -t 5 \
+    "TCP4-LISTEN:${AUDIO_PORT},bind=127.0.0.1,reuseaddr,fork" \
+    EXEC:"${SCRIPT_DIR}/pi-voice-audio-session" &
+  audio_pid=$!
 
-socat \
-  "TCP4-LISTEN:${CONTROL_PORT},bind=127.0.0.1,reuseaddr,fork" \
-  EXEC:"${SCRIPT_DIR}/pi-voice-stt-session" &
-control_pid=$!
+  socat \
+    "TCP4-LISTEN:${CONTROL_PORT},bind=127.0.0.1,reuseaddr,fork" \
+    EXEC:"${SCRIPT_DIR}/pi-voice-stt-session" &
+  control_pid=$!
 
-printf 'Pi Voice client ready: audio=%s microphone=%s\n' "$AUDIO_PORT" "$CONTROL_PORT" >&2
-wait -n "$audio_pid" "$control_pid"
+  printf 'Pi Voice client ready: audio=%s microphone=%s\n' "$AUDIO_PORT" "$CONTROL_PORT" >&2
+}
+
+supervise() {
+  local restarts=0
+  while true; do
+    start_listeners
+    # Returns when either listener dies.
+    wait -n "$audio_pid" "$control_pid" || true
+    kill "${audio_pid:-}" "${control_pid:-}" 2>/dev/null || true
+    wait "${audio_pid:-}" "${control_pid:-}" 2>/dev/null || true
+    audio_pid=; control_pid=
+    restarts=$((restarts + 1))
+    if (( restarts > 20 )); then
+      printf 'Pi Voice client listeners keep exiting; giving up after %s restarts\n' "$restarts" >&2
+      exit 1
+    fi
+    printf 'Pi Voice client listener exited; restarting (%s)\n' "$restarts" >&2
+    sleep 1
+  done
+}
+
+supervise
