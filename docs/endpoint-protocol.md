@@ -28,9 +28,10 @@ A second short connection to the same output endpoint starts with exactly 16 ASC
 ```text
 PI_VOICE_CONTROLpause 12345\n
 PI_VOICE_CONTROLresume 12345\n
+PI_VOICE_CONTROLstop 12345\n
 ```
 
-The bundled client maps this to mpv's `pause` property. Control connections carry no PCM and close immediately.
+The bundled client maps pause/resume to mpv's `pause` property and stop to mpv's `quit` command. Control connections carry no PCM and close immediately. Starting a new audio stream also atomically replaces any previous Pi Voice player on that endpoint, preventing buffered stale audio from overlapping rapid seeks.
 
 ## Input commands
 
@@ -55,7 +56,7 @@ stream\n
 <encoded audio bytes until EOF>
 ```
 
-The bundled clients stream Ogg/Opus. Host-side FFmpeg/VAD consumes the growing stream, and a second `stop` connection asks the recorder to finalize and close the original stream.
+The bundled clients stream Ogg/Opus. Host-side FFmpeg/VAD consumes the growing stream, and a second `stop` connection asks the recorder to finalize and close the original stream. Recording ownership is acquired with an atomic per-device lock; a concurrent second `record` request is rejected rather than sharing or replacing microphone state.
 
 ### Single-response recording
 

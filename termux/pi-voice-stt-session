@@ -4,6 +4,7 @@ set -u
 runtime_dir="${TMPDIR:-/data/data/com.termux/files/usr/tmp}"
 stop_file="$runtime_dir/pi-voice-stop-recording"
 active_file="$runtime_dir/pi-voice-recording-active"
+recording_lock="$runtime_dir/pi-voice-recording-lock"
 
 encode_message() {
   printf '%s' "$1" | base64 | tr -d '\n'
@@ -32,10 +33,29 @@ fi
 
 max_record_seconds=${PI_VOICE_MAX_RECORD_SECONDS:-120}
 recording="$runtime_dir/pi-voice-recording-${BASHPID}.ogg"
+recording_owner=$BASHPID
+lock_acquired=false
+if mkdir "$recording_lock" 2>/dev/null; then
+  lock_acquired=true
+else
+  old_owner=$(cat "$active_file" 2>/dev/null || true)
+  if [[ $old_owner =~ ^[0-9]+$ ]] && ! kill -0 "$old_owner" 2>/dev/null; then
+    rm -rf "$recording_lock" "$active_file" "$stop_file"
+    mkdir "$recording_lock" 2>/dev/null && lock_acquired=true
+  fi
+fi
+if [[ $lock_acquired != true ]]; then
+  printf 'error %s\n' "$(encode_message 'The phone microphone is already recording')"
+  exit 0
+fi
 rm -f "$recording" "$stop_file"
-printf '%s\n' "$BASHPID" > "$active_file"
+printf '%s\n' "$recording_owner" > "$active_file"
 cleanup() {
-  rm -f "$active_file" "$stop_file" "$recording"
+  if [[ $(cat "$active_file" 2>/dev/null || true) == "$recording_owner" ]]; then
+    rm -f "$active_file" "$stop_file"
+    rmdir "$recording_lock" 2>/dev/null || true
+  fi
+  rm -f "$recording"
 }
 trap cleanup EXIT
 

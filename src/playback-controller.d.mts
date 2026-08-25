@@ -5,6 +5,8 @@ export interface PlaybackSink {
 	writable: {
 		write(bytes: Buffer): boolean;
 		once(event: string, listener: () => void): unknown;
+		removeListener?(event: string, listener: () => void): unknown;
+		destroyed?: boolean;
 	};
 	noteAudio?(samples: number): void;
 	setPaused?(paused: boolean): void;
@@ -15,9 +17,10 @@ export interface PlaybackSink {
 export interface PlaybackController {
 	startPlayer(sampleRate: number, utterance: number, output: string, createSink: (output: string, sampleRate: number, utterance: number) => PlaybackSink): PlaybackSink;
 	setPlayerPaused(paused: boolean): void;
+	resetPlayerPaused(): void;
 	stopPlayer(): void;
 	writeAudio(sink: PlaybackSink, pcm: Float32Array): Promise<void>;
-	closePlayer(utterance: number): Promise<void>;
+	closePlayer(utterance: number): Promise<boolean>;
 	clearCurrentPlayer(): void;
 	readonly currentPlayer: PlaybackSink | null;
 }

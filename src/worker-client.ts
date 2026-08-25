@@ -18,7 +18,7 @@ export type WorkerEvent =
 	| { type: "transcribing" }
 	| { type: "transcript"; text: string; candidates?: string[]; requestId: string; preview?: boolean }
 	| { type: "idle"; utterance?: number }
-	| { type: "error"; message: string; requestId?: string; preview?: boolean };
+	| { type: "error"; message: string; requestId?: string; preview?: boolean; utterance?: number };
 
 type PendingPreload = {
 	resolve: () => void;

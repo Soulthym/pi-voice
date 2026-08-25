@@ -145,9 +145,11 @@ export class PhoneInputClient {
 	#activeEndpoint: string | null = null;
 
 	cancel(): void {
+		const endpoint = this.#activeEndpoint;
 		this.#socket?.destroy();
 		this.#socket = null;
-		if (this.#activeEndpoint) void this.stop(this.#activeEndpoint).catch(() => {});
+		this.#activeEndpoint = null;
+		if (endpoint) void this.stop(endpoint).catch(() => {});
 	}
 
 	stop(endpoint: string): Promise<void> {

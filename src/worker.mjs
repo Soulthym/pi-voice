@@ -484,12 +484,12 @@ function createLocalSink(sampleRate, utterance) {
 		},
 	}, sampleRate, utterance);
 	child.stdin.on("error", error => {
-		if (playback.currentPlayer === sink && !shuttingDown) send({ type: "error", message: error.message });
+		if (playback.currentPlayer === sink && !shuttingDown) send({ type: "error", message: error.message, utterance });
 	});
 	child.on("exit", code => {
 		if (playback.currentPlayer === sink) playback.clearCurrentPlayer();
 		if (code !== 0 && code !== null && !shuttingDown) {
-			send({ type: "error", message: stderr.trim() || `Audio player exited with code ${code}` });
+			send({ type: "error", message: stderr.trim() || `Audio player exited with code ${code}`, utterance });
 		}
 	});
 	return sink;
@@ -500,6 +500,24 @@ function validateNetworkEndpoint(output) {
 	if (url.protocol === "tcp:" && url.hostname && url.port) return;
 	if (url.protocol === "unix:" && !url.hostname && url.pathname.startsWith("/")) return;
 	throw new Error(`Invalid network voice output: ${output}`);
+}
+
+function waitForDrainOrClose(writable) {
+	return new Promise(resolve => {
+		let settled = false;
+		const finish = () => {
+			if (settled) return;
+			settled = true;
+			writable.removeListener("drain", finish);
+			writable.removeListener("close", finish);
+			writable.removeListener("error", finish);
+			resolve();
+		};
+		writable.once("drain", finish);
+		writable.once("close", finish);
+		writable.once("error", finish);
+		if (writable.destroyed) finish();
+	});
 }
 
 function createNetworkSink(output, sampleRate, utterance) {
@@ -547,7 +565,8 @@ function createNetworkSink(output, sampleRate, utterance) {
 			// Android/Termux audio output can buffer well over half a second. Keep
 			// the stream alive with silence so EOF cannot discard the final word.
 			const padding = Buffer.alloc(Math.round(sampleRate * 1) * Float32Array.BYTES_PER_ELEMENT);
-			if (!child.stdin.write(padding)) await new Promise(resolve => child.stdin.once("drain", resolve));
+			if (!child.stdin.write(padding)) await waitForDrainOrClose(child.stdin);
+			if (this.stopped) return;
 			const exited = new Promise(resolve => child.once("exit", resolve));
 			child.stdin.end();
 			await exited;
@@ -559,15 +578,23 @@ function createNetworkSink(output, sampleRate, utterance) {
 				readySettled = true;
 				resolveReady();
 			}
+			// Stop the remote mpv explicitly before killing the local helper. EOF
+			// alone lets buffered PCM drain and overlap a replacement timeline seek.
+			try {
+				control.write("stop\n");
+			} catch {
+				// The helper may have failed before its control fd became writable.
+			}
 			child.stdin.destroy();
-			child.kill("SIGKILL");
+			const killTimer = setTimeout(() => child.kill("SIGKILL"), 500);
+			killTimer.unref?.();
 		},
 		setPaused(paused) {
 			control.write(`${paused ? "pause" : "resume"}\n`);
 		},
 	};
 	child.stdin.on("error", error => {
-		if (playback.currentPlayer === sink && !shuttingDown) send({ type: "error", message: error.message });
+		if (playback.currentPlayer === sink && !shuttingDown) send({ type: "error", message: error.message, utterance });
 	});
 	child.on("exit", code => {
 		if (!readySettled) {
@@ -651,7 +678,10 @@ async function runOperation(operation) {
 		return;
 	}
 	if (operation.type === "end") {
-		await closePlayer(operation.utterance);
+		const completed = await closePlayer(operation.utterance);
+		// Code-only omissions and failed/replaced sinks still need a terminal
+		// utterance event so the extension cannot retain the device lease forever.
+		if (!completed) send({ type: "idle", utterance: operation.utterance });
 		return;
 	}
 	if (operation.type === "measure") {
@@ -693,8 +723,14 @@ async function pump() {
 			try {
 				await runOperation(operation);
 			} catch (error) {
-				send({ type: "error", message: error instanceof Error ? error.message : String(error) });
-				stopPlayer();
+				send({
+					type: "error",
+					message: error instanceof Error ? error.message : String(error),
+					...(Number.isInteger(operation.utterance) ? { utterance: operation.utterance } : {}),
+				});
+				// Terminal synthesis/sink failure invalidates the remaining utterance;
+				// otherwise queued segments can create a second uncontrolled player.
+				cancel();
 			}
 		}
 	} finally {
@@ -717,6 +753,7 @@ function enqueue(operation) {
 function cancel() {
 	epoch += 1;
 	cancelAlignment();
+	playback.resetPlayerPaused();
 	queue = queue
 		.filter(
 			operation =>

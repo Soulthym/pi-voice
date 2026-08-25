@@ -38,7 +38,7 @@ function fail(error) {
 		message += " (device bridge unreachable; rerun pi-voice-ssh)";
 	}
 	controlLine(`error ${message}`);
-	send({ type: "error", message });
+	send({ type: "error", message, utterance });
 	process.exitCode = 1;
 }
 
@@ -78,6 +78,13 @@ function sendPlaybackControl(command) {
 		commandSocket.end(`PI_VOICE_CONTROL${command} ${clientSessionId}\n`);
 	});
 	commandSocket.on("error", () => {});
+	if (command === "stop") {
+		commandSocket.on("close", () => {
+			stopped = true;
+			socket.destroy();
+			process.exit(0);
+		});
+	}
 }
 
 let controlCommands = "";
@@ -88,7 +95,7 @@ controlInput.on("data", chunk => {
 		if (newline < 0) break;
 		const command = controlCommands.slice(0, newline).trim();
 		controlCommands = controlCommands.slice(newline + 1);
-		if (command !== "pause" && command !== "resume") continue;
+		if (command !== "pause" && command !== "resume" && command !== "stop") continue;
 		const now = performance.now();
 		if (command === "pause" && pausedAt === null) pausedAt = now;
 		if (command === "resume" && pausedAt !== null) {

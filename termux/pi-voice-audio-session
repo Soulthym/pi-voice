@@ -6,8 +6,11 @@ session_id=${BASHPID:-$$}
 ipc_socket="$runtime_dir/pi-voice-mpv-$session_id.sock"
 header_file="$runtime_dir/pi-voice-header-$session_id.bin"
 audio_fifo="$runtime_dir/pi-voice-mpv-$session_id.pcm"
+player_lock="$runtime_dir/pi-voice-player.lock"
+active_player_file="$runtime_dir/pi-voice-active-player.pid"
 mpv_pid=
 feeder_pid=
+lock_held=false
 
 cleanup() {
   trap - EXIT INT TERM
@@ -15,12 +18,16 @@ cleanup() {
   [[ -n "$mpv_pid" ]] && kill "$mpv_pid" 2>/dev/null || true
   [[ -n "$feeder_pid" ]] && wait "$feeder_pid" 2>/dev/null || true
   [[ -n "$mpv_pid" ]] && wait "$mpv_pid" 2>/dev/null || true
+  if [[ -n "$mpv_pid" ]] && [[ $(cat "$active_player_file" 2>/dev/null || true) == "$mpv_pid" ]]; then
+    rm -f "$active_player_file"
+  fi
+  [[ $lock_held == true ]] && rm -rf "$player_lock" 2>/dev/null || true
   rm -f "$ipc_socket" "$audio_fifo" "$header_file"
 }
 trap cleanup EXIT INT TERM
 
-# A short control connection can pause a specific existing player without
-# framing or modifying the raw Float32 audio stream.
+# A short control connection can pause, resume, or stop a specific existing
+# player without framing or modifying the raw Float32 audio stream.
 exec 3<&0
 dd iflag=fullblock bs=16 count=1 of="$header_file" status=none <&3 2>/dev/null || true
 if cmp -s "$header_file" <(printf 'PI_VOICE_CONTROL'); then
@@ -34,8 +41,36 @@ if cmp -s "$header_file" <(printf 'PI_VOICE_CONTROL'); then
     [[ $command == pause ]] && paused=true
     printf '{"command":["set_property","pause",%s]}\n' "$paused" |
       socat -T 1 - "UNIX-CONNECT:$target_socket" >/dev/null 2>&1 || true
+  elif [[ $command == stop ]] && [[ -S $target_socket ]]; then
+    printf '{"command":["quit"]}\n' |
+      socat -T 1 - "UNIX-CONNECT:$target_socket" >/dev/null 2>&1 || true
   fi
   exit 0
+fi
+
+# Starting a new stream atomically replaces any prior Pi Voice player. This is
+# an endpoint-level safety net for rapid seeks and cross-session preemption.
+for _ in {1..100}; do
+  if mkdir "$player_lock" 2>/dev/null; then
+    lock_held=true
+    printf '%s\n' "${BASHPID:-$$}" >"$player_lock/owner"
+    break
+  fi
+  lock_owner=$(cat "$player_lock/owner" 2>/dev/null || true)
+  if [[ $lock_owner =~ ^[0-9]+$ ]] && ! kill -0 "$lock_owner" 2>/dev/null; then
+    rm -rf "$player_lock" 2>/dev/null || true
+  fi
+  sleep 0.01
+done
+[[ $lock_held == true ]] || exit 1
+old_player=$(cat "$active_player_file" 2>/dev/null || true)
+if [[ $old_player =~ ^[0-9]+$ ]] && kill -0 "$old_player" 2>/dev/null; then
+  kill "$old_player" 2>/dev/null || true
+  for _ in {1..50}; do
+    kill -0 "$old_player" 2>/dev/null || break
+    sleep 0.01
+  done
+  kill -0 "$old_player" 2>/dev/null && kill -KILL "$old_player" 2>/dev/null || true
 fi
 
 rm -f "$ipc_socket" "$audio_fifo"
@@ -49,6 +84,9 @@ mpv --really-quiet --no-video --cache=no \
   --demuxer-rawaudio-channels=mono \
   "$audio_fifo" > /dev/null 2>/dev/null &
 mpv_pid=$!
+printf '%s\n' "$mpv_pid" >"$active_player_file"
+rm -rf "$player_lock" 2>/dev/null || true
+lock_held=false
 
 # stdin is the TCP audio direction. stdout is deliberately kept free for JSON
 # playback-position feedback over the reverse direction of the same socket.

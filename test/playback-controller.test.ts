@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import test from "node:test";
 import { createPlaybackController, type PlaybackSink } from "../src/playback-controller.mjs";
 
@@ -78,6 +79,20 @@ test("pause and resume reach the sink while it drains, and idle waits for closur
 	assert.equal(playback.currentPlayer, null);
 });
 
+test("pause requested before sink creation is applied to the new player", () => {
+	const playback = createPlaybackController({ send: () => {} });
+	const paused = fakeSink();
+	playback.setPlayerPaused(true);
+	playback.startPlayer(24_000, 1, "local", () => paused.sink);
+	assert.deepEqual(paused.events.filter(event => event === "paused"), ["paused"]);
+
+	playback.stopPlayer();
+	playback.resetPlayerPaused();
+	const fresh = fakeSink();
+	playback.startPlayer(24_000, 2, "local", () => fresh.sink);
+	assert.equal(fresh.events.includes("paused"), false);
+});
+
 test("stop interrupts a draining sink without waiting for closure", () => {
 	const sent: unknown[] = [];
 	const playback = createPlaybackController({ send: (event: unknown) => sent.push(event) });
@@ -89,6 +104,51 @@ test("stop interrupts a draining sink without waiting for closure", () => {
 	assert.ok(fake.sink.stopped);
 	assert.equal(playback.currentPlayer, null);
 	assert.equal(fake.events.includes("closing"), false);
+});
+
+test("replacing a draining sink suppresses its stale idle event", async () => {
+	const sent: unknown[] = [];
+	const playback = createPlaybackController({ send: (event: unknown) => sent.push(event) });
+	const stale = fakeSink();
+	const replacement = fakeSink();
+
+	playback.startPlayer(24_000, 1, "local", () => stale.sink);
+	const closing = playback.closePlayer(1);
+	await new Promise(resolve => setImmediate(resolve));
+	playback.startPlayer(24_000, 2, "local", () => replacement.sink);
+	stale.resolveClose();
+	await closing;
+
+	assert.equal(sent.some(event => (event as { type?: string; utterance?: number }).type === "idle"), false);
+	assert.equal(playback.currentPlayer, replacement.sink);
+});
+
+test("cancel settles a write waiting for backpressure without drain", async () => {
+	const playback = createPlaybackController({ send: () => {} });
+	const writable = new EventEmitter() as EventEmitter & {
+		destroyed: boolean;
+		write(bytes: Buffer): boolean;
+	};
+	writable.destroyed = false;
+	writable.write = () => false;
+	const sink = {
+		ready: Promise.resolve(),
+		stopped: false,
+		writable,
+		noteAudio(): void {},
+		stop(): void {
+			this.stopped = true;
+			writable.destroyed = true;
+			writable.emit("close");
+		},
+		async close(): Promise<void> {},
+	} as PlaybackSink;
+	playback.startPlayer(24_000, 1, "local", () => sink);
+	const writing = playback.writeAudio(sink, new Float32Array(100));
+	await new Promise(resolve => setImmediate(resolve));
+	playback.stopPlayer();
+	await writing;
+	assert.equal(sink.stopped, true);
 });
 
 test("a stale end for another utterance never closes the active player", async () => {

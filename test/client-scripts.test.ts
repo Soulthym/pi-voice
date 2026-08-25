@@ -145,6 +145,48 @@ test("local STT session reports stop errors, missing ffmpeg, and honors XDG_RUNT
 	}
 });
 
+test("microphone sessions reject a second concurrent recorder", async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-voice-stt-lock-"));
+	try {
+		const linuxRuntime = path.join(root, "linux-runtime");
+		const linuxState = path.join(linuxRuntime, `pi-voice-client-${process.getuid!()}`);
+		fs.mkdirSync(path.join(linuxState, "recording-lock"), { recursive: true });
+		fs.writeFileSync(path.join(linuxState, "recording-active"), `${process.pid}\n`);
+		const linuxBin = restrictedPath(path.join(root, "linux-tools"), {
+			ffmpeg: "exit 0",
+			"pw-record": "exit 0",
+			wpctl: "exit 0",
+		});
+		const linux = await runScript(
+			path.join(CLIENT_DIR, "pi-voice-stt-session"),
+			[],
+			"record\n",
+			baseEnv({ XDG_RUNTIME_DIR: linuxRuntime, PATH: linuxBin }),
+			8_000,
+			root,
+		);
+		assert.match(decodeMessage(linux.stdout.trim()).message, /already recording/);
+
+		const termuxRuntime = path.join(root, "termux-runtime");
+		fs.mkdirSync(path.join(termuxRuntime, "pi-voice-recording-lock"), { recursive: true });
+		fs.writeFileSync(path.join(termuxRuntime, "pi-voice-recording-active"), `${process.pid}\n`);
+		const termuxBin = restrictedPath(path.join(root, "termux-tools"), {
+			"termux-microphone-record": "exit 0",
+		});
+		const termux = await runScript(
+			path.resolve("termux/pi-voice-stt-session"),
+			[],
+			"record\n",
+			baseEnv({ TMPDIR: termuxRuntime, PATH: termuxBin }),
+			8_000,
+			root,
+		);
+		assert.match(decodeMessage(termux.stdout.trim()).message, /already recording/);
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("local STT session records through PipeWire, forwards audio, and stops cleanly", async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-voice-stt-record-"));
 	try {
@@ -404,7 +446,7 @@ wait $!`,
 	}
 });
 
-test("control connections forward pause and resume to the targeted player", async () => {
+test("control connections forward pause, resume, and stop to the targeted player", async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-voice-audio-control-"));
 	const runtime = path.join(root, "runtime");
 	fs.mkdirSync(runtime);
@@ -430,6 +472,18 @@ test("control connections forward pause and resume to the targeted player", asyn
 		const log = fs.readFileSync(path.join(root, "socat.log"), "utf8");
 		assert.match(log, /"set_property","pause",true/);
 		assert.match(log, new RegExp(`UNIX-CONNECT:${targetPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+
+		const stopped = await runScript(
+			path.join(CLIENT_DIR, "pi-voice-audio-session"),
+			[],
+			"PI_VOICE_CONTROLstop 4242\n",
+			baseEnv({ XDG_RUNTIME_DIR: runtime, PATH: bin }),
+			8_000,
+			root,
+		);
+		assert.equal(stopped.code, 0, `stop control failed: ${stopped.stderr}`);
+		const stoppedLog = fs.readFileSync(path.join(root, "socat.log"), "utf8");
+		assert.match(stoppedLog, /"command":\["quit"\]/);
 	} finally {
 		targetServer?.close();
 		fs.rmSync(root, { recursive: true, force: true });
