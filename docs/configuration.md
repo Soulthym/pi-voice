@@ -23,6 +23,7 @@ Pi Voice reads `~/.pi/agent/pi-voice.json` by default. Unknown or invalid values
 | `output` | `auto` | `auto`, `local`, `tcp://host:port`, or `unix:///absolute/path`. |
 | `input` | `auto` | `auto`, `local`, `disabled`, TCP, or Unix endpoint. |
 | `talkShortcut` | `alt+m` | Pi key identifier such as `alt+m`, `ctrl+shift+m`, `f5`, or `disabled`. |
+| `scrollBottomShortcut` | `ctrl+e` | Key that scrolls the transcript back to the bottom (handy without a PageDown key); `/voice bottom` does the same. |
 | `submitMode` | `review` | `review` or `auto`. |
 | `editMode` | `smart` | `smart` or `append`. |
 | `playbackHighlight` | `true` | Enables progressive prose/code highlighting. |

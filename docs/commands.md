@@ -72,6 +72,7 @@ Shortcut names follow Pi's format, for example `alt+m`, `ctrl+shift+m`, or `f8`.
 
 ```text
 /voice code-preprocess <1..8>
+/voice bottom
 /voice code-budget [unlimited|<n>]
 /voice timing-preprocess auto|<1..8>
 /voice audio-cache on|off

@@ -14,6 +14,7 @@
   "output": "auto",
   "input": "auto",
   "talkShortcut": "alt+m",
+  "scrollBottomShortcut": "ctrl+e",
   "submitMode": "review",
   "editMode": "smart",
   "playbackHighlight": true,

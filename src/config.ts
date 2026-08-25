@@ -36,6 +36,8 @@ export interface VoiceConfig {
 	input: string;
 	/** Pi key identifier used to start/stop microphone recording, or `disabled`. */
 	talkShortcut: KeyId | "disabled";
+	/** Pi key identifier that scrolls the transcript back to the bottom, or `disabled`. */
+	scrollBottomShortcut: KeyId | "disabled";
 	/** Submit recognized speech immediately, or leave it in the editor for review. */
 	submitMode: VoiceSubmitMode;
 	/** Append resolved dictation, or let the resolver also apply spoken edits. */
@@ -79,6 +81,7 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
 	output: "auto",
 	input: "auto",
 	talkShortcut: "alt+m",
+	scrollBottomShortcut: "ctrl+e",
 	submitMode: "review",
 	editMode: "smart",
 	editModel: "current",
@@ -276,6 +279,8 @@ export async function loadVoiceConfig(): Promise<VoiceConfig> {
 			output: normalizeVoiceOutput(parsed.output) ?? DEFAULT_VOICE_CONFIG.output,
 			input: normalizeVoiceInput(parsed.input) ?? DEFAULT_VOICE_CONFIG.input,
 			talkShortcut: normalizeTalkShortcut(parsed.talkShortcut) ?? DEFAULT_VOICE_CONFIG.talkShortcut,
+			scrollBottomShortcut:
+				normalizeTalkShortcut(parsed.scrollBottomShortcut) ?? DEFAULT_VOICE_CONFIG.scrollBottomShortcut,
 			submitMode: isSubmitMode(parsed.submitMode) ? parsed.submitMode : DEFAULT_VOICE_CONFIG.submitMode,
 			editMode: isEditMode(parsed.editMode) ? parsed.editMode : DEFAULT_VOICE_CONFIG.editMode,
 			editModel: normalizeEditModel(parsed.editModel) ?? DEFAULT_VOICE_CONFIG.editModel,

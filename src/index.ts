@@ -2073,6 +2073,24 @@ const chargeBackfillUnit = (): boolean => {
 		if (config.talkShortcut !== "f5") registerTalkShortcut("f5");
 	}
 
+	const scrollToBottom = (ctx: ExtensionContext): void => {
+		const scrollView = activeScrollView();
+		if (!scrollView?.scrollToEnd) {
+			ctx.ui.notify("Scroll-to-bottom is unavailable in this runtime", "warning");
+			return;
+		}
+		scrollView.scrollToEnd();
+		autoScrollSuspended = false;
+		lastAutoScrollTop = undefined;
+	};
+
+	if (config.scrollBottomShortcut !== "disabled") {
+		pi.registerShortcut(config.scrollBottomShortcut, {
+			description: "Scroll the transcript back to the bottom",
+			handler: scrollToBottom,
+		});
+	}
+
 	pi.registerCommand("voice", {
 		description: "Control local Kokoro voice mode",
 		getArgumentCompletions: prefix => {
@@ -2404,6 +2422,10 @@ const chargeBackfillUnit = (): boolean => {
 					backfillExhaustionReported = false;
 					if (activeContext) scheduleMissingCodeDescriptions(activeContext);
 					ctx.ui.notify(`code-description backfill budget set to ${parsed} for this session`, "info");
+					return;
+				}
+				case "bottom": {
+					scrollToBottom(ctx);
 					return;
 				}
 				case "code-retry": {
