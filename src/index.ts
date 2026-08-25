@@ -237,6 +237,7 @@ export default async function (pi: ExtensionAPI) {
 	let deviceSelection: VoiceDeviceSelection = "auto";
 	let activeDeviceId: string | undefined;
 	let ownsSpeech = false;
+	let speechLeaseEpoch = 0;
 	let speechPurpose: SpeechPurpose | undefined;
 	let ownerTurnEnded = false;
 	let lastOwnerUtterance: number | undefined;
@@ -265,6 +266,7 @@ export default async function (pi: ExtensionAPI) {
 		| undefined;
 	let speechPreemptionTimer: NodeJS.Timeout | null = null;
 	let finishSpeechPreemption: () => void = () => {};
+	const transportCancelWaiters = new Map<number, () => void>();
 	let state: VoiceState = "idle";
 	let downloadPercent: number | undefined;
 	let lastError = "";
@@ -1036,6 +1038,10 @@ const chargeBackfillUnit = (): boolean => {
 				downloadPercent = undefined;
 				break;
 			case "idle":
+				if (event.cancelId !== undefined) {
+					transportCancelWaiters.get(event.cancelId)?.();
+					transportCancelWaiters.delete(event.cancelId);
+				}
 				if (
 					event.utterance === undefined &&
 					pendingSpeechPreemption?.cancelId !== undefined &&
@@ -1181,16 +1187,42 @@ const chargeBackfillUnit = (): boolean => {
 		const cancelId = vocalizer.clear();
 		playbackPaused = false;
 		pausedOwnerUtterance = undefined;
+		lastOwnerUtterance = undefined;
+		completedOwnerUtterance = undefined;
+		ownerContentExpected = false;
 		playbackPositionEstimated = false;
 		return cancelId;
 	};
 
+	const waitForTransportCancellation = (cancelId: number | undefined): Promise<void> => {
+		if (cancelId === undefined) return Promise.resolve();
+		return new Promise(resolve => {
+			const timer = setTimeout(() => {
+				transportCancelWaiters.delete(cancelId);
+				resolve();
+			}, 1_000);
+			timer.unref?.();
+			transportCancelWaiters.set(cancelId, () => {
+				clearTimeout(timer);
+				resolve();
+			});
+		});
+	};
+
+	const releaseAfterTransportCancellation = (cancelId: number | undefined, announceNext = false): void => {
+		const leaseEpoch = speechLeaseEpoch;
+		void waitForTransportCancellation(cancelId).then(() => {
+			if (ownsSpeech && speechLeaseEpoch === leaseEpoch) releaseSpeechOwnership(announceNext);
+		});
+	};
+
 	const phoneInput = new PhoneInputClient();
-	const cancelActiveInput = (): void => {
+	const cancelActiveInput = (): Promise<void> => {
 		inputEpoch += 1;
-		phoneInput.cancel();
+		const cancelled = phoneInput.cancel();
 		activeInputEndpoint = undefined;
 		clearInputProgress();
+		return cancelled;
 	};
 	const timingWorkers: VoiceWorkerClient[] = [];
 	let timingWorkEpoch = 0;
@@ -1209,6 +1241,7 @@ const chargeBackfillUnit = (): boolean => {
 	const relinquishSpeech = (): void => {
 		coordinator?.releaseSpeech();
 		ownsSpeech = false;
+		speechLeaseEpoch += 1;
 		liveTurnNarrationActive = false;
 		speechPurpose = undefined;
 		ownerTurnEnded = false;
@@ -1303,6 +1336,7 @@ const chargeBackfillUnit = (): boolean => {
 		cancelTimingWorkers();
 		const shouldAnnounce = announceProject && (!coordinator.attentionIsCurrent() || projectAnnouncementPending);
 		ownsSpeech = true;
+		speechLeaseEpoch += 1;
 		speechPurpose = purpose;
 		ownerTurnEnded = false;
 		lastOwnerUtterance = undefined;
@@ -1662,9 +1696,9 @@ const chargeBackfillUnit = (): boolean => {
 		backfillUsed = 0;
 		backfillExhaustionReported = false;
 		if (wasEnabled && !config.enabled) {
-			clearPlaybackTransport();
+			const cancelId = clearPlaybackTransport();
 			narration.finish();
-			if (!inputInProgress) releaseSpeechOwnership(false);
+			if (!inputInProgress) releaseAfterTransportCancellation(cancelId);
 		}
 		state = "idle";
 		refreshStatus();
@@ -1707,8 +1741,10 @@ const chargeBackfillUnit = (): boolean => {
 		const captureEpoch = ++inputEpoch;
 		beginInputProgress();
 		cancelTimingWorkers();
-		clearPlaybackTransport();
+		const playbackCancelId = clearPlaybackTransport();
 		narration.finish();
+		await waitForTransportCancellation(playbackCancelId);
+		if (captureEpoch !== inputEpoch || talkEpoch !== contextEpoch) return;
 		releaseSpeechOwnership(false);
 		if (!reserveSpeechForInput(true)) {
 			clearInputProgress();
@@ -1898,9 +1934,6 @@ const chargeBackfillUnit = (): boolean => {
 		if (speechPreemptionTimer) clearTimeout(speechPreemptionTimer);
 		speechPreemptionTimer = null;
 		pendingSpeechPreemption = undefined;
-		coordinator?.shutdown();
-		coordinator = null;
-		ownsSpeech = false;
 		pausedForAttention = false;
 		if (narrationRenderTimer) clearTimeout(narrationRenderTimer);
 		narrationRenderTimer = null;
@@ -1909,9 +1942,12 @@ const chargeBackfillUnit = (): boolean => {
 		narrationTui = null;
 		narration.finish();
 		activeContext = null;
-		cancelActiveInput();
+		const inputCancelled = cancelActiveInput();
 		const workers = timingWorkers.splice(0);
-		await Promise.all([...workers.map(worker => worker.terminate()), vocalizer.shutdown()]);
+		await Promise.all([inputCancelled, ...workers.map(worker => worker.terminate()), vocalizer.shutdown()]);
+		coordinator?.shutdown();
+		coordinator = null;
+		ownsSpeech = false;
 	});
 
 	pi.on("session_info_changed", event => {
@@ -1919,7 +1955,7 @@ const chargeBackfillUnit = (): boolean => {
 		coordinator.setSessionName(event.name ?? pi.getSessionName());
 	});
 
-	pi.on("input", () => {
+	pi.on("input", async () => {
 		if (!interactiveVoiceSession) return;
 		coordinator?.clearWaiting();
 		pausedForAttention = false;
@@ -1927,21 +1963,23 @@ const chargeBackfillUnit = (): boolean => {
 		blockedMessageHasSpeech = false;
 		blockedSpeechText = "";
 		cancelTimingWorkers();
-		clearPlaybackTransport();
+		const cancelId = clearPlaybackTransport();
 		narration.finish();
+		await waitForTransportCancellation(cancelId);
 		releaseSpeechOwnership(false);
 		reserveSpeechForInput();
 	});
 
-	pi.on("before_agent_start", () => {
+	pi.on("before_agent_start", async () => {
 		if (!interactiveVoiceSession) return;
 		speechBlocked = false;
 		blockedMessageHasSpeech = false;
 		blockedWarningIssued = false;
 		blockedSpeechText = "";
 		cancelTimingWorkers();
-		clearPlaybackTransport();
+		const cancelId = clearPlaybackTransport();
 		narration.finish();
+		await waitForTransportCancellation(cancelId);
 		if (!speechReservedForInput) releaseSpeechOwnership(false);
 	});
 
@@ -2022,7 +2060,7 @@ const chargeBackfillUnit = (): boolean => {
 		}
 	});
 
-	pi.on("message_end", event => {
+	pi.on("message_end", async event => {
 		if (!interactiveVoiceSession) return;
 		const completedText = assistantText(event.message);
 		const stopReason = assistantStopReason(event.message);
@@ -2038,9 +2076,10 @@ const chargeBackfillUnit = (): boolean => {
 		}
 		if (!config.enabled || stopReason === undefined || !ownsSpeech || speechPurpose !== "turn") return;
 		if (stopReason === "aborted" || stopReason === "error") {
-			clearPlaybackTransport();
+			const cancelId = clearPlaybackTransport();
 			narration.finish();
 			livePlaybackId = undefined;
+			await waitForTransportCancellation(cancelId);
 			releaseSpeechOwnership(true);
 		} else if (config.mode !== "yield") {
 			ownerContentExpected = ownerContentExpected || hasSpeakableAudio(completedText);
@@ -2144,7 +2183,7 @@ const chargeBackfillUnit = (): boolean => {
 		replaySelected(ctx);
 	};
 
-	const attendNextProject = (ctx: ExtensionContext): void => {
+	const attendNextProject = async (ctx: ExtensionContext): Promise<void> => {
 		if (!coordinator) {
 			replaySelected(ctx);
 			return;
@@ -2160,9 +2199,10 @@ const chargeBackfillUnit = (): boolean => {
 			replaySelected(ctx);
 			return;
 		}
-		if (inputInProgress) cancelActiveInput();
-		clearPlaybackTransport();
+		if (inputInProgress) await cancelActiveInput();
+		const cancelId = clearPlaybackTransport();
 		narration.finish();
+		await waitForTransportCancellation(cancelId);
 		releaseSpeechOwnership(false);
 		coordinator.requestAttention(next.instanceId);
 		ctx.ui.notify(`Switching voice attention to project ${coordinator.projectLabel(next.cwd, next.sessionId, next.sessionName)}`, "info");
@@ -2495,20 +2535,21 @@ const chargeBackfillUnit = (): boolean => {
 				case "toggle":
 					await toggle(ctx);
 					return;
-				case "stop":
-					clearPlaybackTransport();
+				case "stop": {
+					const cancelId = clearPlaybackTransport();
 					narration.finish();
 					if (inputInProgress) cancelActiveInput();
 					// Explicit stop must not immediately start an attention announcement.
-					releaseSpeechOwnership(false);
+					releaseAfterTransportCancellation(cancelId);
 					state = "idle";
 					refreshStatus();
 					return;
+				}
 				case "talk":
 					void talk(ctx);
 					return;
 				case "attention":
-					attendNextProject(ctx);
+					await attendNextProject(ctx);
 					return;
 				case "setup":
 					ctx.ui.notify("Preparing speech synthesis and alignment models…", "info");
@@ -2528,9 +2569,9 @@ const chargeBackfillUnit = (): boolean => {
 						return;
 					}
 					if (inputInProgress) cancelActiveInput();
-					clearPlaybackTransport();
+					const cancelId = clearPlaybackTransport();
 					narration.finish();
-					releaseSpeechOwnership(false);
+					releaseAfterTransportCancellation(cancelId);
 					if (action.toLowerCase() === "tts-model") await updateConfig({ ...config, ttsModel: model });
 					else if (action.toLowerCase() === "stt-model") await updateConfig({ ...config, sttModel: model });
 					else await updateConfig({ ...config, alignmentModel: model });
@@ -2546,9 +2587,9 @@ const chargeBackfillUnit = (): boolean => {
 						return;
 					}
 					if (inputInProgress) cancelActiveInput();
-					clearPlaybackTransport();
+					const cancelId = clearPlaybackTransport();
 					narration.finish();
-					releaseSpeechOwnership(false);
+					releaseAfterTransportCancellation(cancelId);
 					if (action.toLowerCase() === "tts-dtype") await updateConfig({ ...config, ttsDtype: dtype });
 					else if (action.toLowerCase() === "stt-dtype") await updateConfig({ ...config, sttDtype: dtype });
 					else await updateConfig({ ...config, alignmentDtype: dtype });
@@ -2576,9 +2617,9 @@ const chargeBackfillUnit = (): boolean => {
 						return;
 					}
 					if (inputInProgress) cancelActiveInput();
-					clearPlaybackTransport();
+					const cancelId = clearPlaybackTransport();
 					narration.finish();
-					releaseSpeechOwnership(false);
+					releaseAfterTransportCancellation(cancelId);
 					deviceSelection = requested;
 					pi.appendEntry(DEVICE_SELECTION_ENTRY, { version: 1, selection: requested });
 					const device = deviceRouter.claim(deviceSelection);
@@ -2829,9 +2870,9 @@ const chargeBackfillUnit = (): boolean => {
 						return;
 					}
 					if (inputInProgress) cancelActiveInput();
-					clearPlaybackTransport();
+					const cancelId = clearPlaybackTransport();
 					narration.finish();
-					releaseSpeechOwnership(false);
+					releaseAfterTransportCancellation(cancelId);
 					await updateConfig({ ...config, mode });
 					ctx.ui.notify(`Voice mode set to ${mode}`, "info");
 					return;
@@ -2850,9 +2891,9 @@ const chargeBackfillUnit = (): boolean => {
 						return;
 					}
 					if (inputInProgress) cancelActiveInput();
-					clearPlaybackTransport();
+					const cancelId = clearPlaybackTransport();
 					narration.finish();
-					releaseSpeechOwnership(false);
+					releaseAfterTransportCancellation(cancelId);
 					await updateConfig({ ...config, voice: selected });
 					ctx.ui.notify(`Kokoro voice set to ${selected}`, "info");
 					return;
@@ -2874,9 +2915,9 @@ const chargeBackfillUnit = (): boolean => {
 						return;
 					}
 					if (inputInProgress) cancelActiveInput();
-					clearPlaybackTransport();
+					const cancelId = clearPlaybackTransport();
 					narration.finish();
-					releaseSpeechOwnership(false);
+					releaseAfterTransportCancellation(cancelId);
 					await updateConfig({ ...config, output });
 					ctx.ui.notify(`Voice output set to ${output}`, "info");
 					return;
@@ -2925,7 +2966,7 @@ const chargeBackfillUnit = (): boolean => {
 						ctx.ui.notify("Usage: /voice input auto|local|disabled|tcp://host:port|unix:///path", "error");
 						return;
 					}
-					cancelActiveInput();
+					await cancelActiveInput();
 					releaseSpeechOwnership(false);
 					await updateConfig({ ...config, input });
 					ctx.ui.notify(`Voice input set to ${input}`, "info");

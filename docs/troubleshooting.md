@@ -59,7 +59,7 @@ Check that no obsolete `tcp-playback.mjs` helper remains after reload. Current h
 
 ## Pause stops highlighting but not audio
 
-The server and client must both include the pause-control protocol. Reinstall client scripts, exit all wrappers, reconnect, and reload Pi. F8 should pause mpv and leave highlighting at the same position.
+The server and client must both include the current pause/resume/stop protocol and single-player endpoint lock. Reinstall client scripts, exit all wrappers, reconnect, and reload Pi; older clients can keep buffered audio alive after a seek. F8 should pause mpv and leave highlighting at the same position.
 
 ## No sound after suspend or network loss
 

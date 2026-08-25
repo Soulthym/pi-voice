@@ -20,7 +20,6 @@ export class MockedVoiceWorkerClient {
 	#onEvent: (event: WorkerEvent) => void;
 	sent: unknown[] = [];
 	pauses: boolean[] = [];
-	#nextCancelId = 0;
 
 	constructor(onEvent: (event: WorkerEvent) => void) {
 		this.#onEvent = onEvent;
@@ -41,8 +40,8 @@ export class MockedVoiceWorkerClient {
 	setPlaybackPaused(paused: boolean): void {
 		this.pauses.push(paused);
 	}
-	cancel(): number {
-		return ++this.#nextCancelId;
+	cancel(): undefined {
+		return undefined;
 	}
 	async transcribe(): Promise<string[]> {
 		return [];

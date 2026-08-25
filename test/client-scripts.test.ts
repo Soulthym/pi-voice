@@ -184,6 +184,15 @@ test("microphone sessions reject a second concurrent recorder", async () => {
 			root,
 		);
 		assert.match(decodeMessage(termux.stdout.trim()).message, /already recording/);
+		const installedTermux = await runScript(
+			path.join(CLIENT_DIR, "pi-voice-termux-stt-session"),
+			[],
+			"record\n",
+			baseEnv({ TMPDIR: termuxRuntime, PATH: termuxBin }),
+			8_000,
+			root,
+		);
+		assert.match(decodeMessage(installedTermux.stdout.trim()).message, /already recording/);
 	} finally {
 		owner.kill("SIGKILL");
 		fs.rmSync(root, { recursive: true, force: true });

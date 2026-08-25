@@ -744,7 +744,7 @@ async function pump() {
 		}
 	} finally {
 		pumping = false;
-		if (queue.length > 0 && !shuttingDown) void pump();
+		if (queue.length > 0 && !shuttingDown) void cancelBarrier.then(() => pump());
 	}
 }
 
@@ -756,15 +756,12 @@ function enqueue(operation) {
 		if (backgroundAt < 0) queue.push(queued);
 		else queue.splice(backgroundAt, 0, queued);
 	}
-	void pump();
+	void cancelBarrier.then(() => pump());
 }
 
 function scheduleCancel(cancelId) {
-	cancelBarrier = cancelBarrier.then(() => cancel(cancelId));
-	return cancelBarrier;
-}
-
-async function cancel(cancelId) {
+	// Invalidate queued/current synthesis synchronously so segment messages that
+	// arrive in the same stdin chunk are stamped with the replacement epoch.
 	epoch += 1;
 	cancelAlignment();
 	playback.resetPlayerPaused();
@@ -774,8 +771,11 @@ async function cancel(cancelId) {
 				operation.type === "preload" || operation.type === "transcribe" || operation.type === "transcribe-pcm",
 		)
 		.map(operation => ({ ...operation, epoch }));
-	await stopPlayer();
-	send({ type: "idle", ...(Number.isInteger(cancelId) ? { cancelId } : {}) });
+	cancelBarrier = cancelBarrier.then(async () => {
+		await stopPlayer();
+		send({ type: "idle", ...(Number.isInteger(cancelId) ? { cancelId } : {}) });
+	});
+	return cancelBarrier;
 }
 
 const lines = readline.createInterface({ input: process.stdin });
