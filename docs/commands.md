@@ -26,10 +26,11 @@ Bare `/voice` is an alias for `/voice status`.
 /voice voice [voice-id]
 /voice speed <0.5..2>
 /voice highlight on|off
+/voice autoscroll on|off
 /voice code-narration guided|summary
 ```
 
-`assistant` streams normal assistant text. `all` includes thinking. `yield` waits for the completed final response. `guided` code narration synchronizes line/bold focus; `summary` shows and speaks a plain description.
+`assistant` streams normal assistant text. `all` includes thinking. `yield` waits for the completed final response. `guided` code narration synchronizes line/bold focus; `summary` shows and speaks a plain description. `autoscroll` persists the exact-word TUI follow setting; it defaults to `on`.
 
 ## Models
 
@@ -78,6 +79,8 @@ Shortcut names follow Pi's format, for example `alt+m`, `ctrl+shift+m`, or `f8`.
 /voice audio-cache on|off
 /voice audio-bitrate <12..128>
 ```
+
+`bottom` follows the currently spoken word during narration; otherwise it scrolls to the transcript bottom. The configured `scrollBottomShortcut` (default `Ctrl+E`) does the same and dismisses the manual-scroll hint.
 
 `code-budget` reports or raises the session-only historical backfill allowance (`scope` and default budget come from the config) and resumes skipped blocks.
 

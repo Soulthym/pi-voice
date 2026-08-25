@@ -29,8 +29,8 @@ export class MockedVoiceWorkerClient {
 		this.#onEvent(event);
 	}
 
-	sendSegment(_utterance: number, _segmentId: number, text: string): void {
-		this.sent.push({ type: "segment", text });
+	sendSegment(utterance: number, segmentId: number, text: string): void {
+		this.sent.push({ type: "segment", utterance, segmentId, text });
 	}
 	measureSegment(): Promise<number> {
 		return Promise.resolve(1);
@@ -54,6 +54,41 @@ export interface Notice {
 	level: string;
 }
 
+/** ScrollView-shaped TUI test double used by narration auto-scroll tests. */
+export class FakeScrollView {
+	scrollTop = 0;
+	viewportHeight = 40;
+	contentHeight = 0;
+	lines: string[] = [];
+
+	setDocument(lines: string[], viewportHeight = this.viewportHeight): void {
+		this.lines = [...lines];
+		this.contentHeight = lines.length;
+		this.viewportHeight = viewportHeight;
+		this.scrollTop = Math.min(this.scrollTop, Math.max(0, this.contentHeight - this.viewportHeight));
+	}
+
+	getContentWidth(width: number): number {
+		return width;
+	}
+
+	render(_width: number): string[] {
+		return [...this.lines];
+	}
+
+	scrollTo(top: number): void {
+		this.scrollTop = Math.max(0, Math.min(Math.max(0, this.contentHeight - this.viewportHeight), Math.trunc(top)));
+	}
+
+	scrollToEnd(): void {
+		this.scrollTop = Math.max(0, this.contentHeight - this.viewportHeight);
+	}
+
+	manualScrollTo(top: number): void {
+		this.scrollTo(top);
+	}
+}
+
 export interface ModelRequest {
 	model: unknown;
 	context: { systemPrompt?: string; messages: Message[]; tools?: unknown[] };
@@ -68,6 +103,17 @@ export class FakeVoiceHost {
 	readonly notices: Notice[] = [];
 	readonly entries: any[] = [];
 	readonly modelRequests: ModelRequest[] = [];
+	/** Active transcript viewport; intentionally differs from the implicit fallback. */
+	readonly scrollView = new FakeScrollView();
+	readonly implicitScrollView = new FakeScrollView();
+	readonly tui = {
+		terminal: { columns: 100 },
+		implicitScrollView: this.implicitScrollView,
+		getPrimaryScrollView: () => this.scrollView,
+		invalidate: () => {},
+		requestRender: () => {},
+	};
+	readonly widgetComponents = new Map<string, { dispose?: () => void }>();
 	/** Latest value per widget name, in update order. */
 	readonly styleCalls: Array<{ style: string; text: string }> = [];
 	readonly widgets = new Map<string, { lines?: string[]; placement?: string } | undefined>();	readonly widgetOperations: Array<{ name: string; value: { lines?: string[]; placement?: string } | undefined }> = [];
@@ -120,12 +166,23 @@ export class FakeVoiceHost {
 				setStatus: () => {},
 				setWidget: (
 					name: string,
-					value: { lines?: string[]; placement?: string } | undefined,
+					value:
+						| { lines?: string[]; placement?: string }
+						| string[]
+						| ((tui: typeof this.tui, theme: any) => { dispose?: () => void })
+						| undefined,
 					options?: { placement?: string },
 				) => {
-					const normalized = Array.isArray(value)
-						? { lines: value as string[], ...(options ? { placement: options.placement } : {}) }
-						: value;
+					if (value === undefined) this.widgetComponents.get(name)?.dispose?.();
+					let normalized: { lines?: string[]; placement?: string } | undefined;
+					if (typeof value === "function") {
+						this.widgetComponents.set(name, value(this.tui, theme));
+						normalized = {};
+					} else {
+						normalized = Array.isArray(value)
+							? { lines: value, ...(options ? { placement: options.placement } : {}) }
+							: value;
+					}
 					this.widgets.set(name, normalized);
 					this.widgetOperations.push({ name, value: normalized });
 				},

@@ -23,11 +23,11 @@ Pi Voice reads `~/.pi/agent/pi-voice.json` by default. Unknown or invalid values
 | `output` | `auto` | `auto`, `local`, `tcp://host:port`, or `unix:///absolute/path`. |
 | `input` | `auto` | `auto`, `local`, `disabled`, TCP, or Unix endpoint. |
 | `talkShortcut` | `alt+m` | Pi key identifier such as `alt+m`, `ctrl+shift+m`, `f5`, or `disabled`. |
-| `scrollBottomShortcut` | `ctrl+e` | Key that scrolls the transcript back to the bottom (handy without a PageDown key); `/voice bottom` does the same. |
+| `scrollBottomShortcut` | `ctrl+e` | During narration, follows the currently spoken word again; otherwise scrolls to the transcript bottom. `/voice bottom` does the same. |
 | `submitMode` | `review` | `review` or `auto`. |
 | `editMode` | `smart` | `smart` or `append`. |
 | `playbackHighlight` | `true` | Enables progressive prose/code highlighting. |
-| `autoScroll` | `true` | Keeps the spoken position visible: re-anchors the viewport when narration leaves the 20–80 % band of visible lines, restores bottom-follow when speech ends. |
+| `autoScroll` | `true` | Locates the exact rendered spoken word, initially places it at 20% from the top (clamped near transcript ends), and re-anchors whenever a later word passes 80%. Manual scrolling suspends it and shows the follow-shortcut hint. |
 | `codeNarration` | `guided` | `guided` synchronized focus or plain `summary`. |
 | `codeDescriptionContext` | `block-only` | `block-only` sends only the concerned fence; `conversation` also sends its resolved historical discussion. |
 | `codeDescriptionPreprocessScope` | `since-compaction` | Background preprocessing covers only messages retained by the latest compaction (`all` revisits the entire branch). |

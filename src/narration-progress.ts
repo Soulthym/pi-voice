@@ -8,6 +8,9 @@ import { type FencedCodeBlock, isTextFenceLanguage, SpeakableStream } from "./sp
 
 export type NarrationMessageType = "assistant" | "assistant-thinking";
 
+/** Invisible marker used to locate the currently spoken word in rendered TUI lines. */
+export const NARRATION_ACTIVE_MARKER = "\u2063\u200b\u2063\u200c\u2063";
+
 export interface NarrationSourceRange {
 	start: number;
 	end: number;
@@ -85,6 +88,7 @@ type CodeDescriptionBlock = {
 	text: string;
 	cursor: number;
 	active: NarrationSourceRange | undefined;
+	activeWord: NarrationSourceRange | undefined;
 };
 
 const WORD_RE = /[\p{L}\p{N}]+(?:[.'’_-][\p{L}\p{N}]+)*/gu;
@@ -273,6 +277,8 @@ function styleNarrationMarkdown(
 	styleUnread: (text: string) => string,
 	styleActive: (text: string) => string,
 	extraExcluded: readonly NarrationSourceRange[] = [],
+	activeWord: NarrationSourceRange | undefined = undefined,
+	activeMarker = "",
 ): string {
 	const excluded = [...excludedMarkdownRanges(markdown), ...extraExcluded];
 	const ranges = tokenize(markdown).filter(word => {
@@ -313,7 +319,10 @@ function styleNarrationMarkdown(
 			const word = ranges[current];
 			phrase += markdown.slice(phraseOffset, word.start);
 			const text = markdown.slice(word.start, word.end);
-			phrase += word.end > cursor ? styleUnread(text) : text;
+			const marksActiveWord = activeWord
+				? word.end > activeWord.start && word.start < activeWord.end
+				: false;
+			phrase += `${marksActiveWord ? activeMarker : ""}${word.end > cursor ? styleUnread(text) : text}`;
 			phraseOffset = word.end;
 		}
 		output += styleActive(phrase);
@@ -422,6 +431,7 @@ export class NarrationProgress {
 	#cursor = 0;
 	#active = false;
 	#activeSource: NarrationSourceRange | undefined;
+	#activeWord: NarrationSourceRange | undefined;
 	#playback = new Map<number, number>();
 	#forceNextBlock = false;
 	#onChange: () => void;
@@ -439,6 +449,7 @@ export class NarrationProgress {
 		this.#cursor = 0;
 		this.#active = true;
 		this.#activeSource = undefined;
+		this.#activeWord = undefined;
 		this.#playback.clear();
 		this.#forceNextBlock = false;
 	}
@@ -500,6 +511,7 @@ export class NarrationProgress {
 					text: segment.codeDescription.text,
 					cursor: 0,
 					active: undefined,
+					activeWord: undefined,
 				});
 				this.#onChange();
 			}
@@ -544,10 +556,12 @@ export class NarrationProgress {
 		this.#cursor = this.#raw.length;
 		this.#active = false;
 		this.#activeSource = undefined;
+		this.#activeWord = undefined;
 		for (const block of this.#codeBlocks.values()) block.complete = true;
 		for (const description of this.#codeDescriptions.values()) {
 			description.cursor = description.text.length;
 			description.active = undefined;
+			description.activeWord = undefined;
 		}
 		this.#onChange();
 	}
@@ -570,11 +584,13 @@ export class NarrationProgress {
 				if (description) {
 					description.cursor = description.text.length;
 					description.active = undefined;
+					description.activeWord = undefined;
 				}
 			}
 		}
 		if (completed.some(segment => segment.source.start === this.#activeSource?.start && segment.source.end === this.#activeSource.end)) {
 			this.#activeSource = undefined;
+			this.#activeWord = undefined;
 		}
 		this.#onChange();
 	}
@@ -587,6 +603,7 @@ export class NarrationProgress {
 		descriptionFor: (block: FencedCodeBlock, transcript: string) => string | undefined = () => undefined,
 		highlightProgress = true,
 		highlightSyntax?: (code: string, language?: string) => string[],
+		activeMarker = "",
 	): string {
 		if (!markdown) return markdown;
 		const candidates = this.#blocks.filter(block => block.type === type && block.text.trim() === markdown);
@@ -600,6 +617,7 @@ export class NarrationProgress {
 			descriptionFor,
 			styleUnread,
 			styleActive,
+			activeMarker,
 		);
 		if (!highlightProgress || !this.#active || !block || blockStart === undefined) return injected.markdown;
 
@@ -610,6 +628,12 @@ export class NarrationProgress {
 			? {
 					start: mapOffset(this.#activeSource.start - blockStart),
 					end: mapOffset(this.#activeSource.end - blockStart),
+				}
+			: undefined;
+		const activeWord = this.#activeWord
+			? {
+					start: mapOffset(this.#activeWord.start - blockStart),
+					end: mapOffset(this.#activeWord.end - blockStart),
 				}
 			: undefined;
 		if (this.#activeSource && active && active.start < injected.markdown.length && active.end > 0) {
@@ -628,6 +652,8 @@ export class NarrationProgress {
 			styleUnread,
 			styleActive,
 			injected.excluded,
+			activeWord,
+			activeMarker,
 		);
 		const focused = [...this.#codeBlocks.values()]
 			.filter(codeBlock => !codeBlock.complete)
@@ -674,6 +700,7 @@ export class NarrationProgress {
 		descriptionFor: (block: FencedCodeBlock, transcript: string) => string | undefined,
 		styleUnread: (text: string) => string,
 		styleActive: (text: string) => string,
+		activeMarker = "",
 	): {
 		markdown: string;
 		shifts: Array<{ at: number; length: number }>;
@@ -696,6 +723,9 @@ export class NarrationProgress {
 				tracked?.active,
 				styleUnread,
 				styleActive,
+				[],
+				tracked?.activeWord,
+				activeMarker,
 			);
 			const prefix = markdown.slice(0, item.source.end).endsWith("\n") ? "\n" : "\n\n";
 			boxes.push({
@@ -776,11 +806,18 @@ export class NarrationProgress {
 	}
 
 	#recomputeCodeDescriptions(segments: TrackedSegment[], playback: number): boolean {
-		const next = new Map<string, { cursor: number; active: NarrationSourceRange | undefined }>();
+		const next = new Map<
+			string,
+			{
+				cursor: number;
+				active: NarrationSourceRange | undefined;
+				activeWord: NarrationSourceRange | undefined;
+			}
+		>();
 		for (const segment of segments) {
 			const description = segment.codeDescription;
 			if (!description) continue;
-			next.set(this.#codeKey(description.blockSource), { cursor: 0, active: undefined });
+			next.set(this.#codeKey(description.blockSource), { cursor: 0, active: undefined, activeWord: undefined });
 		}
 		for (const segment of segments) {
 			const description = segment.codeDescription;
@@ -800,6 +837,10 @@ export class NarrationProgress {
 			for (const word of segment.words) {
 				if (word.time > relative) break;
 				state.cursor = Math.max(state.cursor, word.end);
+				state.activeWord = { start: word.start, end: word.end };
+			}
+			if (!state.activeWord && segment.words[0]) {
+				state.activeWord = { start: segment.words[0].start, end: segment.words[0].end };
 			}
 		}
 
@@ -809,9 +850,13 @@ export class NarrationProgress {
 			if (!description) continue;
 			const activeChanged =
 				state.active?.start !== description.active?.start || state.active?.end !== description.active?.end;
-			if (state.cursor !== description.cursor || activeChanged) changed = true;
+			const activeWordChanged =
+				state.activeWord?.start !== description.activeWord?.start ||
+				state.activeWord?.end !== description.activeWord?.end;
+			if (state.cursor !== description.cursor || activeChanged || activeWordChanged) changed = true;
 			description.cursor = state.cursor;
 			description.active = state.active;
+			description.activeWord = state.activeWord;
 		}
 		return changed;
 	}
@@ -821,6 +866,7 @@ export class NarrationProgress {
 		if (playback === undefined) return;
 		let cursor = this.#cursor;
 		let activeSource: NarrationSourceRange | undefined;
+		let activeWord: NarrationSourceRange | undefined;
 		let codeChanged = false;
 		const segments = [...this.#segments.values()]
 			.filter(segment => segment.utterance === utterance && segment.audioStart !== undefined && segment.duration !== undefined)
@@ -839,20 +885,25 @@ export class NarrationProgress {
 				activeSource = segment.source;
 				segment.activeAt ??= performance.now();
 			}
-			if (!segment.revealAtEnd) {
-				for (const word of segment.words) {
-					if (word.time > relative) break;
-					cursor = Math.max(cursor, word.end);
-				}
+			for (const word of segment.words) {
+				if (word.time > relative) break;
+				activeWord = { start: word.start, end: word.end };
+				if (!segment.revealAtEnd) cursor = Math.max(cursor, word.end);
+			}
+			if (!activeWord && segment.words[0]) {
+				activeWord = { start: segment.words[0].start, end: segment.words[0].end };
 			}
 			break;
 		}
 		const activeChanged =
 			activeSource?.start !== this.#activeSource?.start || activeSource?.end !== this.#activeSource?.end;
+		const activeWordChanged =
+			activeWord?.start !== this.#activeWord?.start || activeWord?.end !== this.#activeWord?.end;
 		const descriptionChanged = this.#recomputeCodeDescriptions(segments, playback);
-		if (cursor === this.#cursor && !activeChanged && !codeChanged && !descriptionChanged) return;
+		if (cursor === this.#cursor && !activeChanged && !activeWordChanged && !codeChanged && !descriptionChanged) return;
 		this.#cursor = cursor;
 		this.#activeSource = activeSource;
+		this.#activeWord = activeWord;
 		this.#onChange();
 	}
 }

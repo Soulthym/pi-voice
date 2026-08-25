@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { NarrationProgress } from "../src/narration-progress.js";
+import { NARRATION_ACTIVE_MARKER, NarrationProgress } from "../src/narration-progress.js";
 
 const dim = (text: string): string => `<dim>${text}</dim>`;
 const background = (text: string): string => `<bg>${text}</bg>`;
@@ -25,6 +25,32 @@ test("dims unread prose and reveals words from playback progress", () => {
 	);
 	progress.setPlayback(1, 1.9);
 	assert.equal(progress.transform("First second.", "assistant", dim), "First second.");
+});
+
+test("marks the exact timed word for TUI auto-scroll", () => {
+	const progress = new NarrationProgress();
+	progress.setCompletedText("Alpha beta gamma.");
+	progress.registerSegment({ id: 70, utterance: 30, text: "Alpha beta gamma.", source: { start: 0, end: 17 } });
+	progress.setSegmentAudio(70, 0, 4);
+	progress.setAlignment(70, [
+		{ text: "Alpha", start: 0, end: 1 },
+		{ text: "beta", start: 1.5, end: 2.5 },
+		{ text: "gamma", start: 3, end: 4 },
+	]);
+
+	progress.setPlayback(30, 1.6);
+	const transformed = progress.transform(
+		"Alpha beta gamma.",
+		"assistant",
+		dim,
+		background,
+		undefined,
+		true,
+		undefined,
+		NARRATION_ACTIVE_MARKER,
+	);
+	assert.match(transformed, new RegExp(`Alpha ${NARRATION_ACTIVE_MARKER}beta`));
+	assert.equal(transformed.split(NARRATION_ACTIVE_MARKER).length - 1, 1);
 });
 
 test("uses forced-alignment word timestamps when they arrive", () => {
@@ -131,8 +157,17 @@ test("shows a code description below its block and reveals it with playback", ()
 	assert.match(pending, /> <dim>The<\/dim> <dim>loop<\/dim>/);
 
 	progress.setPlayback(6, 0);
-	const active = progress.transform(markdown, "assistant", dim, background, () => description);
-	assert.match(active, /> <bg>The <dim>loop<\/dim>/);
+	const active = progress.transform(
+		markdown,
+		"assistant",
+		dim,
+		background,
+		() => description,
+		true,
+		undefined,
+		NARRATION_ACTIVE_MARKER,
+	);
+	assert.match(active, new RegExp(`> <bg>${NARRATION_ACTIVE_MARKER}The <dim>loop<\\/dim>`));
 
 	progress.finish();
 	const finished = progress.transform(markdown, "assistant", dim, background, () => description);

@@ -58,7 +58,11 @@ Subsequent assistant messages do not reset earlier message styling while queued 
 
 ## Auto-scroll
 
-While spoken narration plays, the terminal viewport follows the active highlight: it re-anchors only when the highlight leaves the 20–80 % band of visible lines (measured from the top) and places it back at the 20 % mark. Manual scrolling suspends the behavior until the next utterance or replay. The band math is covered by deterministic tests; anchor precision depends on the scroll view exposed by the terminal runtime.
+With `autoScroll: true` (the default), Pi Voice attaches an invisible location marker to the **currently timed word** and finds that marker in Pi's rendered TUI document. Starting or seeking narration places that word 20% down from the top of the viewport. Near the start or end of the transcript, the target is clamped to the available scroll range instead of creating nonexistent space.
+
+After that initial placement, no scrolling occurs while the word remains in the 20–80% visible band. Each time a new spoken word moves past the 80% mark, it is re-anchored at 20%. F6/F7/F9/F10/F11 replay and seek actions, F8 resume, `/voice attention`, and the follow shortcut all re-arm this behavior.
+
+Manual scrolling during speech suspends automatic follow and shows a small hint below the editor. Press `Ctrl+E` (or the configured `scrollBottomShortcut`) to return to the currently spoken word; `/voice bottom` does the same. Outside active narration, that shortcut and command scroll directly to the transcript bottom.
 
 ## Timing diagnostics
 

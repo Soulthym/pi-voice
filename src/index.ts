@@ -43,7 +43,7 @@ import {
 import { chunkCodeNarration, plainCodeNarration, type CodeNarrationPlan } from "./code-narration.js";
 import { DeviceRouter, type VoiceDeviceSelection } from "./device-router.js";
 import { LiveTranscriptionSession } from "./live-transcription.js";
-import { NarrationProgress } from "./narration-progress.js";
+import { NARRATION_ACTIVE_MARKER, NarrationProgress } from "./narration-progress.js";
 import {
 	PlaybackHistory,
 	type PlaybackMessage,
@@ -730,8 +730,9 @@ const chargeBackfillUnit = (): boolean => {
 					return undefined;
 				}
 			},
-			config.enabled && config.playbackHighlight,
+			config.enabled && (config.playbackHighlight || config.autoScroll),
 			(code, language) => highlightCode(code, language),
+			config.autoScroll ? NARRATION_ACTIVE_MARKER : "",
 		);
 	});
 
@@ -747,6 +748,7 @@ const chargeBackfillUnit = (): boolean => {
 	let autoScrollSuspended = false;
 	let autoScrollForceOnce = false;
 	let autoScrollTookControl = false;
+	let followHintVisible = false;
 	const markdownLineCache = new Map<string, number>();
 	let belowCacheKey = "";
 	let belowCacheValue = 0;
@@ -757,6 +759,7 @@ const chargeBackfillUnit = (): boolean => {
 		contentHeight?: number;
 		isFollowingEnd?: () => boolean;
 		getContentWidth?: (width: number) => number;
+		render?: (width: number) => string[];
 		scrollTo(top: number, options?: { disableFollow?: boolean }): void;
 		scrollToEnd?: () => void;
 	} | undefined => {
@@ -765,7 +768,14 @@ const chargeBackfillUnit = (): boolean => {
 			| undefined
 			| null;
 		if (!tuiAny) return undefined;
-		return (tuiAny.primaryScrollView ?? tuiAny.implicitScrollView ?? tuiAny.getPrimaryScrollView?.()) as never;
+		// Fullscreen Pi always owns an implicit fallback ScrollView, even when its
+		// active layout exposes a different primary transcript viewport.
+		return (tuiAny.getPrimaryScrollView?.() ?? tuiAny.primaryScrollView ?? tuiAny.implicitScrollView) as never;
+	};
+
+	const narrationViewportWidth = (): number => {
+		const terminalWidth = (narrationTui as { terminal?: { columns?: number } } | null)?.terminal?.columns;
+		return Number(terminalWidth ?? process.stdout?.columns ?? 100);
 	};
 
 	const renderedMessageLines = (text: string, width: number): number => {
@@ -787,64 +797,132 @@ const chargeBackfillUnit = (): boolean => {
 		return lines;
 	};
 
+	const followShortcutLabel = (): string => {
+		if (config.scrollBottomShortcut === "disabled") return "/voice bottom";
+		return config.scrollBottomShortcut
+			.split("+")
+			.map(part => (part.length === 1 ? part.toUpperCase() : `${part[0]?.toUpperCase()}${part.slice(1)}`))
+			.join("+");
+	};
+
+	const hideFollowHint = (): void => {
+		if (!followHintVisible) return;
+		followHintVisible = false;
+		try {
+			activeContext?.ui.setWidget("pi-voice-follow-hint", undefined);
+		} catch {
+			// The context may become stale during session replacement.
+		}
+	};
+
+	const showFollowHint = (): void => {
+		if (followHintVisible || !activeContext) return;
+		followHintVisible = true;
+		const text = `↕ Spoken-text follow paused — press ${followShortcutLabel()} to follow again`;
+		activeContext.ui.setWidget(
+			"pi-voice-follow-hint",
+			[activeContext.ui.theme.fg("accent", text)],
+			{ placement: "belowEditor" },
+		);
+	};
+
+	const armNarrationFollow = (): void => {
+		autoScrollSuspended = false;
+		lastAutoScrollTop = undefined;
+		autoScrollForceOnce = true;
+		hideFollowHint();
+		requestNarrationRender();
+	};
+
 	const requestNarrationAutoScroll = (): void => {
-		if (!config.enabled || !config.autoScroll || !ownsSpeech || playbackPaused || autoScrollSuspended) return;
-		if (!autoScrollForceOnce && lastAutoScrollTop === undefined) return;
+		if (!config.enabled || !config.autoScroll || !ownsSpeech || playbackPaused) {
+			hideFollowHint();
+			return;
+		}
 		const scrollView = activeScrollView();
 		if (!scrollView || typeof scrollView.scrollTo !== "function") return;
 
-		const outerWidth = Number(process.stdout?.columns ?? 100);
-		const innerWidth = Math.max(40, Math.min(outerWidth, scrollView.getContentWidth?.(outerWidth) ?? outerWidth - 2));
-		const selected = playbackHistory.selected();
-		const isLive = liveTurnNarrationActive && ownedSpeechText.length > 0;
-		const text = isLive ? ownedSpeechText : (selected?.text ?? "");
-		if (!text) return;
-
-		const status = playbackHistory.status();
-		const totalChars = isLive ? Math.max(text.length, (selected?.text.length ?? 0)) : text.length;
-		const fraction =
-			status && status.duration > 0
-				? Math.min(1, Math.max(0, status.position / status.duration))
-			: Math.min(1, ownedSpeechText.length / Math.max(1, totalChars));
-
 		const resolvedContentHeight = scrollView.contentHeight ?? (scrollView.scrollTop + scrollView.viewportHeight);
-		const scrollViewport = { scrollTop: scrollView.scrollTop, viewportHeight: scrollView.viewportHeight, contentHeight: resolvedContentHeight };
-		const messageLines = renderedMessageLines(text, innerWidth);
-
-		// Lines below the active message: zero while narrating the newest
-		// message; for replays, the rendered heights of every later message.
-		let below = 0;
-		if (!isLive && selected && activeContext) {
-			const cacheId = `${selected.id}:${completedAssistantMessages(activeContext, config.mode).length}`;
-			if (cacheId !== belowCacheKey) {
-				belowCacheKey = cacheId;
-				const ordered = completedAssistantMessages(activeContext, config.mode);
-				const idx = ordered.findIndex(message => message.id === selected.id);
-				belowCacheValue = idx >= 0
-					? ordered.slice(idx + 1).reduce((total, message) => total + renderedMessageLines(message.text, innerWidth) + 2, 0)
-					: 0;
-			}
-			below = belowCacheValue;
-		}
-
-		const messageTop = Math.max(0, resolvedContentHeight - below - messageLines);
-		const anchor = anchorLineForMessage(messageTop, messageLines, fraction);
-		const target = computeAutoScrollTop(scrollViewport, anchor);
-
-		if (target === null && !autoScrollForceOnce) {
-			autoScrollSuspended = isManualScrollAway(scrollViewport, lastAutoScrollTop ?? scrollView.scrollTop);
+		const scrollViewport = {
+			scrollTop: scrollView.scrollTop,
+			viewportHeight: scrollView.viewportHeight,
+			contentHeight: resolvedContentHeight,
+		};
+		if (
+			!autoScrollForceOnce &&
+			lastAutoScrollTop !== undefined &&
+			isManualScrollAway(scrollViewport, lastAutoScrollTop)
+		) {
+			autoScrollSuspended = true;
+			showFollowHint();
 			return;
 		}
+		if (autoScrollSuspended) return;
 
+		const outerWidth = narrationViewportWidth();
+		let anchor: number | undefined;
+		if (scrollView.render) {
+			const lines = scrollView.render(outerWidth);
+			const markedLine = lines.findIndex(line => line.includes(NARRATION_ACTIVE_MARKER));
+			if (markedLine >= 0) anchor = markedLine;
+			else {
+				// The playback event can precede the TUI's narration transform by one
+				// render. Keep force-follow armed until the exact word marker exists.
+				requestNarrationRender();
+				return;
+			}
+		}
+
+		// Compatibility fallback for older/nonstandard TUI scroll views that do
+		// not expose their rendered document.
+		if (anchor === undefined) {
+			const innerWidth = Math.max(
+				40,
+				Math.min(outerWidth, scrollView.getContentWidth?.(outerWidth) ?? outerWidth - 2),
+			);
+			const selected = playbackHistory.selected();
+			const isLive = liveTurnNarrationActive && ownedSpeechText.length > 0;
+			const text = isLive ? ownedSpeechText : (selected?.text ?? "");
+			if (!text) return;
+			const status = playbackHistory.status();
+			const fraction = status && status.duration > 0
+				? Math.min(1, Math.max(0, status.position / status.duration))
+				: 0;
+			const messageLines = renderedMessageLines(text, innerWidth);
+			let below = 0;
+			if (!isLive && selected && activeContext) {
+				const ordered = completedAssistantMessages(activeContext, config.mode);
+				const cacheId = `${innerWidth}:${selected.id}:${ordered.length}`;
+				if (cacheId !== belowCacheKey) {
+					belowCacheKey = cacheId;
+					const idx = ordered.findIndex(message => message.id === selected.id);
+					belowCacheValue = idx >= 0
+						? ordered.slice(idx + 1).reduce(
+							(total, message) => total + renderedMessageLines(message.text, innerWidth) + 2,
+							0,
+						)
+						: 0;
+				}
+				below = belowCacheValue;
+			}
+			const messageTop = Math.max(0, resolvedContentHeight - below - messageLines);
+			anchor = anchorLineForMessage(messageTop, messageLines, fraction);
+		}
+
+		const target = computeAutoScrollTop(scrollViewport, anchor);
+		if (target === null && !autoScrollForceOnce) return;
+
+		const maxScrollTop = Math.max(0, resolvedContentHeight - scrollView.viewportHeight);
 		const topBand = Math.floor(scrollView.viewportHeight * 0.2);
-		const desired = target === null ? Math.max(0, anchor - topBand) : target;
-		lastAutoScrollTop = desired;
+		const desired = Math.max(0, Math.min(maxScrollTop, target ?? anchor - topBand));
 		autoScrollForceOnce = false;
 		autoScrollTookControl = true;
 		scrollView.scrollTo(desired, { disableFollow: true });
+		lastAutoScrollTop = scrollView.scrollTop;
 	};
 
 	const restoreFollowAfterSpeech = (): void => {
+		hideFollowHint();
 		if (!autoScrollTookControl) return;
 		autoScrollTookControl = false;
 		autoScrollForceOnce = false;
@@ -1261,9 +1339,7 @@ const chargeBackfillUnit = (): boolean => {
 		const sourceOffset = Math.max(0, Math.min(target.text.length, target.sourceOffset));
 		const suffix = target.text.slice(sourceOffset);
 		if (!suffix.trim()) return;
-		autoScrollSuspended = false;
-		lastAutoScrollTop = undefined;
-		autoScrollForceOnce = true;
+		armNarrationFollow();
 		codeWorkEpoch += 1;
 		if (activeContext) scheduleMissingCodeDescriptions(activeContext);
 		cancelTimingWorkers();
@@ -1653,6 +1729,8 @@ const chargeBackfillUnit = (): boolean => {
 		ctx.ui.setWidget("pi-voice-input", undefined);
 		ctx.ui.setWidget("pi-voice-playback", undefined);
 		ctx.ui.setWidget("pi-voice-preprocessing", undefined);
+		ctx.ui.setWidget("pi-voice-follow-hint", undefined);
+		followHintVisible = false;
 		if (attentionPollTimer) clearInterval(attentionPollTimer);
 		attentionPollTimer = setInterval(pollWaitingAttention, 200);
 		attentionPollTimer.unref?.();
@@ -1697,6 +1775,8 @@ const chargeBackfillUnit = (): boolean => {
 		ctx.ui.setWidget("pi-voice-input", undefined);
 		ctx.ui.setWidget("pi-voice-playback", undefined);
 		ctx.ui.setWidget("pi-voice-preprocessing", undefined);
+		ctx.ui.setWidget("pi-voice-follow-hint", undefined);
+		followHintVisible = false;
 		codePreprocessingProgress = undefined;
 		timingPreprocessingProgress = undefined;
 		if (attentionPollTimer) clearInterval(attentionPollTimer);
@@ -1787,7 +1867,7 @@ const chargeBackfillUnit = (): boolean => {
 			}
 			vocalizer.setNarrationSourceOffset(sourceOffset);
 			playbackPaused = false;
-			autoScrollForceOnce = true;
+			armNarrationFollow();
 			livePlaybackId = `live:${++nextLivePlaybackId}`;
 			playbackHistory.beginCapture(livePlaybackId, "", 0, true);
 			refreshPlaybackTimeline();
@@ -2012,6 +2092,7 @@ const chargeBackfillUnit = (): boolean => {
 				completedOwnerUtterance = undefined;
 				vocalizer.setPlaybackPaused(false);
 				playbackPaused = false;
+				armNarrationFollow();
 				pausedOwnerUtterance = undefined;
 				state = "speaking";
 				refreshStatus();
@@ -2079,14 +2160,20 @@ const chargeBackfillUnit = (): boolean => {
 			ctx.ui.notify("Scroll-to-bottom is unavailable in this runtime", "warning");
 			return;
 		}
+		if (ownsSpeech && !playbackPaused && config.autoScroll) {
+			armNarrationFollow();
+			requestNarrationAutoScroll();
+			return;
+		}
 		scrollView.scrollToEnd();
 		autoScrollSuspended = false;
 		lastAutoScrollTop = undefined;
+		hideFollowHint();
 	};
 
 	if (config.scrollBottomShortcut !== "disabled") {
 		pi.registerShortcut(config.scrollBottomShortcut, {
-			description: "Scroll the transcript back to the bottom",
+			description: "Follow spoken text, or scroll the transcript to the bottom",
 			handler: scrollToBottom,
 		});
 	}
@@ -2121,6 +2208,7 @@ const chargeBackfillUnit = (): boolean => {
 				"alignment-dtype",
 				"edit-model",
 				"highlight",
+				"autoscroll",
 				"timing",
 				"code-narration",
 				"code-budget",
@@ -2204,10 +2292,10 @@ const chargeBackfillUnit = (): boolean => {
 					.filter(value => value.startsWith(parts[1] ?? ""))
 					.map(value => ({ value: `code-narration ${value}`, label: value }));
 			}
-			if (parts[0] === "highlight") {
+			if (parts[0] === "highlight" || parts[0] === "autoscroll") {
 				return ["on", "off"]
 					.filter(value => value.startsWith(parts[1] ?? ""))
-					.map(value => ({ value: `highlight ${value}`, label: value }));
+					.map(value => ({ value: `${parts[0]} ${value}`, label: value }));
 			}
 			if (parts[0] === "edit-model") {
 				return ["current"]
@@ -2568,8 +2656,23 @@ const chargeBackfillUnit = (): boolean => {
 						return;
 					}
 					await updateConfig({ ...config, playbackHighlight: normalized === "on" });
-					if (normalized === "off") narration.finish();
+					if (normalized === "off" && !config.autoScroll) narration.finish();
+					requestNarrationRender();
 					ctx.ui.notify(`Spoken-word highlighting ${normalized === "on" ? "enabled" : "disabled"}`, "info");
+					return;
+				}
+				case "autoscroll": {
+					const normalized = value.toLowerCase();
+					if (normalized !== "on" && normalized !== "off") {
+						ctx.ui.notify("Usage: /voice autoscroll on|off", "error");
+						return;
+					}
+					await updateConfig({ ...config, autoScroll: normalized === "on" });
+					if (normalized === "on" && ownsSpeech && !playbackPaused) armNarrationFollow();
+					else hideFollowHint();
+					if (normalized === "off" && !config.playbackHighlight) narration.finish();
+					requestNarrationRender();
+					ctx.ui.notify(`Spoken-text auto-scroll ${normalized === "on" ? "enabled" : "disabled"}`, "info");
 					return;
 				}
 				case "edit-model": {
@@ -2713,13 +2816,13 @@ const chargeBackfillUnit = (): boolean => {
 				case "status":
 				case "":
 					ctx.ui.notify(
-						`Voice ${config.enabled ? "on" : "off"}; mode=${config.mode}; voice=${config.voice}; speed=${config.speed}; tts=${config.ttsModel}@${config.ttsDtype}; stt=${config.sttModel}@${config.sttDtype}; sttCandidates=${config.sttCandidates}; alignment=${config.alignmentModel}@${config.alignmentDtype}; editModel=${config.editModel}; highlight=${config.playbackHighlight ? "on" : "off"}; codeNarration=${config.codeNarration}; codeContext=${config.codeDescriptionContext}; codePreprocess=${config.codeDescriptionPreprocessConcurrency}; codeScope=${config.codeDescriptionPreprocessScope}; codeBudget=${backfillAllowance}; timingPreprocess=${config.timingPreprocessConcurrency}; audioCache=${config.audioCache ? `${config.audioCacheBitrate}kbps` : "off"}; device=${deviceSelection}${activeDeviceId ? `→${activeDeviceId}` : "→local"}; output=${config.output}; input=${config.input}; shortcut=${config.talkShortcut}; submit=${config.submitMode}; edit=${config.editMode}`,
+						`Voice ${config.enabled ? "on" : "off"}; mode=${config.mode}; voice=${config.voice}; speed=${config.speed}; tts=${config.ttsModel}@${config.ttsDtype}; stt=${config.sttModel}@${config.sttDtype}; sttCandidates=${config.sttCandidates}; alignment=${config.alignmentModel}@${config.alignmentDtype}; editModel=${config.editModel}; highlight=${config.playbackHighlight ? "on" : "off"}; autoScroll=${config.autoScroll ? "on" : "off"}; followShortcut=${config.scrollBottomShortcut}; codeNarration=${config.codeNarration}; codeContext=${config.codeDescriptionContext}; codePreprocess=${config.codeDescriptionPreprocessConcurrency}; codeScope=${config.codeDescriptionPreprocessScope}; codeBudget=${backfillAllowance}; timingPreprocess=${config.timingPreprocessConcurrency}; audioCache=${config.audioCache ? `${config.audioCacheBitrate}kbps` : "off"}; device=${deviceSelection}${activeDeviceId ? `→${activeDeviceId}` : "→local"}; output=${config.output}; input=${config.input}; shortcut=${config.talkShortcut}; submit=${config.submitMode}; edit=${config.editMode}`,
 						"info",
 					);
 					return;
 				default:
 					ctx.ui.notify(
-						"Usage: /voice [on|off|toggle|status|stop|setup|test|talk|attention|mode|voice|speed|tts-model|tts-dtype|stt-model|stt-dtype|stt-candidates|alignment-model|alignment-dtype|edit-model|highlight|timing|code-narration|code-preprocess|timing-preprocess|audio-cache|audio-bitrate|device|output|input|shortcut|submit|edit]",
+						"Usage: /voice [on|off|toggle|status|stop|setup|test|talk|attention|mode|voice|speed|tts-model|tts-dtype|stt-model|stt-dtype|stt-candidates|alignment-model|alignment-dtype|edit-model|highlight|autoscroll|timing|bottom|code-narration|code-budget|code-preprocess|timing-preprocess|audio-cache|audio-bitrate|device|output|input|shortcut|submit|edit]",
 						"error",
 					);
 			}
