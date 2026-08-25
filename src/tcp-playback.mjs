@@ -13,6 +13,7 @@ let pausedAt = null;
 let pausedDuration = 0;
 let clientSessionId;
 let pendingControl;
+let controlQueue = Promise.resolve();
 let lastFeedbackAt = performance.now();
 let samplesWritten = 0;
 let feedback = "";
@@ -73,18 +74,24 @@ function sendPlaybackControl(command) {
 		pendingControl = command;
 		return;
 	}
-	const commandSocket = connectEndpoint();
-	commandSocket.on("connect", () => {
-		commandSocket.end(`PI_VOICE_CONTROL${command} ${clientSessionId}\n`);
-	});
-	commandSocket.on("error", () => {});
-	if (command === "stop") {
-		commandSocket.on("close", () => {
-			stopped = true;
-			socket.destroy();
-			process.exit(0);
-		});
-	}
+	controlQueue = controlQueue.then(
+		() =>
+			new Promise(resolve => {
+				const commandSocket = connectEndpoint();
+				commandSocket.on("connect", () => {
+					commandSocket.end(`PI_VOICE_CONTROL${command} ${clientSessionId}\n`);
+				});
+				commandSocket.on("error", resolve);
+				commandSocket.on("close", () => {
+					resolve();
+					if (command === "stop") {
+						stopped = true;
+						socket.destroy();
+						process.exit(0);
+					}
+				});
+			}),
+	);
 }
 
 let controlCommands = "";

@@ -17,7 +17,7 @@ export type WorkerEvent =
 	| { type: "alignment-preload-error"; requestId: string; message: string }
 	| { type: "transcribing" }
 	| { type: "transcript"; text: string; candidates?: string[]; requestId: string; preview?: boolean }
-	| { type: "idle"; utterance?: number }
+	| { type: "idle"; utterance?: number; cancelId?: number }
 	| { type: "error"; message: string; requestId?: string; preview?: boolean; utterance?: number };
 
 type PendingPreload = {
@@ -44,6 +44,8 @@ export class VoiceWorkerClient {
 	#pendingTranscriptions = new Map<string, PendingTranscription>();
 	#pendingMeasurements = new Map<string, PendingMeasurement>();
 	#nextRequestId = 0;
+	#nextCancelId = 0;
+	#activeUtterance: number | undefined;
 	#onEvent: (event: WorkerEvent) => void;
 
 	constructor(onEvent: (event: WorkerEvent) => void) {
@@ -51,6 +53,7 @@ export class VoiceWorkerClient {
 	}
 
 	sendSegment(utterance: number, segmentId: number, text: string, config: VoiceConfig): void {
+		this.#activeUtterance = utterance;
 		this.#send({
 			type: "segment",
 			utterance,
@@ -77,14 +80,16 @@ export class VoiceWorkerClient {
 		this.#send({ type: "pause", paused });
 	}
 
-	cancel(): void {
+	cancel(): number | undefined {
 		for (const pending of this.#pendingMeasurements.values()) {
 			clearTimeout(pending.timer);
 			pending.reject(new Error("Speech timing measurement interrupted"));
 		}
 		this.#pendingMeasurements.clear();
-		if (!this.#child) return;
-		this.#send({ type: "cancel" });
+		if (!this.#child) return undefined;
+		const cancelId = ++this.#nextCancelId;
+		this.#send({ type: "cancel", cancelId });
+		return cancelId;
 	}
 
 	measureSegment(text: string, config: VoiceConfig): Promise<number> {
@@ -298,6 +303,12 @@ export class VoiceWorkerClient {
 				else pending.reject(new Error(event.message));
 			}
 		}
+		if (
+			(event.type === "idle" && event.utterance === this.#activeUtterance) ||
+			(event.type === "error" && event.utterance === this.#activeUtterance)
+		) {
+			this.#activeUtterance = undefined;
+		}
 		this.#onEvent(event);
 	}
 
@@ -317,6 +328,11 @@ export class VoiceWorkerClient {
 			pending.reject(error);
 		}
 		this.#pendingMeasurements.clear();
-		this.#onEvent({ type: "error", message: error.message });
+		this.#onEvent({
+			type: "error",
+			message: error.message,
+			...(this.#activeUtterance !== undefined ? { utterance: this.#activeUtterance } : {}),
+		});
+		this.#activeUtterance = undefined;
 	}
 }

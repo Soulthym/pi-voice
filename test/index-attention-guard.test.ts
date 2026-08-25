@@ -56,7 +56,7 @@ function mockWorker(): () => void {
 		return 1;
 	};
 	VoiceWorkerClient.prototype.endUtterance = function (): void {};
-	VoiceWorkerClient.prototype.cancel = function (): void {};
+	VoiceWorkerClient.prototype.cancel = function (): undefined { return undefined; };
 	VoiceWorkerClient.prototype.terminate = async function (): Promise<void> {};
 	return () => {
 		VoiceWorkerClient.prototype.sendSegment = original.sendSegment;

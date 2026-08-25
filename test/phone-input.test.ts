@@ -35,6 +35,43 @@ test("requests a phone recording and decodes the returned audio", async () => {
 	}
 });
 
+test("cancellation finishes the old stop before a replacement capture starts", async () => {
+	let activeRecord: net.Socket | undefined;
+	let records = 0;
+	const commands: string[] = [];
+	const server = net.createServer(socket => {
+		socket.setEncoding("utf8");
+		socket.once("data", command => {
+			commands.push(String(command));
+			if (String(command) === "stop\n") {
+				activeRecord?.destroy();
+				activeRecord = undefined;
+				socket.end(`ok ${Buffer.from("stopping").toString("base64")}\n`);
+				return;
+			}
+			records += 1;
+			if (records === 1) activeRecord = socket;
+			else socket.end(`audio ${Buffer.from("replacement").toString("base64")}\n`);
+		});
+	});
+	const port = await listen(server);
+	try {
+		const client = new PhoneInputClient();
+		const first = client.capture(`tcp://127.0.0.1:${port}`);
+		await new Promise(resolve => setTimeout(resolve, 30));
+		const cancellation = client.cancel();
+		const replacement = client.capture(`tcp://127.0.0.1:${port}`);
+		await assert.rejects(first);
+		await cancellation;
+		const result = await replacement;
+		assert.equal(result.type, "audio");
+		assert.deepEqual(commands.slice(0, 3), ["record\n", "stop\n", "record\n"]);
+	} finally {
+		activeRecord?.destroy();
+		await new Promise<void>(resolve => server.close(() => resolve()));
+	}
+});
+
 test("connects to microphone bridges forwarded over Unix sockets", async () => {
 	const socketPath = path.join(os.tmpdir(), `pi-voice-input-${process.pid}-${Date.now()}.sock`);
 	const server = net.createServer(socket => {

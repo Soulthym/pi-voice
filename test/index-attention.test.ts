@@ -43,7 +43,7 @@ function mockWorker(spoken: string[]): () => void {
 		spoken.push(text);
 	};
 	VoiceWorkerClient.prototype.endUtterance = function (): void {};
-	VoiceWorkerClient.prototype.cancel = function (): void {};
+	VoiceWorkerClient.prototype.cancel = function (): undefined { return undefined; };
 	VoiceWorkerClient.prototype.terminate = async function (): Promise<void> {};
 	return () => {
 		VoiceWorkerClient.prototype.sendSegment = original.sendSegment;

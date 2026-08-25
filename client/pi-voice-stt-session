@@ -54,7 +54,14 @@ if mkdir "$recording_lock" 2>/dev/null; then
   lock_acquired=true
 else
   old_owner=$(cat "$active_file" 2>/dev/null || true)
-  if [[ $old_owner =~ ^[0-9]+$ ]] && ! kill -0 "$old_owner" 2>/dev/null; then
+  old_command=$(tr '\0' ' ' <"/proc/$old_owner/cmdline" 2>/dev/null || true)
+  if [[ -z $old_owner ]]; then
+    sleep 0.05
+    if [[ -z $(cat "$active_file" 2>/dev/null || true) ]]; then
+      rm -rf "$recording_lock" "$active_file" "$stop_file"
+      mkdir "$recording_lock" 2>/dev/null && lock_acquired=true
+    fi
+  elif [[ ! $old_owner =~ ^[0-9]+$ ]] || [[ $old_command != *pi-voice-stt-session* ]]; then
     rm -rf "$recording_lock" "$active_file" "$stop_file"
     mkdir "$recording_lock" 2>/dev/null && lock_acquired=true
   fi

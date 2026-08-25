@@ -147,11 +147,13 @@ test("local STT session reports stop errors, missing ffmpeg, and honors XDG_RUNT
 
 test("microphone sessions reject a second concurrent recorder", async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-voice-stt-lock-"));
+	const owner = spawn("bash", ["-c", "exec -a pi-voice-stt-session sleep 30"], { stdio: "ignore" });
 	try {
+		await new Promise(resolve => setTimeout(resolve, 30));
 		const linuxRuntime = path.join(root, "linux-runtime");
 		const linuxState = path.join(linuxRuntime, `pi-voice-client-${process.getuid!()}`);
 		fs.mkdirSync(path.join(linuxState, "recording-lock"), { recursive: true });
-		fs.writeFileSync(path.join(linuxState, "recording-active"), `${process.pid}\n`);
+		fs.writeFileSync(path.join(linuxState, "recording-active"), `${owner.pid}\n`);
 		const linuxBin = restrictedPath(path.join(root, "linux-tools"), {
 			ffmpeg: "exit 0",
 			"pw-record": "exit 0",
@@ -169,7 +171,7 @@ test("microphone sessions reject a second concurrent recorder", async () => {
 
 		const termuxRuntime = path.join(root, "termux-runtime");
 		fs.mkdirSync(path.join(termuxRuntime, "pi-voice-recording-lock"), { recursive: true });
-		fs.writeFileSync(path.join(termuxRuntime, "pi-voice-recording-active"), `${process.pid}\n`);
+		fs.writeFileSync(path.join(termuxRuntime, "pi-voice-recording-active"), `${owner.pid}\n`);
 		const termuxBin = restrictedPath(path.join(root, "termux-tools"), {
 			"termux-microphone-record": "exit 0",
 		});
@@ -183,6 +185,7 @@ test("microphone sessions reject a second concurrent recorder", async () => {
 		);
 		assert.match(decodeMessage(termux.stdout.trim()).message, /already recording/);
 	} finally {
+		owner.kill("SIGKILL");
 		fs.rmSync(root, { recursive: true, force: true });
 	}
 });

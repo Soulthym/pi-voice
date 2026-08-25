@@ -143,13 +143,17 @@ class LiveVoiceDetector {
 export class PhoneInputClient {
 	#socket: InputConnection | null = null;
 	#activeEndpoint: string | null = null;
+	#cancellation: Promise<void> = Promise.resolve();
 
-	cancel(): void {
+	cancel(): Promise<void> {
 		const endpoint = this.#activeEndpoint;
 		this.#socket?.destroy();
 		this.#socket = null;
 		this.#activeEndpoint = null;
-		if (endpoint) void this.stop(endpoint).catch(() => {});
+		if (endpoint) {
+			this.#cancellation = this.#cancellation.then(() => this.stop(endpoint)).catch(() => {});
+		}
+		return this.#cancellation;
 	}
 
 	stop(endpoint: string): Promise<void> {
@@ -185,8 +189,8 @@ export class PhoneInputClient {
 		});
 	}
 
-	capture(endpoint: string, options: PhoneCaptureOptions = {}): Promise<PhoneCapture> {
-		this.cancel();
+	async capture(endpoint: string, options: PhoneCaptureOptions = {}): Promise<PhoneCapture> {
+		await this.cancel();
 		const socket = connectEndpoint(endpoint);
 		this.#socket = socket;
 		this.#activeEndpoint = endpoint;

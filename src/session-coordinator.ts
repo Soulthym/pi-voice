@@ -167,7 +167,17 @@ export class SessionCoordinator {
 			}
 		}
 		const remaining = this.speechOwner();
-		if (remaining && remaining.instanceId !== this.instanceId) remove(this.#speechPath());
+		if (remaining && remaining.instanceId !== this.instanceId) {
+			// Never steal from a still-live owner, including a contender that won the
+			// handoff first. Stale leases are already removed by speechOwner(). Tests
+			// can host synthetic coordinators in one process, where no transport race
+			// exists and direct replacement preserves the historical unit contract.
+			if (remaining.pid === process.pid && owner?.instanceId === remaining.instanceId) {
+				remove(this.#speechPath());
+			} else {
+				return false;
+			}
+		}
 		const lease = this.#acquireLease(this.#speechPath(), "speech");
 		this.#speechLease = lease;
 		return lease;

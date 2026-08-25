@@ -31,6 +31,7 @@ const sttModels = new Map();
 let epoch = 0;
 let queue = [];
 let pumping = false;
+let cancelBarrier = Promise.resolve();
 let alignmentChild = null;
 let shuttingDown = false;
 
@@ -476,7 +477,10 @@ function createLocalSink(sampleRate, utterance) {
 			this.stopped = true;
 			this.stopPlaybackClock();
 			child.stdin.destroy();
+			if (child.exitCode !== null) return Promise.resolve();
+			const exited = new Promise(resolve => child.once("exit", resolve));
 			child.kill("SIGKILL");
+			return exited.then(() => {});
 		},
 		setPaused(paused) {
 			this.setPlaybackClockPaused(paused);
@@ -574,6 +578,9 @@ function createNetworkSink(output, sampleRate, utterance) {
 		stop() {
 			this.stopped = true;
 			intentionallyStopped = true;
+			const exited = child.exitCode !== null
+				? Promise.resolve()
+				: new Promise(resolve => child.once("exit", resolve));
 			if (!readySettled) {
 				readySettled = true;
 				resolveReady();
@@ -588,6 +595,7 @@ function createNetworkSink(output, sampleRate, utterance) {
 			child.stdin.destroy();
 			const killTimer = setTimeout(() => child.kill("SIGKILL"), 500);
 			killTimer.unref?.();
+			return exited.then(() => clearTimeout(killTimer));
 		},
 		setPaused(paused) {
 			control.write(`${paused ? "pause" : "resume"}\n`);
@@ -624,7 +632,7 @@ function setPlayerPaused(paused) {
 }
 
 function stopPlayer() {
-	playback.stopPlayer();
+	return playback.stopPlayer();
 }
 
 async function writeAudio(sink, pcm) {
@@ -723,6 +731,7 @@ async function pump() {
 			try {
 				await runOperation(operation);
 			} catch (error) {
+				if (operation.epoch !== epoch) continue;
 				send({
 					type: "error",
 					message: error instanceof Error ? error.message : String(error),
@@ -730,7 +739,7 @@ async function pump() {
 				});
 				// Terminal synthesis/sink failure invalidates the remaining utterance;
 				// otherwise queued segments can create a second uncontrolled player.
-				cancel();
+				await scheduleCancel();
 			}
 		}
 	} finally {
@@ -750,7 +759,12 @@ function enqueue(operation) {
 	void pump();
 }
 
-function cancel() {
+function scheduleCancel(cancelId) {
+	cancelBarrier = cancelBarrier.then(() => cancel(cancelId));
+	return cancelBarrier;
+}
+
+async function cancel(cancelId) {
 	epoch += 1;
 	cancelAlignment();
 	playback.resetPlayerPaused();
@@ -760,8 +774,8 @@ function cancel() {
 				operation.type === "preload" || operation.type === "transcribe" || operation.type === "transcribe-pcm",
 		)
 		.map(operation => ({ ...operation, epoch }));
-	stopPlayer();
-	send({ type: "idle" });
+	await stopPlayer();
+	send({ type: "idle", ...(Number.isInteger(cancelId) ? { cancelId } : {}) });
 }
 
 const lines = readline.createInterface({ input: process.stdin });
@@ -847,7 +861,7 @@ lines.on("line", line => {
 			setPlayerPaused(message.paused === true);
 			break;
 		case "cancel":
-			cancel();
+			void scheduleCancel(message.cancelId);
 			break;
 		case "shutdown":
 			shuttingDown = true;

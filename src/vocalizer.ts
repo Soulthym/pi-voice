@@ -31,13 +31,12 @@ type VoiceWorker = Pick<
 	| "sendSegment"
 	| "measureSegment"
 	| "endUtterance"
-	| "cancel"
 	| "transcribe"
 	| "transcribePcm"
 	| "preload"
 	| "preloadAlignment"
 	| "terminate"
-> & { setPlaybackPaused?(paused: boolean): void };
+> & { cancel(): number | undefined | void; setPlaybackPaused?(paused: boolean): void };
 
 export class Vocalizer {
 	#worker: VoiceWorker;
@@ -148,7 +147,7 @@ export class Vocalizer {
 		this.#worker.setPlaybackPaused?.(paused);
 	}
 
-	clear(): void {
+	clear(): number | undefined {
 		this.#generation += 1;
 		this.#clearIdleTimer();
 		this.#speakable = null;
@@ -160,7 +159,7 @@ export class Vocalizer {
 		this.#codeDescriptionMessages = undefined;
 		for (const controller of this.#descriptionControllers) controller.abort();
 		this.#descriptionControllers.clear();
-		this.#worker.cancel();
+		return this.#worker.cancel() as number | undefined;
 	}
 
 	measureSegment(text: string): Promise<number> {

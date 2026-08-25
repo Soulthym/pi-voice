@@ -55,11 +55,12 @@ export function createPlaybackController({ send }) {
 		const sink = player;
 		if (sink) playerGeneration += 1;
 		clearCurrentPlayer();
-		if (!sink) return;
+		if (!sink) return Promise.resolve();
 		try {
-			sink.stop();
+			return Promise.resolve(sink.stop()).catch(() => {});
 		} catch {
 			// Best-effort interruption.
+			return Promise.resolve();
 		}
 	}
 
@@ -101,6 +102,7 @@ export function createPlaybackController({ send }) {
 		await sink.close();
 		if (sink.stopped || generation !== playerGeneration) return false;
 		if (player === sink) clearCurrentPlayer();
+		desiredPaused = false;
 		send({ type: "idle", utterance });
 		return true;
 	}

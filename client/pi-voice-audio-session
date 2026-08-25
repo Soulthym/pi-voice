@@ -57,14 +57,19 @@ for _ in {1..100}; do
     break
   fi
   lock_owner=$(cat "$player_lock/owner" 2>/dev/null || true)
-  if [[ $lock_owner =~ ^[0-9]+$ ]] && ! kill -0 "$lock_owner" 2>/dev/null; then
+  lock_command=$(tr '\0' ' ' <"/proc/$lock_owner/cmdline" 2>/dev/null || true)
+  if [[ -z $lock_owner ]]; then
+    sleep 0.05
+    [[ -z $(cat "$player_lock/owner" 2>/dev/null || true) ]] && rm -rf "$player_lock" 2>/dev/null || true
+  elif [[ ! $lock_owner =~ ^[0-9]+$ ]] || [[ $lock_command != *pi-voice-audio-session* ]]; then
     rm -rf "$player_lock" 2>/dev/null || true
   fi
   sleep 0.01
 done
 [[ $lock_held == true ]] || exit 1
 old_player=$(cat "$active_player_file" 2>/dev/null || true)
-if [[ $old_player =~ ^[0-9]+$ ]] && kill -0 "$old_player" 2>/dev/null; then
+old_player_command=$(tr '\0' ' ' <"/proc/$old_player/cmdline" 2>/dev/null || true)
+if [[ $old_player =~ ^[0-9]+$ ]] && [[ $old_player_command == *mpv* && $old_player_command == *pi-voice-mpv-* ]] && kill -0 "$old_player" 2>/dev/null; then
   kill "$old_player" 2>/dev/null || true
   for _ in {1..50}; do
     kill -0 "$old_player" 2>/dev/null || break
