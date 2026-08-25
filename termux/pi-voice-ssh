@@ -121,54 +121,75 @@ clean_all_sessions() {
 bridge_pid_file=$runtime_root/client-bridge.pid
 # A pid file alone cannot be trusted: after a suspend the recorded pid may
 # belong to an unrelated process, which previously left playback pointing at a
-# dead reverse tunnel (ECONNREFUSED) until the client was restarted manually.
+# dead reverse tunnel (ECONNREFUSED) until the client restarted manually.
+probe_audio_port() {
+  # Prefer socat (a bridge dependency) or node; some bash builds lack /dev/tcp,
+  # whose failed exec can abort the shell outright.
+  if command -v socat >/dev/null 2>&1; then
+    printf '' | socat -T1 - "TCP:127.0.0.1:${AUDIO_PORT}" >/dev/null 2>&1
+    return $?
+  fi
+  if command -v node >/dev/null 2>&1; then
+    node -e 'const n=require("net");const c=n.createConnection({host:"127.0.0.1",port:Number(process.env.PI_VOICE_AUDIO_PORT)});c.on("connect",()=>{c.end();process.exit(0)});c.on("error",()=>process.exit(1));setTimeout(()=>process.exit(1),700)'
+    return $?
+  fi
+  return 0
+}
+
 bridge_alive() {
   local pid=$1
-  [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null || return 1
+  if [[ -z $pid ]]; then
+    return 1
+  fi
+  if ! kill -0 "$pid" 2>/dev/null; then
+    return 1
+  fi
   if [[ -r /proc/$pid/cmdline ]] && grep -aq "pi-voice-client" /proc/$pid/cmdline 2>/dev/null; then
     return 0
   fi
   # No /proc or unexpected cmdline: fall back to probing the audio port.
-  (exec 3<>"/dev/tcp/127.0.0.1/${AUDIO_PORT}") 2>/dev/null || return 1
-  exec 3>&- 3<&- 2>/dev/null || true
+  probe_audio_port
 }
 
 ensure_bridge() {
   local bridge_lock=$runtime_root/bridge.lock pid=
   while ! mkdir "$bridge_lock" 2>/dev/null; do sleep 0.05; done
   [[ -s $bridge_pid_file ]] && pid=$(<"$bridge_pid_file")
-  if bridge_alive "$pid"; then
-    rmdir "$bridge_lock"
-    return
-  fi
-  rm -f "$bridge_pid_file"
-  local bridge=${PI_VOICE_CLIENT_COMMAND:-$HOME/.local/bin/pi-voice-client}
-  if [[ ! -x $bridge ]]; then
-    rmdir "$bridge_lock"
-    printf 'Missing %s; install the pi-voice client scripts first\n' "$bridge" >&2
-    exit 1
-  fi
-  "$bridge" >"$runtime_root/client-bridge.log" 2>&1 &
-  pid=$!
-  printf '%s\n' "$pid" >"$bridge_pid_file"
-  # Wait until the audio listener actually answers, not just until the pid exists.
-  local tick=0
-  while (( tick < 20 )); do
-    if (exec 3<>"/dev/tcp/127.0.0.1/${AUDIO_PORT}") 2>/dev/null; then
-      exec 3>&- 3<&- 2>/dev/null || true
-      break
+  if ! bridge_alive "$pid"; then
+    rm -f "$bridge_pid_file"
+    local bridge=${PI_VOICE_CLIENT_COMMAND:-$HOME/.local/bin/pi-voice-client}
+    if [[ ! -x $bridge ]]; then
+      rmdir "$bridge_lock"
+      printf 'Missing %s; install the pi-voice client scripts first\n' "$bridge" >&2
+      exit 1
     fi
-    kill -0 "$pid" 2>/dev/null || break
-    sleep 0.1
-    (( tick += 1 ))
-  done
-  if ! kill -0 "$pid" 2>/dev/null || ! (exec 3<>"/dev/tcp/127.0.0.1/${AUDIO_PORT}") 2>/dev/null; then
-    exec 3>&- 3<&- 2>/dev/null || true
+    # Leftover listeners or players from a previous bridge can steal ports or
+    # hold a dead audio FIFO, producing silent playback after reconnects.
+    pkill -f "pi-voice-audio-session" 2>/dev/null || true
+    pkill -f "pi-voice-stt-session" 2>/dev/null || true
+    pkill -f "TCP4-LISTEN:${AUDIO_PORT}" 2>/dev/null || true
+    pkill -f "TCP4-LISTEN:${CONTROL_PORT}" 2>/dev/null || true
+    sleep 0.15
+    "$bridge" >"$runtime_root/client-bridge.log" 2>&1 &
+    pid=$!
+    printf '%s\n' "$pid" >"$bridge_pid_file"
+    # Wait until the audio listener actually answers.
+    local tick=0
+    while (( tick < 20 )); do
+      if probe_audio_port; then break; fi
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+      (( tick += 1 )) || true
+    done
+    if ! kill -0 "$pid" 2>/dev/null || ! probe_audio_port; then
+      rmdir "$bridge_lock"
+      cat "$runtime_root/client-bridge.log" >&2
+      exit 1
+    fi
     rmdir "$bridge_lock"
-    cat "$runtime_root/client-bridge.log" >&2
-    exit 1
+  else
+    rmdir "$bridge_lock"
   fi
-  rmdir "$bridge_lock"
 }
 
 shell_quote() { printf "'%s'" "${1//\'/\'\\\'\'}"; }

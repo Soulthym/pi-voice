@@ -12,8 +12,15 @@ const TERMUX_WRAPPER = path.resolve("termux/pi-voice-ssh");
 const CORE_TOOLS = [
 	"awk", "basename", "bash", "cat", "chmod", "cmp", "cut", "date", "dd", "dirname", "env", "head", "id", "kill",
 	"mkdir", "mkfifo", "rmdir", "printf", "readlink", "rm", "sh", "sha256sum", "sleep", "sort", "stat", "tail", "touch",
-	"tr", "base64", "setsid", "timeout", "uname",
+	"tr", "base64", "setsid", "timeout", "uname", "pkill",
 ];
+
+/** socat stub that really dials TCP endpoints so liveness probes behave. */
+const DIAL_SOCAT = `if [[ $1 == -T1 ]]; then
+  addr=$3; addr=\${addr#TCP:}; host=\${addr%:*}; port=\${addr##*:}
+  exec node -e 'const n=require("net");const c=n.createConnection({host:process.argv[1],port:+process.argv[2]});c.on("connect",()=>{c.end();process.exit(0)});c.on("error",()=>process.exit(1));setTimeout(()=>process.exit(1),700)' "$host" "$port"
+fi
+exit 0`;
 
 function restrictedPath(root: string, fakes: Record<string, string>): string {
 	const bin = path.join(root, "bin");
@@ -118,7 +125,7 @@ async function scenario(
 	args: string[],
 	envOverrides: Record<string, string> = {},
 ): Promise<RunResult & { log(): string }> {
-	const bin = restrictedPath(root, { ssh: FAKE_SSH });
+	const bin = restrictedPath(root, { ssh: FAKE_SSH, socat: DIAL_SOCAT });
 	const runtime = path.join(root, "runtime");
 	fs.mkdirSync(runtime, { recursive: true });
 	const logFile = path.join(root, "ssh.log");
@@ -201,7 +208,7 @@ test("stale bridge pid files are replaced; live bridges are reused", async () =>
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-voice-ssh-bridge-"));
 	const runtime = path.join(root, "runtime");
 	fs.mkdirSync(runtime, { recursive: true });
-	const bin = restrictedPath(root, { ssh: FAKE_SSH });
+	const bin = restrictedPath(root, { ssh: FAKE_SSH, socat: DIAL_SOCAT });
 	const audioPort = 20000 + (process.pid % 20000);
 	const env = {
 		XDG_RUNTIME_DIR: runtime,
@@ -264,6 +271,55 @@ test("stale bridge pid files are replaced; live bridges are reused", async () =>
 		}
 		fs.rmSync(root, { recursive: true, force: true });
 	}
+});
+
+test("termux wrapper runs the lifecycle and clears stale players", async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-voice-ssh-termux-"));
+	const runtime = path.join(root, "runtime");
+	fs.mkdirSync(runtime, { recursive: true });
+	const bin = restrictedPath(root, { ssh: FAKE_SSH, socat: DIAL_SOCAT });
+	const audioPort = 22000 + (process.pid % 20000);
+	fs.writeFileSync(
+		path.join(root, "counting-bridge"),
+		"#!/usr/bin/env bash\necho started >> " + JSON.stringify(path.join(root, "bridge-starts.log")) +
+			"\nexec node -e 'const n=require(\"net\");const s=n.createServer(c=>c.end());s.listen(Number(process.env.PI_VOICE_AUDIO_PORT)||8765,\"127.0.0.1\")'\n",
+	);
+	fs.chmodSync(path.join(root, "counting-bridge"), 0o755);
+
+	// A leftover player from a previous bridge instance: argv[0] renamed so
+	// pkill -f can find it exactly like the real session scripts.
+	const { spawn } = await import("node:child_process");
+	const stalePlayer = spawn("bash", ["-c", "exec -a pi-voice-audio-session sleep 60"], {
+		detached: true,
+		stdio: "ignore",
+	});
+	await new Promise(r => setTimeout(r, 150));
+
+	const result = await runScript(TERMUX_WRAPPER, ["u@termux"], {
+		XDG_RUNTIME_DIR: runtime,
+		PATH: bin,
+		HOME: root,
+		PREFIX: path.join(root, "com.termux"),
+		PI_VOICE_DEVICE_NAME: "t",
+		PI_VOICE_CLIENT_COMMAND: path.join(root, "counting-bridge"),
+		PI_VOICE_AUDIO_PORT: String(audioPort),
+		FAKE_SSH_LOG: path.join(root, "ssh.log"),
+	});
+	const startsCount = (() => { try { return fs.readFileSync(path.join(root, "bridge-starts.log"), "utf8").split("\n").filter(Boolean).length; } catch { return 0; } })();
+	assert.equal(result.code, 0, JSON.stringify({ rc: result.code, err: result.stderr.slice(0,400), out: result.stdout.slice(0,200) }));
+	const sshLog = fs.readFileSync(path.join(root, "ssh.log"), "utf8").replaceAll("\0", "\n");
+	assert.match(sshLog, /u@termux/);
+	console.error("TERMUX-DATA", JSON.stringify({ rc: result.code, err: result.stderr.slice(0,300), out: result.stdout.slice(0,200), starts: startsCount }));
+	assert.ok(startsCount >= 1, `bridge must start`);
+
+	let alive = true;
+	try {
+		process.kill(stalePlayer.pid!, 0);
+	} catch {
+		alive = false;
+	}
+	assert.equal(alive, false, "stale players from previous bridges must be cleared");
+	stalePlayer.kill("SIGKILL");
 });
 
 test("managed sessions register inside the override and export it remotely", async () => {
