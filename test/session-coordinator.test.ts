@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -43,6 +44,51 @@ test("grants speech to only the first session and records waiting attention", ()
 	}
 });
 
+test("forced acquisition waits for the previous process to acknowledge transport preemption", async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-voice-handoff-"));
+	const modulePath = path.resolve("src/session-coordinator.ts");
+	const childScript = `
+		const { SessionCoordinator } = await import(${JSON.stringify(modulePath)});
+		const coordinator = new SessionCoordinator('/child/project', 'child', ${JSON.stringify(root)});
+		coordinator.start();
+		if (!coordinator.tryAcquireSpeech()) process.exit(2);
+		process.stdout.write('ready\\n');
+		setInterval(() => {
+			if (!coordinator.consumeSpeechPreemptionRequest()) return;
+			coordinator.releaseSpeech();
+			process.stdout.write('released\\n');
+		}, 10);
+	`;
+	const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", childScript], {
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+	let stdout = "";
+	child.stdout.on("data", chunk => {
+		stdout += String(chunk);
+	});
+	try {
+		const deadline = Date.now() + 5_000;
+		while (!stdout.includes("ready")) {
+			if (Date.now() > deadline) assert.fail("child coordinator did not acquire speech");
+			await new Promise(resolve => setTimeout(resolve, 10));
+		}
+		const contender = new SessionCoordinator("/parent/project", "parent", root);
+		contender.start();
+		try {
+			const started = Date.now();
+			assert.equal(contender.forceAcquireSpeech(), true);
+			assert.ok(Date.now() - started < 700, "handoff should acknowledge before the stale-owner timeout");
+			assert.equal(contender.ownsSpeech(), true);
+		} finally {
+			contender.shutdown();
+		}
+	} finally {
+		child.kill("SIGTERM");
+		await new Promise(resolve => child.once("close", resolve));
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("lets a waiting session announce itself after the previous owner releases", () => {
 	const { root, first, second } = coordinators();
 	try {
@@ -70,6 +116,25 @@ test("announces project attention only when the active session changes", () => {
 		assert.equal(second.claimAttention(), true);
 		assert.equal(second.attentionIsCurrent(), true);
 		assert.equal(first.attentionIsCurrent(), false);
+	} finally {
+		first.shutdown();
+		second.shutdown();
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("owners consume explicit speech-preemption requests", () => {
+	const { root, first, second } = coordinators();
+	try {
+		assert.equal(first.tryAcquireSpeech(), true);
+		const directory = path.join(root, "preemption");
+		fs.writeFileSync(
+			path.join(directory, `${first.instanceId}.json`),
+			JSON.stringify({ requestedBy: second.instanceId, requestedAt: Date.now() }),
+		);
+		assert.equal(first.consumeSpeechPreemptionRequest(), true);
+		assert.equal(first.consumeSpeechPreemptionRequest(), false);
+		first.releaseSpeech();
 	} finally {
 		first.shutdown();
 		second.shutdown();

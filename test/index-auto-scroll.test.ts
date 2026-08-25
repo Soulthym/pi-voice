@@ -7,6 +7,7 @@ import { NARRATION_ACTIVE_MARKER } from "../src/narration-progress.js";
 import {
 	FakeVoiceHost,
 	MockedVoiceWorkerClient,
+	assistant,
 	streamCompletedResponse,
 } from "./helpers/fake-voice-host.js";
 
@@ -179,6 +180,7 @@ test("TUI follows exact words, permits in-band framing, and seek/resume controls
 	await host.shortcut("f8");
 	assert.equal(host.scrollView.scrollTop, 185);
 	assert.equal(worker!.pauses.at(-1), true);
+	await fs.stat(path.join(root, "coordinator", "speech.lock", "lease.json"));
 	const pausedSeekStart = worker!.sent.length;
 	await host.shortcut("f9");
 	assert.equal(worker!.pauses.at(-1), false);
@@ -216,4 +218,53 @@ test("TUI follows exact words, permits in-band framing, and seek/resume controls
 	await host.command("autoscroll on");
 	worker!.emit({ type: "playback", utterance: pausedSeek.utterance, position: 3 } as never);
 	await waitForScroll(host, 205);
+
+	// Stop invalidates a paused transport; a later F8 cannot "resume" a ghost
+	// sink or reacquire the device indefinitely.
+	await host.shortcut("f8");
+	await host.command("stop");
+	const pauseCommandsAfterStop = worker!.pauses.length;
+	await host.shortcut("f8");
+	assert.equal(worker!.pauses.length, pauseCommandsAfterStop);
+	assert.ok(host.notices.some(notice => notice.message.includes("no assistant message playing")));
+
+	// Manual replay during a newly streaming turn must never append later live
+	// deltas to the historical replay transport.
+	worker!.emit({ type: "idle", utterance: pausedSeek.utterance } as never);
+	const partial = assistant("Live prefix. Queued while paused. Live tail must stay separate.", "pending");
+	await host.emit("before_agent_start", { type: "before_agent_start" });
+	await host.emit("message_start", { type: "message_start", message: partial });
+	await host.emit("message_update", {
+		type: "message_update",
+		message: partial,
+		assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Live prefix. ", partial },
+	});
+	const beforeLivePause = worker!.sent.length;
+	await host.shortcut("f8");
+	await fs.stat(path.join(root, "coordinator", "speech.lock", "lease.json"));
+	await host.emit("message_update", {
+		type: "message_update",
+		message: partial,
+		assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Queued while paused. ", partial },
+	});
+	await new Promise(resolve => setTimeout(resolve, 1_100)); // Vocalizer idle flush
+	assert.ok(worker!.sent.length > beforeLivePause, "live deltas must remain queued behind F8 pause");
+	await host.shortcut("f8");
+	await host.shortcut("f6");
+	const afterReplayStarted = worker!.sent.length;
+	await host.emit("message_update", {
+		type: "message_update",
+		message: partial,
+		assistantMessageEvent: {
+			type: "text_delta",
+			contentIndex: 0,
+			delta: "Live tail must stay separate.",
+			partial,
+		},
+	});
+	assert.equal(worker!.sent.length, afterReplayStarted, "live tail leaked into historical replay audio");
+	assert.equal(
+		worker!.sent.slice(afterReplayStarted).some(item => String((item as { text?: string }).text).includes("Live tail")),
+		false,
+	);
 });

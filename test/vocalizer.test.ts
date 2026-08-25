@@ -122,6 +122,7 @@ test("starts code description early while preserving spoken order", async () => 
 	const deferred = Promise.withResolvers<CodeNarrationPlan>();
 	let descriptionStarted = false;
 	let descriptionContext: CodeDescriptionSourceContext = { beforeBlock: "", throughBlock: "", sourceEnd: 0 };
+	let allocatedUtterance: number | undefined;
 	const vocalizer = new Vocalizer(
 		() => ({ ...DEFAULT_VOICE_CONFIG, enabled: true }),
 		() => {},
@@ -132,6 +133,9 @@ test("starts code description early while preserving spoken order", async () => 
 		},
 		undefined,
 		worker,
+		utterance => {
+			allocatedUtterance = utterance;
+		},
 	);
 
 	const providerMessages = [{ role: "user", content: [{ type: "text", text: "Actual API context" }] }] as never;
@@ -140,6 +144,7 @@ test("starts code description early while preserving spoken order", async () => 
 	vocalizer.flush();
 
 	assert.equal(descriptionStarted, true);
+	assert.equal(allocatedUtterance, 1, "deferred code narration must reserve its utterance synchronously");
 	assert.deepEqual(descriptionContext, {
 		beforeBlock: "Before.\n",
 		throughBlock: "Before.\n```ts\nconst value = 1;\n```\n",

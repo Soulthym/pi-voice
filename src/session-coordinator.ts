@@ -82,6 +82,7 @@ export class SessionCoordinator {
 		fs.mkdirSync(this.#presenceDir(), { recursive: true });
 		fs.mkdirSync(this.#waitingDir(), { recursive: true });
 		fs.mkdirSync(this.#attentionDir(), { recursive: true });
+		fs.mkdirSync(this.#preemptionDir(), { recursive: true });
 		fs.mkdirSync(this.#resourceDir(), { recursive: true });
 		this.#writePresence();
 		this.#heartbeat = setInterval(() => {
@@ -144,13 +145,29 @@ export class SessionCoordinator {
 		return lease;
 	}
 
-	/** Manual user action preempts the current lease instead of waiting behind it. */
+	/** Manual user action requests an acknowledged handoff before taking the lease. */
 	forceAcquireSpeech(): boolean {
 		if (this.ownsSpeech()) {
 			this.#speechLease = true;
 			return true;
 		}
-		remove(this.#speechPath());
+		const owner = this.speechOwner();
+		if (owner && owner.pid !== process.pid) {
+			writeJson(this.#preemptionFile(owner.instanceId), {
+				requestedBy: this.instanceId,
+				requestedAt: Date.now(),
+			});
+			// The owner polls this file in another process, stops its transport, and
+			// releases the lease. Bounded waiting prevents replacement audio from
+			// starting during that shutdown window.
+			const sleeper = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+			const deadline = Date.now() + 750;
+			while (Date.now() < deadline && this.speechOwner()?.instanceId === owner.instanceId) {
+				Atomics.wait(sleeper, 0, 0, 25);
+			}
+		}
+		const remaining = this.speechOwner();
+		if (remaining && remaining.instanceId !== this.instanceId) remove(this.#speechPath());
 		const lease = this.#acquireLease(this.#speechPath(), "speech");
 		this.#speechLease = lease;
 		return lease;
@@ -247,6 +264,13 @@ export class SessionCoordinator {
 		return true;
 	}
 
+	consumeSpeechPreemptionRequest(): boolean {
+		const file = this.#preemptionFile(this.instanceId);
+		if (!fs.existsSync(file)) return false;
+		remove(file);
+		return true;
+	}
+
 	async withResource<T>(kind: "code" | "timing", limit: number, operation: () => Promise<T>): Promise<T> {
 		let lease: string | undefined;
 		while (!lease) {
@@ -278,6 +302,7 @@ export class SessionCoordinator {
 		this.#resourceLeases.clear();
 		this.clearWaiting();
 		remove(this.#attentionFile(this.instanceId));
+		remove(this.#preemptionFile(this.instanceId));
 		remove(this.#presenceFile(this.instanceId));
 	}
 
@@ -387,6 +412,10 @@ export class SessionCoordinator {
 		return path.join(this.root, "attention");
 	}
 
+	#preemptionDir(): string {
+		return path.join(this.root, "preemption");
+	}
+
 	#resourceDir(): string {
 		return path.join(this.root, "resources");
 	}
@@ -405,6 +434,10 @@ export class SessionCoordinator {
 
 	#attentionFile(instanceId: string): string {
 		return path.join(this.#attentionDir(), `${instanceId}.json`);
+	}
+
+	#preemptionFile(instanceId: string): string {
+		return path.join(this.#preemptionDir(), `${instanceId}.json`);
 	}
 
 	#attentionCurrentFile(): string {

@@ -142,21 +142,33 @@ test("unified progress widget orders input, playback, and preprocessing and clea
 	await host.emit("agent_settled", { type: "agent_settled" });
 	await settle();
 
-	let lines = await waitForWidgetLines(host, candidate => candidate.length >= 3);
+	let lines = await waitForWidgetLines(host, candidate => candidate.length >= 2);
 	assert.match(lines[0], /Playback · message 1\/1: speech timing pending/);
 	assert.match(lines[1], /Preprocessing · code descriptions \(0\/25 budget\): 0\/1 ready/);
-	assert.match(lines[2], /Preprocessing · speech timing: 0\/1 ready/);
+	assert.equal(
+		lines.some(line => line.includes("Preprocessing · speech timing")),
+		false,
+		"timing work must not contend with an allocated deferred speech utterance",
+	);
 
 	void host.command("talk");
 	await new Promise(resolve => setTimeout(resolve, 150));
 	lines = host.widgetLines() ?? lines;
 	assert.match(lines[0], /🎙 Listening: 0s|🎙 Listening: 1s/);
 	assert.equal(lines.some(line => line.includes("Preprocessing · code descriptions")), true);
-	assert.equal(lines.some(line => line.includes("Preprocessing · speech timing")), true);
 
-	// Stop the recording; the fake STT endpoint closes without audio, clearing the input line.
+	// Stop the recording; once its lease is released, timing preprocessing joins
+	// the still-pending code work in deterministic playback/code/timing order.
 	await host.command("talk");
-	await waitForWidgetLines(host, candidate => candidate.every(line => !line.includes("🎙")));
+	lines = await waitForWidgetLines(
+		host,
+		candidate =>
+			candidate.every(line => !line.includes("🎙")) &&
+			candidate.some(line => line.includes("Preprocessing · speech timing")),
+	);
+	assert.match(lines[0], /Playback · message 1\/1/);
+	assert.match(lines[1], /Preprocessing · code descriptions/);
+	assert.match(lines[2], /Preprocessing · speech timing/);
 
 	deferredDescription.resolve({
 		role: "assistant",

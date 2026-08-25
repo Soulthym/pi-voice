@@ -48,6 +48,7 @@ export class Vocalizer {
 	#nextUtterance = 0;
 	#nextSegment = 0;
 	#onNarrationSegment: ((segment: NarrationSegment) => void) | undefined;
+	#onUtteranceAllocated: ((utterance: number) => void) | undefined;
 	#idleTimer: NodeJS.Timeout | null = null;
 	#deliveryBarrier: Promise<void> | null = null;
 	#descriptionControllers = new Set<AbortController>();
@@ -64,11 +65,13 @@ export class Vocalizer {
 		describeCode?: CodeDescriber,
 		onNarrationSegment?: (segment: NarrationSegment) => void,
 		worker: VoiceWorker = new VoiceWorkerClient(onEvent),
+		onUtteranceAllocated?: (utterance: number) => void,
 	) {
 		this.#getConfig = getConfig;
 		this.#worker = worker;
 		this.#describeCode = describeCode;
 		this.#onNarrationSegment = onNarrationSegment;
+		this.#onUtteranceAllocated = onUtteranceAllocated;
 	}
 
 	setNarrationSourceOffset(offset: number): void {
@@ -276,7 +279,10 @@ export class Vocalizer {
 	}
 
 	#ensureUtterance(): number {
-		this.#utterance ??= ++this.#nextUtterance;
+		if (this.#utterance === null) {
+			this.#utterance = ++this.#nextUtterance;
+			this.#onUtteranceAllocated?.(this.#utterance);
+		}
 		return this.#utterance;
 	}
 

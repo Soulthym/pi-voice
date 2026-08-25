@@ -259,11 +259,17 @@ export default async function (pi: ExtensionAPI) {
 	let voiceWorkerIdleTimer: NodeJS.Timeout | null = null;
 	let handleCoordinatedIdle: (utterance: number | undefined) => void = () => {};
 	let playRequestedAttention: (ctx: ExtensionContext) => void = () => {};
-	let releaseSpeechOwnership: (announceNext?: boolean, preserveViewport?: boolean) => void = () => {};
+	let releaseSpeechOwnership: (announceNext?: boolean) => void = () => {};
+	let pendingSpeechPreemption:
+		| { purpose: SpeechPurpose | undefined; wasComplete: boolean; spokenText: string }
+		| undefined;
+	let speechPreemptionTimer: NodeJS.Timeout | null = null;
+	let finishSpeechPreemption: () => void = () => {};
 	let state: VoiceState = "idle";
 	let downloadPercent: number | undefined;
 	let lastError = "";
 	let inputInProgress = false;
+	let inputEpoch = 0;
 	let activeInputEndpoint: string | undefined;
 	let inputPhase: InputPhase = "idle";
 	let inputProgressTimer: NodeJS.Timeout | null = null;
@@ -1030,6 +1036,7 @@ const chargeBackfillUnit = (): boolean => {
 				downloadPercent = undefined;
 				break;
 			case "idle":
+				if (event.utterance === undefined && pendingSpeechPreemption) finishSpeechPreemption();
 				if (!inputInProgress) state = "idle";
 				downloadPercent = undefined;
 				playbackHistory.finishUtterance(event.utterance);
@@ -1083,6 +1090,20 @@ const chargeBackfillUnit = (): boolean => {
 				break;
 			case "error":
 				if (event.preview) break;
+				if (
+					event.utterance !== undefined &&
+					(event.utterance === lastOwnerUtterance || event.utterance === pausedOwnerUtterance)
+				) {
+					playbackPaused = false;
+					pausedOwnerUtterance = undefined;
+					if (speechPurpose === "turn" && !ownerTurnEnded) {
+						speechBlocked = true;
+						blockedSpeechText = ownedSpeechText;
+						blockedMessageHasSpeech = hasSpeakableAudio(ownedSpeechText);
+					}
+					ownerTurnEnded = true;
+					if (ownsSpeech) releaseSpeechOwnership(false);
+				}
 				state = "error";
 				if (event.message !== lastError) {
 					lastError = event.message;
@@ -1141,8 +1162,27 @@ const chargeBackfillUnit = (): boolean => {
 					: undefined,
 			});
 		},
+		undefined,
+		utterance => {
+			if (!ownsSpeech) return;
+			lastOwnerUtterance = utterance;
+			ownerContentExpected = true;
+		},
 	);
+	const clearPlaybackTransport = (): void => {
+		vocalizer.clear();
+		playbackPaused = false;
+		pausedOwnerUtterance = undefined;
+		playbackPositionEstimated = false;
+	};
+
 	const phoneInput = new PhoneInputClient();
+	const cancelActiveInput = (): void => {
+		inputEpoch += 1;
+		phoneInput.cancel();
+		activeInputEndpoint = undefined;
+		clearInputProgress();
+	};
 	const timingWorkers: VoiceWorkerClient[] = [];
 	let timingWorkEpoch = 0;
 	let timingRescheduleRequested = false;
@@ -1199,14 +1239,9 @@ const chargeBackfillUnit = (): boolean => {
 		);
 	};
 
-	releaseSpeechOwnership = (announceNext = true, preserveViewport = false): void => {
+	releaseSpeechOwnership = (announceNext = true): void => {
 		if (!ownsSpeech || !coordinator) return;
-		if (preserveViewport) {
-			hideFollowHint();
-			autoScrollForceOnce = false;
-		} else {
-			restoreFollowAfterSpeech();
-		}
+		restoreFollowAfterSpeech();
 		if (announceNext) {
 			const waiting = coordinator.nextUnannouncedWaiting();
 			if (waiting) {
@@ -1290,31 +1325,58 @@ const chargeBackfillUnit = (): boolean => {
 		projectPrefixUtterance = vocalizer.speakUntracked(`Project ${coordinator.projectLabel()}.`);
 	};
 
-	const reserveSpeechForInput = (): void => {
-		if (!config.enabled || !coordinator) return;
-		if (!acquireSpeech("turn", false, true)) return;
+	const reserveSpeechForInput = (): boolean => {
+		if (!coordinator) return true;
+		if (!acquireSpeech("turn", false, true)) return false;
 		speechReservedForInput = true;
 		projectAnnouncementPending = !coordinator.attentionIsCurrent();
+		return true;
 	};
 
-	const handleSpeechPreemption = (): void => {
-		const interruptedPurpose = speechPurpose;
-		const wasComplete = ownerTurnEnded;
-		vocalizer.clear();
-		narration.finish();
+	finishSpeechPreemption = (): void => {
+		const interrupted = pendingSpeechPreemption;
+		if (!interrupted) return;
+		pendingSpeechPreemption = undefined;
+		if (speechPreemptionTimer) clearTimeout(speechPreemptionTimer);
+		speechPreemptionTimer = null;
 		relinquishSpeech();
-		if (interruptedPurpose === "turn" || interruptedPurpose === "replay") {
+		if (interrupted.purpose === "turn" || interrupted.purpose === "replay") {
 			pausedForAttention = true;
-			if (wasComplete || interruptedPurpose === "replay") coordinator?.markWaiting();
+			if (interrupted.purpose === "turn" && !interrupted.wasComplete) {
+				speechBlocked = true;
+				blockedSpeechText = interrupted.spokenText;
+				blockedMessageHasSpeech = hasSpeakableAudio(interrupted.spokenText);
+			} else {
+				coordinator?.markWaiting();
+			}
 			refreshStatus();
 		}
 	};
 
+	const handleSpeechPreemption = (): void => {
+		if (pendingSpeechPreemption) return;
+		pendingSpeechPreemption = {
+			purpose: speechPurpose,
+			wasComplete: ownerTurnEnded,
+			spokenText: ownedSpeechText,
+		};
+		if (inputInProgress) cancelActiveInput();
+		clearPlaybackTransport();
+		narration.finish();
+		// Worker cancel emits unscoped idle only after its sink has stopped. Keep
+		// the lease until that acknowledgement, with a crash-safe bounded fallback.
+		speechPreemptionTimer = setTimeout(finishSpeechPreemption, 500);
+		speechPreemptionTimer.unref?.();
+	};
+
 	const pollWaitingAttention = (): void => {
 		if (!coordinator) return;
+		if (ownsSpeech && coordinator.consumeSpeechPreemptionRequest()) {
+			handleSpeechPreemption();
+		}
 		if (coordinator.hasAttentionRequest() && activeContext) {
 			try {
-				if (activeContext.isIdle() && coordinator.consumeAttentionRequest()) {
+				if (coordinator.consumeAttentionRequest()) {
 					playRequestedAttention(activeContext);
 					return;
 				}
@@ -1347,21 +1409,39 @@ const chargeBackfillUnit = (): boolean => {
 	const playTarget = (target: PlaybackTarget, recordTimings: boolean): void => {
 		const sourceOffset = Math.max(0, Math.min(target.text.length, target.sourceOffset));
 		const suffix = target.text.slice(sourceOffset);
+		const displacedLiveTurn = ownsSpeech && speechPurpose === "turn" && !ownerTurnEnded;
+		const displacedLiveText = displacedLiveTurn ? ownedSpeechText : "";
 		if (!suffix.trim()) return;
+		if (inputInProgress) {
+			cancelActiveInput();
+			activeContext?.ui.notify("Voice recording stopped for playback control", "info");
+		}
 		armNarrationFollow();
 		codeWorkEpoch += 1;
 		if (activeContext) scheduleMissingCodeDescriptions(activeContext);
 		cancelTimingWorkers();
-		vocalizer.clear();
+		clearPlaybackTransport();
 		// A seek may replace an F8-paused transport. Cancellation stops the old
 		// sink, but explicitly clear worker pause state before queuing fresh audio.
 		vocalizer.setPlaybackPaused(false);
 		narration.finish();
 		if (!acquireSpeech("replay", true, true)) {
+			if (displacedLiveTurn) {
+				speechBlocked = true;
+				blockedSpeechText = displacedLiveText;
+				blockedMessageHasSpeech = hasSpeakableAudio(displacedLiveText);
+			}
 			pausedForAttention = true;
 			refreshStatus();
 			activeContext?.ui.notify("Another Pi project currently owns voice playback; this replay remains paused", "warning");
 			return;
+		}
+		if (displacedLiveTurn) {
+			// Keep the streaming response independent from this completed snapshot.
+			// Later deltas are collected for attention instead of joining replay audio.
+			speechBlocked = true;
+			blockedSpeechText = displacedLiveText;
+			blockedMessageHasSpeech = hasSpeakableAudio(displacedLiveText);
 		}
 		narration.begin();
 		narration.setCompletedText(target.text);
@@ -1567,7 +1647,7 @@ const chargeBackfillUnit = (): boolean => {
 		backfillUsed = 0;
 		backfillExhaustionReported = false;
 		if (wasEnabled && !config.enabled) {
-			vocalizer.clear();
+			clearPlaybackTransport();
 			narration.finish();
 			releaseSpeechOwnership(false);
 		}
@@ -1609,12 +1689,17 @@ const chargeBackfillUnit = (): boolean => {
 			ctx.ui.notify("The previous voice recording is still being transcribed", "info");
 			return;
 		}
+		const captureEpoch = ++inputEpoch;
 		beginInputProgress();
 		cancelTimingWorkers();
-		vocalizer.clear();
+		clearPlaybackTransport();
 		narration.finish();
 		releaseSpeechOwnership(false);
-		reserveSpeechForInput();
+		if (!reserveSpeechForInput()) {
+			clearInputProgress();
+			ctx.ui.notify("Another Pi session still owns the selected voice device", "warning");
+			return;
+		}
 		activeInputEndpoint = routed.input;
 		state = "listening";
 		refreshStatus();
@@ -1653,7 +1738,7 @@ const chargeBackfillUnit = (): boolean => {
 			if (inputProgressTimer) clearInterval(inputProgressTimer);
 			inputProgressTimer = null;
 			setInputProgress("♬ Finalizing transcript…");
-			if (talkEpoch !== contextEpoch || !activeContext) {
+			if (talkEpoch !== contextEpoch || captureEpoch !== inputEpoch || !activeContext) {
 				live.cancel();
 				return;
 			}
@@ -1667,7 +1752,7 @@ const chargeBackfillUnit = (): boolean => {
 				capture.type === "audio" ? await vocalizer.transcribe(capture.data) : [capture.data.trim()];
 			candidates = [...new Set(candidates.map(candidate => candidate.replace(/\s+/g, " ").trim()).filter(Boolean))];
 			if (candidates.length === 0 && liveTranscript) candidates = [liveTranscript];
-			if (talkEpoch !== contextEpoch || !activeContext) return;
+			if (talkEpoch !== contextEpoch || captureEpoch !== inputEpoch || !activeContext) return;
 			clearInputProgress();
 			state = "idle";
 			refreshStatus();
@@ -1700,7 +1785,7 @@ const chargeBackfillUnit = (): boolean => {
 			} finally {
 				setInputProgress(undefined);
 			}
-			if (talkEpoch !== contextEpoch || !activeContext) return;
+			if (talkEpoch !== contextEpoch || captureEpoch !== inputEpoch || !activeContext) return;
 			if (config.submitMode === "review") {
 				releaseSpeechOwnership(false);
 				ctx.ui.setEditorText(prompt);
@@ -1712,9 +1797,9 @@ const chargeBackfillUnit = (): boolean => {
 			else pi.sendUserMessage(prompt, { deliverAs: "steer" });
 		} catch (error) {
 			activeInputEndpoint = undefined;
-			releaseSpeechOwnership(false);
 			live.cancel();
-			if (talkEpoch !== contextEpoch || !activeContext) return;
+			if (talkEpoch !== contextEpoch || captureEpoch !== inputEpoch || !activeContext) return;
+			releaseSpeechOwnership(false);
 			clearInputProgress();
 			state = "error";
 			refreshStatus();
@@ -1795,6 +1880,9 @@ const chargeBackfillUnit = (): boolean => {
 		attentionPollTimer = null;
 		if (voiceWorkerIdleTimer) clearTimeout(voiceWorkerIdleTimer);
 		voiceWorkerIdleTimer = null;
+		if (speechPreemptionTimer) clearTimeout(speechPreemptionTimer);
+		speechPreemptionTimer = null;
+		pendingSpeechPreemption = undefined;
 		coordinator?.shutdown();
 		coordinator = null;
 		ownsSpeech = false;
@@ -1806,7 +1894,7 @@ const chargeBackfillUnit = (): boolean => {
 		narrationTui = null;
 		narration.finish();
 		activeContext = null;
-		phoneInput.cancel();
+		cancelActiveInput();
 		const workers = timingWorkers.splice(0);
 		await Promise.all([...workers.map(worker => worker.terminate()), vocalizer.shutdown()]);
 	});
@@ -1824,7 +1912,7 @@ const chargeBackfillUnit = (): boolean => {
 		blockedMessageHasSpeech = false;
 		blockedSpeechText = "";
 		cancelTimingWorkers();
-		vocalizer.clear();
+		clearPlaybackTransport();
 		narration.finish();
 		releaseSpeechOwnership(false);
 		reserveSpeechForInput();
@@ -1837,7 +1925,7 @@ const chargeBackfillUnit = (): boolean => {
 		blockedWarningIssued = false;
 		blockedSpeechText = "";
 		cancelTimingWorkers();
-		vocalizer.clear();
+		clearPlaybackTransport();
 		narration.finish();
 		if (!speechReservedForInput) releaseSpeechOwnership(false);
 	});
@@ -1895,7 +1983,7 @@ const chargeBackfillUnit = (): boolean => {
 			delta.type === "text_delta" || (delta.type === "thinking_delta" && config.mode === "all")
 				? delta.delta
 				: undefined;
-		if (!ownsSpeech) {
+		if (!ownsSpeech || speechPurpose !== "turn") {
 			if (speechBlocked && speakableDelta !== undefined) {
 				blockedSpeechText += speakableDelta;
 				if (hasSpeakableAudio(blockedSpeechText)) {
@@ -1933,9 +2021,9 @@ const chargeBackfillUnit = (): boolean => {
 			pausedForAttention = true;
 			refreshStatus();
 		}
-		if (!config.enabled || stopReason === undefined || !ownsSpeech) return;
+		if (!config.enabled || stopReason === undefined || !ownsSpeech || speechPurpose !== "turn") return;
 		if (stopReason === "aborted" || stopReason === "error") {
-			vocalizer.clear();
+			clearPlaybackTransport();
 			narration.finish();
 			livePlaybackId = undefined;
 			releaseSpeechOwnership(true);
@@ -2057,7 +2145,7 @@ const chargeBackfillUnit = (): boolean => {
 			replaySelected(ctx);
 			return;
 		}
-		vocalizer.clear();
+		clearPlaybackTransport();
 		narration.finish();
 		releaseSpeechOwnership(false);
 		coordinator.requestAttention(next.instanceId);
@@ -2097,10 +2185,13 @@ const chargeBackfillUnit = (): boolean => {
 					if (target) playTarget(target, false);
 					return;
 				}
-				if (!acquireSpeech("replay", false, true)) return;
+				if (!ownsSpeech || !(coordinator?.ownsSpeech() ?? true)) {
+					const target = playbackHistory.resumeTarget();
+					if (target) playTarget(target, false);
+					return;
+				}
 				lastOwnerUtterance = pausedOwnerUtterance;
 				ownerContentExpected = true;
-				ownerTurnEnded = true;
 				completedOwnerUtterance = undefined;
 				vocalizer.setPlaybackPaused(false);
 				playbackPaused = false;
@@ -2111,16 +2202,18 @@ const chargeBackfillUnit = (): boolean => {
 				refreshPlaybackTimeline();
 				return;
 			}
-			if (!playbackHistory.selected()) {
+			if (!playbackHistory.selected() || !ownsSpeech || lastOwnerUtterance === undefined) {
 				ctx.ui.notify("There is no assistant message playing", "warning");
 				return;
 			}
 			pausedOwnerUtterance = lastOwnerUtterance;
 			vocalizer.setPlaybackPaused(true);
 			playbackPaused = true;
-			// Pausing releases cross-session speech ownership but must retain the
-			// exact viewport around the paused word.
-			releaseSpeechOwnership(false, true);
+			// A paused sink still owns the selected output device. Retaining the
+			// lease prevents another session from starting overlapping audio and lets
+			// live turns continue queueing/flush safely behind the paused transport.
+			hideFollowHint();
+			autoScrollForceOnce = false;
 			state = "idle";
 			refreshStatus();
 			refreshPlaybackTimeline();
@@ -2383,16 +2476,12 @@ const chargeBackfillUnit = (): boolean => {
 					await toggle(ctx);
 					return;
 				case "stop":
-					vocalizer.clear();
+					clearPlaybackTransport();
 					narration.finish();
-					releaseSpeechOwnership(true);
-					if (inputPhase === "recording") {
-						setInputProgress("🎙 Stopping voice recording…");
-						void phoneInput.stop(activeInputEndpoint ?? routedVoiceConfig().input).catch(error =>
-							ctx.ui.notify(`Voice microphone: ${error instanceof Error ? error.message : String(error)}`, "error"),
-						);
-					}
-					state = inputInProgress ? "listening" : "idle";
+					if (inputInProgress) cancelActiveInput();
+					// Explicit stop must not immediately start an attention announcement.
+					releaseSpeechOwnership(false);
+					state = "idle";
 					refreshStatus();
 					return;
 				case "talk":
@@ -2418,8 +2507,9 @@ const chargeBackfillUnit = (): boolean => {
 						ctx.ui.notify(`Usage: /voice ${action} <huggingface-repo>`, "error");
 						return;
 					}
-					vocalizer.clear();
+					clearPlaybackTransport();
 					narration.finish();
+					releaseSpeechOwnership(false);
 					if (action.toLowerCase() === "tts-model") await updateConfig({ ...config, ttsModel: model });
 					else if (action.toLowerCase() === "stt-model") await updateConfig({ ...config, sttModel: model });
 					else await updateConfig({ ...config, alignmentModel: model });
@@ -2434,8 +2524,9 @@ const chargeBackfillUnit = (): boolean => {
 						ctx.ui.notify(`Usage: /voice ${action} fp32|q8|q4`, "error");
 						return;
 					}
-					vocalizer.clear();
+					clearPlaybackTransport();
 					narration.finish();
+					releaseSpeechOwnership(false);
 					if (action.toLowerCase() === "tts-dtype") await updateConfig({ ...config, ttsDtype: dtype });
 					else if (action.toLowerCase() === "stt-dtype") await updateConfig({ ...config, sttDtype: dtype });
 					else await updateConfig({ ...config, alignmentDtype: dtype });
@@ -2711,8 +2802,9 @@ const chargeBackfillUnit = (): boolean => {
 						ctx.ui.notify("Usage: /voice mode assistant|all|yield", "error");
 						return;
 					}
-					vocalizer.clear();
+					clearPlaybackTransport();
 					narration.finish();
+					releaseSpeechOwnership(false);
 					await updateConfig({ ...config, mode });
 					ctx.ui.notify(`Voice mode set to ${mode}`, "info");
 					return;
@@ -2730,8 +2822,9 @@ const chargeBackfillUnit = (): boolean => {
 						ctx.ui.notify("Unknown voice. Run /voice voice and choose from the picker.", "error");
 						return;
 					}
-					vocalizer.clear();
+					clearPlaybackTransport();
 					narration.finish();
+					releaseSpeechOwnership(false);
 					await updateConfig({ ...config, voice: selected });
 					ctx.ui.notify(`Kokoro voice set to ${selected}`, "info");
 					return;
@@ -2752,8 +2845,9 @@ const chargeBackfillUnit = (): boolean => {
 						ctx.ui.notify("Usage: /voice output auto|local|tcp://host:port|unix:///path", "error");
 						return;
 					}
-					vocalizer.clear();
+					clearPlaybackTransport();
 					narration.finish();
+					releaseSpeechOwnership(false);
 					await updateConfig({ ...config, output });
 					ctx.ui.notify(`Voice output set to ${output}`, "info");
 					return;
@@ -2802,7 +2896,8 @@ const chargeBackfillUnit = (): boolean => {
 						ctx.ui.notify("Usage: /voice input auto|local|disabled|tcp://host:port|unix:///path", "error");
 						return;
 					}
-					phoneInput.cancel();
+					cancelActiveInput();
+					releaseSpeechOwnership(false);
 					await updateConfig({ ...config, input });
 					ctx.ui.notify(`Voice input set to ${input}`, "info");
 					return;
@@ -2813,7 +2908,7 @@ const chargeBackfillUnit = (): boolean => {
 						return;
 					}
 					const text = args.slice(action.length).trim() || "Pi voice mode is ready.";
-					vocalizer.clear();
+					clearPlaybackTransport();
 					narration.finish();
 					if (!acquireSpeech("replay", true, true)) return;
 					ownerContentExpected = true;

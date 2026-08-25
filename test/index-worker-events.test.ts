@@ -80,8 +80,12 @@ test("worker events drive speaking styling, idle completion, and error notices",
 		`idle transition must be clean: ${JSON.stringify(host.notices)}`,
 	);
 
-	// Worker errors surface as notifications.
+	// A terminal utterance error surfaces once and releases the device lease so
+	// another session cannot be blocked behind a player that no longer exists.
+	await host.shortcut("f11");
+	const failed = instance!.sent.at(-1) as { utterance: number };
 	const errorCountBefore = host.notices.filter(notice => notice.message.startsWith("Voice mode:")).length;
-	instance!.emit({ type: "error", message: "synthesis exploded" } as never);
+	instance!.emit({ type: "error", message: "synthesis exploded", utterance: failed.utterance } as never);
 	assert.equal(host.notices.filter(notice => notice.message.startsWith("Voice mode:")).length, errorCountBefore + 1);
+	await assert.rejects(fs.stat(path.join(root, "coordinator", "speech.lock", "lease.json")));
 });

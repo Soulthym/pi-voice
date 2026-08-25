@@ -16,7 +16,7 @@ Pi extension
 
 The main worker serializes TTS/STT operations and loads models lazily. Alignment and network playback events bypass that queue and write progress directly back to Pi, so ongoing Kokoro inference cannot delay highlighting updates.
 
-Network playback helpers own full-duplex client connections and forward actual player position. The worker can pause/resume a specific client player over a short control connection without framing the raw PCM stream.
+Network playback helpers own full-duplex client connections and forward actual player position. The worker can pause, resume, or stop a specific client player over a short control connection without framing the raw PCM stream. Each endpoint enforces a single active Pi Voice player, so a replacement seek terminates buffered stale audio before starting.
 
 ## Streaming narration
 
@@ -50,7 +50,7 @@ Interactive TUI processes coordinate through atomic files under `~/.cache/pi-voi
 
 Heartbeats recover stale files and crashed leases. Presence records explicitly mark interactive sessions, so headless child/subagent processes are excluded even if they inherit the extension and global config.
 
-Manual activity uses force-acquire semantics. The displaced process notices lease loss during polling, stops its own transport, and records a waiting response when appropriate. Paused sessions never auto-resume.
+Manual activity uses acknowledged force-acquire semantics. The requester writes a preemption request, the displaced process stops its transport and releases the lease, and only then does replacement audio start (with a bounded stale-owner fallback). A paused sink retains its device lease because it still owns the physical output resource; paused sessions never auto-resume.
 
 ## Device registry
 
