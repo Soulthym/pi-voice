@@ -135,8 +135,10 @@ test("TUI follows exact words, permits in-band framing, and seek/resume controls
 	worker!.emit({ type: "playback", utterance: sought.utterance, position: 1 } as never);
 	await waitForScroll(host, 185);
 
-	// F8 resume has the same non-forcing semantics as seek/replay controls.
+	// F8 pause preserves the current viewport rather than restoring transcript
+	// bottom; resume then has the same non-forcing semantics as seek controls.
 	await host.shortcut("f8");
+	assert.equal(host.scrollView.scrollTop, 185);
 	host.scrollView.manualScrollTo(180); // active line 193 is safely in-band
 	await host.shortcut("f8");
 	worker!.emit({ type: "playback", utterance: sought.utterance, position: 1.5 } as never);

@@ -259,7 +259,7 @@ export default async function (pi: ExtensionAPI) {
 	let voiceWorkerIdleTimer: NodeJS.Timeout | null = null;
 	let handleCoordinatedIdle: (utterance: number | undefined) => void = () => {};
 	let playRequestedAttention: (ctx: ExtensionContext) => void = () => {};
-	let releaseSpeechOwnership: (announceNext?: boolean) => void = () => {};
+	let releaseSpeechOwnership: (announceNext?: boolean, preserveViewport?: boolean) => void = () => {};
 	let state: VoiceState = "idle";
 	let downloadPercent: number | undefined;
 	let lastError = "";
@@ -1199,9 +1199,14 @@ const chargeBackfillUnit = (): boolean => {
 		);
 	};
 
-	releaseSpeechOwnership = (announceNext = true): void => {
+	releaseSpeechOwnership = (announceNext = true, preserveViewport = false): void => {
 		if (!ownsSpeech || !coordinator) return;
-		restoreFollowAfterSpeech();
+		if (preserveViewport) {
+			hideFollowHint();
+			autoScrollForceOnce = false;
+		} else {
+			restoreFollowAfterSpeech();
+		}
 		if (announceNext) {
 			const waiting = coordinator.nextUnannouncedWaiting();
 			if (waiting) {
@@ -2110,7 +2115,9 @@ const chargeBackfillUnit = (): boolean => {
 			pausedOwnerUtterance = lastOwnerUtterance;
 			vocalizer.setPlaybackPaused(true);
 			playbackPaused = true;
-			releaseSpeechOwnership(false);
+			// Pausing releases cross-session speech ownership but must retain the
+			// exact viewport around the paused word.
+			releaseSpeechOwnership(false, true);
 			state = "idle";
 			refreshStatus();
 			refreshPlaybackTimeline();

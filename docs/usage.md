@@ -44,7 +44,7 @@ Examples for smart mode include “replace port 8000 with 8080,” “scratch th
 
 F6/F10 navigate Pi Voice's selected-message history; merely scrolling the terminal viewport does not change that selection. Navigation is available while Pi is idle.
 
-F8 preserves the current audio connection and highlighting position. If no live paused transport survives, resume falls back to regenerating from the nearest persisted timing checkpoint.
+F8 preserves the current audio connection, highlighting position, and transcript viewport around the paused word. It does not restore bottom-follow merely because playback paused. If no live paused transport survives, resume falls back to regenerating from the nearest persisted timing checkpoint.
 
 F7/F9 use segment-to-source timing checkpoints and are therefore approximate. Unchanged messages reuse valid timing maps and cached Opus segments.
 
