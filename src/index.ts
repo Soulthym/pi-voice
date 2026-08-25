@@ -1,5 +1,6 @@
 import type { Message, Tool } from "@earendil-works/pi-ai";
-import { highlightCode, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getMarkdownTheme, highlightCode, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Markdown } from "@earendil-works/pi-tui";
 import { hasSpeakableAudio, requiresVoiceAttention } from "./attention.js";
 import {
 	contextualAssistantMessages,
@@ -53,7 +54,7 @@ import { PhoneInputClient } from "./phone-input.js";
 import { prioritizeFromCurrent, processConcurrently, resolveTimingConcurrency } from "./preprocessing.js";
 import { SpeakableStream, type FencedCodeBlock, type SpeakableSourceRange } from "./speakable.js";
 import { pendingPlaybackTiming, voiceProgressLines } from "./status-text.js";
-import { computeAutoScrollTop, isManualScrollAway } from "./auto-scroll.js";
+import { anchorLineForMessage, computeAutoScrollTop, isManualScrollAway } from "./auto-scroll.js";
 import { applySpokenEdit, resolveDictationCandidates } from "./prompt-editor.js";
 import { narrationRenderKey } from "./render-identity.js";
 import { SessionCoordinator, type WaitingSession } from "./session-coordinator.js";
@@ -736,36 +737,122 @@ const chargeBackfillUnit = (): boolean => {
 
 	const refreshPlaybackTimeline = refreshProgressWidget;
 
-	/** Best-effort anchor for narration auto-scroll (see auto-scroll.ts). */
+	/**
+	 * Keeps the spoken position visible: estimates the active message's rendered
+	 * height with Pi's own Markdown renderer, places the playback fraction inside
+	 * it, and applies 20/80 band hysteresis. The first tick of a new utterance
+	 * always brings the anchor into view, even if the user had scrolled away.
+	 */
 	let lastAutoScrollTop: number | undefined;
 	let autoScrollSuspended = false;
-	const applyNarrationAutoScroll = (): void => {
-		if (!config.enabled || !ownsSpeech || playbackPaused || autoScrollSuspended) return;
+	let autoScrollForceOnce = false;
+	let autoScrollTookControl = false;
+	const markdownLineCache = new Map<string, number>();
+	let belowCacheKey = "";
+	let belowCacheValue = 0;
+
+	const activeScrollView = (): {
+		scrollTop: number;
+		viewportHeight: number;
+		contentHeight?: number;
+		isFollowingEnd?: () => boolean;
+		getContentWidth?: (width: number) => number;
+		scrollTo(top: number, options?: { disableFollow?: boolean }): void;
+		scrollToEnd?: () => void;
+	} | undefined => {
 		const tuiAny = narrationTui as
 			| { primaryScrollView?: unknown; implicitScrollView?: unknown; getPrimaryScrollView?: () => unknown }
 			| undefined
 			| null;
-		if (!tuiAny) return;
-		const scrollView = (tuiAny.primaryScrollView ?? tuiAny.implicitScrollView ?? tuiAny.getPrimaryScrollView?.()) as
-			| {
-				scrollTop: number;
-				viewportHeight: number;
-				contentHeight: number;
-				scrollTo(top: number, options?: { disableFollow?: boolean }): void;
-			}
-			| undefined
-			| null;
+		if (!tuiAny) return undefined;
+		return (tuiAny.primaryScrollView ?? tuiAny.implicitScrollView ?? tuiAny.getPrimaryScrollView?.()) as never;
+	};
+
+	const renderedMessageLines = (text: string, width: number): number => {
+		const key = `${width}:${text}`;
+		const cached = markdownLineCache.get(key);
+		if (cached !== undefined) return cached;
+		let lines = Math.max(1, text.split("\n").length);
+		try {
+			const component = new Markdown(text, 1, 0, getMarkdownTheme());
+			lines = Math.max(1, component.render(width).length);
+		} catch {
+			// Offline rendering is best-effort; the line estimate degrades gracefully.
+		}
+		if (markdownLineCache.size >= 400) {
+			const oldest = markdownLineCache.keys().next().value;
+			if (oldest !== undefined) markdownLineCache.delete(oldest);
+		}
+		markdownLineCache.set(key, lines);
+		return lines;
+	};
+
+	const requestNarrationAutoScroll = (): void => {
+		if (!config.enabled || !config.autoScroll || !ownsSpeech || playbackPaused || autoScrollSuspended) return;
+		if (!autoScrollForceOnce && lastAutoScrollTop === undefined) return;
+		const scrollView = activeScrollView();
 		if (!scrollView || typeof scrollView.scrollTo !== "function") return;
-		// While speaking, the active highlight lives near the transcript tail;
-		// anchor it a quarter viewport above the bottom so context stays visible.
-		const anchorLine = Math.max(0, scrollView.contentHeight - Math.ceil(scrollView.viewportHeight * 0.25));
-		const target = computeAutoScrollTop(scrollView, anchorLine);
-		if (target === null) {
-			autoScrollSuspended = isManualScrollAway(scrollView, lastAutoScrollTop ?? scrollView.scrollTop);
+
+		const outerWidth = Number(process.stdout?.columns ?? 100);
+		const innerWidth = Math.max(40, Math.min(outerWidth, scrollView.getContentWidth?.(outerWidth) ?? outerWidth - 2));
+		const selected = playbackHistory.selected();
+		const isLive = liveTurnNarrationActive && ownedSpeechText.length > 0;
+		const text = isLive ? ownedSpeechText : (selected?.text ?? "");
+		if (!text) return;
+
+		const status = playbackHistory.status();
+		const totalChars = isLive ? Math.max(text.length, (selected?.text.length ?? 0)) : text.length;
+		const fraction =
+			status && status.duration > 0
+				? Math.min(1, Math.max(0, status.position / status.duration))
+			: Math.min(1, ownedSpeechText.length / Math.max(1, totalChars));
+
+		const resolvedContentHeight = scrollView.contentHeight ?? (scrollView.scrollTop + scrollView.viewportHeight);
+		const scrollViewport = { scrollTop: scrollView.scrollTop, viewportHeight: scrollView.viewportHeight, contentHeight: resolvedContentHeight };
+		const messageLines = renderedMessageLines(text, innerWidth);
+
+		// Lines below the active message: zero while narrating the newest
+		// message; for replays, the rendered heights of every later message.
+		let below = 0;
+		if (!isLive && selected && activeContext) {
+			const cacheId = `${selected.id}:${completedAssistantMessages(activeContext, config.mode).length}`;
+			if (cacheId !== belowCacheKey) {
+				belowCacheKey = cacheId;
+				const ordered = completedAssistantMessages(activeContext, config.mode);
+				const idx = ordered.findIndex(message => message.id === selected.id);
+				belowCacheValue = idx >= 0
+					? ordered.slice(idx + 1).reduce((total, message) => total + renderedMessageLines(message.text, innerWidth) + 2, 0)
+					: 0;
+			}
+			below = belowCacheValue;
+		}
+
+		const messageTop = Math.max(0, resolvedContentHeight - below - messageLines);
+		const anchor = anchorLineForMessage(messageTop, messageLines, fraction);
+		const target = computeAutoScrollTop(scrollViewport, anchor);
+
+		if (target === null && !autoScrollForceOnce) {
+			autoScrollSuspended = isManualScrollAway(scrollViewport, lastAutoScrollTop ?? scrollView.scrollTop);
 			return;
 		}
-		lastAutoScrollTop = target;
-		scrollView.scrollTo(target, { disableFollow: true });
+
+		const topBand = Math.floor(scrollView.viewportHeight * 0.2);
+		const desired = target === null ? Math.max(0, anchor - topBand) : target;
+		lastAutoScrollTop = desired;
+		autoScrollForceOnce = false;
+		autoScrollTookControl = true;
+		scrollView.scrollTo(desired, { disableFollow: true });
+	};
+
+	const restoreFollowAfterSpeech = (): void => {
+		if (!autoScrollTookControl) return;
+		autoScrollTookControl = false;
+		autoScrollForceOnce = false;
+		try {
+			activeScrollView()?.scrollToEnd?.();
+		} catch {
+			// Follow restoration is cosmetic; ignore missing runtime support.
+		}
 	};
 
 	const requestPlaybackTimeline = (): void => {
@@ -773,7 +860,7 @@ const chargeBackfillUnit = (): boolean => {
 		playbackTimelineTimer = setTimeout(() => {
 			playbackTimelineTimer = null;
 			refreshPlaybackTimeline();
-			applyNarrationAutoScroll();
+			requestNarrationAutoScroll();
 		}, 80);
 		playbackTimelineTimer.unref?.();
 	};
@@ -1032,6 +1119,7 @@ const chargeBackfillUnit = (): boolean => {
 
 	releaseSpeechOwnership = (announceNext = true): void => {
 		if (!ownsSpeech || !coordinator) return;
+		restoreFollowAfterSpeech();
 		if (announceNext) {
 			const waiting = coordinator.nextUnannouncedWaiting();
 			if (waiting) {
@@ -1175,6 +1263,7 @@ const chargeBackfillUnit = (): boolean => {
 		if (!suffix.trim()) return;
 		autoScrollSuspended = false;
 		lastAutoScrollTop = undefined;
+		autoScrollForceOnce = true;
 		codeWorkEpoch += 1;
 		if (activeContext) scheduleMissingCodeDescriptions(activeContext);
 		cancelTimingWorkers();
@@ -1698,6 +1787,7 @@ const chargeBackfillUnit = (): boolean => {
 			}
 			vocalizer.setNarrationSourceOffset(sourceOffset);
 			playbackPaused = false;
+			autoScrollForceOnce = true;
 			livePlaybackId = `live:${++nextLivePlaybackId}`;
 			playbackHistory.beginCapture(livePlaybackId, "", 0, true);
 			refreshPlaybackTimeline();

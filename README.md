@@ -98,6 +98,7 @@ Pi Voice reads `~/.pi/agent/pi-voice.json`. Missing settings use these defaults;
   "submitMode": "review",
   "editMode": "smart",
   "playbackHighlight": true,
+  "autoScroll": true,
   "codeNarration": "guided",
   "codeDescriptionContext": "block-only",
   "codeDescriptionPreprocessConcurrency": 4,

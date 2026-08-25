@@ -44,6 +44,8 @@ export interface VoiceConfig {
 	editModel: string;
 	/** Dim unread assistant prose and reveal it as phone playback advances. */
 	playbackHighlight: boolean;
+	/** Keep the spoken position visible by scrolling the terminal during playback. */
+	autoScroll: boolean;
 	/** Narrate code with synchronized focus groups, or use a plain summary. */
 	codeNarration: VoiceCodeNarration;
 	/** Send only the concerned block, or also its resolved historical discussion. */
@@ -81,6 +83,7 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
 	editMode: "smart",
 	editModel: "current",
 	playbackHighlight: true,
+	autoScroll: true,
 	codeNarration: "guided",
 	codeDescriptionContext: "block-only",
 	codeDescriptionPreprocessConcurrency: 4,
@@ -280,6 +283,8 @@ export async function loadVoiceConfig(): Promise<VoiceConfig> {
 				typeof parsed.playbackHighlight === "boolean"
 					? parsed.playbackHighlight
 					: DEFAULT_VOICE_CONFIG.playbackHighlight,
+			autoScroll:
+				typeof parsed.autoScroll === "boolean" ? parsed.autoScroll : DEFAULT_VOICE_CONFIG.autoScroll,
 			codeNarration: isCodeNarration(parsed.codeNarration)
 				? parsed.codeNarration
 				: DEFAULT_VOICE_CONFIG.codeNarration,

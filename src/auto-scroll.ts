@@ -31,3 +31,17 @@ export function computeAutoScrollTop(viewport: ScrollViewportLike, anchorLine: n
 export function isManualScrollAway(viewport: ScrollViewportLike, lastAnchoredScrollTop: number): boolean {
 	return Math.abs(viewport.scrollTop - lastAnchoredScrollTop) > 1;
 }
+
+/**
+ * Absolute rendered line of the spoken position within a message whose top
+ * sits at `messageTopLine` and that renders as `messageLines` lines.
+ */
+export function anchorLineForMessage(
+	messageTopLine: number,
+	messageLines: number,
+	fraction: number,
+): number {
+	const clamped = Math.min(1, Math.max(0, fraction));
+	const lines = Math.max(0, messageLines);
+	return messageTopLine + Math.floor(clamped * lines);
+}

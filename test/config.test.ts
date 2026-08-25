@@ -29,6 +29,10 @@ test("normalizes preprocessing scope and backfill budget", () => {
 	assert.equal(normalizeBackfillBudget("25"), undefined);
 });
 
+test("autoScroll defaults to enabled", () => {
+	assert.equal(DEFAULT_VOICE_CONFIG.autoScroll, true);
+});
+
 test("defaults code descriptions to block-only context", () => {
 	assert.equal(DEFAULT_VOICE_CONFIG.codeDescriptionContext, "block-only");
 });
