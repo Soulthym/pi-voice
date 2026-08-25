@@ -1353,6 +1353,9 @@ const chargeBackfillUnit = (): boolean => {
 		if (activeContext) scheduleMissingCodeDescriptions(activeContext);
 		cancelTimingWorkers();
 		vocalizer.clear();
+		// A seek may replace an F8-paused transport. Cancellation stops the old
+		// sink, but explicitly clear worker pause state before queuing fresh audio.
+		vocalizer.setPlaybackPaused(false);
 		narration.finish();
 		if (!acquireSpeech("replay", true, true)) {
 			pausedForAttention = true;

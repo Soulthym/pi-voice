@@ -78,12 +78,22 @@ test("TUI follows exact words, permits in-band framing, and seek/resume controls
 	const live = worker!.sent.at(-1) as { utterance: number };
 	worker!.emit({ type: "idle", utterance: live.utterance } as never);
 
-	// F11 starts replay and must force the exact marked word to 20% (8 lines)
-	// from the top. This works even though the viewport began far away at line 0.
+	// F11 starts replay and must place an out-of-frame marked word at 20%.
+	// Register every sentence as a separate 2-second checkpoint so F7/F9 below
+	// exercise genuine timeline movement rather than restarting checkpoint zero.
+	const replayStart = worker!.sent.length;
 	await host.shortcut("f11");
-	const replay = worker!.sent.at(-1) as { utterance: number; segmentId: number };
+	const replaySegments = worker!.sent.slice(replayStart) as Array<{
+		utterance: number;
+		segmentId: number;
+		text: string;
+	}>;
+	assert.ok(replaySegments.length >= 10, "the fixture must produce a multi-checkpoint timeline");
+	const replay = replaySegments[0]!;
+	replaySegments.forEach((segment, index) => {
+		worker!.emit({ type: "segment-audio", segmentId: segment.segmentId, start: index * 2, duration: 2 } as never);
+	});
 	host.scrollView.setDocument(renderedDocument(160), 40);
-	worker!.emit({ type: "segment-audio", segmentId: replay.segmentId, start: 0, duration: 30 } as never);
 	worker!.emit({ type: "playback", utterance: replay.utterance, position: 0 } as never);
 	await waitForScroll(host, 152);
 
@@ -121,11 +131,40 @@ test("TUI follows exact words, permits in-band framing, and seek/resume controls
 	worker!.emit({ type: "playback", utterance: replay.utterance, position: 3 } as never);
 	await new Promise(resolve => setTimeout(resolve, 120));
 	assert.ok(host.widgets.get("pi-voice-follow-hint"));
+	const forwardStart = worker!.sent.length;
 	await host.shortcut("f9");
-	const sought = worker!.sent.at(-1) as { utterance: number; segmentId: number };
+	const forwardSegments = worker!.sent.slice(forwardStart) as Array<{
+		utterance: number;
+		segmentId: number;
+		text: string;
+	}>;
+	const forward = forwardSegments[0]!;
+	assert.ok(forward, "F9 must regenerate from a later checkpoint");
+	const forwardSentence = Number(/Sentence (\d+)/.exec(forward.text)?.[1]);
+	assert.ok(forwardSentence > 1, `F9 did not advance: ${forward.text}`);
 	host.scrollView.setDocument(renderedDocument(180), 40); // 20/40 lines down: already in-band
+	worker!.emit({ type: "segment-audio", segmentId: forward.segmentId, start: 0, duration: 20 } as never);
+	worker!.emit({ type: "playback", utterance: forward.utterance, position: 0 } as never);
+	assert.match(host.render(text), new RegExp(`${NARRATION_ACTIVE_MARKER}Sentence ${forwardSentence}`));
+	await new Promise(resolve => setTimeout(resolve, 120));
+	assert.equal(host.scrollView.scrollTop, 160);
+
+	// F7 from that new base time must move to an earlier persisted checkpoint,
+	// retain usable playback state, and preserve an in-band viewport too.
+	const backwardStart = worker!.sent.length;
+	await host.shortcut("f7");
+	const backwardSegments = worker!.sent.slice(backwardStart) as Array<{
+		utterance: number;
+		segmentId: number;
+		text: string;
+	}>;
+	const sought = backwardSegments[0]!;
+	assert.ok(sought, "F7 must regenerate from an earlier checkpoint");
+	const backwardSentence = Number(/Sentence (\d+)/.exec(sought.text)?.[1]);
+	assert.ok(backwardSentence < forwardSentence, `${backwardSentence} should precede ${forwardSentence}`);
 	worker!.emit({ type: "segment-audio", segmentId: sought.segmentId, start: 0, duration: 20 } as never);
 	worker!.emit({ type: "playback", utterance: sought.utterance, position: 0 } as never);
+	assert.match(host.render(text), new RegExp(`${NARRATION_ACTIVE_MARKER}Sentence ${backwardSentence}`));
 	await new Promise(resolve => setTimeout(resolve, 120));
 	assert.equal(host.scrollView.scrollTop, 160);
 	assert.equal(host.widgets.get("pi-voice-follow-hint"), undefined);
@@ -135,26 +174,46 @@ test("TUI follows exact words, permits in-band framing, and seek/resume controls
 	worker!.emit({ type: "playback", utterance: sought.utterance, position: 1 } as never);
 	await waitForScroll(host, 185);
 
+	// Seeking directly from an F8-paused transport must explicitly clear worker
+	// pause state before regenerated audio is queued.
+	await host.shortcut("f8");
+	assert.equal(host.scrollView.scrollTop, 185);
+	assert.equal(worker!.pauses.at(-1), true);
+	const pausedSeekStart = worker!.sent.length;
+	await host.shortcut("f9");
+	assert.equal(worker!.pauses.at(-1), false);
+	const pausedSeekSegments = worker!.sent.slice(pausedSeekStart) as Array<{
+		utterance: number;
+		segmentId: number;
+		text: string;
+	}>;
+	const pausedSeek = pausedSeekSegments[0]!;
+	assert.ok(pausedSeek, "F9 after pause must queue fresh playback");
+	worker!.emit({ type: "segment-audio", segmentId: pausedSeek.segmentId, start: 0, duration: 20 } as never);
+	worker!.emit({ type: "playback", utterance: pausedSeek.utterance, position: 0 } as never);
+	await new Promise(resolve => setTimeout(resolve, 120));
+	assert.equal(host.scrollView.scrollTop, 185);
+
 	// F8 pause preserves the current viewport rather than restoring transcript
 	// bottom; resume then has the same non-forcing semantics as seek controls.
 	await host.shortcut("f8");
 	assert.equal(host.scrollView.scrollTop, 185);
 	host.scrollView.manualScrollTo(180); // active line 193 is safely in-band
 	await host.shortcut("f8");
-	worker!.emit({ type: "playback", utterance: sought.utterance, position: 1.5 } as never);
+	worker!.emit({ type: "playback", utterance: pausedSeek.utterance, position: 1.5 } as never);
 	await new Promise(resolve => setTimeout(resolve, 120));
 	assert.equal(host.scrollView.scrollTop, 180);
 	host.scrollView.setDocument(renderedDocument(213), 40); // now 33/40 lines down
-	worker!.emit({ type: "playback", utterance: sought.utterance, position: 2 } as never);
+	worker!.emit({ type: "playback", utterance: pausedSeek.utterance, position: 2 } as never);
 	await waitForScroll(host, 205);
 
 	// The default-on behavior is also a persisted runtime setting.
 	await host.command("autoscroll off");
 	host.scrollView.manualScrollTo(0);
-	worker!.emit({ type: "playback", utterance: sought.utterance, position: 2.5 } as never);
+	worker!.emit({ type: "playback", utterance: pausedSeek.utterance, position: 2.5 } as never);
 	await new Promise(resolve => setTimeout(resolve, 120));
 	assert.equal(host.scrollView.scrollTop, 0);
 	await host.command("autoscroll on");
-	worker!.emit({ type: "playback", utterance: sought.utterance, position: 3 } as never);
+	worker!.emit({ type: "playback", utterance: pausedSeek.utterance, position: 3 } as never);
 	await waitForScroll(host, 205);
 });

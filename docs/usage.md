@@ -46,7 +46,7 @@ F6/F10 navigate Pi Voice's selected-message history; merely scrolling the termin
 
 F8 preserves the current audio connection, highlighting position, and transcript viewport around the paused word. It does not restore bottom-follow merely because playback paused. If no live paused transport survives, resume falls back to regenerating from the nearest persisted timing checkpoint.
 
-F7/F9 use segment-to-source timing checkpoints and are therefore approximate. Unchanged messages reuse valid timing maps and cached Opus segments.
+F7/F9 use segment-to-source timing checkpoints and are therefore approximate. Unchanged messages reuse valid timing maps and cached Opus segments. Seeking from an F8-paused transport explicitly clears the worker pause state before fresh audio is queued.
 
 ## Highlighting and status
 
