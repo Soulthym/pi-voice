@@ -1042,13 +1042,6 @@ const chargeBackfillUnit = (): boolean => {
 					transportCancelWaiters.get(event.cancelId)?.();
 					transportCancelWaiters.delete(event.cancelId);
 				}
-				if (
-					event.utterance === undefined &&
-					pendingSpeechPreemption?.cancelId !== undefined &&
-					event.cancelId === pendingSpeechPreemption.cancelId
-				) {
-					finishSpeechPreemption();
-				}
 				if (!inputInProgress) state = "idle";
 				downloadPercent = undefined;
 				playbackHistory.finishUtterance(event.utterance);
@@ -1404,13 +1397,18 @@ const chargeBackfillUnit = (): boolean => {
 			wasComplete: ownerTurnEnded,
 			spokenText: ownedSpeechText,
 		};
-		if (inputInProgress) cancelActiveInput();
+		const hadActiveInput = inputInProgress;
+		const inputCancellation = hadActiveInput ? cancelActiveInput() : Promise.resolve();
 		const cancelId = clearPlaybackTransport();
-		pendingSpeechPreemption = { ...interrupted, ...(cancelId !== undefined ? { cancelId } : {}) };
+		const pending = { ...interrupted, ...(cancelId !== undefined ? { cancelId } : {}) };
+		pendingSpeechPreemption = pending;
 		narration.finish();
-		// Worker cancel emits unscoped idle only after its sink has stopped. Keep
-		// the lease until that acknowledgement, with a crash-safe bounded fallback.
-		speechPreemptionTimer = setTimeout(finishSpeechPreemption, 500);
+		// Release only after both the player and microphone have acknowledged stop.
+		void Promise.all([inputCancellation, waitForTransportCancellation(cancelId)]).then(() => {
+			if (pendingSpeechPreemption === pending) finishSpeechPreemption();
+		});
+		// Crash-safe fallback; microphone stop itself has a ten-second timeout.
+		speechPreemptionTimer = setTimeout(finishSpeechPreemption, hadActiveInput ? 10_500 : 1_250);
 		speechPreemptionTimer.unref?.();
 	};
 
@@ -1451,7 +1449,7 @@ const chargeBackfillUnit = (): boolean => {
 		speakAttentionNotification(waiting);
 	};
 
-	const playTarget = (target: PlaybackTarget, recordTimings: boolean): void => {
+	const playTarget = async (target: PlaybackTarget, recordTimings: boolean): Promise<void> => {
 		const sourceOffset = Math.max(0, Math.min(target.text.length, target.sourceOffset));
 		const suffix = target.text.slice(sourceOffset);
 		const displacedLiveTurn = ownsSpeech && speechPurpose === "turn" && !ownerTurnEnded;
@@ -1462,7 +1460,7 @@ const chargeBackfillUnit = (): boolean => {
 			return;
 		}
 		if (inputInProgress) {
-			cancelActiveInput();
+			await cancelActiveInput();
 			activeContext?.ui.notify("Voice recording stopped for playback control", "info");
 		}
 		armNarrationFollow();
@@ -2538,7 +2536,7 @@ const chargeBackfillUnit = (): boolean => {
 				case "stop": {
 					const cancelId = clearPlaybackTransport();
 					narration.finish();
-					if (inputInProgress) cancelActiveInput();
+					if (inputInProgress) await cancelActiveInput();
 					// Explicit stop must not immediately start an attention announcement.
 					releaseAfterTransportCancellation(cancelId);
 					state = "idle";
@@ -2568,7 +2566,7 @@ const chargeBackfillUnit = (): boolean => {
 						ctx.ui.notify(`Usage: /voice ${action} <huggingface-repo>`, "error");
 						return;
 					}
-					if (inputInProgress) cancelActiveInput();
+					if (inputInProgress) await cancelActiveInput();
 					const cancelId = clearPlaybackTransport();
 					narration.finish();
 					releaseAfterTransportCancellation(cancelId);
@@ -2586,7 +2584,7 @@ const chargeBackfillUnit = (): boolean => {
 						ctx.ui.notify(`Usage: /voice ${action} fp32|q8|q4`, "error");
 						return;
 					}
-					if (inputInProgress) cancelActiveInput();
+					if (inputInProgress) await cancelActiveInput();
 					const cancelId = clearPlaybackTransport();
 					narration.finish();
 					releaseAfterTransportCancellation(cancelId);
@@ -2616,7 +2614,7 @@ const chargeBackfillUnit = (): boolean => {
 						ctx.ui.notify("Usage: /voice device auto|local|<connected-device-id>", "error");
 						return;
 					}
-					if (inputInProgress) cancelActiveInput();
+					if (inputInProgress) await cancelActiveInput();
 					const cancelId = clearPlaybackTransport();
 					narration.finish();
 					releaseAfterTransportCancellation(cancelId);
@@ -2869,7 +2867,7 @@ const chargeBackfillUnit = (): boolean => {
 						ctx.ui.notify("Usage: /voice mode assistant|all|yield", "error");
 						return;
 					}
-					if (inputInProgress) cancelActiveInput();
+					if (inputInProgress) await cancelActiveInput();
 					const cancelId = clearPlaybackTransport();
 					narration.finish();
 					releaseAfterTransportCancellation(cancelId);
@@ -2890,7 +2888,7 @@ const chargeBackfillUnit = (): boolean => {
 						ctx.ui.notify("Unknown voice. Run /voice voice and choose from the picker.", "error");
 						return;
 					}
-					if (inputInProgress) cancelActiveInput();
+					if (inputInProgress) await cancelActiveInput();
 					const cancelId = clearPlaybackTransport();
 					narration.finish();
 					releaseAfterTransportCancellation(cancelId);
@@ -2914,7 +2912,7 @@ const chargeBackfillUnit = (): boolean => {
 						ctx.ui.notify("Usage: /voice output auto|local|tcp://host:port|unix:///path", "error");
 						return;
 					}
-					if (inputInProgress) cancelActiveInput();
+					if (inputInProgress) await cancelActiveInput();
 					const cancelId = clearPlaybackTransport();
 					narration.finish();
 					releaseAfterTransportCancellation(cancelId);
