@@ -30,7 +30,7 @@ test("degenerate viewports never scroll", () => {
 	assert.equal(computeAutoScrollTop(viewport(0, 40, 10), 5), null);
 });
 
-test("manual scrolling away suspends auto-scroll until re-anchor", () => {
+test("detects manual reframing relative to the last automatic anchor", () => {
 	assert.equal(isManualScrollAway(viewport(105), 100), true);
 	assert.equal(isManualScrollAway(viewport(101), 100), false);
 });

@@ -27,7 +27,7 @@ Pi Voice reads `~/.pi/agent/pi-voice.json` by default. Unknown or invalid values
 | `submitMode` | `review` | `review` or `auto`. |
 | `editMode` | `smart` | `smart` or `append`. |
 | `playbackHighlight` | `true` | Enables progressive prose/code highlighting. |
-| `autoScroll` | `true` | Locates the exact rendered spoken word, initially places it at 20% from the top (clamped near transcript ends), and re-anchors whenever a later word passes 80%. Manual scrolling suspends it and shows the follow-shortcut hint. |
+| `autoScroll` | `true` | Locates the exact rendered spoken word, initially places it at 20% from the top (clamped near transcript ends), permits manual reframing inside the 20–80% band, and re-anchors only when a word crosses a band edge. |
 | `codeNarration` | `guided` | `guided` synchronized focus or plain `summary`. |
 | `codeDescriptionContext` | `block-only` | `block-only` sends only the concerned fence; `conversation` also sends its resolved historical discussion. |
 | `codeDescriptionPreprocessScope` | `since-compaction` | Background preprocessing covers only messages retained by the latest compaction (`all` revisits the entire branch). |

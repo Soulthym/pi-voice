@@ -62,7 +62,7 @@ With `autoScroll: true` (the default), Pi Voice attaches an invisible location m
 
 After that initial placement, no scrolling occurs while the word remains in the 20–80% visible band. Each time a new spoken word moves past the 80% mark, it is re-anchored at 20%. F6/F7/F9/F10/F11 replay and seek actions, F8 resume, `/voice attention`, and the follow shortcut all re-arm this behavior.
 
-Manual scrolling during speech suspends automatic follow and shows a small hint below the editor. Press `Ctrl+E` (or the configured `scrollBottomShortcut`) to return to the currently spoken word; `/voice bottom` does the same. Outside active narration, that shortcut and command scroll directly to the transcript bottom.
+Manual scrolling is accepted while the spoken word remains inside the 20–80% band, so you can adjust its framing without an immediate snap. A small hint below the editor offers `Ctrl+E` (or the configured `scrollBottomShortcut`) to restore the canonical 20% anchor immediately. Otherwise tracking stays armed and snaps only when a spoken word crosses a band edge. `/voice bottom` has the same re-anchor behavior during narration; outside active narration, the shortcut and command scroll directly to the transcript bottom.
 
 ## Timing diagnostics
 

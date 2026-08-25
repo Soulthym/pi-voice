@@ -745,7 +745,6 @@ const chargeBackfillUnit = (): boolean => {
 	 * always brings the anchor into view, even if the user had scrolled away.
 	 */
 	let lastAutoScrollTop: number | undefined;
-	let autoScrollSuspended = false;
 	let autoScrollForceOnce = false;
 	let autoScrollTookControl = false;
 	let followHintVisible = false;
@@ -818,7 +817,7 @@ const chargeBackfillUnit = (): boolean => {
 	const showFollowHint = (): void => {
 		if (followHintVisible || !activeContext) return;
 		followHintVisible = true;
-		const text = `↕ Spoken-text follow paused — press ${followShortcutLabel()} to follow again`;
+		const text = `↕ Free framing active — press ${followShortcutLabel()} to re-anchor spoken text`;
 		activeContext.ui.setWidget(
 			"pi-voice-follow-hint",
 			[activeContext.ui.theme.fg("accent", text)],
@@ -827,7 +826,6 @@ const chargeBackfillUnit = (): boolean => {
 	};
 
 	const armNarrationFollow = (): void => {
-		autoScrollSuspended = false;
 		lastAutoScrollTop = undefined;
 		autoScrollForceOnce = true;
 		hideFollowHint();
@@ -848,17 +846,6 @@ const chargeBackfillUnit = (): boolean => {
 			viewportHeight: scrollView.viewportHeight,
 			contentHeight: resolvedContentHeight,
 		};
-		if (
-			!autoScrollForceOnce &&
-			lastAutoScrollTop !== undefined &&
-			isManualScrollAway(scrollViewport, lastAutoScrollTop)
-		) {
-			autoScrollSuspended = true;
-			showFollowHint();
-			return;
-		}
-		if (autoScrollSuspended) return;
-
 		const outerWidth = narrationViewportWidth();
 		let anchor: number | undefined;
 		if (scrollView.render) {
@@ -910,8 +897,21 @@ const chargeBackfillUnit = (): boolean => {
 		}
 
 		const target = computeAutoScrollTop(scrollViewport, anchor);
-		if (target === null && !autoScrollForceOnce) return;
+		const manuallyReframed =
+			!autoScrollForceOnce &&
+			lastAutoScrollTop !== undefined &&
+			isManualScrollAway(scrollViewport, lastAutoScrollTop);
+		if (target === null && !autoScrollForceOnce) {
+			if (manuallyReframed) {
+				// Accept user framing while the spoken word remains inside 20–80%.
+				// Tracking stays armed and will snap only after a later word overflows.
+				lastAutoScrollTop = scrollView.scrollTop;
+				showFollowHint();
+			}
+			return;
+		}
 
+		hideFollowHint();
 		const maxScrollTop = Math.max(0, resolvedContentHeight - scrollView.viewportHeight);
 		const topBand = Math.floor(scrollView.viewportHeight * 0.2);
 		const desired = Math.max(0, Math.min(maxScrollTop, target ?? anchor - topBand));
@@ -2166,7 +2166,6 @@ const chargeBackfillUnit = (): boolean => {
 			return;
 		}
 		scrollView.scrollToEnd();
-		autoScrollSuspended = false;
 		lastAutoScrollTop = undefined;
 		hideFollowHint();
 	};

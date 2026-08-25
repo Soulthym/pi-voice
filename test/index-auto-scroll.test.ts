@@ -25,7 +25,7 @@ const renderedDocument = (activeLine: number, count = 300): string[] =>
 		line === activeLine ? `${NARRATION_ACTIVE_MARKER}spoken word` : `line ${line}`,
 	);
 
-test("TUI follows exact spoken words, suspends on manual scroll, and seek/resume controls re-follow", async t => {
+test("TUI follows exact words, permits in-band framing, and seek/resume controls re-follow", async t => {
 	mock.module("../src/worker-client.js", {
 		namedExports: { VoiceWorkerClient: MockedVoiceWorkerClient },
 	});
@@ -93,24 +93,31 @@ test("TUI follows exact spoken words, suspends on manual scroll, and seek/resume
 	worker!.emit({ type: "playback", utterance: replay.utterance, position: 1 } as never);
 	await waitForScroll(host, 177);
 
-	// A manual scroll suspends follow and shows a bottom TUI hint.
-	host.scrollView.manualScrollTo(20);
+	// Manual framing is accepted while the spoken word remains within 20–80%.
+	// Tracking stays armed, and a bottom TUI hint offers immediate re-anchoring.
+	host.scrollView.manualScrollTo(160);
 	worker!.emit({ type: "playback", utterance: replay.utterance, position: 2 } as never);
 	await new Promise(resolve => setTimeout(resolve, 120));
-	assert.equal(host.scrollView.scrollTop, 20);
+	assert.equal(host.scrollView.scrollTop, 160);
 	const hint = host.widgets.get("pi-voice-follow-hint");
 	assert.equal(hint?.placement, "belowEditor");
-	assert.match(hint?.lines?.[0] ?? "", /Ctrl\+E.*follow again/);
+	assert.match(hint?.lines?.[0] ?? "", /Ctrl\+E.*re-anchor spoken text/);
 
-	// The advertised shortcut follows the spoken word again (rather than merely
-	// jumping to transcript end) and dismisses the hint.
+	// The advertised shortcut restores the canonical 20% anchor immediately
+	// (rather than merely jumping to transcript end) and dismisses the hint.
 	await host.shortcut("ctrl+e");
 	await waitForScroll(host, 177);
 	assert.equal(host.widgets.get("pi-voice-follow-hint"), undefined);
 
-	// Timeline seek buttons route through playTarget, which must re-arm follow
-	// even after another manual-scroll suspension.
-	host.scrollView.manualScrollTo(10);
+	// Moving just beyond the 80% edge is the point at which auto-scroll snaps.
+	host.scrollView.manualScrollTo(152); // active line 185 is now 33/40 lines down
+	worker!.emit({ type: "playback", utterance: replay.utterance, position: 2.5 } as never);
+	await waitForScroll(host, 177);
+	assert.equal(host.widgets.get("pi-voice-follow-hint"), undefined);
+
+	// Timeline seek buttons route through playTarget and always restore canonical
+	// follow, even after another accepted in-band reframe.
+	host.scrollView.manualScrollTo(160);
 	worker!.emit({ type: "playback", utterance: replay.utterance, position: 3 } as never);
 	await new Promise(resolve => setTimeout(resolve, 120));
 	assert.ok(host.widgets.get("pi-voice-follow-hint"));

@@ -27,7 +27,7 @@ export function computeAutoScrollTop(viewport: ScrollViewportLike, anchorLine: n
 	return Math.max(0, Math.min(maxScrollTop, target));
 }
 
-/** True when a manual scroll should suspend automatic re-anchoring. */
+/** True when the viewport moved independently from the last automatic anchor. */
 export function isManualScrollAway(viewport: ScrollViewportLike, lastAnchoredScrollTop: number): boolean {
 	return Math.abs(viewport.scrollTop - lastAnchoredScrollTop) > 1;
 }
