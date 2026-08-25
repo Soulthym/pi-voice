@@ -58,7 +58,7 @@ Subsequent assistant messages do not reset earlier message styling while queued 
 
 ## Auto-scroll
 
-With `autoScroll: true` (the default), Pi Voice attaches an invisible location marker to the **currently timed word** and finds that marker in Pi's rendered TUI document. Starting or seeking narration places that word 20% down from the top of the viewport. Near the start or end of the transcript, the target is clamped to the available scroll range instead of creating nonexistent space.
+With `autoScroll: true` (the default), Pi Voice attaches an invisible location marker to the **currently timed word** and finds that marker in Pi's rendered TUI document. New live narration initially places that word 20% down from the top. Replay, seek, and resume keys preserve the current viewport when their resulting word is already inside 20–80%; they snap it to 20% only when it is outside that band. Near the start or end of the transcript, targets are clamped to the available scroll range instead of creating nonexistent space.
 
 After that initial placement, no scrolling occurs while the word remains in the 20–80% visible band. Each time a new spoken word moves past the 80% mark, it is re-anchored at 20%. F6/F7/F9/F10/F11 replay and seek actions, F8 resume, `/voice attention`, and the follow shortcut all re-arm this behavior.
 

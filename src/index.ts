@@ -825,9 +825,9 @@ const chargeBackfillUnit = (): boolean => {
 		);
 	};
 
-	const armNarrationFollow = (): void => {
+	const armNarrationFollow = (forceCanonicalAnchor = false): void => {
 		lastAutoScrollTop = undefined;
-		autoScrollForceOnce = true;
+		autoScrollForceOnce = forceCanonicalAnchor;
 		hideFollowHint();
 		requestNarrationRender();
 	};
@@ -902,7 +902,11 @@ const chargeBackfillUnit = (): boolean => {
 			lastAutoScrollTop !== undefined &&
 			isManualScrollAway(scrollViewport, lastAutoScrollTop);
 		if (target === null && !autoScrollForceOnce) {
-			if (manuallyReframed) {
+			if (lastAutoScrollTop === undefined) {
+				// Replay/seek/resume controls re-arm from the current framing. They do
+				// not force 20% when the newly spoken word is already inside the band.
+				lastAutoScrollTop = scrollView.scrollTop;
+			} else if (manuallyReframed) {
 				// Accept user framing while the spoken word remains inside 20–80%.
 				// Tracking stays armed and will snap only after a later word overflows.
 				lastAutoScrollTop = scrollView.scrollTop;
@@ -1867,7 +1871,7 @@ const chargeBackfillUnit = (): boolean => {
 			}
 			vocalizer.setNarrationSourceOffset(sourceOffset);
 			playbackPaused = false;
-			armNarrationFollow();
+			armNarrationFollow(true);
 			livePlaybackId = `live:${++nextLivePlaybackId}`;
 			playbackHistory.beginCapture(livePlaybackId, "", 0, true);
 			refreshPlaybackTimeline();
@@ -2161,7 +2165,7 @@ const chargeBackfillUnit = (): boolean => {
 			return;
 		}
 		if (ownsSpeech && !playbackPaused && config.autoScroll) {
-			armNarrationFollow();
+			armNarrationFollow(true);
 			requestNarrationAutoScroll();
 			return;
 		}

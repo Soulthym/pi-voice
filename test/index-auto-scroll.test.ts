@@ -115,35 +115,44 @@ test("TUI follows exact words, permits in-band framing, and seek/resume controls
 	await waitForScroll(host, 177);
 	assert.equal(host.widgets.get("pi-voice-follow-hint"), undefined);
 
-	// Timeline seek buttons route through playTarget and always restore canonical
-	// follow, even after another accepted in-band reframe.
+	// Timeline seek buttons route through playTarget, but re-arming is not a
+	// forced snap: a sought word already inside 20–80% keeps current framing.
 	host.scrollView.manualScrollTo(160);
 	worker!.emit({ type: "playback", utterance: replay.utterance, position: 3 } as never);
 	await new Promise(resolve => setTimeout(resolve, 120));
 	assert.ok(host.widgets.get("pi-voice-follow-hint"));
 	await host.shortcut("f9");
 	const sought = worker!.sent.at(-1) as { utterance: number; segmentId: number };
-	host.scrollView.setDocument(renderedDocument(220), 40);
+	host.scrollView.setDocument(renderedDocument(180), 40); // 20/40 lines down: already in-band
 	worker!.emit({ type: "segment-audio", segmentId: sought.segmentId, start: 0, duration: 20 } as never);
 	worker!.emit({ type: "playback", utterance: sought.utterance, position: 0 } as never);
-	await waitForScroll(host, 212);
+	await new Promise(resolve => setTimeout(resolve, 120));
+	assert.equal(host.scrollView.scrollTop, 160);
 	assert.equal(host.widgets.get("pi-voice-follow-hint"), undefined);
 
-	// Pause/resume is the only playback control that does not use playTarget;
-	// resuming explicitly re-arms exact-word follow too.
-	await host.shortcut("f8");
-	host.scrollView.manualScrollTo(0);
-	await host.shortcut("f8");
+	// The next word crossing 80% still snaps normally.
+	host.scrollView.setDocument(renderedDocument(193), 40); // 33/40 lines down
 	worker!.emit({ type: "playback", utterance: sought.utterance, position: 1 } as never);
-	await waitForScroll(host, 212);
+	await waitForScroll(host, 185);
+
+	// F8 resume has the same non-forcing semantics as seek/replay controls.
+	await host.shortcut("f8");
+	host.scrollView.manualScrollTo(180); // active line 193 is safely in-band
+	await host.shortcut("f8");
+	worker!.emit({ type: "playback", utterance: sought.utterance, position: 1.5 } as never);
+	await new Promise(resolve => setTimeout(resolve, 120));
+	assert.equal(host.scrollView.scrollTop, 180);
+	host.scrollView.setDocument(renderedDocument(213), 40); // now 33/40 lines down
+	worker!.emit({ type: "playback", utterance: sought.utterance, position: 2 } as never);
+	await waitForScroll(host, 205);
 
 	// The default-on behavior is also a persisted runtime setting.
 	await host.command("autoscroll off");
 	host.scrollView.manualScrollTo(0);
-	worker!.emit({ type: "playback", utterance: sought.utterance, position: 2 } as never);
+	worker!.emit({ type: "playback", utterance: sought.utterance, position: 2.5 } as never);
 	await new Promise(resolve => setTimeout(resolve, 120));
 	assert.equal(host.scrollView.scrollTop, 0);
 	await host.command("autoscroll on");
 	worker!.emit({ type: "playback", utterance: sought.utterance, position: 3 } as never);
-	await waitForScroll(host, 212);
+	await waitForScroll(host, 205);
 });
