@@ -164,10 +164,14 @@ test("TUI follows exact words, permits in-band framing, and seek/resume controls
 	await new Promise(resolve => setTimeout(resolve, 120));
 	assert.equal(host.scrollView.scrollTop, 160);
 
-	// F7 from that new base time must move to an earlier persisted checkpoint,
-	// retain usable playback state, and preserve an in-band viewport too.
+	// F7 immediately previews and anchors its target before audio starts. Once
+	// manually reframed in-band, the first playback tick preserves that framing.
+	host.scrollView.setDocument(renderedDocument(220), 40);
 	const backwardStart = worker!.sent.length;
 	await host.shortcut("f7");
+	assert.equal(host.scrollView.scrollTop, 212);
+	host.scrollView.manualScrollTo(160);
+	host.scrollView.setDocument(renderedDocument(180), 40);
 	const backwardSegments = worker!.sent.slice(backwardStart) as Array<{
 		utterance: number;
 		segmentId: number;
@@ -182,7 +186,7 @@ test("TUI follows exact words, permits in-band framing, and seek/resume controls
 	assert.ok(host.render(text).includes(NARRATION_ACTIVE_MARKER));
 	await new Promise(resolve => setTimeout(resolve, 120));
 	assert.equal(host.scrollView.scrollTop, 160);
-	assert.equal(host.widgets.get("pi-voice-follow-hint"), undefined);
+	assert.ok(host.widgets.get("pi-voice-follow-hint"));
 
 	// The next word crossing 80% still snaps normally.
 	host.scrollView.setDocument(renderedDocument(193), 40); // 33/40 lines down
@@ -249,6 +253,31 @@ test("TUI follows exact words, permits in-band framing, and seek/resume controls
 	await host.shortcut("f8");
 	assert.equal(worker!.pauses.length, pauseCommandsAfterStop);
 	assert.ok(host.notices.some(notice => notice.message.includes("no assistant message playing")));
+
+	// Message movement also previews and anchors while paused without starting
+	// the replacement sink. Moving back in-band preserves the chosen framing.
+	host.addMessage("user-2", "assistant-1", {
+		role: "user",
+		content: [{ type: "text", text: "Another response." }],
+		timestamp: 2,
+	});
+	host.addMessage("assistant-2", "user-2", assistant("Second historical response."));
+	await host.emit("agent_settled", { type: "agent_settled" });
+	host.scrollView.setDocument(renderedDocument(240), 40);
+	await host.shortcut("f11");
+	await host.shortcut("f8");
+	assert.equal(worker!.pauses.at(-1), true);
+	host.scrollView.setDocument(renderedDocument(80), 40);
+	await host.shortcut("f6");
+	assert.equal(host.scrollView.scrollTop, 72);
+	assert.equal(worker!.pauses.at(-1), true);
+	assert.ok(host.render(text).includes(NARRATION_ACTIVE_MARKER));
+	host.scrollView.manualScrollTo(90);
+	host.scrollView.setDocument(renderedDocument(100), 40);
+	await host.shortcut("f10");
+	assert.equal(host.scrollView.scrollTop, 90);
+	assert.equal(worker!.pauses.at(-1), true);
+	await host.command("stop");
 
 	// Manual replay during a newly streaming turn must never append later live
 	// deltas to the historical replay transport.

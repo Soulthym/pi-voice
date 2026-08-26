@@ -2305,7 +2305,7 @@ const chargeBackfillUnit = (): boolean => {
 		handler: ctx => {
 			if (!requireEnabledVoice(ctx)) return;
 			const target = playbackHistory.seekTarget(-10);
-			if (target) playTarget(target, false);
+			if (target) playTarget(target, false, true);
 			else {
 				scheduleMissingTimings(ctx);
 				ctx.ui.notify("Timing preprocessing for this message has not finished yet", "warning");
@@ -2369,7 +2369,7 @@ const chargeBackfillUnit = (): boolean => {
 		handler: ctx => {
 			if (!requireEnabledVoice(ctx)) return;
 			const target = playbackHistory.seekTarget(10);
-			if (target) playTarget(target, false);
+			if (target) playTarget(target, false, true);
 			else {
 				scheduleMissingTimings(ctx);
 				ctx.ui.notify("Timing preprocessing for this message has not finished yet", "warning");

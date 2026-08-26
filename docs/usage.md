@@ -46,7 +46,7 @@ F6/F10 navigate Pi Voice's selected-message history; merely scrolling the termin
 
 F8 preserves the current audio connection, highlighting position, and transcript viewport around the paused word. Because the paused sink still owns the physical output resource, it retains the cross-session device lease until resume, seek, or stop. It does not restore bottom-follow merely because playback paused. If no live paused transport survives, resume falls back to regenerating from the nearest persisted timing checkpoint.
 
-F7/F9 use segment-to-source timing checkpoints and are therefore approximate. Unchanged messages reuse valid timing maps and cached Opus segments. Seeking from an F8-paused transport explicitly clears the worker pause state before fresh audio is queued.
+F7/F9 use duration estimates first and replace them with aligned source-word checkpoints when alignment arrives, usually landing within a fraction of the requested ten seconds. Unchanged messages reuse valid timing maps and cached Opus segments. Message and time movement never changes play/pause state: while paused it updates the highlighted position and queues the replacement sink in paused state.
 
 ## Highlighting and status
 

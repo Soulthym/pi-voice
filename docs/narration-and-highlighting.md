@@ -4,7 +4,7 @@
 
 ## Prose and Markdown
 
-Pi Voice converts streaming Markdown into bounded speech segments. It starts with a short first segment, then uses sentence and clause boundaries so Kokoro inputs stay manageable.
+Pi Voice converts streaming Markdown into bounded speech segments. It starts with a short first segment, then uses sentence and clause boundaries so Kokoro inputs stay manageable. Single prose newlines are treated as soft model line wraps, while blank lines, headings, lists, tables, and fences retain real block boundaries.
 
 It avoids reading most Markdown syntax, preserves link labels while shortening URLs to useful host names, and leaves fence markers and link destinations untouched during terminal styling.
 
@@ -58,9 +58,9 @@ Subsequent assistant messages do not reset earlier message styling while queued 
 
 ## Auto-scroll
 
-With `autoScroll: true` (the default), Pi Voice attaches an invisible location marker to the **currently timed word** and finds that marker in Pi's rendered TUI document. New live narration initially places that word 20% down from the top. Replay, seek, and resume keys preserve the current viewport when their resulting word is already inside 20–80%; they snap it to 20% only when it is outside that band. Near the start or end of the transcript, targets are clamped to the available scroll range instead of creating nonexistent space.
+With `autoScroll: true` (the default), Pi Voice attaches an invisible location marker to the **currently timed word** and finds that marker in Pi's rendered TUI document. New live narration initially places that word 20% down from the top. Message and ±10-second controls preview their target immediately, before regenerated audio begins: the viewport stays put when that target is already inside 20–80%, otherwise it snaps to 20%. Pausing itself never moves the viewport, and timeline movement while paused updates highlighting and framing without resuming audio. Near the start or end of the transcript, targets are clamped to the available scroll range instead of creating nonexistent space.
 
-After that initial placement, no scrolling occurs while the word remains in the 20–80% visible band. Each time a new spoken word moves past the 80% mark, it is re-anchored at 20%. F6/F7/F9/F10/F11 replay and seek actions, F8 resume, `/voice attention`, and the follow shortcut all re-arm this behavior.
+After that initial placement, no scrolling occurs while the word remains in the 20–80% visible band. Each time a new spoken word moves past the 80% mark, it is re-anchored at 20%. F6/F7/F9/F10/F11 replay and seek actions, F8 resume, `/voice attention`, and the follow shortcut all re-arm this behavior. The first marker lookup establishes the active message's transcript position; subsequent words render only that message, with periodic full-layout resynchronization, rather than rerendering a long transcript twice on every playback tick.
 
 Manual scrolling is accepted while the spoken word remains inside the 20–80% band, so you can adjust its framing without an immediate snap. A small hint below the editor offers `Ctrl+E` (or the configured `scrollBottomShortcut`) to restore the canonical 20% anchor immediately. Otherwise tracking stays armed and snaps only when a spoken word crosses a band edge. `/voice bottom` has the same re-anchor behavior during narration; outside active narration, the shortcut and command scroll directly to the transcript bottom.
 
