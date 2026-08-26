@@ -89,7 +89,7 @@ test("invalidates and replaces timing checkpoints for a full rerender", () => {
 	history.sync([{ id: "message", text, renderKey: "old-render" }], true);
 	history.restore([
 		{
-			version: 2,
+			version: 3,
 			messageId: "message",
 			renderKey: "old-render",
 			duration: 9,

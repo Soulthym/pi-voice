@@ -36,7 +36,7 @@ function message(id: string, renderKey: string): PlaybackMessage {
 	return { id, text: TEXT, renderKey };
 }
 
-function snapshot(version: 1 | 2, id: string, renderKey: string): PlaybackTimingSnapshot {
+function snapshot(version: 1 | 2 | 3, id: string, renderKey: string): PlaybackTimingSnapshot {
 	return {
 		version,
 		messageId: id,
@@ -60,10 +60,13 @@ test("restore rejects the legacy fixture while accepting equivalent current data
 	history.restore([snapshot(1, "m1", legacyVersion1Key(TEXT, ["code-a"]))]);
 	assert.equal(history.status()!.hasTimings, false, "version-1 data must be rejected outright");
 
-	history.restore([snapshot(2, "m1", legacyVersion1Key(TEXT, ["code-a"]))]);
-	assert.equal(history.status()!.hasTimings, false, "stale keys must be rejected even under version 2");
-
 	history.restore([snapshot(2, "m1", CURRENT_KEY)]);
+	assert.equal(history.status()!.hasTimings, false, "segment-only version-2 timing data must be reprocessed");
+
+	history.restore([snapshot(3, "m1", legacyVersion1Key(TEXT, ["code-a"]))]);
+	assert.equal(history.status()!.hasTimings, false, "stale keys must be rejected even under version 3");
+
+	history.restore([snapshot(3, "m1", CURRENT_KEY)]);
 	assert.equal(history.status()!.hasTimings, true);
 });
 
@@ -76,13 +79,13 @@ test("rejecting legacy data preserves other messages and accepts later fresh wor
 		{ id: "fresh-message", text: freshText, renderKey: freshKey },
 	]);
 
-	history.restore([snapshot(2, "fresh-message", freshKey), snapshot(1, "legacy-message", legacyVersion1Key(TEXT, ["code-a"]))]);
+	history.restore([snapshot(3, "fresh-message", freshKey), snapshot(1, "legacy-message", legacyVersion1Key(TEXT, ["code-a"]))]);
 
 	assert.equal(history.status()!.hasTimings, true, "unrelated accepted timings must survive a rejected snapshot");
 
 	// Freshly recorded work for the formerly legacy message is still restorable.
 	const refreshed = narrationRenderKey(TEXT, DEFAULT_VOICE_CONFIG, []);
 	history.sync([message("legacy-message", refreshed)]);
-	history.restore([snapshot(2, "legacy-message", refreshed)]);
+	history.restore([snapshot(3, "legacy-message", refreshed)]);
 	assert.equal(history.status()!.hasTimings, true);
 });

@@ -158,7 +158,7 @@ function playbackTimingSnapshots(ctx: ExtensionContext): PlaybackTimingSnapshot[
 	for (const entry of ctx.sessionManager.getBranch()) {
 		if (entry.type !== "custom" || entry.customType !== PLAYBACK_TIMING_ENTRY) continue;
 		const data = entry.data;
-		if (!data || typeof data !== "object" || !("version" in data) || data.version !== 2) continue;
+		if (!data || typeof data !== "object" || !("version" in data) || data.version !== 3) continue;
 		snapshots.push(data as PlaybackTimingSnapshot);
 	}
 	return snapshots;
@@ -525,12 +525,12 @@ export default async function (pi: ExtensionAPI) {
 		text: string,
 		conversationMessages: readonly Message[],
 		assistantMessage: unknown,
-	): Promise<Array<{ text: string; source: SpeakableSourceRange }>> => {
+	): Promise<Array<{ text: string; source: SpeakableSourceRange; wordTimings: boolean }>> => {
 		const stream = new SpeakableStream();
-		const result: Array<{ text: string; source: SpeakableSourceRange }> = [];
+		const result: Array<{ text: string; source: SpeakableSourceRange; wordTimings: boolean }> = [];
 		for (const item of [...stream.push(text), ...stream.flush()]) {
 			if (item.kind === "speech") {
-				result.push({ text: item.text, source: item.source });
+				result.push({ text: item.text, source: item.source, wordTimings: true });
 				continue;
 			}
 			const providerMessages = contextualAssistantMessagesThroughText(
@@ -548,7 +548,7 @@ export default async function (pi: ExtensionAPI) {
 			if (plan.omitted) continue;
 			let chunks = chunkCodeNarration(plan);
 			if (chunks.length === 0) chunks = chunkCodeNarration(plainCodeNarration(fallbackCodeDescription(item.block)));
-			for (const chunk of chunks) result.push({ text: chunk.text, source: item.source });
+			for (const chunk of chunks) result.push({ text: chunk.text, source: item.source, wordTimings: false });
 		}
 		return result;
 	};
@@ -1686,7 +1686,11 @@ const chargeBackfillUnit = (): boolean => {
 				if (epoch !== contextEpoch || workEpoch !== timingWorkEpoch || activeContext !== ctx) return;
 				const contextual = contextualById.get(message.id);
 				if (!contextual) return;
-				const checkpoints: PlaybackTimingSnapshot["checkpoints"] = [];
+				let checkpoints: PlaybackTimingSnapshot["checkpoints"] = [];
+				const timingNarration = new NarrationProgress();
+				timingNarration.setCompletedText(message.text);
+				let timingSegmentId = 0;
+				let lastWordTime = Number.NEGATIVE_INFINITY;
 				let time = 0;
 				try {
 					for (const item of await timingItemsFor(
@@ -1699,6 +1703,22 @@ const chargeBackfillUnit = (): boolean => {
 						if (epoch !== contextEpoch || workEpoch !== timingWorkEpoch || activeContext !== ctx) return;
 						if (!Number.isFinite(duration) || duration <= 0) continue;
 						checkpoints.push({ time, duration, sourceOffset: item.source.start });
+						if (item.wordTimings) {
+							const segmentId = ++timingSegmentId;
+							timingNarration.registerSegment({
+								id: segmentId,
+								utterance: 1,
+								text: item.text,
+								source: item.source,
+							});
+							timingNarration.setSegmentAudio(segmentId, 0, duration);
+							for (const word of timingNarration.sourceWordTimings(segmentId)) {
+								const wordTime = time + word.time;
+								if (word.sourceOffset === item.source.start || wordTime - lastWordTime < 0.4) continue;
+								checkpoints.push({ time: wordTime, duration: 0, sourceOffset: word.sourceOffset });
+								lastWordTime = wordTime;
+							}
+						}
 						time += duration;
 					}
 				} catch {
@@ -1706,6 +1726,13 @@ const chargeBackfillUnit = (): boolean => {
 					return;
 				}
 				if (checkpoints.length === 0 || epoch !== contextEpoch || activeContext !== ctx) return;
+				checkpoints.sort((left, right) => left.time - right.time);
+				if (checkpoints.length > 2_000) {
+					const all = checkpoints;
+					checkpoints = Array.from({ length: 2_000 }, (_value, index) =>
+						all[Math.round((index * (all.length - 1)) / 1_999)] as PlaybackTimingSnapshot["checkpoints"][number],
+					);
+				}
 				try {
 					const resolvedRenderKey = renderKeyFor(ctx, contextual);
 					if (resolvedRenderKey !== message.renderKey) {
@@ -1713,7 +1740,7 @@ const chargeBackfillUnit = (): boolean => {
 						playbackHistory.sync(playbackMessages(ctx));
 					}
 					const snapshot: PlaybackTimingSnapshot = {
-						version: 2,
+						version: 3,
 						messageId: message.id,
 						renderKey: resolvedRenderKey,
 						duration: time,

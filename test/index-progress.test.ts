@@ -131,7 +131,7 @@ test("unified progress widget orders input, playback, and preprocessing and clea
 	assert.ok(removals.includes("pi-voice-preprocessing"), "legacy preprocessing widget must be removed");
 	assert.equal(host.widgetLines(), undefined);
 
-	const text = "Answer.\n```ts\nrun();\n```";
+	const text = "This answer contains several words for precise timing.\n```ts\nrun();\n```";
 	const partial = assistant(text, "pending");
 	const complete = assistant(text, "stop");
 	await host.emit("before_agent_start", { type: "before_agent_start" });
@@ -180,6 +180,10 @@ test("unified progress widget orders input, playback, and preprocessing and clea
 		candidate => candidate.length > 0 && candidate.every(line => !line.includes("Preprocessing ·")),
 	);
 	assert.match(lines[0], /message 1\/1/);
+	const timingEntry = host.entries.findLast(
+		entry => entry.type === "custom" && entry.customType === "pi-voice.playback-timing",
+	);
+	assert.ok(timingEntry?.data.checkpoints.some((checkpoint: any) => checkpoint.duration === 0 && checkpoint.sourceOffset > 0));
 
 	await host.shutdown();
 	assert.equal(host.widgetLines(), undefined);

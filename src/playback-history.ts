@@ -21,7 +21,7 @@ export interface PlaybackStatus {
 }
 
 export interface PlaybackTimingSnapshot {
-	version: 2;
+	version: 3;
 	messageId: string;
 	renderKey: string;
 	duration: number;
@@ -81,7 +81,7 @@ export class PlaybackHistory {
 
 	restore(snapshots: readonly PlaybackTimingSnapshot[]): void {
 		for (const snapshot of snapshots) {
-			if (snapshot.version !== 2 || !Number.isFinite(snapshot.duration) || snapshot.duration < 0) continue;
+			if (snapshot.version !== 3 || !Number.isFinite(snapshot.duration) || snapshot.duration < 0) continue;
 			const record = this.#records.get(snapshot.messageId);
 			if (
 				!record ||
@@ -210,7 +210,7 @@ export class PlaybackHistory {
 					all[Math.round((index * (all.length - 1)) / 1_999)] as TimingCheckpoint,
 			);
 		return {
-			version: 2,
+			version: 3,
 			messageId: capture.record.id,
 			renderKey: capture.record.renderKey,
 			duration: capture.record.duration,
