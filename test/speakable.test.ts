@@ -24,6 +24,21 @@ test("emits fenced code for description while preserving its spoken position", (
 	]);
 });
 
+test("joins model-inserted prose line wraps without splitting intonation", () => {
+	const stream = new SpeakableStream();
+	const items = [
+		...stream.push("This explanation continues across a\nline wrap before the sentence ends."),
+		...stream.flush(),
+	];
+	assert.deepEqual(speech(items), ["This explanation continues across a line wrap before the sentence ends."]);
+});
+
+test("retains real Markdown block boundaries", () => {
+	const stream = new SpeakableStream();
+	const items = [...stream.push("First fragment\n\nSecond fragment\n- List item"), ...stream.flush()];
+	assert.deepEqual(speech(items), ["First fragment", "Second fragment", "List item"]);
+});
+
 test("speaks text-like fenced blocks instead of describing them", () => {
 	const stream = new SpeakableStream();
 	const items = [

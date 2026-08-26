@@ -12,7 +12,7 @@
  * 1. Block pass (per character, stateful): emits fenced code blocks as
  *    description jobs, reads text-like fences and table cells as prose,
  *    strips heading/bullet/blockquote markers (numbered-list markers are spoken
- *    as "1, …"), and turns newlines into hard segment breaks.
+ *    as "1, …"), joins soft prose line wraps, and retains block boundaries.
  * 2. Segmentation (stateful): emits a segment the moment a sentence boundary
  *    appears — no next-sentence confirmation, which is what made the previous
  *    engine-side splitter stall a full sentence behind generation. The first
@@ -222,6 +222,10 @@ export class SpeakableStream {
 	#textFence = false;
 	/** Whether the current prose line contains Markdown table cell separators. */
 	#tableLine = false;
+	/** Whether this line began with a heading/list marker and must remain a block. */
+	#blockLine = false;
+	/** A prose newline tentatively joined until the next line resolves. */
+	#softLineBreak = false;
 	/** Prose accumulator the segmenter cuts from. */
 	#buf = "";
 	/** Source offset for every transformed character in #buf. */
@@ -283,8 +287,14 @@ export class SpeakableStream {
 				this.#consumeLineStart(ch, offset, out);
 				return;
 			case "prose":
-				if (ch === "\n") this.#hardBreak(out);
-				else this.#append(ch, offset);
+				if (ch === "\n") {
+					if (this.#tableLine || this.#blockLine) this.#hardBreak(out);
+					else {
+						this.#appendSynthetic(" ", offset, offset + 1);
+						this.#mode = "linestart";
+						this.#softLineBreak = true;
+					}
+				} else this.#append(ch, offset);
 				return;
 			case "fence-open":
 				if (ch === "\n") this.#openFenceBody();
@@ -302,6 +312,10 @@ export class SpeakableStream {
 			// short undecided prefix ("Hi.", "OK") was prose all along.
 			const line = this.#prefix;
 			this.#prefix = "";
+			if (this.#softLineBreak && line.length === 0) {
+				this.#buf = this.#buf.slice(0, -1);
+				this.#bufPositions.pop();
+			}
 			if (line.length > 0 && !HR_LINE_RE.test(line)) this.#appendSequential(line, this.#prefixStart);
 			this.#hardBreak(out);
 			return;
@@ -319,6 +333,14 @@ export class SpeakableStream {
 			return;
 		}
 		this.#prefix = "";
+		if (this.#softLineBreak && (decision.kind === "marker" || decision.kind === "fence")) {
+			// The provisional joining space belongs to the newline, not the preceding
+			// prose source range, once the next line proves to be a real block.
+			this.#buf = this.#buf.slice(0, -1);
+			this.#bufPositions.pop();
+			this.#hardBreak(out);
+		}
+		this.#softLineBreak = false;
 		switch (decision.kind) {
 			case "prose": {
 				const relative = prefix.lastIndexOf(decision.text);
@@ -328,6 +350,7 @@ export class SpeakableStream {
 			}
 			case "marker":
 				this.#appendSynthetic(decision.spoken, this.#prefixStart, offset + 1);
+				this.#blockLine = true;
 				this.#mode = "prose";
 				return;
 			case "fence":
@@ -398,11 +421,13 @@ export class SpeakableStream {
 		this.#mode = "linestart";
 	}
 
-	/** Newline in prose: everything buffered is a complete unit — emit it now. */
+	/** Confirmed Markdown block boundary: emit buffered prose as one unit. */
 	#hardBreak(out: SpeakableItem[]): void {
 		this.#mode = "linestart";
 		this.#drain(out);
 		this.#tableLine = false;
+		this.#blockLine = false;
+		this.#softLineBreak = false;
 	}
 
 	/**
