@@ -292,13 +292,15 @@ test("TUI follows exact words, permits in-band framing, and seek/resume controls
 	await host.shortcut("f11");
 	await host.shortcut("f8");
 	assert.equal(worker!.pauses.at(-1), true);
-	host.scrollView.setDocument(renderedDocument(80), 40);
+	// Pi's Markdown component still has the previous message's marker cached when
+	// the key handler starts. The move must invalidate that cache before scanning.
+	host.scrollView.queueDocument(renderedDocument(80), 40);
 	await host.shortcut("f6");
 	assert.equal(host.scrollView.scrollTop, 72);
 	assert.equal(worker!.pauses.at(-1), true);
 	assert.ok(host.render(text).includes(NARRATION_ACTIVE_MARKER));
 	host.scrollView.manualScrollTo(90);
-	host.scrollView.setDocument(renderedDocument(100), 40);
+	host.scrollView.queueDocument(renderedDocument(100), 40);
 	await host.shortcut("f10");
 	assert.equal(host.scrollView.scrollTop, 90);
 	assert.equal(worker!.pauses.at(-1), true);

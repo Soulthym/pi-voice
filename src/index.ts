@@ -311,6 +311,12 @@ export default async function (pi: ExtensionAPI) {
 		}, 80);
 		narrationRenderTimer.unref?.();
 	};
+	const flushNarrationRender = (): void => {
+		if (narrationRenderTimer) clearTimeout(narrationRenderTimer);
+		narrationRenderTimer = null;
+		narrationTui?.invalidate();
+		narrationTui?.requestRender(true);
+	};
 	const narration = new NarrationProgress(requestNarrationRender);
 
 	const routedVoiceConfig = (claim = false): VoiceConfig => {
@@ -1590,8 +1596,13 @@ const chargeBackfillUnit = (): boolean => {
 		narration.begin();
 		narration.setCompletedText(target.text);
 		narration.previewSourceOffset(sourceOffset);
-		requestNarrationRender();
-		if (previewTarget) requestNarrationAutoScroll();
+		if (previewTarget) {
+			// Markdown caches rendered output by source text and width, not by
+			// transformer state. Invalidate synchronously so this scan cannot find
+			// the marker left in the previously selected message.
+			flushNarrationRender();
+			requestNarrationAutoScroll();
+		} else requestNarrationRender();
 		playbackHistory.beginCapture(target.id, target.text, target.time, recordTimings);
 		const contextual = activeContext
 			? completedAssistantMessages(activeContext, config.mode).find(message => message.id === target.id)

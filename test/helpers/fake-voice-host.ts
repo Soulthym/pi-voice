@@ -68,12 +68,24 @@ export class FakeScrollView {
 	contentHeight = 0;
 	renderCalls = 0;
 	lines: string[] = [];
+	#pendingDocument: { lines: string[]; viewportHeight: number } | undefined;
 
 	setDocument(lines: string[], viewportHeight = this.viewportHeight): void {
 		this.lines = [...lines];
 		this.contentHeight = lines.length;
 		this.viewportHeight = viewportHeight;
 		this.scrollTop = Math.min(this.scrollTop, Math.max(0, this.contentHeight - this.viewportHeight));
+	}
+
+	queueDocument(lines: string[], viewportHeight = this.viewportHeight): void {
+		this.#pendingDocument = { lines: [...lines], viewportHeight };
+	}
+
+	invalidate(): void {
+		const pending = this.#pendingDocument;
+		if (!pending) return;
+		this.#pendingDocument = undefined;
+		this.setDocument(pending.lines, pending.viewportHeight);
 	}
 
 	getContentWidth(width: number): number {
@@ -123,7 +135,10 @@ export class FakeVoiceHost {
 		terminal: { columns: 100 },
 		implicitScrollView: this.implicitScrollView,
 		getPrimaryScrollView: () => this.scrollView,
-		invalidate: () => {},
+		invalidate: () => {
+			this.scrollView.invalidate();
+			this.implicitScrollView.invalidate();
+		},
 		requestRender: () => {},
 	};
 	readonly widgetComponents = new Map<string, { dispose?: () => void }>();
