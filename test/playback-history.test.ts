@@ -61,6 +61,28 @@ test("maps playback time to approximate source checkpoints without audio storage
 	});
 });
 
+test("uses aligned word checkpoints to land close to a ten-second scrub", () => {
+	const text = "x".repeat(200);
+	const history = new PlaybackHistory();
+	history.sync([{ id: "message", text, renderKey: "render-words" }], true);
+	history.beginCapture("message", text);
+	history.registerSegment(segment(20, 4, 0));
+	history.setSegmentAudio(20, 0, 30);
+	history.setWordTimings(20, [
+		{ time: 0, sourceOffset: 0 },
+		{ time: 9.9, sourceOffset: 40 },
+		{ time: 14.8, sourceOffset: 60 },
+		{ time: 20.2, sourceOffset: 80 },
+	]);
+	history.setPlayback(4, 5);
+	assert.deepEqual(history.seekTarget(10), {
+		id: "message",
+		text,
+		time: 14.8,
+		sourceOffset: 60,
+	});
+});
+
 test("invalidates and replaces timing checkpoints for a full rerender", () => {
 	const text = "x".repeat(80);
 	const history = new PlaybackHistory();

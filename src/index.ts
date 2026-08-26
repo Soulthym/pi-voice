@@ -1074,10 +1074,12 @@ const chargeBackfillUnit = (): boolean => {
 			case "segment-audio":
 				narration.setSegmentAudio(event.segmentId, event.start, event.duration);
 				playbackHistory.setSegmentAudio(event.segmentId, event.start, event.duration);
+				playbackHistory.setWordTimings(event.segmentId, narration.sourceWordTimings(event.segmentId));
 				requestPlaybackTimeline();
 				return;
 			case "alignment":
 				narration.setAlignment(event.segmentId, event.words);
+				playbackHistory.setWordTimings(event.segmentId, narration.sourceWordTimings(event.segmentId));
 				return;
 			case "playback":
 				narration.setPlayback(event.utterance, event.position);

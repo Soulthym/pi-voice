@@ -52,7 +52,10 @@ export class PlaybackHistory {
 	#order: string[] = [];
 	#selectedId: string | undefined;
 	#capture: Capture | undefined;
-	#segments = new Map<number, { capture: Capture; sourceOffset: number }>();
+	#segments = new Map<
+		number,
+		{ capture: Capture; sourceOffset: number; audioStart?: number; wordOffsets: Set<number> }
+	>();
 	#utterances = new Map<number, Capture>();
 	#activeUtterance: number | undefined;
 	#persistedUtterances = new Set<number>();
@@ -139,7 +142,11 @@ export class PlaybackHistory {
 	registerSegment(segment: NarrationSegment): void {
 		const capture = this.#capture;
 		if (!capture) return;
-		this.#segments.set(segment.id, { capture, sourceOffset: segment.source.start });
+		this.#segments.set(segment.id, {
+			capture,
+			sourceOffset: segment.source.start,
+			wordOffsets: new Set(),
+		});
 		this.#utterances.set(segment.utterance, capture);
 		this.#activeUtterance = segment.utterance;
 	}
@@ -147,7 +154,9 @@ export class PlaybackHistory {
 	setSegmentAudio(segmentId: number, start: number, duration: number): void {
 		const tracked = this.#segments.get(segmentId);
 		if (!tracked || !Number.isFinite(start) || !Number.isFinite(duration)) return;
-		const absoluteTime = tracked.capture.baseTime + Math.max(0, start);
+		const normalizedStart = Math.max(0, start);
+		tracked.audioStart = normalizedStart;
+		const absoluteTime = tracked.capture.baseTime + normalizedStart;
 		const record = tracked.capture.record;
 		if (tracked.capture.recordTimings) {
 			record.checkpoints.push({
@@ -158,6 +167,28 @@ export class PlaybackHistory {
 			record.checkpoints.sort((left, right) => left.time - right.time);
 			record.duration = Math.max(record.duration, absoluteTime + Math.max(0, duration));
 		}
+	}
+
+	setWordTimings(segmentId: number, words: Array<{ time: number; sourceOffset: number }>): void {
+		const tracked = this.#segments.get(segmentId);
+		if (!tracked?.capture.recordTimings || tracked.audioStart === undefined || words.length === 0) return;
+		const record = tracked.capture.record;
+		if (tracked.wordOffsets.size > 0) {
+			record.checkpoints = record.checkpoints.filter(
+				checkpoint => !tracked.wordOffsets.has(checkpoint.sourceOffset),
+			);
+			tracked.wordOffsets.clear();
+		}
+		let lastTime = Number.NEGATIVE_INFINITY;
+		for (const word of words) {
+			if (!Number.isFinite(word.time) || word.time < 0 || !Number.isInteger(word.sourceOffset)) continue;
+			const absoluteTime = tracked.capture.baseTime + tracked.audioStart + word.time;
+			if (word.sourceOffset === tracked.sourceOffset || absoluteTime - lastTime < 0.4) continue;
+			record.checkpoints.push({ time: absoluteTime, duration: 0, sourceOffset: word.sourceOffset });
+			tracked.wordOffsets.add(word.sourceOffset);
+			lastTime = absoluteTime;
+		}
+		record.checkpoints.sort((left, right) => left.time - right.time);
 	}
 
 	snapshotForUtterance(utterance: number): PlaybackTimingSnapshot | undefined {
@@ -172,12 +203,18 @@ export class PlaybackHistory {
 		}
 		this.#persistedUtterances.add(utterance);
 		if (!capture.record.renderKey) return undefined;
+		const all = capture.record.checkpoints;
+		const persisted = all.length <= 2_000
+			? all
+			: Array.from({ length: 2_000 }, (_value, index) =>
+					all[Math.round((index * (all.length - 1)) / 1_999)] as TimingCheckpoint,
+			);
 		return {
 			version: 2,
 			messageId: capture.record.id,
 			renderKey: capture.record.renderKey,
 			duration: capture.record.duration,
-			checkpoints: capture.record.checkpoints.map(checkpoint => ({ ...checkpoint })),
+			checkpoints: persisted.map(checkpoint => ({ ...checkpoint })),
 		};
 	}
 

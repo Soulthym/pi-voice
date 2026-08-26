@@ -557,6 +557,12 @@ export class NarrationProgress {
 		this.#recompute(segment.utterance);
 	}
 
+	sourceWordTimings(segmentId: number): Array<{ time: number; sourceOffset: number }> {
+		const segment = this.#segments.get(segmentId);
+		if (!segment?.words.length || segment.duration === undefined) return [];
+		return segment.words.map(word => ({ time: word.time, sourceOffset: word.start }));
+	}
+
 	setPlayback(utterance: number, position: number): void {
 		if (!Number.isFinite(position) || position < 0) return;
 		this.#playback.set(utterance, position);
