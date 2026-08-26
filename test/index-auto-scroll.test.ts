@@ -98,8 +98,19 @@ test("TUI follows exact words, permits in-band framing, and seek/resume controls
 		worker!.emit({ type: "segment-audio", segmentId: segment.segmentId, start: index * 2, duration: 2 } as never);
 	});
 	host.scrollView.setDocument(renderedDocument(160), 40);
+	host.scrollView.piVoiceCacheNarrationLayout = true;
 	worker!.emit({ type: "playback", utterance: replay.utterance, position: 0 } as never);
 	await waitForScroll(host, 152);
+	await new Promise(resolve => setTimeout(resolve, 120));
+	const transcriptRenders = host.scrollView.renderCalls;
+	worker!.emit({ type: "playback", utterance: replay.utterance, position: 0.05 } as never);
+	await new Promise(resolve => setTimeout(resolve, 120));
+	assert.equal(
+		host.scrollView.renderCalls,
+		transcriptRenders,
+		"repeated playback ticks within one word must not rerender the full transcript",
+	);
+	host.scrollView.piVoiceCacheNarrationLayout = false;
 
 	// Crossing below 80% (line 184 is the edge, 185 overflows it) re-anchors
 	// that individual spoken word at 20%.

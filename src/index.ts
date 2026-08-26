@@ -43,7 +43,11 @@ import {
 import { chunkCodeNarration, plainCodeNarration, type CodeNarrationPlan } from "./code-narration.js";
 import { DeviceRouter, type VoiceDeviceSelection } from "./device-router.js";
 import { LiveTranscriptionSession } from "./live-transcription.js";
-import { NARRATION_ACTIVE_MARKER, NarrationProgress } from "./narration-progress.js";
+import {
+	NARRATION_ACTIVE_MARKER,
+	NarrationProgress,
+	type NarrationMessageType,
+} from "./narration-progress.js";
 import {
 	PlaybackHistory,
 	type PlaybackMessage,
@@ -694,11 +698,10 @@ const chargeBackfillUnit = (): boolean => {
 		}
 	};
 
-	pi.registerMarkdownTransformer((markdown, context) => {
-		if (context.messageType === "user") return markdown;
-		return narration.transform(
+	const transformNarrationMarkdown = (markdown: string, messageType: NarrationMessageType): string =>
+		narration.transform(
 			markdown,
-			context.messageType,
+			messageType,
 			text => (config.playbackHighlight ? (activeContext?.ui.theme.fg("dim", text) ?? text) : text),
 			text => (config.playbackHighlight ? (activeContext?.ui.theme.bg("selectedBg", text) ?? text) : text),
 			(block, messageThroughBlock) => {
@@ -727,7 +730,7 @@ const chargeBackfillUnit = (): boolean => {
 						const omission = codeDescriptionOmissions.get(key);
 						return `⚠ No semantic description available (${omissionRecord?.reason ?? "failed"}). Run /voice code-retry current or /voice code-retry historical.`;
 					}
-						const plan = codeDescriptionCache.get(key);
+					const plan = codeDescriptionCache.get(key);
 					if (!plan) return undefined;
 					const text = chunkCodeNarration(plan)
 						.map(chunk => chunk.text)
@@ -742,7 +745,10 @@ const chargeBackfillUnit = (): boolean => {
 			(code, language) => highlightCode(code, language),
 			config.autoScroll ? NARRATION_ACTIVE_MARKER : "",
 		);
-	});
+
+	pi.registerMarkdownTransformer((markdown, context) =>
+		context.messageType === "user" ? markdown : transformNarrationMarkdown(markdown, context.messageType),
+	);
 
 	const refreshPlaybackTimeline = refreshProgressWidget;
 
@@ -759,6 +765,16 @@ const chargeBackfillUnit = (): boolean => {
 	const markdownLineCache = new Map<string, number>();
 	let belowCacheKey = "";
 	let belowCacheValue = 0;
+	let narrationMessageAnchor:
+		| {
+				messageId: string;
+				width: number;
+				messageTop: number;
+				scannedAt: number;
+				wordStart?: number;
+				localMarkerLine?: number;
+			}
+		| undefined;
 
 	const activeScrollView = (): {
 		scrollTop: number;
@@ -767,6 +783,8 @@ const chargeBackfillUnit = (): boolean => {
 		isFollowingEnd?: () => boolean;
 		getContentWidth?: (width: number) => number;
 		render?: (width: number) => string[];
+		/** Test/nonstandard views can opt out when their rendered document is synthetic. */
+		piVoiceCacheNarrationLayout?: boolean;
 		scrollTo(top: number, options?: { disableFollow?: boolean }): void;
 		scrollToEnd?: () => void;
 	} | undefined => {
@@ -802,6 +820,17 @@ const chargeBackfillUnit = (): boolean => {
 		}
 		markdownLineCache.set(key, lines);
 		return lines;
+	};
+
+	const renderedNarrationMarkerLine = (text: string, width: number): number => {
+		if (!text) return -1;
+		try {
+			const transformed = transformNarrationMarkdown(text, "assistant");
+			const component = new Markdown(transformed, 1, 0, getMarkdownTheme());
+			return component.render(width).findIndex(line => line.includes(NARRATION_ACTIVE_MARKER));
+		} catch {
+			return -1;
+		}
 	};
 
 	const followShortcutLabel = (): string => {
@@ -863,12 +892,54 @@ const chargeBackfillUnit = (): boolean => {
 			contentHeight: resolvedContentHeight,
 		};
 		const outerWidth = narrationViewportWidth();
-		let anchor: number | undefined;
-		if (scrollView.render) {
+		const innerWidth = Math.max(
+			40,
+			Math.min(outerWidth, scrollView.getContentWidth?.(outerWidth) ?? outerWidth - 2),
+		);
+		const selected = playbackHistory.selected();
+		const isLive = liveTurnNarrationActive && ownedSpeechText.length > 0;
+		const text = isLive ? ownedSpeechText : (selected?.text ?? "");
+		const messageId = isLive ? "live" : selected?.id;
+		const wordStart = narration.activeWordStart;
+		const canCacheMessageTop = scrollView.piVoiceCacheNarrationLayout !== false;
+		const cached =
+			canCacheMessageTop &&
+			messageId &&
+			narrationMessageAnchor?.messageId === messageId &&
+			narrationMessageAnchor.width === innerWidth
+				? narrationMessageAnchor
+				: undefined;
+		const localMarkerLine =
+			cached && cached.wordStart === wordStart && cached.localMarkerLine !== undefined
+				? cached.localMarkerLine
+				: renderedNarrationMarkerLine(text, innerWidth);
+		const cachedMessageTop = cached && Date.now() - cached.scannedAt < 5_000 ? cached.messageTop : undefined;
+		if (cached && localMarkerLine >= 0 && cached.wordStart !== wordStart) {
+			narrationMessageAnchor = { ...cached, wordStart, localMarkerLine };
+		}
+		let anchor = cachedMessageTop !== undefined && localMarkerLine >= 0
+			? cachedMessageTop + localMarkerLine
+			: undefined;
+
+		// Establish the selected message's absolute top from one full transcript
+		// render. Subsequent words render only that message until a periodic resync,
+		// avoiding a second full long-context render on every playback tick.
+		if (anchor === undefined && scrollView.render) {
 			const lines = scrollView.render(outerWidth);
 			const markedLine = lines.findIndex(line => line.includes(NARRATION_ACTIVE_MARKER));
-			if (markedLine >= 0) anchor = markedLine;
-			else {
+			if (markedLine >= 0) {
+				anchor = markedLine;
+				if (canCacheMessageTop && messageId && localMarkerLine >= 0) {
+					narrationMessageAnchor = {
+						messageId,
+						width: innerWidth,
+						messageTop: markedLine - localMarkerLine,
+						scannedAt: Date.now(),
+						wordStart,
+						localMarkerLine,
+					};
+				}
+			} else {
 				// The playback event can precede the TUI's narration transform by one
 				// render. Keep force-follow armed until the exact word marker exists.
 				requestNarrationRender();
@@ -879,13 +950,6 @@ const chargeBackfillUnit = (): boolean => {
 		// Compatibility fallback for older/nonstandard TUI scroll views that do
 		// not expose their rendered document.
 		if (anchor === undefined) {
-			const innerWidth = Math.max(
-				40,
-				Math.min(outerWidth, scrollView.getContentWidth?.(outerWidth) ?? outerWidth - 2),
-			);
-			const selected = playbackHistory.selected();
-			const isLive = liveTurnNarrationActive && ownedSpeechText.length > 0;
-			const text = isLive ? ownedSpeechText : (selected?.text ?? "");
 			if (!text) return;
 			const status = playbackHistory.status();
 			const fraction = status && status.duration > 0
@@ -1499,6 +1563,7 @@ const chargeBackfillUnit = (): boolean => {
 			activeContext?.ui.notify("Another Pi project currently owns voice playback; this replay remains paused", "warning");
 			return;
 		}
+		liveTurnNarrationActive = false;
 		if (displacedLiveTurn) {
 			// Keep the streaming response independent from this completed snapshot.
 			// Later deltas are collected for attention instead of joining replay audio.

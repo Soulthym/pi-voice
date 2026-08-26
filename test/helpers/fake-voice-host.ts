@@ -61,9 +61,11 @@ export interface Notice {
 
 /** ScrollView-shaped TUI test double used by narration auto-scroll tests. */
 export class FakeScrollView {
+	piVoiceCacheNarrationLayout = false;
 	scrollTop = 0;
 	viewportHeight = 40;
 	contentHeight = 0;
+	renderCalls = 0;
 	lines: string[] = [];
 
 	setDocument(lines: string[], viewportHeight = this.viewportHeight): void {
@@ -78,6 +80,7 @@ export class FakeScrollView {
 	}
 
 	render(_width: number): string[] {
+		this.renderCalls += 1;
 		return [...this.lines];
 	}
 

@@ -694,6 +694,10 @@ export class NarrationProgress {
 		return this.#cursor;
 	}
 
+	get activeWordStart(): number | undefined {
+		return this.#activeWord?.start;
+	}
+
 	timingSummary(): string {
 		const rows = [...this.#segments.values()]
 			.filter(segment => segment.audioAt !== undefined)
