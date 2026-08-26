@@ -45,8 +45,8 @@ test("TUI follows exact words, permits in-band framing, and seek/resume controls
 			input: "disabled",
 			audioCache: false,
 			autoScroll: true,
-			scrollToShortcut: "alt+s",
-			scrollBottomShortcut: "alt+end",
+			scrollToShortcut: "alt+v",
+			scrollBottomShortcut: "alt+t",
 		}),
 	);
 	process.env.PI_VOICE_CONFIG = path.join(root, "voice.json");
@@ -138,7 +138,7 @@ test("TUI follows exact words, permits in-band framing, and seek/resume controls
 	assert.equal(host.scrollView.scrollTop, 160);
 	const hint = host.widgets.get("pi-voice-follow-hint");
 	assert.equal(hint?.placement, "belowEditor");
-	assert.match(hint?.lines?.[0] ?? "", /Alt\+S.*re-anchor spoken text/);
+	assert.match(hint?.lines?.[0] ?? "", /Alt\+V.*re-anchor spoken text/);
 
 	// /voice scroll-to and its advertised shortcut re-anchor the narrated word.
 	await host.command("scroll-to");
@@ -152,9 +152,9 @@ test("TUI follows exact words, permits in-band framing, and seek/resume controls
 	worker!.emit({ type: "playback", utterance: replay.utterance, position: 2.25 } as never);
 	await new Promise(resolve => setTimeout(resolve, 120));
 	assert.equal(host.scrollView.scrollTop, 260);
-	await host.shortcut("alt+s");
+	await host.shortcut("alt+v");
 	await waitForScroll(host, 177);
-	await host.shortcut("alt+end");
+	await host.shortcut("alt+t");
 	assert.equal(host.scrollView.scrollTop, 260);
 	await host.command("scroll-to");
 	await waitForScroll(host, 177);

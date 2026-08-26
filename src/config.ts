@@ -83,8 +83,8 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
 	output: "auto",
 	input: "auto",
 	talkShortcut: "alt+m",
-	scrollToShortcut: "alt+s",
-	scrollBottomShortcut: "alt+end",
+	scrollToShortcut: "alt+v",
+	scrollBottomShortcut: "alt+t",
 	submitMode: "review",
 	editMode: "smart",
 	editModel: "current",
@@ -286,8 +286,11 @@ export async function loadVoiceConfig(): Promise<VoiceConfig> {
 				normalizeTalkShortcut(parsed.scrollToShortcut) ?? DEFAULT_VOICE_CONFIG.scrollToShortcut,
 			scrollBottomShortcut: (() => {
 				const shortcut = normalizeTalkShortcut(parsed.scrollBottomShortcut);
-				// Migrate the old conflicting default; Ctrl+E belongs to editor line-end.
-				return shortcut === "ctrl+e" ? DEFAULT_VOICE_CONFIG.scrollBottomShortcut : (shortcut ?? DEFAULT_VOICE_CONFIG.scrollBottomShortcut);
+				// Migrate old defaults: Ctrl+E belongs to editor line-end, and
+				// Alt+End is unusable on common compact/phone keyboards.
+				return shortcut === "ctrl+e" || shortcut === "alt+end"
+					? DEFAULT_VOICE_CONFIG.scrollBottomShortcut
+					: (shortcut ?? DEFAULT_VOICE_CONFIG.scrollBottomShortcut);
 			})(),
 			submitMode: isSubmitMode(parsed.submitMode) ? parsed.submitMode : DEFAULT_VOICE_CONFIG.submitMode,
 			editMode: isEditMode(parsed.editMode) ? parsed.editMode : DEFAULT_VOICE_CONFIG.editMode,

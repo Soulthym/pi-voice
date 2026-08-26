@@ -35,20 +35,22 @@ test("normalizes preprocessing scope and backfill budget", () => {
 
 test("autoScroll defaults to enabled with non-conflicting transcript shortcuts", () => {
 	assert.equal(DEFAULT_VOICE_CONFIG.autoScroll, true);
-	assert.equal(DEFAULT_VOICE_CONFIG.scrollToShortcut, "alt+s");
-	assert.equal(DEFAULT_VOICE_CONFIG.scrollBottomShortcut, "alt+end");
+	assert.equal(DEFAULT_VOICE_CONFIG.scrollToShortcut, "alt+v");
+	assert.equal(DEFAULT_VOICE_CONFIG.scrollBottomShortcut, "alt+t");
 });
 
-test("migrates the old Ctrl+E transcript shortcut", async () => {
+test("migrates obsolete transcript shortcuts", async () => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-voice-shortcuts-"));
 	const configPath = path.join(root, "voice.json");
 	const previous = process.env.PI_VOICE_CONFIG;
 	try {
-		await fs.writeFile(configPath, JSON.stringify({ scrollBottomShortcut: "ctrl+e" }));
 		process.env.PI_VOICE_CONFIG = configPath;
-		const config = await loadVoiceConfig();
-		assert.equal(config.scrollToShortcut, "alt+s");
-		assert.equal(config.scrollBottomShortcut, "alt+end");
+		for (const obsolete of ["ctrl+e", "alt+end"]) {
+			await fs.writeFile(configPath, JSON.stringify({ scrollBottomShortcut: obsolete }));
+			const config = await loadVoiceConfig();
+			assert.equal(config.scrollToShortcut, "alt+v");
+			assert.equal(config.scrollBottomShortcut, "alt+t");
+		}
 	} finally {
 		if (previous === undefined) delete process.env.PI_VOICE_CONFIG;
 		else process.env.PI_VOICE_CONFIG = previous;
