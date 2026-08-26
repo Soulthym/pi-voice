@@ -695,7 +695,8 @@ export class NarrationProgress {
 	}
 
 	get activeWordStart(): number | undefined {
-		return this.#activeWord?.start;
+		if (this.#activeWord) return this.#activeWord.start;
+		return [...this.#codeDescriptions.values()].find(description => description.activeWord)?.activeWord?.start;
 	}
 
 	timingSummary(): string {

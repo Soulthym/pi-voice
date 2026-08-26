@@ -63,6 +63,7 @@ export interface Notice {
 export class FakeScrollView {
 	piVoiceCacheNarrationLayout = false;
 	scrollTop = 0;
+	isFollowingEnd = true;
 	viewportHeight = 40;
 	contentHeight = 0;
 	renderCalls = 0;
@@ -84,16 +85,19 @@ export class FakeScrollView {
 		return [...this.lines];
 	}
 
-	scrollTo(top: number): void {
-		this.scrollTop = Math.max(0, Math.min(Math.max(0, this.contentHeight - this.viewportHeight), Math.trunc(top)));
+	scrollTo(top: number, options: { disableFollow?: boolean } = {}): void {
+		const max = Math.max(0, this.contentHeight - this.viewportHeight);
+		this.scrollTop = Math.max(0, Math.min(max, Math.trunc(top)));
+		this.isFollowingEnd = options.disableFollow !== true && this.scrollTop === max;
 	}
 
 	scrollToEnd(): void {
 		this.scrollTop = Math.max(0, this.contentHeight - this.viewportHeight);
+		this.isFollowingEnd = true;
 	}
 
 	manualScrollTo(top: number): void {
-		this.scrollTo(top);
+		this.scrollTo(top, { disableFollow: true });
 	}
 }
 

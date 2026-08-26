@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import test from "node:test";
 import {
 	DEFAULT_VOICE_CONFIG,
+	loadVoiceConfig,
 	normalizeAudioCacheBitrate,
 	normalizeBackfillBudget,
 	normalizePreprocessScope,
@@ -29,8 +33,27 @@ test("normalizes preprocessing scope and backfill budget", () => {
 	assert.equal(normalizeBackfillBudget("25"), undefined);
 });
 
-test("autoScroll defaults to enabled", () => {
+test("autoScroll defaults to enabled with non-conflicting transcript shortcuts", () => {
 	assert.equal(DEFAULT_VOICE_CONFIG.autoScroll, true);
+	assert.equal(DEFAULT_VOICE_CONFIG.scrollToShortcut, "alt+s");
+	assert.equal(DEFAULT_VOICE_CONFIG.scrollBottomShortcut, "alt+end");
+});
+
+test("migrates the old Ctrl+E transcript shortcut", async () => {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-voice-shortcuts-"));
+	const configPath = path.join(root, "voice.json");
+	const previous = process.env.PI_VOICE_CONFIG;
+	try {
+		await fs.writeFile(configPath, JSON.stringify({ scrollBottomShortcut: "ctrl+e" }));
+		process.env.PI_VOICE_CONFIG = configPath;
+		const config = await loadVoiceConfig();
+		assert.equal(config.scrollToShortcut, "alt+s");
+		assert.equal(config.scrollBottomShortcut, "alt+end");
+	} finally {
+		if (previous === undefined) delete process.env.PI_VOICE_CONFIG;
+		else process.env.PI_VOICE_CONFIG = previous;
+		await fs.rm(root, { recursive: true, force: true });
+	}
 });
 
 test("defaults code descriptions to block-only context", () => {

@@ -45,7 +45,8 @@ test("TUI follows exact words, permits in-band framing, and seek/resume controls
 			input: "disabled",
 			audioCache: false,
 			autoScroll: true,
-			scrollBottomShortcut: "ctrl+e",
+			scrollToShortcut: "alt+s",
+			scrollBottomShortcut: "alt+end",
 		}),
 	);
 	process.env.PI_VOICE_CONFIG = path.join(root, "voice.json");
@@ -76,8 +77,19 @@ test("TUI follows exact words, permits in-band framing, and seek/resume controls
 
 	const worker = MockedVoiceWorkerClient.instances.find(instance => instance.sent.length > 0);
 	assert.ok(worker, "the vocalizer worker must receive narration segments");
-	const live = worker!.sent.at(-1) as { utterance: number };
+	const liveSegments = worker!.sent as Array<{ utterance: number; segmentId: number }>;
+	const liveUtterance = liveSegments.at(-1)!.utterance;
+	const contentSegments = liveSegments.filter(segment => segment.utterance === liveUtterance);
+	const live = contentSegments[0]!;
+	host.scrollView.setDocument(renderedDocument(160), 40);
+	contentSegments.forEach((segment, index) => {
+		worker!.emit({ type: "segment-audio", segmentId: segment.segmentId, start: index * 2, duration: 2 } as never);
+	});
+	worker!.emit({ type: "playback", utterance: live.utterance, position: 0 } as never);
+	await waitForScroll(host, 152);
 	worker!.emit({ type: "idle", utterance: live.utterance } as never);
+	assert.equal(host.scrollView.scrollTop, 260, "automatic live narration should restore prior bottom-follow");
+	assert.equal(host.scrollView.isFollowingEnd, true);
 
 	// F11 starts replay and must place an out-of-frame marked word at 20%.
 	// Register every sentence as a separate 2-second checkpoint so F7/F9 below
@@ -119,20 +131,33 @@ test("TUI follows exact words, permits in-band framing, and seek/resume controls
 	await waitForScroll(host, 177);
 
 	// Manual framing is accepted while the spoken word remains within 20–80%.
-	// Tracking stays armed, and a bottom TUI hint offers immediate re-anchoring.
+	// Tracking stays armed, and a TUI hint offers immediate re-anchoring.
 	host.scrollView.manualScrollTo(160);
 	worker!.emit({ type: "playback", utterance: replay.utterance, position: 2 } as never);
 	await new Promise(resolve => setTimeout(resolve, 120));
 	assert.equal(host.scrollView.scrollTop, 160);
 	const hint = host.widgets.get("pi-voice-follow-hint");
 	assert.equal(hint?.placement, "belowEditor");
-	assert.match(hint?.lines?.[0] ?? "", /Ctrl\+E.*re-anchor spoken text/);
+	assert.match(hint?.lines?.[0] ?? "", /Alt\+S.*re-anchor spoken text/);
 
-	// The advertised shortcut restores the canonical 20% anchor immediately
-	// (rather than merely jumping to transcript end) and dismisses the hint.
-	await host.shortcut("ctrl+e");
+	// /voice scroll-to and its advertised shortcut re-anchor the narrated word.
+	await host.command("scroll-to");
 	await waitForScroll(host, 177);
 	assert.equal(host.widgets.get("pi-voice-follow-hint"), undefined);
+
+	// /voice bottom is distinct: it pins transcript-end following and subsequent
+	// word updates cannot pull it back to the narrated position.
+	await host.command("bottom");
+	assert.equal(host.scrollView.scrollTop, 260);
+	worker!.emit({ type: "playback", utterance: replay.utterance, position: 2.25 } as never);
+	await new Promise(resolve => setTimeout(resolve, 120));
+	assert.equal(host.scrollView.scrollTop, 260);
+	await host.shortcut("alt+s");
+	await waitForScroll(host, 177);
+	await host.shortcut("alt+end");
+	assert.equal(host.scrollView.scrollTop, 260);
+	await host.command("scroll-to");
+	await waitForScroll(host, 177);
 
 	// Moving just beyond the 80% edge is the point at which auto-scroll snaps.
 	host.scrollView.manualScrollTo(152); // active line 185 is now 33/40 lines down
@@ -278,6 +303,18 @@ test("TUI follows exact words, permits in-band framing, and seek/resume controls
 	assert.equal(host.scrollView.scrollTop, 90);
 	assert.equal(worker!.pauses.at(-1), true);
 	await host.command("stop");
+
+	// User-triggered replay must leave the resulting historical viewport in place
+	// when it finishes instead of restoring transcript-end following.
+	host.scrollView.setDocument(renderedDocument(80), 40);
+	host.scrollView.manualScrollTo(200);
+	const manualReplayStart = worker!.sent.length;
+	await host.shortcut("f11");
+	assert.equal(host.scrollView.scrollTop, 72);
+	const manualReplay = (worker!.sent.slice(manualReplayStart) as Array<{ utterance: number }>).at(-1)!;
+	worker!.emit({ type: "idle", utterance: manualReplay.utterance } as never);
+	assert.equal(host.scrollView.scrollTop, 72);
+	assert.equal(host.scrollView.isFollowingEnd, false);
 
 	// Manual replay during a newly streaming turn must never append later live
 	// deltas to the historical replay transport.

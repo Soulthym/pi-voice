@@ -760,7 +760,8 @@ const chargeBackfillUnit = (): boolean => {
 	 */
 	let lastAutoScrollTop: number | undefined;
 	let autoScrollForceOnce = false;
-	let autoScrollTookControl = false;
+	let restoreBottomAfterSpeech = false;
+	let bottomPinned = false;
 	let followHintVisible = false;
 	const markdownLineCache = new Map<string, number>();
 	let belowCacheKey = "";
@@ -780,7 +781,7 @@ const chargeBackfillUnit = (): boolean => {
 		scrollTop: number;
 		viewportHeight: number;
 		contentHeight?: number;
-		isFollowingEnd?: () => boolean;
+		isFollowingEnd?: boolean | (() => boolean);
 		getContentWidth?: (width: number) => number;
 		render?: (width: number) => string[];
 		/** Test/nonstandard views can opt out when their rendered document is synthetic. */
@@ -834,8 +835,8 @@ const chargeBackfillUnit = (): boolean => {
 	};
 
 	const followShortcutLabel = (): string => {
-		if (config.scrollBottomShortcut === "disabled") return "/voice bottom";
-		return config.scrollBottomShortcut
+		if (config.scrollToShortcut === "disabled") return "/voice scroll-to";
+		return config.scrollToShortcut
 			.split("+")
 			.map(part => (part.length === 1 ? part.toUpperCase() : `${part[0]?.toUpperCase()}${part.slice(1)}`))
 			.join("+");
@@ -862,7 +863,13 @@ const chargeBackfillUnit = (): boolean => {
 		);
 	};
 
+	const transcriptIsFollowingEnd = (): boolean => {
+		const following = activeScrollView()?.isFollowingEnd;
+		return typeof following === "function" ? following() : following === true;
+	};
+
 	const armNarrationFollow = (forceCanonicalAnchor = false): void => {
+		bottomPinned = false;
 		lastAutoScrollTop = undefined;
 		autoScrollForceOnce = forceCanonicalAnchor;
 		hideFollowHint();
@@ -877,8 +884,8 @@ const chargeBackfillUnit = (): boolean => {
 		lastAutoScrollTop = scrollView.scrollTop;
 	};
 
-	const requestNarrationAutoScroll = (): void => {
-		if (!config.enabled || !config.autoScroll || !ownsSpeech || playbackPaused) {
+	const requestNarrationAutoScroll = (allowPaused = false, force = false): void => {
+		if (bottomPinned || !config.enabled || (!config.autoScroll && !force) || !ownsSpeech || (playbackPaused && !allowPaused)) {
 			hideFollowHint();
 			return;
 		}
@@ -891,6 +898,9 @@ const chargeBackfillUnit = (): boolean => {
 			viewportHeight: scrollView.viewportHeight,
 			contentHeight: resolvedContentHeight,
 		};
+		if (restoreBottomAfterSpeech && lastAutoScrollTop === undefined && !transcriptIsFollowingEnd()) {
+			restoreBottomAfterSpeech = false;
+		}
 		const outerWidth = narrationViewportWidth();
 		const innerWidth = Math.max(
 			40,
@@ -981,6 +991,7 @@ const chargeBackfillUnit = (): boolean => {
 			!autoScrollForceOnce &&
 			lastAutoScrollTop !== undefined &&
 			isManualScrollAway(scrollViewport, lastAutoScrollTop);
+		if (manuallyReframed) restoreBottomAfterSpeech = false;
 		if (target === null && !autoScrollForceOnce) {
 			if (lastAutoScrollTop === undefined) {
 				// Replay/seek/resume controls re-arm from the current framing. They do
@@ -1000,16 +1011,20 @@ const chargeBackfillUnit = (): boolean => {
 		const topBand = Math.floor(scrollView.viewportHeight * 0.2);
 		const desired = Math.max(0, Math.min(maxScrollTop, target ?? anchor - topBand));
 		autoScrollForceOnce = false;
-		autoScrollTookControl = true;
 		scrollView.scrollTo(desired, { disableFollow: true });
 		lastAutoScrollTop = scrollView.scrollTop;
 	};
 
 	const restoreFollowAfterSpeech = (): void => {
 		hideFollowHint();
-		if (!autoScrollTookControl) return;
-		autoScrollTookControl = false;
 		autoScrollForceOnce = false;
+		const manuallyMoved =
+			lastAutoScrollTop !== undefined &&
+			Math.abs((activeScrollView()?.scrollTop ?? lastAutoScrollTop) - lastAutoScrollTop) > 1;
+		const restoreBottom = restoreBottomAfterSpeech && !manuallyMoved;
+		restoreBottomAfterSpeech = false;
+		bottomPinned = false;
+		if (!restoreBottom) return;
 		try {
 			activeScrollView()?.scrollToEnd?.();
 		} catch {
@@ -1529,6 +1544,7 @@ const chargeBackfillUnit = (): boolean => {
 		recordTimings: boolean,
 		previewTarget = false,
 	): Promise<void> => {
+		restoreBottomAfterSpeech = false;
 		const remainPaused = playbackPaused;
 		const sourceOffset = Math.max(0, Math.min(target.text.length, target.sourceOffset));
 		const suffix = target.text.slice(sourceOffset);
@@ -1828,6 +1844,8 @@ const chargeBackfillUnit = (): boolean => {
 	};
 
 	const talk = async (ctx: ExtensionContext): Promise<void> => {
+		restoreBottomAfterSpeech = false;
+		bottomPinned = false;
 		const talkEpoch = contextEpoch;
 		const routed = claimOutputDevice();
 		if (routed.input === "disabled") {
@@ -2066,6 +2084,8 @@ const chargeBackfillUnit = (): boolean => {
 
 	pi.on("input", async () => {
 		if (!interactiveVoiceSession) return;
+		restoreBottomAfterSpeech = false;
+		bottomPinned = false;
 		coordinator?.clearWaiting();
 		pausedForAttention = false;
 		speechBlocked = false;
@@ -2110,6 +2130,7 @@ const chargeBackfillUnit = (): boolean => {
 			speechAssistantMessage = event.message;
 			const continuingTurn =
 				liveTurnNarrationActive && ownsSpeech && speechPurpose === "turn" && (coordinator?.ownsSpeech() ?? true);
+			const wasFollowingTranscriptEnd = transcriptIsFollowingEnd();
 			if (!continuingTurn && !acquireSpeech("turn")) {
 				speechBlocked = true;
 				blockedMessageHasSpeech = false;
@@ -2123,6 +2144,8 @@ const chargeBackfillUnit = (): boolean => {
 			ownedSpeechText = "";
 			const sourceOffset = continuingTurn ? narration.startMessage() : 0;
 			if (!continuingTurn) {
+				restoreBottomAfterSpeech = wasFollowingTranscriptEnd;
+				bottomPinned = false;
 				narration.finish();
 				narration.begin();
 				liveTurnNarrationActive = true;
@@ -2262,7 +2285,11 @@ const chargeBackfillUnit = (): boolean => {
 
 	pi.registerShortcut("ctrl+shift+v", {
 		description: "Toggle Kokoro voice mode",
-		handler: async ctx => toggle(ctx),
+		handler: async ctx => {
+			restoreBottomAfterSpeech = false;
+			bottomPinned = false;
+			await toggle(ctx);
+		},
 	});
 
 	// Playback controls act on completed assistant snapshots and never mutate a
@@ -2293,6 +2320,8 @@ const chargeBackfillUnit = (): boolean => {
 	};
 
 	const attendNextProject = async (ctx: ExtensionContext): Promise<void> => {
+		restoreBottomAfterSpeech = false;
+		bottomPinned = false;
 		if (!coordinator) {
 			replaySelected(ctx);
 			return;
@@ -2348,6 +2377,8 @@ const chargeBackfillUnit = (): boolean => {
 				ctx.ui.notify("Voice device handoff is still stopping the previous transport", "warning");
 				return;
 			}
+			restoreBottomAfterSpeech = false;
+			bottomPinned = false;
 			if (playbackPaused) {
 				if (pausedOwnerUtterance === undefined) {
 					const target = playbackHistory.resumeTarget();
@@ -2432,25 +2463,39 @@ const chargeBackfillUnit = (): boolean => {
 		if (config.talkShortcut !== "f5") registerTalkShortcut("f5");
 	}
 
+	const scrollToNarration = (ctx: ExtensionContext): void => {
+		if (!ownsSpeech || narration.activeWordStart === undefined) {
+			ctx.ui.notify("There is no active narrated position to scroll to", "warning");
+			return;
+		}
+		restoreBottomAfterSpeech = false;
+		armNarrationFollow(true);
+		requestNarrationAutoScroll(true, true);
+	};
+
 	const scrollToBottom = (ctx: ExtensionContext): void => {
 		const scrollView = activeScrollView();
 		if (!scrollView?.scrollToEnd) {
 			ctx.ui.notify("Scroll-to-bottom is unavailable in this runtime", "warning");
 			return;
 		}
-		if (ownsSpeech && !playbackPaused && config.autoScroll) {
-			armNarrationFollow(true);
-			requestNarrationAutoScroll();
-			return;
-		}
 		scrollView.scrollToEnd();
-		lastAutoScrollTop = undefined;
+		bottomPinned = ownsSpeech;
+		restoreBottomAfterSpeech = ownsSpeech;
+		lastAutoScrollTop = scrollView.scrollTop;
+		autoScrollForceOnce = false;
 		hideFollowHint();
 	};
 
+	if (config.scrollToShortcut !== "disabled" && config.scrollToShortcut !== config.scrollBottomShortcut) {
+		pi.registerShortcut(config.scrollToShortcut, {
+			description: "Scroll to the current narrated position",
+			handler: scrollToNarration,
+		});
+	}
 	if (config.scrollBottomShortcut !== "disabled") {
 		pi.registerShortcut(config.scrollBottomShortcut, {
-			description: "Follow spoken text, or scroll the transcript to the bottom",
+			description: "Pin the transcript to its end and follow new output",
 			handler: scrollToBottom,
 		});
 	}
@@ -2486,6 +2531,8 @@ const chargeBackfillUnit = (): boolean => {
 				"edit-model",
 				"highlight",
 				"autoscroll",
+				"scroll-to",
+				"bottom",
 				"timing",
 				"code-narration",
 				"code-budget",
@@ -2634,7 +2681,12 @@ const chargeBackfillUnit = (): boolean => {
 		handler: async (rawArgs, ctx) => {
 			const args = rawArgs.trim();
 			const [action = "status", value = "", ...restArgs] = args.split(/\s+/);
-			switch (action.toLowerCase()) {
+			const normalizedAction = action.toLowerCase();
+			if (!["", "status", "timing", "bottom"].includes(normalizedAction)) {
+				restoreBottomAfterSpeech = false;
+				bottomPinned = false;
+			}
+			switch (normalizedAction) {
 				case "on":
 					await updateConfig({ ...config, enabled: true });
 					ctx.ui.notify("Voice mode enabled", "info");
@@ -2792,6 +2844,10 @@ const chargeBackfillUnit = (): boolean => {
 					backfillExhaustionReported = false;
 					if (activeContext) scheduleMissingCodeDescriptions(activeContext);
 					ctx.ui.notify(`code-description backfill budget set to ${parsed} for this session`, "info");
+					return;
+				}
+				case "scroll-to": {
+					scrollToNarration(ctx);
 					return;
 				}
 				case "bottom": {
@@ -3105,13 +3161,13 @@ const chargeBackfillUnit = (): boolean => {
 				case "status":
 				case "":
 					ctx.ui.notify(
-						`Voice ${config.enabled ? "on" : "off"}; mode=${config.mode}; voice=${config.voice}; speed=${config.speed}; tts=${config.ttsModel}@${config.ttsDtype}; stt=${config.sttModel}@${config.sttDtype}; sttCandidates=${config.sttCandidates}; alignment=${config.alignmentModel}@${config.alignmentDtype}; editModel=${config.editModel}; highlight=${config.playbackHighlight ? "on" : "off"}; autoScroll=${config.autoScroll ? "on" : "off"}; followShortcut=${config.scrollBottomShortcut}; codeNarration=${config.codeNarration}; codeContext=${config.codeDescriptionContext}; codePreprocess=${config.codeDescriptionPreprocessConcurrency}; codeScope=${config.codeDescriptionPreprocessScope}; codeBudget=${backfillAllowance}; timingPreprocess=${config.timingPreprocessConcurrency}; audioCache=${config.audioCache ? `${config.audioCacheBitrate}kbps` : "off"}; device=${deviceSelection}${activeDeviceId ? `→${activeDeviceId}` : "→local"}; output=${config.output}; input=${config.input}; shortcut=${config.talkShortcut}; submit=${config.submitMode}; edit=${config.editMode}`,
+						`Voice ${config.enabled ? "on" : "off"}; mode=${config.mode}; voice=${config.voice}; speed=${config.speed}; tts=${config.ttsModel}@${config.ttsDtype}; stt=${config.sttModel}@${config.sttDtype}; sttCandidates=${config.sttCandidates}; alignment=${config.alignmentModel}@${config.alignmentDtype}; editModel=${config.editModel}; highlight=${config.playbackHighlight ? "on" : "off"}; autoScroll=${config.autoScroll ? "on" : "off"}; scrollToShortcut=${config.scrollToShortcut}; bottomShortcut=${config.scrollBottomShortcut}; codeNarration=${config.codeNarration}; codeContext=${config.codeDescriptionContext}; codePreprocess=${config.codeDescriptionPreprocessConcurrency}; codeScope=${config.codeDescriptionPreprocessScope}; codeBudget=${backfillAllowance}; timingPreprocess=${config.timingPreprocessConcurrency}; audioCache=${config.audioCache ? `${config.audioCacheBitrate}kbps` : "off"}; device=${deviceSelection}${activeDeviceId ? `→${activeDeviceId}` : "→local"}; output=${config.output}; input=${config.input}; shortcut=${config.talkShortcut}; submit=${config.submitMode}; edit=${config.editMode}`,
 						"info",
 					);
 					return;
 				default:
 					ctx.ui.notify(
-						"Usage: /voice [on|off|toggle|status|stop|setup|test|talk|attention|mode|voice|speed|tts-model|tts-dtype|stt-model|stt-dtype|stt-candidates|alignment-model|alignment-dtype|edit-model|highlight|autoscroll|timing|bottom|code-narration|code-budget|code-preprocess|timing-preprocess|audio-cache|audio-bitrate|device|output|input|shortcut|submit|edit]",
+						"Usage: /voice [on|off|toggle|status|stop|setup|test|talk|attention|mode|voice|speed|tts-model|tts-dtype|stt-model|stt-dtype|stt-candidates|alignment-model|alignment-dtype|edit-model|highlight|autoscroll|scroll-to|bottom|timing|code-narration|code-budget|code-preprocess|timing-preprocess|audio-cache|audio-bitrate|device|output|input|shortcut|submit|edit]",
 						"error",
 					);
 			}

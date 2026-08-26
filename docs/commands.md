@@ -73,6 +73,7 @@ Shortcut names follow Pi's format, for example `alt+m`, `ctrl+shift+m`, or `f8`.
 
 ```text
 /voice code-preprocess <1..8>
+/voice scroll-to
 /voice bottom
 /voice code-budget [unlimited|<n>]
 /voice timing-preprocess auto|<1..8>
@@ -80,7 +81,7 @@ Shortcut names follow Pi's format, for example `alt+m`, `ctrl+shift+m`, or `f8`.
 /voice audio-bitrate <12..128>
 ```
 
-`bottom` follows the currently spoken word during narration; otherwise it scrolls to the transcript bottom. The configured `scrollBottomShortcut` (default `Ctrl+E`) does the same and dismisses the manual-scroll hint.
+`scroll-to` re-anchors the current narrated position at 20% without changing play/pause state; its default shortcut is `Alt+S`. `bottom` pins the transcript to its end and restores normal transcript-end following, including while narration remains active; its default shortcut is `Alt+End`.
 
 `code-budget` reports or raises the session-only historical backfill allowance (`scope` and default budget come from the config) and resumes skipped blocks.
 

@@ -41,6 +41,8 @@ Examples for smart mode include “replace port 8000 with 8080,” “scratch th
 | `F9` | Seek approximately 10 seconds forward |
 | `F10` | Select and play the next completed assistant message |
 | `F11` | Play this session's waiting response, route attention to the oldest waiting project, or replay the selected message |
+| `Alt+S` | Scroll to and follow the current narrated position (`/voice scroll-to`) |
+| `Alt+End` | Pin to transcript end and follow new output (`/voice bottom`) |
 
 F6/F10 navigate Pi Voice's selected-message history; merely scrolling the terminal viewport does not change that selection. Navigation is available while Pi is idle.
 
