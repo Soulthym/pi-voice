@@ -175,10 +175,15 @@ test("TUI follows exact words, permits in-band framing, and seek/resume controls
 	worker!.emit({ type: "playback", utterance: sought.utterance, position: 1 } as never);
 	await waitForScroll(host, 185);
 
+	// Pausing must preserve the exact viewport even when pause-related widget
+	// updates would otherwise make Pi's follow-end layout snap to the bottom.
+	host.snapScrollOnWidgetUpdate = true;
+	await host.shortcut("f8");
+	host.snapScrollOnWidgetUpdate = false;
+	assert.equal(host.scrollView.scrollTop, 185);
+
 	// Seeking directly from an F8-paused transport must explicitly clear worker
 	// pause state before regenerated audio is queued.
-	await host.shortcut("f8");
-	assert.equal(host.scrollView.scrollTop, 185);
 	assert.equal(worker!.pauses.at(-1), true);
 	await fs.stat(path.join(root, "coordinator", "speech.lock", "lease.json"));
 	const pausedSeekStart = worker!.sent.length;

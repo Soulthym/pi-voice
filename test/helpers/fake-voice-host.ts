@@ -108,6 +108,7 @@ export class FakeVoiceHost {
 	readonly notices: Notice[] = [];
 	readonly entries: any[] = [];
 	readonly modelRequests: ModelRequest[] = [];
+	snapScrollOnWidgetUpdate = false;
 	/** Active transcript viewport; intentionally differs from the implicit fallback. */
 	readonly scrollView = new FakeScrollView();
 	readonly implicitScrollView = new FakeScrollView();
@@ -178,6 +179,7 @@ export class FakeVoiceHost {
 						| undefined,
 					options?: { placement?: string },
 				) => {
+					if (this.snapScrollOnWidgetUpdate) this.scrollView.scrollToEnd();
 					if (value === undefined) this.widgetComponents.get(name)?.dispose?.();
 					let normalized: { lines?: string[]; placement?: string } | undefined;
 					if (typeof value === "function") {

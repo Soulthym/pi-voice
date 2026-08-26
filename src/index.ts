@@ -840,6 +840,14 @@ const chargeBackfillUnit = (): boolean => {
 		requestNarrationRender();
 	};
 
+	const preserveNarrationViewport = (scrollTop: number | undefined): void => {
+		if (scrollTop === undefined) return;
+		const scrollView = activeScrollView();
+		if (!scrollView) return;
+		scrollView.scrollTo(scrollTop, { disableFollow: true });
+		lastAutoScrollTop = scrollView.scrollTop;
+	};
+
 	const requestNarrationAutoScroll = (): void => {
 		if (!config.enabled || !config.autoScroll || !ownsSpeech || playbackPaused) {
 			hideFollowHint();
@@ -2264,6 +2272,7 @@ const chargeBackfillUnit = (): boolean => {
 				ctx.ui.notify("There is no assistant message playing", "warning");
 				return;
 			}
+			const pausedScrollTop = activeScrollView()?.scrollTop;
 			pausedOwnerUtterance = lastOwnerUtterance;
 			vocalizer.setPlaybackPaused(true);
 			playbackPaused = true;
@@ -2275,6 +2284,7 @@ const chargeBackfillUnit = (): boolean => {
 			state = "idle";
 			refreshStatus();
 			refreshPlaybackTimeline();
+			preserveNarrationViewport(pausedScrollTop);
 		},
 	});
 
