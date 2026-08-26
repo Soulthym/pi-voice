@@ -27,6 +27,24 @@ test("dims unread prose and reveals words from playback progress", () => {
 	assert.equal(progress.transform("First second.", "assistant", dim), "First second.");
 });
 
+test("previews a regenerated source position before audio starts", () => {
+	const progress = new NarrationProgress();
+	progress.setCompletedText("Alpha beta gamma.");
+	progress.previewSourceOffset(6);
+	const transformed = progress.transform(
+		"Alpha beta gamma.",
+		"assistant",
+		dim,
+		background,
+		undefined,
+		true,
+		undefined,
+		NARRATION_ACTIVE_MARKER,
+	);
+	assert.ok(transformed.indexOf(NARRATION_ACTIVE_MARKER) < transformed.indexOf("beta"));
+	assert.ok(transformed.indexOf(NARRATION_ACTIVE_MARKER) > transformed.indexOf("Alpha"));
+});
+
 test("marks the exact timed word for TUI auto-scroll", () => {
 	const progress = new NarrationProgress();
 	progress.setCompletedText("Alpha beta gamma.");

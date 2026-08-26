@@ -83,7 +83,10 @@ test("TUI follows exact words, permits in-band framing, and seek/resume controls
 	// Register every sentence as a separate 2-second checkpoint so F7/F9 below
 	// exercise genuine timeline movement rather than restarting checkpoint zero.
 	const replayStart = worker!.sent.length;
+	host.scrollView.setDocument(renderedDocument(160), 40);
+	host.scrollView.manualScrollTo(0);
 	await host.shortcut("f11");
+	assert.equal(host.scrollView.scrollTop, 152, "message replay should anchor before its first audio event");
 	const replaySegments = worker!.sent.slice(replayStart) as Array<{
 		utterance: number;
 		segmentId: number;
@@ -188,7 +191,7 @@ test("TUI follows exact words, permits in-band framing, and seek/resume controls
 	await fs.stat(path.join(root, "coordinator", "speech.lock", "lease.json"));
 	const pausedSeekStart = worker!.sent.length;
 	await host.shortcut("f9");
-	assert.equal(worker!.pauses.at(-1), false);
+	assert.equal(worker!.pauses.at(-1), true, "timeline movement must retain paused transport state");
 	const pausedSeekSegments = worker!.sent.slice(pausedSeekStart) as Array<{
 		utterance: number;
 		segmentId: number;
@@ -196,16 +199,19 @@ test("TUI follows exact words, permits in-band framing, and seek/resume controls
 	}>;
 	const pausedSeek = pausedSeekSegments[0]!;
 	assert.ok(pausedSeek, "F9 after pause must queue fresh playback");
-	worker!.emit({ type: "segment-audio", segmentId: pausedSeek.segmentId, start: 0, duration: 20 } as never);
-	worker!.emit({ type: "playback", utterance: pausedSeek.utterance, position: 0 } as never);
-	await new Promise(resolve => setTimeout(resolve, 120));
+	assert.match(host.render(text), new RegExp(`${NARRATION_ACTIVE_MARKER}Sentence`));
 	assert.equal(host.scrollView.scrollTop, 185);
 
-	// F8 pause preserves the current viewport rather than restoring transcript
-	// bottom; resume then has the same non-forcing semantics as seek controls.
+	// Resume keeps the current framing. Pausing it again preserves a manually
+	// framed viewport, and the next resume re-arms normal 20–80 tracking.
 	await host.shortcut("f8");
+	assert.equal(worker!.pauses.at(-1), false);
+	worker!.emit({ type: "segment-audio", segmentId: pausedSeek.segmentId, start: 0, duration: 20 } as never);
+	worker!.emit({ type: "playback", utterance: pausedSeek.utterance, position: 0 } as never);
 	assert.equal(host.scrollView.scrollTop, 185);
 	host.scrollView.manualScrollTo(180); // active line 193 is safely in-band
+	await host.shortcut("f8");
+	assert.equal(host.scrollView.scrollTop, 180);
 	await host.shortcut("f8");
 	worker!.emit({ type: "playback", utterance: pausedSeek.utterance, position: 1.5 } as never);
 	await new Promise(resolve => setTimeout(resolve, 120));

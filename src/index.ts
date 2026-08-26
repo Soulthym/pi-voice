@@ -1181,6 +1181,7 @@ const chargeBackfillUnit = (): boolean => {
 		utterance => {
 			if (!ownsSpeech) return;
 			lastOwnerUtterance = utterance;
+			if (playbackPaused) pausedOwnerUtterance = utterance;
 			ownerContentExpected = true;
 		},
 	);
@@ -1457,7 +1458,12 @@ const chargeBackfillUnit = (): boolean => {
 		speakAttentionNotification(waiting);
 	};
 
-	const playTarget = async (target: PlaybackTarget, recordTimings: boolean): Promise<void> => {
+	const playTarget = async (
+		target: PlaybackTarget,
+		recordTimings: boolean,
+		previewTarget = false,
+	): Promise<void> => {
+		const remainPaused = playbackPaused;
 		const sourceOffset = Math.max(0, Math.min(target.text.length, target.sourceOffset));
 		const suffix = target.text.slice(sourceOffset);
 		const displacedLiveTurn = ownsSpeech && speechPurpose === "turn" && !ownerTurnEnded;
@@ -1476,9 +1482,9 @@ const chargeBackfillUnit = (): boolean => {
 		if (activeContext) scheduleMissingCodeDescriptions(activeContext);
 		cancelTimingWorkers();
 		clearPlaybackTransport();
-		// A seek may replace an F8-paused transport. Cancellation stops the old
-		// sink, but explicitly clear worker pause state before queuing fresh audio.
-		vocalizer.setPlaybackPaused(false);
+		// Timeline movement replaces the sink without changing transport state.
+		// Sticky worker pause applies even before the replacement sink exists.
+		vocalizer.setPlaybackPaused(remainPaused);
 		narration.finish();
 		if (!acquireSpeech("replay", true, true)) {
 			if (displacedLiveTurn) {
@@ -1500,13 +1506,16 @@ const chargeBackfillUnit = (): boolean => {
 		}
 		narration.begin();
 		narration.setCompletedText(target.text);
+		narration.previewSourceOffset(sourceOffset);
+		requestNarrationRender();
+		if (previewTarget) requestNarrationAutoScroll();
 		playbackHistory.beginCapture(target.id, target.text, target.time, recordTimings);
 		const contextual = activeContext
 			? completedAssistantMessages(activeContext, config.mode).find(message => message.id === target.id)
 			: undefined;
 		speechConversationMessages = contextual?.conversationMessages ?? [];
 		speechAssistantMessage = contextual?.assistantMessage;
-		playbackPaused = false;
+		playbackPaused = remainPaused;
 		pausedOwnerUtterance = undefined;
 		playbackPositionEstimated = false;
 		refreshPlaybackTimeline();
@@ -2181,7 +2190,7 @@ const chargeBackfillUnit = (): boolean => {
 			ctx.ui.notify("There is no completed assistant message to replay yet", "warning");
 			return;
 		}
-		playTarget(target, !playbackHistory.hasTimings());
+		playTarget(target, !playbackHistory.hasTimings(), true);
 	};
 
 	playRequestedAttention = ctx => {
@@ -2220,7 +2229,7 @@ const chargeBackfillUnit = (): boolean => {
 			if (!requireEnabledVoice(ctx)) return;
 			syncPlaybackMessages(ctx);
 			const message = playbackHistory.move(-1);
-			if (message) playTarget({ ...message, time: 0, sourceOffset: 0 }, !playbackHistory.hasTimings());
+			if (message) playTarget({ ...message, time: 0, sourceOffset: 0 }, !playbackHistory.hasTimings(), true);
 		},
 	});
 
@@ -2307,7 +2316,7 @@ const chargeBackfillUnit = (): boolean => {
 			if (!requireEnabledVoice(ctx)) return;
 			syncPlaybackMessages(ctx);
 			const message = playbackHistory.move(1);
-			if (message) playTarget({ ...message, time: 0, sourceOffset: 0 }, !playbackHistory.hasTimings());
+			if (message) playTarget({ ...message, time: 0, sourceOffset: 0 }, !playbackHistory.hasTimings(), true);
 		},
 	});
 

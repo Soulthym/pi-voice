@@ -478,6 +478,18 @@ export class NarrationProgress {
 		this.pushDelta("assistant", 0, text);
 	}
 
+	/** Places a provisional marker before regenerated audio begins. */
+	previewSourceOffset(sourceOffset: number): void {
+		if (!this.#active || !this.#raw) return;
+		const offset = Math.max(0, Math.min(this.#raw.length, Math.trunc(sourceOffset)));
+		const word = tokenize(this.#raw.slice(offset), offset)[0];
+		if (!word) return;
+		this.#cursor = word.start;
+		this.#activeSource = { start: word.start, end: word.end };
+		this.#activeWord = { start: word.start, end: word.end };
+		this.#onChange();
+	}
+
 	registerSegment(segment: NarrationSegment): void {
 		const words = segment.codeDescription
 			? mapDescriptionWords(segment.text, segment.codeDescription.offset)
