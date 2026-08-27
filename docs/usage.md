@@ -73,7 +73,11 @@ Manual prompt submission, replay controls, F11, and `/voice attention` take prio
 
 ## Optional Termux function-key row
 
-Add a third row to `extra-keys` in `~/.termux/termux.properties`. Insert this before the configuration's final `]]`:
+The extended row provides one-tap access to dictation and every F6–F11 playback control:
+
+![Termux extended keyboard row showing microphone, previous message, rewind 10 seconds, pause or resume, forward 10 seconds, next message, and replay](assets/pi-voice-ssh-termux-extended-kb.jpg)
+
+Add the row to `extra-keys` in `~/.termux/termux.properties`. Insert this before the configuration's final `]]`:
 
 ```properties
   ], [\

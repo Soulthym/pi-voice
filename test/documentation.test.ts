@@ -28,6 +28,10 @@ test("README, example JSON, and configuration table match current defaults", () 
 
 	assert.match(readme, /`Alt\+V` \| Re-anchor the current narrated position/);
 	assert.match(readme, /`Alt\+T` \| Pin to and follow the transcript tail/);
+	const keyboardAsset = "docs/assets/pi-voice-ssh-termux-extended-kb.jpg";
+	assert.equal(fs.existsSync(keyboardAsset), true);
+	assert.match(readme, new RegExp(keyboardAsset.replaceAll("/", "\\/")));
+	assert.match(read("docs/usage.md"), /assets\/pi-voice-ssh-termux-extended-kb\.jpg/);
 	assert.match(read("docs/commands.md"), /\/voice code-retry current/);
 	assert.match(read("docs/commands.md"), /\/voice code-retry historical/);
 });

@@ -35,6 +35,14 @@ Kokoro, Whisper, Wav2Vec2 alignment, and audio-cache processing run on the machi
 
 Native macOS and Windows client backends are planned. Voice ownership and attention are limited to interactive Pi TUI sessions; headless child/subagent sessions stay silent.
 
+## Termux extended controls
+
+Termux can expose one-tap microphone, message navigation, ±10-second seeking, pause/resume, and replay controls through an optional F5–F11 extra-key row.
+
+[![Termux extended keyboard row for Pi Voice playback controls](docs/assets/pi-voice-ssh-termux-extended-kb.jpg)](docs/usage.md#optional-termux-function-key-row)
+
+[Configure the Termux extended keyboard row →](docs/usage.md#optional-termux-function-key-row)
+
 ## Quick start
 
 Install the extension on the Pi host:
