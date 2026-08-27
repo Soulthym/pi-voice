@@ -2547,6 +2547,7 @@ const chargeBackfillUnit = (): boolean => {
 				"timing",
 				"code-narration",
 				"code-budget",
+				"code-retry",
 				"code-preprocess",
 				"timing-preprocess",
 				"audio-cache",
@@ -2609,6 +2610,16 @@ const chargeBackfillUnit = (): boolean => {
 				return ["unlimited"]
 					.filter(value => value.startsWith(parts[1] ?? ""))
 					.map(value => ({ value: `code-budget ${value}`, label: value }));
+			}
+			if (parts[0] === "code-retry") {
+				if (parts[1] === "historical" && parts.length > 2) {
+					return ["all"]
+						.filter(value => value.startsWith(parts[2] ?? ""))
+						.map(value => ({ value: `code-retry historical ${value}`, label: value }));
+				}
+				return ["current", "historical"]
+					.filter(value => value.startsWith(parts[1] ?? ""))
+					.map(value => ({ value: `code-retry ${value}`, label: value }));
 			}
 			if (parts[0] === "code-preprocess" || parts[0] === "timing-preprocess") {
 				const choices = ["1", "2", "3", "4", "5", "6", "7", "8"];
@@ -3178,7 +3189,7 @@ const chargeBackfillUnit = (): boolean => {
 					return;
 				default:
 					ctx.ui.notify(
-						"Usage: /voice [on|off|toggle|status|stop|setup|test|talk|attention|mode|voice|speed|tts-model|tts-dtype|stt-model|stt-dtype|stt-candidates|alignment-model|alignment-dtype|edit-model|highlight|autoscroll|scroll-to|bottom|timing|code-narration|code-budget|code-preprocess|timing-preprocess|audio-cache|audio-bitrate|device|output|input|shortcut|submit|edit]",
+						"Usage: /voice [on|off|toggle|status|stop|setup|test|talk|attention|mode|voice|speed|tts-model|tts-dtype|stt-model|stt-dtype|stt-candidates|alignment-model|alignment-dtype|edit-model|highlight|autoscroll|scroll-to|bottom|timing|code-narration|code-budget|code-retry|code-preprocess|timing-preprocess|audio-cache|audio-bitrate|device|output|input|shortcut|submit|edit]",
 						"error",
 					);
 			}
