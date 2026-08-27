@@ -79,6 +79,18 @@ Missing processes mean the bridge is not running; rerun `pi-voice-ssh`. If
 processes exist but audio is silent, check Android media volume (separate from
 the ringer) and Termux battery-optimization exemptions.
 
+## SSH wrapper waits on a lock
+
+Current wrappers use owner-tagged locks and automatically reclaim lock directories left by older crashed wrappers. Reinstall the complete `client/pi-voice-*` set and restart every wrapper. If a traced older wrapper repeatedly prints `mkdir .../lock`, first confirm no wrapper is alive, then remove the legacy lock once:
+
+```bash
+runtime=${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/pi-voice-ssh-$(id -u)
+pgrep -af pi-voice-ssh
+rm -rf "$runtime"/bridge.lock "$runtime"/targets/*/lock
+```
+
+Never remove these paths while a wrapper is active. New owner-tagged locks are released only by their owner and stale ownership is recovered automatically.
+
 ## SSH forwarding fails
 
 Run a dry resolution check:

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -10,8 +11,8 @@ const TERMUX_WRAPPER = path.resolve("termux/pi-voice-ssh");
 
 /** Tools the wrappers legitimately need; audio/SSH tooling is faked explicitly. */
 const CORE_TOOLS = [
-	"awk", "basename", "bash", "cat", "chmod", "cmp", "cut", "date", "dd", "dirname", "env", "head", "id", "kill",
-	"mkdir", "mkfifo", "rmdir", "printf", "readlink", "rm", "sh", "sha256sum", "sleep", "sort", "stat", "tail", "touch",
+	"awk", "basename", "bash", "cat", "chmod", "cmp", "cut", "date", "dd", "dirname", "env", "grep", "head", "id", "kill",
+	"ln", "mkdir", "mkfifo", "mv", "rmdir", "printf", "readlink", "rm", "sh", "sha256sum", "sleep", "sort", "stat", "tail", "touch",
 	"tr", "base64", "setsid", "timeout", "uname", "pkill",
 ];
 
@@ -124,6 +125,7 @@ async function scenario(
 	wrapper: string,
 	args: string[],
 	envOverrides: Record<string, string> = {},
+	timeoutMs = 15_000,
 ): Promise<RunResult & { log(): string }> {
 	const bin = restrictedPath(root, { ssh: FAKE_SSH, socat: DIAL_SOCAT });
 	const runtime = path.join(root, "runtime");
@@ -144,7 +146,7 @@ async function scenario(
 		PI_VOICE_CLIENT_COMMAND: bridge,
 		FAKE_SSH_LOG: logFile,
 		...envOverrides,
-	});
+	}, timeoutMs);
 	return {
 		...result,
 		log: () => fs.readFileSync(logFile, "utf8").replaceAll("\0", "\n"),
@@ -201,6 +203,53 @@ test("dry run resolves device-dir precedence and rejects invalid values", async 
 		assert.match(optionsPreserved.stdout, /deviceDir=default/);
 	} finally {
 		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("ownerless locks from crashed legacy wrappers are reclaimed automatically", async () => {
+	for (const [index, wrapper] of [CLIENT_WRAPPER, TERMUX_WRAPPER].entries()) {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-voice-ssh-stale-lock-"));
+		try {
+			const runtimeRoot = path.join(root, "runtime", `pi-voice-ssh-${process.getuid!()!}`);
+			const targetHash = createHash("sha256").update("fakeuser@fakehost:22").digest("hex").slice(0, 20);
+			fs.mkdirSync(path.join(runtimeRoot, "targets", targetHash, "lock"), { recursive: true });
+			fs.mkdirSync(path.join(runtimeRoot, "bridge.lock"), { recursive: true });
+
+			const result = await scenario(root, wrapper, ["u@h"], {
+				PI_VOICE_AUDIO_PORT: String(24_000 + index),
+			});
+			assert.equal(result.code, 0, `${path.basename(wrapper)} failed: ${result.stderr}`);
+			assert.equal(fs.existsSync(path.join(runtimeRoot, "bridge.lock")), false);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	}
+});
+
+test("locks that may be owned by a live wrapper are never reclaimed", async () => {
+	for (const legacy of [false, true]) {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-voice-ssh-live-lock-"));
+		const runtimeRoot = path.join(root, "runtime", `pi-voice-ssh-${process.getuid!()!}`);
+		const targetHash = createHash("sha256").update("fakeuser@fakehost:22").digest("hex").slice(0, 20);
+		const lock = path.join(runtimeRoot, "targets", targetHash, "lock");
+		fs.mkdirSync(path.dirname(lock), { recursive: true });
+		const owner = spawn("bash", ["-c", "exec -a pi-voice-ssh sleep 60"], { detached: true, stdio: "ignore" });
+		try {
+			await new Promise(resolve => setTimeout(resolve, 100));
+			if (legacy) fs.mkdirSync(lock);
+			else fs.symlinkSync(String(owner.pid), lock);
+			const result = await scenario(root, CLIENT_WRAPPER, ["u@h"], {}, 400);
+			assert.equal(result.code, null, "the contender should still be waiting when its timeout expires");
+			if (legacy) assert.equal(fs.statSync(lock).isDirectory(), true);
+			else assert.equal(fs.readlinkSync(lock), String(owner.pid));
+		} finally {
+			try {
+				process.kill(-owner.pid!, "SIGKILL");
+			} catch {
+				owner.kill("SIGKILL");
+			}
+			fs.rmSync(root, { recursive: true, force: true });
+		}
 	}
 });
 

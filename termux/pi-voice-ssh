@@ -94,11 +94,56 @@ control_socket=$runtime_root/cm-$target_hash.sock
 session_file=$target_state/sessions/$$
 mkdir -p "$target_state/sessions"
 
-lock_dir=$target_state/lock
-acquire_lock() {
-  while ! mkdir "$lock_dir" 2>/dev/null; do sleep 0.05; done
+lock_token=$$
+lock_owner_alive() {
+  local path=$1 owner
+  [[ -L $path ]] || return 1
+  owner=$(readlink "$path" 2>/dev/null || true)
+  [[ $owner =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$owner" 2>/dev/null || return 1
+  # Avoid treating a recycled pid as the old wrapper when procfs is readable.
+  [[ ! -r /proc/$owner/cmdline ]] || grep -aq 'pi-voice-ssh' "/proc/$owner/cmdline" 2>/dev/null
 }
-release_lock() { rmdir "$lock_dir" 2>/dev/null || true; }
+legacy_wrapper_alive() {
+  local cmdline pid
+  shopt -s nullglob
+  for cmdline in /proc/[0-9]*/cmdline; do
+    pid=${cmdline#/proc/}; pid=${pid%/cmdline}
+    if [[ $pid != "$lock_token" ]] && grep -aq 'pi-voice-ssh' "$cmdline" 2>/dev/null; then
+      shopt -u nullglob
+      return 0
+    fi
+  done
+  shopt -u nullglob
+  return 1
+}
+acquire_path_lock() {
+  local path=$1 stale
+  while ! ln -s "$lock_token" "$path" 2>/dev/null; do
+    if lock_owner_alive "$path"; then
+      sleep 0.05
+      continue
+    fi
+    # Old wrappers used ownerless directories. Never steal one while another
+    # legacy wrapper could still be in its setup critical section.
+    if [[ -d $path && ! -L $path ]] && legacy_wrapper_alive; then
+      sleep 0.05
+      continue
+    fi
+    # Rename first so concurrent reclaimers can never delete a newly acquired lock.
+    stale=${path}.stale.${lock_token}.${RANDOM}
+    if mv "$path" "$stale" 2>/dev/null; then rm -rf "$stale"; fi
+  done
+}
+release_path_lock() {
+  local path=$1 owner=
+  if [[ -L $path ]]; then owner=$(readlink "$path" 2>/dev/null || true); fi
+  if [[ $owner == "$lock_token" ]]; then rm -f "$path"; fi
+  return 0
+}
+lock_dir=$target_state/lock
+acquire_lock() { acquire_path_lock "$lock_dir"; }
+release_lock() { release_path_lock "$lock_dir"; }
 clean_sessions() {
   local file pid
   shopt -s nullglob
@@ -153,13 +198,13 @@ bridge_alive() {
 
 ensure_bridge() {
   local bridge_lock=$runtime_root/bridge.lock pid=
-  while ! mkdir "$bridge_lock" 2>/dev/null; do sleep 0.05; done
+  acquire_path_lock "$bridge_lock"
   [[ -s $bridge_pid_file ]] && pid=$(<"$bridge_pid_file")
   if ! bridge_alive "$pid"; then
     rm -f "$bridge_pid_file"
     local bridge=${PI_VOICE_CLIENT_COMMAND:-$HOME/.local/bin/pi-voice-client}
     if [[ ! -x $bridge ]]; then
-      rmdir "$bridge_lock"
+      release_path_lock "$bridge_lock"
       printf 'Missing %s; install the pi-voice client scripts first\n' "$bridge" >&2
       exit 1
     fi
@@ -182,13 +227,13 @@ ensure_bridge() {
       (( tick += 1 )) || true
     done
     if ! kill -0 "$pid" 2>/dev/null || ! probe_audio_port; then
-      rmdir "$bridge_lock"
+      release_path_lock "$bridge_lock"
       cat "$runtime_root/client-bridge.log" >&2
       exit 1
     fi
-    rmdir "$bridge_lock"
+    release_path_lock "$bridge_lock"
   else
-    rmdir "$bridge_lock"
+    release_path_lock "$bridge_lock"
   fi
 }
 
@@ -250,7 +295,7 @@ cleanup() {
 
   # The client bridge is shared by every target and closes with the final shell.
   bridge_lock=$runtime_root/bridge.lock
-  while ! mkdir "$bridge_lock" 2>/dev/null; do sleep 0.05; done
+  acquire_path_lock "$bridge_lock"
   clean_all_sessions
   shopt -s nullglob
   all_sessions=("$runtime_root"/targets/*/sessions/*)
@@ -261,7 +306,7 @@ cleanup() {
     wait "$bridge_pid" 2>/dev/null || true
     rm -f "$bridge_pid_file"
   fi
-  rmdir "$bridge_lock"
+  release_path_lock "$bridge_lock"
 }
 trap cleanup EXIT INT TERM
 
