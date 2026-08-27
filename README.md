@@ -35,14 +35,6 @@ Kokoro, Whisper, Wav2Vec2 alignment, and audio-cache processing run on the machi
 
 Native macOS and Windows client backends are planned. Voice ownership and attention are limited to interactive Pi TUI sessions; headless child/subagent sessions stay silent.
 
-## Termux extended controls
-
-Termux can expose one-tap microphone, message navigation, ±10-second seeking, pause/resume, and replay controls through an optional F5–F11 extra-key row.
-
-[![Termux extended keyboard row for Pi Voice playback controls](docs/assets/pi-voice-ssh-termux-extended-kb.jpg)](docs/usage.md#optional-termux-function-key-row)
-
-[Configure the Termux extended keyboard row →](docs/usage.md#optional-termux-function-key-row)
-
 ## Quick start
 
 Install the extension on the Pi host:
@@ -122,7 +114,9 @@ Pi Voice reads `~/.pi/agent/pi-voice.json`. Missing settings use these defaults;
 
 See [Configuration](docs/configuration.md) for valid values and setting behavior, or copy [`pi-voice.example.json`](pi-voice.example.json).
 
-## Everyday controls
+## Controls
+
+### Everyday shortcuts
 
 | Key | Action |
 | --- | --- |
@@ -139,7 +133,7 @@ See [Configuration](docs/configuration.md) for valid values and setting behavior
 
 Speak after pressing the microphone key. Recording normally stops after about 1.35 seconds of silence. In the default review mode, edit the resulting prompt and press Enter yourself.
 
-Useful commands:
+### Useful commands
 
 ```text
 /voice status
@@ -152,7 +146,15 @@ Useful commands:
 /voice setup
 ```
 
-See [Usage](docs/usage.md) for dictation, editing, playback, highlighting, session attention, and the optional Termux function-key row. See [Command reference](docs/commands.md) for every `/voice` command.
+### Termux extended keyboard
+
+Termux can expose one-tap microphone, message navigation, ±10-second seeking, pause/resume, and replay controls through an optional F5–F11 extra-key row.
+
+[![Termux extended keyboard row for Pi Voice playback controls](docs/assets/pi-voice-ssh-termux-extended-kb.jpg)](docs/usage.md#optional-termux-function-key-row)
+
+[Configure the Termux extended keyboard row →](docs/usage.md#optional-termux-function-key-row)
+
+See [Usage](docs/usage.md) for dictation, editing, playback, highlighting, session attention, and keybinding details. See [Command reference](docs/commands.md) for every `/voice` command.
 
 ## Documentation
 
