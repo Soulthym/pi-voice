@@ -71,8 +71,8 @@ pid file. If you still hear nothing after reconnecting:
 
 ```bash
 pgrep -af "socat|mpv|pi-voice"   # expect two socat listeners while connected
-tail -5 "$XDG_RUNTIME_DIR"/pi-voice-ssh-*/client-bridge.log 2>/dev/null || \
-  tail -5 /tmp/pi-voice-ssh-*/client-bridge.log
+runtime=${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/pi-voice-ssh-$(id -u)
+tail -20 "$runtime/client-bridge.log"
 ```
 
 Missing processes mean the bridge is not running; rerun `pi-voice-ssh`. If
@@ -81,7 +81,7 @@ the ringer) and Termux battery-optimization exemptions.
 
 ## SSH wrapper waits on a lock
 
-Current wrappers use owner-tagged locks and automatically reclaim lock directories left by older crashed wrappers. Reinstall the complete `client/pi-voice-*` set and restart every wrapper. If a traced older wrapper repeatedly prints `mkdir .../lock`, first confirm no wrapper is alive, then remove the legacy lock once:
+Current wrappers use owner-tagged locks and automatically reclaim dead-owner locks. They also reclaim ownerless directories left by older crashed wrappers once no other legacy wrapper could still own them. Reinstall the complete `client/pi-voice-*` set and restart every wrapper. If a traced older wrapper repeatedly prints `mkdir .../lock`, first confirm no wrapper is alive, then remove the legacy lock once:
 
 ```bash
 runtime=${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/pi-voice-ssh-$(id -u)
@@ -89,7 +89,7 @@ pgrep -af pi-voice-ssh
 rm -rf "$runtime"/bridge.lock "$runtime"/targets/*/lock
 ```
 
-Never remove these paths while a wrapper is active. New owner-tagged locks are released only by their owner and stale ownership is recovered automatically.
+Never remove these paths while a wrapper is active. New owner-tagged locks are released only by their owner and stale ownership is recovered automatically. For a diagnostic trace, run `timeout 30s bash -x "$(command -v pi-voice-ssh)" -vvv YOUR_HOST >~/pi-voice-ssh-debug.log 2>&1`; review hostnames, usernames, key paths, and secret-bearing proxy options before sharing it.
 
 ## SSH forwarding fails
 

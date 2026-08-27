@@ -38,6 +38,8 @@ For the same client device and SSH target, concurrent wrappers share:
 
 Reference files track interactive wrapper processes. The last shell to exit closes the ControlMaster and client bridge. Stale local wrapper references are cleaned on the next invocation.
 
+Setup and bridge transitions use atomic owner-tagged locks. A contender waits for a live owner, reclaims a dead owner's lock, and cannot delete a replacement acquired concurrently. Current wrappers also recover ownerless lock directories left by a crashed legacy wrapper once no other legacy wrapper could still own them.
+
 Different target hosts use separate masters while sharing the same local bridge. Different client devices register separate IDs and may connect simultaneously.
 
 ## Device identity

@@ -40,6 +40,8 @@ Pi Voice reads `~/.pi/agent/pi-voice.json` by default. Unknown or invalid values
 
 Changing model, dtype, voice, speed, narration dependencies, or cache bitrate changes render identity. Pi Voice rebuilds only affected timing/audio data.
 
+The three shortcut settings are registered when the extension loads, so edit their JSON values and run `/reload`. The old `ctrl+e` and `alt+end` bottom defaults are migrated because Pi reserves Ctrl+E for editor line-end and compact Termux keyboards may have no End key. The current defaults avoid Ctrl, Shift, and an End key.
+
 ## Voice catalog
 
 | ID | Voice |

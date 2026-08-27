@@ -41,14 +41,14 @@ Examples for smart mode include “replace port 8000 with 8080,” “scratch th
 | `F9` | Seek approximately 10 seconds forward |
 | `F10` | Select and play the next completed assistant message |
 | `F11` | Play this session's waiting response, route attention to the oldest waiting project, or replay the selected message |
-| `Alt+V` | Scroll to and follow the current narrated position (`/voice scroll-to`) |
+| `Alt+V` | Re-anchor the current narrated position (`/voice scroll-to`) |
 | `Alt+T` | Pin to transcript end and follow new output (`/voice bottom`) |
 
-F6/F10 navigate Pi Voice's selected-message history; merely scrolling the terminal viewport does not change that selection. Navigation is available while Pi is idle.
+F6/F10 navigate Pi Voice's selected-message history; merely scrolling the terminal viewport does not change that selection. Navigation is available while Pi is idle. The destination message is highlighted and exposed immediately, before regenerated audio starts, and Pi Voice invalidates any marker cached in the previously selected message before locating the destination.
 
 F8 preserves the current audio connection, highlighting position, and transcript viewport around the paused word. Because the paused sink still owns the physical output resource, it retains the cross-session device lease until resume, seek, or stop. It does not restore bottom-follow merely because playback paused. If no live paused transport survives, resume falls back to regenerating from the nearest persisted timing checkpoint.
 
-F7/F9 use duration estimates first and replace them with aligned source-word checkpoints when alignment arrives, usually landing within a fraction of the requested ten seconds. Unchanged messages reuse valid timing maps and cached Opus segments. Message and time movement never changes play/pause state: while paused it updates the highlighted position and queues the replacement sink in paused state.
+F7/F9 use duration estimates first and replace them with aligned source-word checkpoints when alignment arrives, usually landing within a fraction of the requested ten seconds. Unchanged messages reuse valid timing maps and cached Opus segments. Message and time movement preserves the transport's paused versus unpaused state: while paused it updates the highlighted position and queues the replacement sink in paused state; from idle, message replay starts unpaused.
 
 ## Highlighting and status
 

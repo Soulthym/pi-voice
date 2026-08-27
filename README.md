@@ -95,6 +95,8 @@ Pi Voice reads `~/.pi/agent/pi-voice.json`. Missing settings use these defaults;
   "output": "auto",
   "input": "auto",
   "talkShortcut": "alt+m",
+  "scrollToShortcut": "alt+v",
+  "scrollBottomShortcut": "alt+t",
   "submitMode": "review",
   "editMode": "smart",
   "playbackHighlight": true,
@@ -102,6 +104,8 @@ Pi Voice reads `~/.pi/agent/pi-voice.json`. Missing settings use these defaults;
   "codeNarration": "guided",
   "codeDescriptionContext": "block-only",
   "codeDescriptionPreprocessConcurrency": 4,
+  "codeDescriptionPreprocessScope": "since-compaction",
+  "codeDescriptionPreprocessBudget": 25,
   "timingPreprocessConcurrency": "auto",
   "audioCache": true,
   "audioCacheBitrate": 32
@@ -121,6 +125,8 @@ See [Configuration](docs/configuration.md) for valid values and setting behavior
 | `F9` | Seek about 10 seconds forward |
 | `F10` | Next assistant message |
 | `F11` | Play this or the next waiting project's response |
+| `Alt+V` | Re-anchor the current narrated position |
+| `Alt+T` | Pin to and follow the transcript tail |
 | `Ctrl+Shift+V` | Toggle spoken output |
 
 Speak after pressing the microphone key. Recording normally stops after about 1.35 seconds of silence. In the default review mode, edit the resulting prompt and press Enter yourself.
@@ -132,6 +138,8 @@ Useful commands:
 /voice on|off|toggle|stop
 /voice talk
 /voice attention
+/voice scroll-to
+/voice bottom
 /voice device auto|local|<device-id>
 /voice setup
 ```

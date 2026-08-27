@@ -15,7 +15,7 @@ Preprocessing continues while spoken output is disabled. Live speech, microphone
 Session-wide progress and selected-message playback state use distinct labels:
 
 ```text
-Preprocessing · code descriptions: 24/61 ready
+Preprocessing · code descriptions (12/25 budget): 24/61 ready
 Preprocessing · speech timing: 109/284 ready
 ○ Playback · message 280/284: speech timing pending
 ```
@@ -34,7 +34,7 @@ Failed model requests use local structural narration. Before inference, `block-o
 
 ## Speech timing
 
-A timing pass converts speakable text and persisted code narration into segments, obtains each segment's synthesized duration, and stores source checkpoints plus a complete render identity.
+A timing pass converts speakable text and persisted code narration into segments, obtains each segment's synthesized duration, and stores segment starts plus duration-weighted prose word checkpoints under a complete render identity. Live playback replaces estimates with sampled Wav2Vec2-aligned word checkpoints when alignment arrives. This gives ±10-second scrubbing useful precision without retaining audio.
 
 `timingPreprocessConcurrency` accepts `auto` or `1..8`. Each lane is an independent CPU Kokoro worker because the runtime does not batch concurrent synthesis in one process. `auto` considers available RAM and CPU parallelism and caps at four. Kokoro is currently CPU-bound; VRAM is not used in this calculation.
 
@@ -53,7 +53,7 @@ Timing validity depends on the rendered audio, including:
 - cached/non-cached representation;
 - Opus bitrate.
 
-Changing a dependency invalidates only affected messages. Older timing entries without render identity are treated as missing and rebuilt incrementally.
+Changing a dependency invalidates only affected messages. Legacy timing versions, including older segment-only maps, are treated as missing and rebuilt incrementally.
 
 ## Audio cache
 

@@ -114,7 +114,7 @@ cd /path/to/pi-voice
 install -m755 client/pi-voice-* "$HOME/.local/bin/"
 ```
 
-Exit every existing `pi-voice-ssh` shell before testing a new bridge. Multiple wrappers share a bridge and ControlMaster, so the old bridge remains alive until the final wrapper exits.
+Exit every existing `pi-voice-ssh` shell before testing a new bridge. Multiple wrappers share a bridge and ControlMaster, so the old bridge remains alive until the final wrapper exits. Current wrappers use owner-tagged locks and recover locks left by crashes; reinstalling all scripts together is required because an already-running legacy wrapper still executes its old locking and endpoint logic.
 
 If the checkout is not available on the client, copy scripts directly from the Pi host:
 

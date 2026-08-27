@@ -8,7 +8,7 @@ Bare `/voice` is an alias for `/voice status`.
 
 | Command | Effect |
 | --- | --- |
-| `/voice status` | Shows active mode, models, device, cache, preprocessing, shortcut, and editing settings. |
+| `/voice status` | Shows active mode, models, device, cache, preprocessing, talk/scroll shortcuts, and editing settings. |
 | `/voice on` | Enables spoken output. |
 | `/voice off` | Disables and stops spoken output; dictation remains available. |
 | `/voice toggle` | Toggles spoken output. |
@@ -69,13 +69,15 @@ Shortcut names follow Pi's format, for example `alt+m`, `ctrl+shift+m`, or `f8`.
 
 `device` stores a per-session routing preference. `output` controls the global endpoint policy. Output-producing controls automatically claim the current session's selected device.
 
-## Preprocessing and cache
+## Timeline, preprocessing, and cache
 
 ```text
 /voice code-preprocess <1..8>
 /voice scroll-to
 /voice bottom
 /voice code-budget [unlimited|<n>]
+/voice code-retry current
+/voice code-retry historical [all|<message-id>]
 /voice timing-preprocess auto|<1..8>
 /voice audio-cache on|off
 /voice audio-bitrate <12..128>
@@ -83,6 +85,6 @@ Shortcut names follow Pi's format, for example `alt+m`, `ctrl+shift+m`, or `f8`.
 
 `scroll-to` re-anchors the current narrated position at 20% without changing play/pause state; its default shortcut is `Alt+V`. `bottom` pins the transcript to its end and restores normal transcript-end following, including while narration remains active; its default shortcut is `Alt+T`.
 
-`code-budget` reports or raises the session-only historical backfill allowance (`scope` and default budget come from the config) and resumes skipped blocks.
+`code-budget` reports or raises the session-only historical backfill allowance (`scope` and default budget come from the config) and resumes skipped blocks. `code-retry current` retries recoverable omitted descriptions on the selected playback message. `code-retry historical` opens a picker; pass `all` or a message-ID substring to select non-interactively. Retries still respect the session backfill allowance.
 
 Code concurrency controls parallel `editModel` requests and is explicit. Timing `auto` derives a CPU worker limit from available RAM and CPU, capped at four. Disabling audio caching does not delete existing Opus files.

@@ -24,7 +24,7 @@
 | `PI_VOICE_CLIENT_COMMAND` | `~/.local/bin/pi-voice-client` | Alternate bridge executable started by `pi-voice-ssh`. |
 | `PI_VOICE_SSH_DRY_RUN` | unset | Set to `1` to print resolved SSH/device state without connecting. |
 
-`XDG_CONFIG_HOME` controls the persistent client device-ID location. `XDG_RUNTIME_DIR` or `TMPDIR` controls Linux client runtime files where supported.
+`XDG_CONFIG_HOME` controls the persistent client device-ID location. `XDG_RUNTIME_DIR`, then `TMPDIR`, controls Linux and Termux client runtime files; the fallback is `/tmp`.
 
 ## Internal wrapper variables
 
