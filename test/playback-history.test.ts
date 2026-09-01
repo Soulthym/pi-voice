@@ -44,6 +44,7 @@ test("maps playback time to approximate source checkpoints without audio storage
 		time: 16,
 		sourceOffset: 80,
 	});
+	assert.equal(history.canSeekForward(), false);
 
 	history.finishUtterance(1);
 	assert.equal(history.status()?.position, 24);
@@ -59,6 +60,22 @@ test("maps playback time to approximate source checkpoints without audio storage
 		time: 8,
 		sourceOffset: 40,
 	});
+});
+
+test("directional scrubs advance across ties until the final checkpoint", () => {
+	const text = "x".repeat(100);
+	const history = new PlaybackHistory();
+	history.sync([{ id: "message", text, renderKey: "sparse" }], true);
+	history.beginCapture("message", text);
+	history.registerSegment(segment(10, 2, 0));
+	history.registerSegment(segment(11, 2, 50));
+	history.setSegmentAudio(10, 0, 20);
+	history.setSegmentAudio(11, 20, 20);
+	history.setPlayback(2, 0);
+	assert.equal(history.canSeekForward(), true);
+	assert.equal(history.seekTarget(10)?.time, 20, "a midpoint tie must advance to the next checkpoint");
+	history.setPlayback(2, 20);
+	assert.equal(history.canSeekForward(), false);
 });
 
 test("uses aligned word checkpoints to land close to a ten-second scrub", () => {

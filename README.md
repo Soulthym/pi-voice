@@ -124,8 +124,8 @@ See [Configuration](docs/configuration.md) for valid values and setting behavior
 | `F6` | Previous assistant message |
 | `F7` | Seek about 10 seconds backward |
 | `F8` | Pause/resume audio and highlighting |
-| `F9` | Seek about 10 seconds forward |
-| `F10` | Next assistant message |
+| `F9` | Seek about 10 seconds forward; at the latest endpoint, follow the transcript tail |
+| `F10` | Next assistant message; from the latest message, follow the transcript tail |
 | `F11` | Play this or the next waiting project's response |
 | `Alt+V` | Re-anchor the current narrated position |
 | `Alt+T` | Pin to and follow the transcript tail |

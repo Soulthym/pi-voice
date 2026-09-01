@@ -301,8 +301,39 @@ test("TUI follows exact words, permits in-band framing, and seek/resume controls
 	assert.ok(host.render(text).includes(NARRATION_ACTIVE_MARKER));
 	host.scrollView.manualScrollTo(90);
 	host.scrollView.queueDocument(renderedDocument(100), 40);
+	const latestStart = worker!.sent.length;
 	await host.shortcut("f10");
 	assert.equal(host.scrollView.scrollTop, 90);
+	assert.equal(worker!.pauses.at(-1), true);
+	const latestSegments = worker!.sent.slice(latestStart) as Array<{
+		utterance: number;
+		segmentId: number;
+	}>;
+	assert.ok(latestSegments.length > 0);
+	latestSegments.forEach((segment, index) => {
+		worker!.emit({ type: "segment-audio", segmentId: segment.segmentId, start: index * 2, duration: 2 } as never);
+	});
+	const latestUtterance = latestSegments.at(-1)!.utterance;
+	worker!.emit({
+		type: "playback",
+		utterance: latestUtterance,
+		position: 1_000, // clamps to the completed message duration
+	} as never);
+
+	// Transcript-tail follow is the sentinel after the latest message. F10 from
+	// that message and F9 after its final checkpoint both behave like Alt+T,
+	// without restarting playback or changing its paused state.
+	const tailStart = worker!.sent.length;
+	host.scrollView.manualScrollTo(90);
+	await host.shortcut("f10");
+	assert.equal(host.scrollView.scrollTop, 260);
+	assert.equal(host.scrollView.isFollowingEnd, true);
+	assert.equal(worker!.sent.length, tailStart);
+	host.scrollView.manualScrollTo(90);
+	await host.shortcut("f9");
+	assert.equal(host.scrollView.scrollTop, 260);
+	assert.equal(host.scrollView.isFollowingEnd, true);
+	assert.equal(worker!.sent.length, tailStart);
 	assert.equal(worker!.pauses.at(-1), true);
 	await host.command("stop");
 

@@ -890,6 +890,20 @@ const chargeBackfillUnit = (): boolean => {
 		lastAutoScrollTop = scrollView.scrollTop;
 	};
 
+	const scrollToBottom = (ctx: ExtensionContext): void => {
+		const scrollView = activeScrollView();
+		if (!scrollView?.scrollToEnd) {
+			ctx.ui.notify("Scroll-to-bottom is unavailable in this runtime", "warning");
+			return;
+		}
+		scrollView.scrollToEnd();
+		bottomPinned = ownsSpeech;
+		restoreBottomAfterSpeech = ownsSpeech;
+		lastAutoScrollTop = scrollView.scrollTop;
+		autoScrollForceOnce = false;
+		hideFollowHint();
+	};
+
 	const requestNarrationAutoScroll = (allowPaused = false, force = false): void => {
 		if (bottomPinned || !config.enabled || (!config.autoScroll && !force) || !ownsSpeech || (playbackPaused && !allowPaused)) {
 			hideFollowHint();
@@ -2437,6 +2451,14 @@ const chargeBackfillUnit = (): boolean => {
 		description: "Regenerate playback from about 10 seconds later",
 		handler: ctx => {
 			if (!requireEnabledVoice(ctx)) return;
+			syncPlaybackMessages(ctx);
+			const before = playbackHistory.status();
+			// Treat transcript-tail following as the timeline position immediately
+			// after the final checkpoint of the latest completed message.
+			if (before?.hasTimings && before.messageIndex === before.messageCount - 1 && !playbackHistory.canSeekForward()) {
+				scrollToBottom(ctx);
+				return;
+			}
 			const target = playbackHistory.seekTarget(10);
 			if (target) playTarget(target, false, true);
 			else {
@@ -2451,6 +2473,11 @@ const chargeBackfillUnit = (): boolean => {
 		handler: ctx => {
 			if (!requireEnabledVoice(ctx)) return;
 			syncPlaybackMessages(ctx);
+			const before = playbackHistory.status();
+			if (before && before.messageIndex === before.messageCount - 1) {
+				scrollToBottom(ctx);
+				return;
+			}
 			const message = playbackHistory.move(1);
 			if (message) playTarget({ ...message, time: 0, sourceOffset: 0 }, !playbackHistory.hasTimings(), true);
 		},
@@ -2482,20 +2509,6 @@ const chargeBackfillUnit = (): boolean => {
 		restoreBottomAfterSpeech = false;
 		armNarrationFollow(true);
 		requestNarrationAutoScroll(true, true);
-	};
-
-	const scrollToBottom = (ctx: ExtensionContext): void => {
-		const scrollView = activeScrollView();
-		if (!scrollView?.scrollToEnd) {
-			ctx.ui.notify("Scroll-to-bottom is unavailable in this runtime", "warning");
-			return;
-		}
-		scrollView.scrollToEnd();
-		bottomPinned = ownsSpeech;
-		restoreBottomAfterSpeech = ownsSpeech;
-		lastAutoScrollTop = scrollView.scrollTop;
-		autoScrollForceOnce = false;
-		hideFollowHint();
 	};
 
 	if (config.scrollToShortcut !== "disabled" && config.scrollToShortcut !== config.scrollBottomShortcut) {

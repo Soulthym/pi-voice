@@ -271,7 +271,19 @@ export class PlaybackHistory {
 		for (const checkpoint of record.checkpoints) {
 			if (Math.abs(checkpoint.time - desired) < Math.abs(closest.time - desired)) closest = checkpoint;
 		}
+		// Sparse checkpoints can tie around the requested offset. A directional
+		// scrub must still advance rather than selecting its current checkpoint.
+		if (deltaSeconds > 0 && closest.time <= record.position) {
+			closest = record.checkpoints.find(checkpoint => checkpoint.time > record.position) ?? closest;
+		} else if (deltaSeconds < 0 && closest.time >= record.position) {
+			closest = record.checkpoints.findLast(checkpoint => checkpoint.time < record.position) ?? closest;
+		}
 		return { id: record.id, text: record.text, time: closest.time, sourceOffset: closest.sourceOffset };
+	}
+
+	canSeekForward(): boolean {
+		const record = this.#selectedId ? this.#records.get(this.#selectedId) : undefined;
+		return Boolean(record?.checkpoints.some(checkpoint => checkpoint.time > record.position));
 	}
 
 	resumeTarget(): PlaybackTarget | undefined {
