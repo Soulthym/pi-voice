@@ -38,7 +38,7 @@ Examples for smart mode include “replace port 8000 with 8080,” “scratch th
 | `F6` | Select and play the previous completed assistant message |
 | `F7` | Seek approximately 10 seconds backward |
 | `F8` | Pause or resume the existing audio player |
-| `F9` | Seek approximately 10 seconds forward; after the latest message's final checkpoint, pause and follow the transcript tail |
+| `F9` | Seek approximately 10 seconds forward; after the latest message's confirmed final checkpoint, pause and follow the transcript tail |
 | `F10` | Select and play the next completed assistant message; from the latest message, pause and follow the transcript tail |
 | `F11` | Play this session's waiting response, route attention to the oldest waiting project, or replay the selected message |
 | `Alt+V` | Re-anchor the current narrated position (`/voice scroll-to`) |

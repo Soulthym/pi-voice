@@ -18,6 +18,7 @@ export interface PlaybackStatus {
 	messageIndex: number;
 	messageCount: number;
 	hasTimings: boolean;
+	timingsComplete: boolean;
 }
 
 export interface PlaybackTimingSnapshot {
@@ -38,6 +39,7 @@ type MessageRecord = PlaybackMessage & {
 	checkpoints: TimingCheckpoint[];
 	duration: number;
 	position: number;
+	timingsComplete: boolean;
 };
 
 type Capture = {
@@ -54,9 +56,10 @@ export class PlaybackHistory {
 	#capture: Capture | undefined;
 	#segments = new Map<
 		number,
-		{ capture: Capture; sourceOffset: number; audioStart?: number; wordOffsets: Set<number> }
+		{ capture: Capture; utterance: number; sourceOffset: number; audioStart?: number; wordOffsets: Set<number> }
 	>();
 	#utterances = new Map<number, Capture>();
+	#endedUtterances = new Set<number>();
 	#activeUtterance: number | undefined;
 	#persistedUtterances = new Set<number>();
 
@@ -69,10 +72,11 @@ export class PlaybackHistory {
 					existing.checkpoints = [];
 					existing.duration = 0;
 					existing.position = 0;
+					existing.timingsComplete = false;
 				}
 				existing.text = message.text;
 				existing.renderKey = message.renderKey;
-			} else this.#records.set(message.id, { ...message, checkpoints: [], duration: 0, position: 0 });
+			} else this.#records.set(message.id, { ...message, checkpoints: [], duration: 0, position: 0, timingsComplete: false });
 		}
 		if (selectLatest || !this.#selectedId || !this.#order.includes(this.#selectedId)) {
 			this.#selectedId = this.#order.at(-1);
@@ -102,13 +106,14 @@ export class PlaybackHistory {
 			record.checkpoints = checkpoints.map(checkpoint => ({ ...checkpoint })).sort((left, right) => left.time - right.time);
 			record.duration = snapshot.duration;
 			record.position = 0;
+			record.timingsComplete = true;
 		}
 	}
 
 	beginCapture(id: string, text: string, baseTime = 0, recordTimings = true): void {
 		let record = this.#records.get(id);
 		if (!record) {
-			record = { id, text, checkpoints: [], duration: 0, position: baseTime };
+			record = { id, text, checkpoints: [], duration: 0, position: baseTime, timingsComplete: false };
 			this.#records.set(id, record);
 		} else {
 			record.text = text;
@@ -117,6 +122,7 @@ export class PlaybackHistory {
 		if (recordTimings) {
 			record.checkpoints = [];
 			record.duration = 0;
+			record.timingsComplete = false;
 		}
 		this.#selectedId = id;
 		this.#capture = { record, baseTime, recordTimings };
@@ -144,6 +150,7 @@ export class PlaybackHistory {
 		if (!capture) return;
 		this.#segments.set(segment.id, {
 			capture,
+			utterance: segment.utterance,
 			sourceOffset: segment.source.start,
 			wordOffsets: new Set(),
 		});
@@ -166,6 +173,7 @@ export class PlaybackHistory {
 			});
 			record.checkpoints.sort((left, right) => left.time - right.time);
 			record.duration = Math.max(record.duration, absoluteTime + Math.max(0, duration));
+			this.#completeTimingsIfReady(tracked.utterance);
 		}
 	}
 
@@ -197,6 +205,7 @@ export class PlaybackHistory {
 			!capture?.recordTimings ||
 			capture.record.id.startsWith("live:") ||
 			capture.record.checkpoints.length === 0 ||
+			!capture.record.timingsComplete ||
 			this.#persistedUtterances.has(utterance)
 		) {
 			return undefined;
@@ -218,11 +227,30 @@ export class PlaybackHistory {
 		};
 	}
 
+	finishTimingGeneration(utterance: number): void {
+		this.#endedUtterances.add(utterance);
+		this.#completeTimingsIfReady(utterance);
+	}
+
 	finishUtterance(utterance: number | undefined): void {
 		if (utterance === undefined || utterance !== this.#activeUtterance) return;
+		this.#endedUtterances.add(utterance);
+		this.#completeTimingsIfReady(utterance);
 		const capture = this.#utterances.get(utterance);
 		if (!capture || capture.record.duration <= 0) return;
 		capture.record.position = capture.record.duration;
+	}
+
+	#completeTimingsIfReady(utterance: number): void {
+		if (!this.#endedUtterances.has(utterance)) return;
+		const capture = this.#utterances.get(utterance);
+		if (!capture?.recordTimings) return;
+		const segments = [...this.#segments.values()].filter(
+			tracked => tracked.capture === capture && tracked.utterance === utterance,
+		);
+		if (segments.length > 0 && segments.every(segment => segment.audioStart !== undefined)) {
+			capture.record.timingsComplete = true;
+		}
 	}
 
 	setPlayback(utterance: number, position: number): void {
@@ -247,6 +275,7 @@ export class PlaybackHistory {
 			messageIndex: index,
 			messageCount: this.#order.length,
 			hasTimings: record.checkpoints.length > 0,
+			timingsComplete: record.timingsComplete,
 		};
 	}
 
@@ -292,6 +321,11 @@ export class PlaybackHistory {
 
 	hasTimingFor(messageId: string): boolean {
 		return Boolean(this.#records.get(messageId)?.checkpoints.length);
+	}
+
+	hasCompleteTimingFor(messageId: string): boolean {
+		const record = this.#records.get(messageId);
+		return Boolean(record?.timingsComplete && record.checkpoints.length > 0);
 	}
 
 	hasTimings(): boolean {

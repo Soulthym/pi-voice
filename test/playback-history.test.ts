@@ -31,6 +31,7 @@ test("maps playback time to approximate source checkpoints without audio storage
 		messageIndex: 0,
 		messageCount: 1,
 		hasTimings: true,
+		timingsComplete: false,
 	});
 	assert.deepEqual(history.seekTarget(-10), {
 		id: "message",
@@ -48,12 +49,14 @@ test("maps playback time to approximate source checkpoints without audio storage
 
 	history.finishUtterance(1);
 	assert.equal(history.status()?.position, 24);
+	assert.equal(history.status()?.timingsComplete, true);
 	const snapshot = history.snapshotForUtterance(1);
 	assert.ok(snapshot);
 	assert.equal(history.snapshotForUtterance(1), undefined);
 	const restored = new PlaybackHistory();
 	restored.sync([{ id: "message", text: "x".repeat(120), renderKey: "render-a" }], true);
 	restored.restore([snapshot]);
+	assert.equal(restored.status()?.timingsComplete, true, "persisted timing snapshots are complete");
 	assert.deepEqual(restored.seekTarget(10), {
 		id: "message",
 		text: "x".repeat(120),
@@ -76,6 +79,11 @@ test("directional scrubs advance across ties until the final checkpoint", () => 
 	assert.equal(history.seekTarget(10)?.time, 20, "a midpoint tie must advance to the next checkpoint");
 	history.setPlayback(2, 20);
 	assert.equal(history.canSeekForward(), false);
+	assert.equal(history.status()?.timingsComplete, false, "the last known checkpoint is not necessarily final");
+	assert.equal(history.hasCompleteTimingFor("message"), false);
+	history.finishTimingGeneration(2);
+	assert.equal(history.status()?.timingsComplete, true);
+	assert.equal(history.hasCompleteTimingFor("message"), true);
 });
 
 test("uses aligned word checkpoints to land close to a ten-second scrub", () => {

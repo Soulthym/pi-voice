@@ -1302,6 +1302,7 @@ const chargeBackfillUnit = (): boolean => {
 			if (playbackPaused) pausedOwnerUtterance = utterance;
 			ownerContentExpected = true;
 		},
+		utterance => playbackHistory.finishTimingGeneration(utterance),
 	);
 	const clearPlaybackTransport = (): number | undefined => {
 		playbackRequestEpoch += 1;
@@ -1768,7 +1769,7 @@ const chargeBackfillUnit = (): boolean => {
 		const ordered = prioritizeFromCurrent(messages, playbackHistory.status()?.messageId).filter(message =>
 			scopedIds.has(message.id),
 		);
-		const missing = ordered.filter(message => !playbackHistory.hasTimingFor(message.id));
+		const missing = ordered.filter(message => !playbackHistory.hasCompleteTimingFor(message.id));
 		if (missing.length === 0) return;
 		let processedMessages = messages.length - missing.length;
 		timingPreprocessingProgress = {
@@ -2544,12 +2545,20 @@ const chargeBackfillUnit = (): boolean => {
 			const before = playbackHistory.status();
 			// Treat transcript-tail following as the timeline position immediately
 			// after the final checkpoint of the latest completed message.
-			if (before?.hasTimings && before.messageIndex === before.messageCount - 1 && !playbackHistory.canSeekForward()) {
+			if (
+				before?.hasTimings &&
+				before.timingsComplete &&
+				before.messageIndex === before.messageCount - 1 &&
+				!playbackHistory.canSeekForward()
+			) {
 				followTranscriptTail(ctx);
 				return;
 			}
 			const target = playbackHistory.seekTarget(10);
-			if (target) playTarget(target, false, true);
+			if (target) {
+				if (!before?.timingsComplete) scheduleMissingTimings(ctx);
+				playTarget(target, false, true);
+			}
 			else {
 				scheduleMissingTimings(ctx);
 				ctx.ui.notify("Timing preprocessing for this message has not finished yet", "warning");

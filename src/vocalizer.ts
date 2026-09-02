@@ -48,6 +48,7 @@ export class Vocalizer {
 	#nextSegment = 0;
 	#onNarrationSegment: ((segment: NarrationSegment) => void) | undefined;
 	#onUtteranceAllocated: ((utterance: number) => void) | undefined;
+	#onUtteranceEnded: ((utterance: number) => void) | undefined;
 	#idleTimer: NodeJS.Timeout | null = null;
 	#deliveryBarrier: Promise<void> | null = null;
 	#descriptionControllers = new Set<AbortController>();
@@ -65,12 +66,14 @@ export class Vocalizer {
 		onNarrationSegment?: (segment: NarrationSegment) => void,
 		worker: VoiceWorker = new VoiceWorkerClient(onEvent),
 		onUtteranceAllocated?: (utterance: number) => void,
+		onUtteranceEnded?: (utterance: number) => void,
 	) {
 		this.#getConfig = getConfig;
 		this.#worker = worker;
 		this.#describeCode = describeCode;
 		this.#onNarrationSegment = onNarrationSegment;
 		this.#onUtteranceAllocated = onUtteranceAllocated;
+		this.#onUtteranceEnded = onUtteranceEnded;
 	}
 
 	setNarrationSourceOffset(offset: number): void {
@@ -107,13 +110,17 @@ export class Vocalizer {
 		const barrier = this.#deliveryBarrier;
 		this.#deliveryBarrier = null;
 		if (utterance === null) return;
+		const endUtterance = (): void => {
+			this.#worker.endUtterance(utterance);
+			this.#onUtteranceEnded?.(utterance);
+		};
 		if (barrier) {
 			const generation = this.#generation;
 			void barrier.then(() => {
-				if (generation === this.#generation) this.#worker.endUtterance(utterance);
+				if (generation === this.#generation) endUtterance();
 			});
 		} else {
-			this.#worker.endUtterance(utterance);
+			endUtterance();
 		}
 	}
 
