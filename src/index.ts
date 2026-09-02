@@ -289,6 +289,17 @@ export default async function (pi: ExtensionAPI) {
 	let nextLivePlaybackId = 0;
 	let playbackPaused = false;
 	let pausedOwnerUtterance: number | undefined;
+	let playbackRequestEpoch = 0;
+	let pendingReplay:
+		| {
+				epoch: number;
+				target: PlaybackTarget;
+				recordTimings: boolean;
+				previewTarget: boolean;
+				paused: boolean;
+				waiting: boolean;
+			}
+		| undefined;
 	let playbackPositionEstimated = false;
 	let playbackTimelineTimer: NodeJS.Timeout | null = null;
 	let codePreprocessingProgress: PreprocessingProgress | undefined;
@@ -1287,6 +1298,8 @@ const chargeBackfillUnit = (): boolean => {
 		},
 	);
 	const clearPlaybackTransport = (): number | undefined => {
+		playbackRequestEpoch += 1;
+		pendingReplay = undefined;
 		const cancelId = vocalizer.clear();
 		playbackPaused = false;
 		pausedOwnerUtterance = undefined;
@@ -1422,17 +1435,11 @@ const chargeBackfillUnit = (): boolean => {
 		completeOwnerSpeech();
 	};
 
-	const acquireSpeech = (
+	const activateSpeechOwnership = (
 		purpose: "turn" | "replay",
-		announceProject = true,
-		force = false,
+		announceProject: boolean,
 	): boolean => {
 		if (!coordinator) return true;
-		const alreadyOwned = ownsSpeech && coordinator.ownsSpeech();
-		if (!alreadyOwned) {
-			const acquired = force ? coordinator.forceAcquireSpeech() : coordinator.tryAcquireSpeech();
-			if (!acquired) return false;
-		}
 		claimOutputDevice();
 		if (voiceWorkerIdleTimer) clearTimeout(voiceWorkerIdleTimer);
 		voiceWorkerIdleTimer = null;
@@ -1460,6 +1467,20 @@ const chargeBackfillUnit = (): boolean => {
 		return true;
 	};
 
+	const acquireSpeech = (purpose: "turn" | "replay", announceProject = true): boolean => {
+		if (!coordinator) return true;
+		const alreadyOwned = ownsSpeech && coordinator.ownsSpeech();
+		if (!alreadyOwned && !coordinator.tryAcquireSpeech()) return false;
+		return activateSpeechOwnership(purpose, announceProject);
+	};
+
+	const forceAcquireSpeech = async (purpose: "turn" | "replay", announceProject = true): Promise<boolean> => {
+		if (!coordinator) return true;
+		const alreadyOwned = ownsSpeech && coordinator.ownsSpeech();
+		if (!alreadyOwned && !(await coordinator.forceAcquireSpeech())) return false;
+		return activateSpeechOwnership(purpose, announceProject);
+	};
+
 	const announceProjectForSpeech = (): void => {
 		if (!coordinator) return;
 		const changed = coordinator.claimAttention();
@@ -1471,10 +1492,10 @@ const chargeBackfillUnit = (): boolean => {
 		projectPrefixUtterance = vocalizer.speakUntracked(`Project ${coordinator.projectLabel()}.`);
 	};
 
-	const reserveSpeechForInput = (dictation = false): boolean => {
+	const reserveSpeechForInput = async (dictation = false): Promise<boolean> => {
 		if (!dictation && !config.enabled) return true;
 		if (!coordinator) return true;
-		if (!acquireSpeech("turn", false, true)) return false;
+		if (!(await forceAcquireSpeech("turn", false))) return false;
 		speechReservedForInput = true;
 		projectAnnouncementPending = !coordinator.attentionIsCurrent();
 		return true;
@@ -1565,40 +1586,75 @@ const chargeBackfillUnit = (): boolean => {
 		previewTarget = false,
 	): Promise<void> => {
 		restoreBottomAfterSpeech = false;
-		const remainPaused = playbackPaused;
 		const sourceOffset = Math.max(0, Math.min(target.text.length, target.sourceOffset));
 		const suffix = target.text.slice(sourceOffset);
-		const displacedLiveTurn = ownsSpeech && speechPurpose === "turn" && !ownerTurnEnded;
-		const displacedLiveText = displacedLiveTurn ? ownedSpeechText : "";
 		if (!suffix.trim()) return;
 		if (pendingSpeechPreemption) {
 			activeContext?.ui.notify("Voice device handoff is still stopping the previous transport", "warning");
 			return;
 		}
+
+		const request = {
+			epoch: ++playbackRequestEpoch,
+			target: { ...target, sourceOffset },
+			recordTimings,
+			previewTarget,
+			paused: playbackPaused,
+			waiting: true,
+		};
+		pendingReplay = request;
+		// Keep the requested target usable by F6–F10 and F8 while another process
+		// acknowledges shutdown. Do not destroy the current sink before ownership.
+		playbackHistory.beginCapture(target.id, target.text, target.time, false);
+		playbackPaused = request.paused;
+		pausedOwnerUtterance = undefined;
+		narration.finish();
+		narration.begin();
+		narration.setCompletedText(target.text);
+		narration.previewSourceOffset(sourceOffset);
+		armNarrationFollow();
+		if (previewTarget) {
+			flushNarrationRender();
+			requestNarrationAutoScroll();
+		} else requestNarrationRender();
+		refreshPlaybackTimeline();
+
+		const displacedLiveTurn = ownsSpeech && speechPurpose === "turn" && !ownerTurnEnded;
+		const displacedLiveText = displacedLiveTurn ? ownedSpeechText : "";
 		if (inputInProgress) {
 			await cancelActiveInput();
+			if (pendingReplay !== request) return;
 			activeContext?.ui.notify("Voice recording stopped for playback control", "info");
 		}
-		armNarrationFollow();
-		codeWorkEpoch += 1;
-		if (activeContext) scheduleMissingCodeDescriptions(activeContext);
-		cancelTimingWorkers();
-		clearPlaybackTransport();
-		// Timeline movement replaces the sink without changing transport state.
-		// Sticky worker pause applies even before the replacement sink exists.
-		vocalizer.setPlaybackPaused(remainPaused);
-		narration.finish();
-		if (!acquireSpeech("replay", true, true)) {
-			if (displacedLiveTurn) {
-				speechBlocked = true;
-				blockedSpeechText = displacedLiveText;
-				blockedMessageHasSpeech = hasSpeakableAudio(displacedLiveText);
+
+		let acquired = true;
+		let newlyAcquired = false;
+		if (coordinator && !(ownsSpeech && coordinator.ownsSpeech())) {
+			if (coordinator.tryAcquireSpeech()) newlyAcquired = true;
+			else {
+				acquired = await coordinator.forceAcquireSpeech();
+				newlyAcquired = acquired;
 			}
+		}
+		if (pendingReplay !== request) {
+			// A newer playback request can reuse this lease. A non-playback action
+			// that superseded the wait has no use for it and must release it.
+			if (newlyAcquired && !pendingReplay && !ownsSpeech) coordinator?.releaseSpeech();
+			return;
+		}
+		if (!acquired) {
+			request.waiting = false;
+			request.paused = true;
+			playbackPaused = true;
+			vocalizer.setPlaybackPaused(true);
 			pausedForAttention = true;
 			refreshStatus();
 			activeContext?.ui.notify("Another Pi project currently owns voice playback; this replay remains paused", "warning");
 			return;
 		}
+
+		activateSpeechOwnership("replay", true);
+		pendingReplay = undefined;
 		liveTurnNarrationActive = false;
 		if (displacedLiveTurn) {
 			// Keep the streaming response independent from this completed snapshot.
@@ -1607,23 +1663,20 @@ const chargeBackfillUnit = (): boolean => {
 			blockedSpeechText = displacedLiveText;
 			blockedMessageHasSpeech = hasSpeakableAudio(displacedLiveText);
 		}
-		narration.begin();
-		narration.setCompletedText(target.text);
-		narration.previewSourceOffset(sourceOffset);
-		if (previewTarget) {
-			// Markdown caches rendered output by source text and width, not by
-			// transformer state. Invalidate synchronously so this scan cannot find
-			// the marker left in the previously selected message.
-			flushNarrationRender();
-			requestNarrationAutoScroll();
-		} else requestNarrationRender();
+		codeWorkEpoch += 1;
+		if (activeContext) scheduleMissingCodeDescriptions(activeContext);
+		cancelTimingWorkers();
+		clearPlaybackTransport();
+		// Timeline movement replaces the sink without changing transport state.
+		// Sticky worker pause applies even before the replacement sink exists.
+		vocalizer.setPlaybackPaused(request.paused);
 		playbackHistory.beginCapture(target.id, target.text, target.time, recordTimings);
 		const contextual = activeContext
 			? completedAssistantMessages(activeContext, config.mode).find(message => message.id === target.id)
 			: undefined;
 		speechConversationMessages = contextual?.conversationMessages ?? [];
 		speechAssistantMessage = contextual?.assistantMessage;
-		playbackPaused = remainPaused;
+		playbackPaused = request.paused;
 		pausedOwnerUtterance = undefined;
 		playbackPositionEstimated = false;
 		refreshPlaybackTimeline();
@@ -1898,7 +1951,7 @@ const chargeBackfillUnit = (): boolean => {
 		await waitForTransportCancellation(playbackCancelId);
 		if (captureEpoch !== inputEpoch || talkEpoch !== contextEpoch) return;
 		releaseSpeechOwnership(false);
-		if (!reserveSpeechForInput(true)) {
+		if (!(await reserveSpeechForInput(true))) {
 			clearInputProgress();
 			ctx.ui.notify("Another Pi session still owns the selected voice device", "warning");
 			return;
@@ -2121,7 +2174,7 @@ const chargeBackfillUnit = (): boolean => {
 		narration.finish();
 		await waitForTransportCancellation(cancelId);
 		releaseSpeechOwnership(false);
-		reserveSpeechForInput();
+		await reserveSpeechForInput();
 	});
 
 	pi.on("before_agent_start", async () => {
@@ -2417,6 +2470,11 @@ const chargeBackfillUnit = (): boolean => {
 		// Tail is beyond the final playable position. Freeze an active sink before
 		// moving the viewport so narration cannot continue behind transcript-tail
 		// following. An already paused or completed transport remains untouched.
+		if (pendingReplay) {
+			playbackRequestEpoch += 1;
+			pendingReplay = undefined;
+			playbackPaused = true;
+		}
 		pauseCurrentPlayback(false);
 		scrollToBottom(ctx);
 	};
@@ -2425,6 +2483,18 @@ const chargeBackfillUnit = (): boolean => {
 		description: "Pause or resume regenerated voice playback",
 		handler: ctx => {
 			if (!requireEnabledVoice(ctx)) return;
+			if (pendingReplay) {
+				const request = pendingReplay;
+				request.paused = !request.paused;
+				playbackPaused = request.paused;
+				vocalizer.setPlaybackPaused(request.paused);
+				refreshStatus();
+				refreshPlaybackTimeline();
+				if (!request.waiting && !request.paused) {
+					void playTarget(request.target, request.recordTimings, request.previewTarget);
+				}
+				return;
+			}
 			if (pendingSpeechPreemption) {
 				ctx.ui.notify("Voice device handoff is still stopping the previous transport", "warning");
 				return;
@@ -3195,7 +3265,7 @@ const chargeBackfillUnit = (): boolean => {
 					const text = args.slice(action.length).trim() || "Pi voice mode is ready.";
 					clearPlaybackTransport();
 					narration.finish();
-					if (!acquireSpeech("replay", true, true)) return;
+					if (!(await forceAcquireSpeech("replay", true))) return;
 					ownerContentExpected = true;
 					announceProjectForSpeech();
 					lastOwnerUtterance = vocalizer.speakUntracked(text);

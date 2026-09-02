@@ -15,13 +15,13 @@ function coordinators() {
 	return { root, first, second };
 }
 
-test("grants speech to only the first session and records waiting attention", () => {
+test("grants speech to only the first session and records waiting attention", async () => {
 	const { root, first, second } = coordinators();
 	try {
 		assert.equal(first.tryAcquireSpeech(), true);
 		assert.equal(second.speechOwner()?.instanceId, first.instanceId);
 		assert.equal(second.tryAcquireSpeech(), false);
-		assert.equal(second.forceAcquireSpeech(), true);
+		assert.equal(await second.forceAcquireSpeech(), true);
 		assert.equal(first.ownsSpeech(), false);
 		assert.equal(second.ownsSpeech(), true);
 		second.releaseSpeech();
@@ -55,8 +55,10 @@ test("forced acquisition waits for the previous process to acknowledge transport
 		process.stdout.write('ready\\n');
 		setInterval(() => {
 			if (!coordinator.consumeSpeechPreemptionRequest()) return;
-			coordinator.releaseSpeech();
-			process.stdout.write('released\\n');
+			setTimeout(() => {
+				coordinator.releaseSpeech();
+				process.stdout.write('released\\n');
+			}, 900);
 		}, 10);
 	`;
 	const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", childScript], {
@@ -76,8 +78,10 @@ test("forced acquisition waits for the previous process to acknowledge transport
 		contender.start();
 		try {
 			const started = Date.now();
-			assert.equal(contender.forceAcquireSpeech(), true);
-			assert.ok(Date.now() - started < 700, "handoff should acknowledge before the stale-owner timeout");
+			assert.equal(await contender.forceAcquireSpeech(), true);
+			const elapsed = Date.now() - started;
+			assert.ok(elapsed >= 850, `handoff returned before delayed release: ${elapsed}ms`);
+			assert.ok(elapsed < 1_400, `handoff exceeded the acknowledged shutdown window: ${elapsed}ms`);
 			assert.equal(contender.ownsSpeech(), true);
 		} finally {
 			contender.shutdown();

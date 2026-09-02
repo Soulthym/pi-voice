@@ -24,6 +24,8 @@ type Lease = SessionPresence & { kind: string };
 
 const HEARTBEAT_MS = 1_000;
 const STALE_MS = 8_000;
+const SPEECH_HANDOFF_TIMEOUT_MS = 1_500;
+const SPEECH_HANDOFF_POLL_MS = 25;
 
 function processIsAlive(pid: number): boolean {
 	if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -146,7 +148,7 @@ export class SessionCoordinator {
 	}
 
 	/** Manual user action requests an acknowledged handoff before taking the lease. */
-	forceAcquireSpeech(): boolean {
+	async forceAcquireSpeech(): Promise<boolean> {
 		if (this.ownsSpeech()) {
 			this.#speechLease = true;
 			return true;
@@ -157,17 +159,20 @@ export class SessionCoordinator {
 				requestedBy: this.instanceId,
 				requestedAt: Date.now(),
 			});
-			// The owner polls this file in another process, stops its transport, and
-			// releases the lease. Bounded waiting prevents replacement audio from
-			// starting during that shutdown window.
-			const sleeper = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
-			const deadline = Date.now() + 750;
+			// The owner may need the full acknowledged player-stop window before it
+			// can release. Poll asynchronously so playback controls can supersede this
+			// request while the TUI remains responsive.
+			const deadline = Date.now() + SPEECH_HANDOFF_TIMEOUT_MS;
 			while (Date.now() < deadline && this.speechOwner()?.instanceId === owner.instanceId) {
-				Atomics.wait(sleeper, 0, 0, 25);
+				await new Promise(resolve => setTimeout(resolve, SPEECH_HANDOFF_POLL_MS));
 			}
 		}
 		const remaining = this.speechOwner();
-		if (remaining && remaining.instanceId !== this.instanceId) {
+		if (remaining?.instanceId === this.instanceId) {
+			this.#speechLease = true;
+			return true;
+		}
+		if (remaining) {
 			// Never steal from a still-live owner, including a contender that won the
 			// handoff first. Stale leases are already removed by speechOwner(). Tests
 			// can host synthetic coordinators in one process, where no transport race

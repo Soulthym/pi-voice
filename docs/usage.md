@@ -71,7 +71,7 @@ Only interactive Pi TUI sessions participate in voice coordination. The first pr
 
 When the owner finishes, Pi announces the oldest waiting project. Waiting audio never starts automatically. When user-audible playback actually switches sessions, Pi announces the newly active project once; reacquiring, seeking, pausing, or replaying again in the same session does not repeat its name. In the waiting project, press F11 or run `/voice attention`. Running either action in another project sends a cross-process request to the waiting session and force-preempts current playback.
 
-Manual prompt submission, replay controls, F11, and `/voice attention` take priority. A displaced response is paused and returned to the attention queue rather than automatically resumed.
+Manual prompt submission, replay controls, F11, and `/voice attention` take priority. Cross-process replay waits asynchronously for the current player to acknowledge shutdown; controls remain responsive, newer navigation supersedes the pending target, and F8 preserves its intended paused state. A displaced response is paused and returned to the attention queue rather than automatically resumed.
 
 ## Optional Termux function-key row
 
