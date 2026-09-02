@@ -38,8 +38,8 @@ Examples for smart mode include “replace port 8000 with 8080,” “scratch th
 | `F6` | Select and play the previous completed assistant message |
 | `F7` | Seek approximately 10 seconds backward |
 | `F8` | Pause or resume the existing audio player |
-| `F9` | Seek approximately 10 seconds forward; after the latest message's final checkpoint, follow the transcript tail |
-| `F10` | Select and play the next completed assistant message; from the latest message, follow the transcript tail |
+| `F9` | Seek approximately 10 seconds forward; after the latest message's final checkpoint, pause and follow the transcript tail |
+| `F10` | Select and play the next completed assistant message; from the latest message, pause and follow the transcript tail |
 | `F11` | Play this session's waiting response, route attention to the oldest waiting project, or replay the selected message |
 | `Alt+V` | Re-anchor the current narrated position (`/voice scroll-to`) |
 | `Alt+T` | Pin to transcript end and follow new output (`/voice bottom`) |
@@ -50,7 +50,7 @@ F8 preserves the current audio connection, highlighting position, and transcript
 
 F7/F9 use duration estimates first and replace them with aligned source-word checkpoints when alignment arrives, usually landing within a fraction of the requested ten seconds. Unchanged messages reuse valid timing maps and cached Opus segments. Message and time movement preserves the transport's paused versus unpaused state: while paused it updates the highlighted position and queues the replacement sink in paused state; from idle, message replay starts unpaused.
 
-Transcript-tail following acts as the timeline position after the latest completed message. F10 while that message is selected, or F9 after its final available checkpoint, behaves like `Alt+T`/`/voice bottom`: it snaps to the transcript end and follows new output without restarting audio or changing pause state.
+Transcript-tail following acts as the timeline position after the latest completed message. F10 while that message is selected, or F9 after its final available checkpoint, pauses active playback before behaving like `Alt+T`/`/voice bottom`: it snaps to the transcript end and follows new output without restarting or regenerating audio. If playback is already paused or complete, the transport is left untouched.
 
 ## Highlighting and status
 

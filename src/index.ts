@@ -2394,6 +2394,33 @@ const chargeBackfillUnit = (): boolean => {
 		},
 	});
 
+	const pauseCurrentPlayback = (preserveViewport: boolean): boolean => {
+		if (playbackPaused) return true;
+		if (!playbackHistory.selected() || !ownsSpeech || lastOwnerUtterance === undefined) return false;
+		const pausedScrollTop = preserveViewport ? activeScrollView()?.scrollTop : undefined;
+		pausedOwnerUtterance = lastOwnerUtterance;
+		vocalizer.setPlaybackPaused(true);
+		playbackPaused = true;
+		// A paused sink still owns the selected output device. Retaining the
+		// lease prevents another session from starting overlapping audio and lets
+		// live turns continue queueing/flush safely behind the paused transport.
+		hideFollowHint();
+		autoScrollForceOnce = false;
+		state = "idle";
+		refreshStatus();
+		refreshPlaybackTimeline();
+		if (preserveViewport) preserveNarrationViewport(pausedScrollTop);
+		return true;
+	};
+
+	const followTranscriptTail = (ctx: ExtensionContext): void => {
+		// Tail is beyond the final playable position. Freeze an active sink before
+		// moving the viewport so narration cannot continue behind transcript-tail
+		// following. An already paused or completed transport remains untouched.
+		pauseCurrentPlayback(false);
+		scrollToBottom(ctx);
+	};
+
 	pi.registerShortcut("f8", {
 		description: "Pause or resume regenerated voice playback",
 		handler: ctx => {
@@ -2427,28 +2454,14 @@ const chargeBackfillUnit = (): boolean => {
 				refreshPlaybackTimeline();
 				return;
 			}
-			if (!playbackHistory.selected() || !ownsSpeech || lastOwnerUtterance === undefined) {
+			if (!pauseCurrentPlayback(true)) {
 				ctx.ui.notify("There is no assistant message playing", "warning");
-				return;
 			}
-			const pausedScrollTop = activeScrollView()?.scrollTop;
-			pausedOwnerUtterance = lastOwnerUtterance;
-			vocalizer.setPlaybackPaused(true);
-			playbackPaused = true;
-			// A paused sink still owns the selected output device. Retaining the
-			// lease prevents another session from starting overlapping audio and lets
-			// live turns continue queueing/flush safely behind the paused transport.
-			hideFollowHint();
-			autoScrollForceOnce = false;
-			state = "idle";
-			refreshStatus();
-			refreshPlaybackTimeline();
-			preserveNarrationViewport(pausedScrollTop);
 		},
 	});
 
 	pi.registerShortcut("f9", {
-		description: "Regenerate playback from about 10 seconds later",
+		description: "Seek forward; pause and follow transcript tail after the final checkpoint",
 		handler: ctx => {
 			if (!requireEnabledVoice(ctx)) return;
 			syncPlaybackMessages(ctx);
@@ -2456,7 +2469,7 @@ const chargeBackfillUnit = (): boolean => {
 			// Treat transcript-tail following as the timeline position immediately
 			// after the final checkpoint of the latest completed message.
 			if (before?.hasTimings && before.messageIndex === before.messageCount - 1 && !playbackHistory.canSeekForward()) {
-				scrollToBottom(ctx);
+				followTranscriptTail(ctx);
 				return;
 			}
 			const target = playbackHistory.seekTarget(10);
@@ -2469,13 +2482,13 @@ const chargeBackfillUnit = (): boolean => {
 	});
 
 	pi.registerShortcut("f10", {
-		description: "Play the next assistant message",
+		description: "Play the next assistant message; pause and follow transcript tail after the latest",
 		handler: ctx => {
 			if (!requireEnabledVoice(ctx)) return;
 			syncPlaybackMessages(ctx);
 			const before = playbackHistory.status();
 			if (before && before.messageIndex === before.messageCount - 1) {
-				scrollToBottom(ctx);
+				followTranscriptTail(ctx);
 				return;
 			}
 			const message = playbackHistory.move(1);

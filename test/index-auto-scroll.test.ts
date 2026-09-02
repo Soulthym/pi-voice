@@ -321,20 +321,26 @@ test("TUI follows exact words, permits in-band framing, and seek/resume controls
 	} as never);
 
 	// Transcript-tail follow is the sentinel after the latest message. F10 from
-	// that message and F9 after its final checkpoint both behave like Alt+T,
-	// without restarting playback or changing its paused state.
+	// that message and F9 after its final checkpoint pause active playback before
+	// behaving like Alt+T. Neither transition regenerates audio.
+	await host.shortcut("f8");
+	assert.equal(worker!.pauses.at(-1), false, "fixture playback must be active before F10 tail-follow");
 	const tailStart = worker!.sent.length;
 	host.scrollView.manualScrollTo(90);
 	await host.shortcut("f10");
+	assert.equal(worker!.pauses.at(-1), true, "F10 must pause before entering transcript-tail follow");
 	assert.equal(host.scrollView.scrollTop, 260);
 	assert.equal(host.scrollView.isFollowingEnd, true);
 	assert.equal(worker!.sent.length, tailStart);
+
+	await host.shortcut("f8");
+	assert.equal(worker!.pauses.at(-1), false, "fixture playback must be active before F9 tail-follow");
 	host.scrollView.manualScrollTo(90);
 	await host.shortcut("f9");
+	assert.equal(worker!.pauses.at(-1), true, "F9 must pause before entering transcript-tail follow");
 	assert.equal(host.scrollView.scrollTop, 260);
 	assert.equal(host.scrollView.isFollowingEnd, true);
 	assert.equal(worker!.sent.length, tailStart);
-	assert.equal(worker!.pauses.at(-1), true);
 	await host.command("stop");
 
 	// User-triggered replay must leave the resulting historical viewport in place
