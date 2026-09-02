@@ -916,7 +916,13 @@ const chargeBackfillUnit = (): boolean => {
 	};
 
 	const requestNarrationAutoScroll = (allowPaused = false, force = false): void => {
-		if (bottomPinned || !config.enabled || (!config.autoScroll && !force) || !ownsSpeech || (playbackPaused && !allowPaused)) {
+		if (
+			bottomPinned ||
+			!config.enabled ||
+			(!config.autoScroll && !force) ||
+			(!ownsSpeech && !pendingReplay) ||
+			(playbackPaused && !allowPaused)
+		) {
 			hideFollowHint();
 			return;
 		}
@@ -1615,7 +1621,7 @@ const chargeBackfillUnit = (): boolean => {
 		armNarrationFollow();
 		if (previewTarget) {
 			flushNarrationRender();
-			requestNarrationAutoScroll();
+			requestNarrationAutoScroll(true);
 		} else requestNarrationRender();
 		refreshPlaybackTimeline();
 
