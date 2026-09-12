@@ -88,14 +88,16 @@ Install the extension and client dependencies in Termux as above, then run norma
 
 ## SSH server configuration
 
-Managed clients use reverse Unix-socket forwarding. The target SSH server normally permits this by default. If forwarding fails, enable:
+Managed clients use dynamically allocated reverse TCP forwarding on server loopback, for both ordinary SSH and Tailscale SSH. No public voice ports need opening.
+
+For an OpenSSH server, retain `GatewayPorts no` and permit remote forwarding:
 
 ```text
 AllowTcpForwarding yes
-AllowStreamLocalForwarding yes
+GatewayPorts no
 ```
 
-Restart or reload `sshd` after changing its configuration. Managed sockets and metadata are stored under `~/.cache/pi-voice/devices` on the Pi host.
+Validate with `sshd -t`, then reload `sshd` after changing its configuration. These settings do not control Tailscale's built-in SSH server; its version and policy must permit TCP reverse forwarding. Managed endpoint metadata is stored under `~/.cache/pi-voice/devices` on the Pi host.
 
 ## Upgrading
 
@@ -113,6 +115,8 @@ Reinstall client scripts whenever files under `client/` changed:
 cd /path/to/pi-voice
 install -m755 client/pi-voice-* "$HOME/.local/bin/"
 ```
+
+For the Unix-socket-to-TCP migration, update the Pi host and reinstall all client scripts, then exit every existing `pi-voice-ssh` shell before reconnecting. Run `/reload` in Pi. No `--tailscale` option or endpoint configuration is needed.
 
 Exit every existing `pi-voice-ssh` shell before testing a new bridge. Multiple wrappers share a bridge and ControlMaster, so the old bridge remains alive until the final wrapper exits. Current wrappers use owner-tagged locks and recover locks left by crashes; reinstalling all scripts together is required because an already-running legacy wrapper still executes its old locking and endpoint logic.
 

@@ -2,7 +2,7 @@
 
 Bidirectional, local-first voice input and output for the [Pi coding agent](https://github.com/earendil-works/pi). Pi Voice combines streaming Kokoro speech synthesis, local Whisper dictation, synchronized playback highlighting, narrated code, replay controls, and automatic Linux/Termux device routing.
 
-Kokoro, Whisper, Wav2Vec2 alignment, and audio-cache processing run on the machine hosting Pi. With the managed `pi-voice-ssh` topology, bridge endpoints stay on loopback or private Unix sockets and audio travels inside SSH. A remote `editModel` may still receive ASR alternatives, drafts, bounded dictation context, and—when explicitly enabled—compaction-aware conversation context for fenced blocks; see [Models and privacy](docs/models-and-privacy.md).
+Kokoro, Whisper, Wav2Vec2 alignment, and audio-cache processing run on the machine hosting Pi. With the managed `pi-voice-ssh` topology, bridge endpoints use loopback TCP with dynamically allocated server ports, and audio travels inside SSH (ordinary OpenSSH or Tailscale SSH). A remote `editModel` may still receive ASR alternatives, drafts, bounded dictation context, and—when explicitly enabled—compaction-aware conversation context for fenced blocks; see [Models and privacy](docs/models-and-privacy.md).
 
 ## Features
 
@@ -32,6 +32,8 @@ Kokoro, Whisper, Wav2Vec2 alignment, and audio-cache processing run on the machi
 | Server, `pi-voice-ssh` from Termux | Termux client |
 | Linux desktop, `pi-voice-ssh` from Termux | Termux client |
 | Termux, normal `pi` | Termux microphone and `mpv` |
+
+Ordinary OpenSSH and Tailscale SSH use the same `pi-voice-ssh` command and reverse TCP transport; no public voice ports or special Tailscale flag are needed. This is intended for personal servers: loopback endpoints are accessible to other local users.
 
 Native macOS and Windows client backends are planned. Voice ownership and attention are limited to interactive Pi TUI sessions; headless child/subagent sessions stay silent.
 

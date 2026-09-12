@@ -61,7 +61,7 @@ If `editModel` is remote, the applicable content above is sent to its provider. 
 
 Raw PCM is used transiently for synthesis/playback/alignment and is never retained. Optional cache files are Opus. Microphone Ogg/Opus is streamed to the Pi host, decoded for VAD/Whisper, and discarded after processing.
 
-Managed `pi-voice-ssh` endpoints bind to local ports on the client and private Unix sockets on the host; SSH provides transport encryption. Explicit TCP endpoints can leave loopback and are unencrypted unless the operator supplies a secure tunnel.
+Managed `pi-voice-ssh` endpoints bind to loopback ports on the client and dynamically allocated loopback ports on the host; SSH provides transport encryption. Keep OpenSSH `GatewayPorts no`. Other local users can access these endpoints, so the managed topology is intended for personal servers. Explicit TCP endpoints can leave loopback and are unencrypted unless the operator supplies a secure tunnel.
 
 Client playback returns player session IDs and playback positions over the existing full-duplex connection. Microphone data uses a separate bridge.
 

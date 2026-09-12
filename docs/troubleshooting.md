@@ -18,7 +18,7 @@ Look for `device=auto→<id>` or `→local`, plus the configured `input` and `ou
 /voice device <id>
 ```
 
-On the Pi host, managed registrations and sockets should exist under:
+On the Pi host, managed registration JSON files should exist under:
 
 ```bash
 ls -la ~/.cache/pi-voice/devices
@@ -99,7 +99,9 @@ Run a dry resolution check:
 PI_VOICE_SSH_DRY_RUN=1 pi-voice-ssh YOUR_HOST
 ```
 
-If OpenSSH reports forwarding failure, enable `AllowTcpForwarding yes` and `AllowStreamLocalForwarding yes` on the target SSH server. Check for path-length or permission errors under `~/.cache/pi-voice/devices`.
+If OpenSSH reports forwarding failure, enable `AllowTcpForwarding yes` on the target SSH server and retain `GatewayPorts no`. Tailscale SSH is controlled by Tailscale, not `sshd_config`; its version/policy must allow remote TCP forwarding. The wrapper must receive two allocated port numbers before registering the device.
+
+If an older Tailscale connection reports `Permission denied` on root-owned `.audio.sock` or `.input.sock` files, reinstall all client scripts and exit every old wrapper before reconnecting. Current wrappers use dynamic loopback TCP forwards for both SSH implementations, avoiding socket ownership issues. Do not solve this by exposing listeners on `0.0.0.0` or opening firewall ports.
 
 ## No Linux local playback
 

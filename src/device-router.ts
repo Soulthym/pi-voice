@@ -37,11 +37,14 @@ function readRegistration(file: string): VoiceDeviceRegistration | undefined {
 	}
 }
 
-function loopbackPortIsListening(port: number): boolean {
+function loopbackPortIsListening(port: number): boolean | undefined {
+	let readable = false;
 	const expected = port.toString(16).toUpperCase().padStart(4, "0");
 	for (const table of ["/proc/net/tcp", "/proc/net/tcp6"]) {
 		try {
-			for (const line of fs.readFileSync(table, "utf8").split("\n").slice(1)) {
+			const contents = fs.readFileSync(table, "utf8");
+			readable = true;
+			for (const line of contents.split("\n").slice(1)) {
 				const columns = line.trim().split(/\s+/);
 				if (columns.length < 4 || columns[3] !== "0A") continue;
 				const [address, candidatePort] = columns[1].split(":");
@@ -52,15 +55,21 @@ function loopbackPortIsListening(port: number): boolean {
 			// procfs is unavailable on some platforms.
 		}
 	}
-	return false;
+	return readable ? false : undefined;
 }
 
-function endpointSocket(endpoint: string): string | undefined {
+function endpointIsAvailable(endpoint: string): boolean {
 	try {
 		const url = new URL(endpoint);
-		return url.protocol === "unix:" ? decodeURIComponent(url.pathname) : undefined;
+		if (url.protocol === "unix:") return fs.existsSync(decodeURIComponent(url.pathname));
+		if (url.protocol === "tcp:" && (url.hostname === "127.0.0.1" || url.hostname === "[::1]")) {
+			// Android and restricted hosts may hide procfs; let the transport
+			// attempt the connection rather than silently hiding every device.
+			return loopbackPortIsListening(Number(url.port)) ?? true;
+		}
+		return true;
 	} catch {
-		return undefined;
+		return false;
 	}
 }
 
@@ -87,11 +96,7 @@ export class DeviceRouter {
 			.filter(name => name.endsWith(".json"))
 			.map(name => readRegistration(path.join(this.directory, name)))
 			.filter((device): device is VoiceDeviceRegistration => device !== undefined)
-			.filter(device => {
-				const audio = endpointSocket(device.audioEndpoint);
-				const input = endpointSocket(device.inputEndpoint);
-				return (!audio || fs.existsSync(audio)) && (!input || fs.existsSync(input));
-			})
+			.filter(device => endpointIsAvailable(device.audioEndpoint) && endpointIsAvailable(device.inputEndpoint))
 			.sort((left, right) => right.lastActive - left.lastActive || right.connectedAt - left.connectedAt);
 		if (devices.length === 0) {
 			const audioPort = Number(process.env.PI_VOICE_AUDIO_PORT ?? 8765);

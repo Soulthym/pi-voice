@@ -16,16 +16,18 @@ Explicit `local`, `disabled`, `tcp://…`, and `unix:///…` endpoint settings b
 
 ## Managed SSH topology
 
-`pi-voice-ssh` launches a local client bridge and asks OpenSSH to create two reverse Unix-socket forwards:
+`pi-voice-ssh` launches a local client bridge and requests two dynamically allocated reverse TCP forwards. The same mechanism is used with OpenSSH and Tailscale SSH:
 
 ```text
-Pi host ~/.cache/pi-voice/devices/<id>.audio.sock → SSH → client player
-Pi host ~/.cache/pi-voice/devices/<id>.input.sock → SSH → client microphone
+Pi host 127.0.0.1:<allocated audio port> → SSH → client 127.0.0.1:8765
+Pi host 127.0.0.1:<allocated input port> → SSH → client 127.0.0.1:8766
 ```
 
-The wrapper writes a registration file alongside those sockets. Pi scans registrations dynamically, so a running session can discover newly connected clients without reload.
+The wrapper writes the allocated endpoints to `~/.cache/pi-voice/devices/<id>.json`. Ports are cached alongside the shared ControlMaster on the client and reused by concurrent wrappers. Pi scans registrations dynamically and ignores closed loopback listeners when procfs is available.
 
-Managed endpoints never listen on a public interface. SSH encrypts transport between the client and Pi host. Explicit custom TCP endpoints do not inherit this guarantee.
+Managed forwards request loopback-only listeners; keep OpenSSH `GatewayPorts no` (the default) to prevent the server from overriding that restriction. Do not open voice ports in your firewall. SSH encrypts transport between the client and Pi host. Local users on a shared server can access loopback endpoints; this topology is intended for personal servers, not untrusted multi-user isolation.
+
+Connect from Termux or Linux with `pi-voice-ssh USER@TAILSCALE_NAME_OR_IP`. No Tailscale flag is needed. This avoids reverse Unix sockets that some Tailscale SSH versions create as root, preventing the Pi user from accessing them. TCP reverse forwarding must be allowed by the SSH server/policy; support is checked during setup.
 
 ## Shared wrappers and lifetime
 
@@ -75,13 +77,13 @@ pi-voice-ssh --device-dir /srv/pi-voice/devices u@host
 pi-voice-ssh --device-dir=/srv/pi-voice/devices u@host
 ```
 
-The value must be an absolute remote path (`~` and relative paths are rejected). If `--device-dir` is omitted but the client's own `PI_VOICE_DEVICE_DIR` is set, that value is treated as the intended remote path. The chosen directory is used for registration, sockets, and cleanup, and is exported as `PI_VOICE_DEVICE_DIR` into the remote shell so a Pi started there scans the same registry.
+The value must be an absolute remote path (`~` and relative paths are rejected). If `--device-dir` is omitted but the client's own `PI_VOICE_DEVICE_DIR` is set, that value is treated as the intended remote path. The chosen directory is used for registration and cleanup, and is exported as `PI_VOICE_DEVICE_DIR` into the remote shell so a Pi started there scans the same registry.
 
 Set `PI_VOICE_SSH_DRY_RUN=1` to print resolved identity/platform/target information without connecting.
 
 ## Legacy bridge compatibility
 
-If no managed registration exists but loopback listeners are present on ports 8765 and 8766, automatic routing exposes a `legacy-loopback` Termux device. This permits old fixed-port wrappers to keep working during migration. New installations should use managed per-device Unix sockets.
+If no managed registration exists but loopback listeners are present on ports 8765 and 8766, automatic routing exposes a `legacy-loopback` Termux device. This permits old fixed-port wrappers to keep working during migration. New installations use managed per-device dynamic TCP forwards. Existing Unix-socket registrations remain readable for compatibility; exit all old wrappers before upgrading.
 
 ## Multiple Pi sessions
 

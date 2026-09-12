@@ -54,7 +54,7 @@ Manual activity uses acknowledged force-acquire semantics. The requester writes 
 
 ## Device registry
 
-`pi-voice-ssh` creates JSON metadata and reverse-forwarded Unix sockets under `~/.cache/pi-voice/devices`. The extension validates metadata version, ID, endpoints, socket presence, and staleness before routing.
+`pi-voice-ssh` registers dynamically allocated reverse TCP forwards as JSON metadata under `~/.cache/pi-voice/devices`. Both SSH implementations use the same loopback transport. The extension validates metadata and checks registered loopback listener presence through procfs when available. Existing Unix endpoint registrations remain supported. Listener presence is not an authenticated health check; port reuse and a failed client bridge are still detected by playback/input connection failures.
 
 The router prefers an inherited device ID and otherwise sorts by recent activity. Legacy loopback TCP listeners are detected only when no managed device registration is available.
 

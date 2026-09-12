@@ -241,37 +241,78 @@ shell_quote() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
 
 remote_home=
 remote_device_dir=
-remote_audio_socket=
-remote_input_socket=
+remote_audio_port_file=$target_state/audio-port
+remote_input_port_file=$target_state/input-port
 remote_registration=
 
-trap release_lock EXIT
+allocate_remote_port() {
+  local label=$1 local_port=$2 allocation port
+  if ! allocation=$(ssh -S "$control_socket" -O forward \
+    -R "127.0.0.1:0:127.0.0.1:${local_port}" "$target" 2>&1); then
+    printf 'Unable to allocate remote %s forwarding port: %s\n' "$label" "$allocation" >&2
+    return 1
+  fi
+  port=$(awk '
+    $1 ~ /^[0-9]+$/ { print $1; exit }
+    tolower($1) == "allocated" && tolower($2) == "port" && $3 ~ /^[0-9]+$/ { print $3; exit }
+  ' <<<"$allocation")
+  if [[ ! $port =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
+    printf 'SSH did not report a valid remote %s forwarding port: %s\n' "$label" "$allocation" >&2
+    return 1
+  fi
+  printf '%s\n' "$port"
+}
+
+# Roll back a newly created master if setup fails before registration completes.
+# Never close an existing master: another wrapper may still be using it.
+created_master=false
+setup_cleanup() {
+  if [[ $created_master == true ]]; then
+    ssh -S "$control_socket" -O exit "$target" >/dev/null 2>&1 || true
+    rm -f "$control_socket" "$remote_audio_port_file" "$remote_input_port_file"
+  fi
+  release_lock
+  acquire_path_lock "$runtime_root/bridge.lock"
+  clean_all_sessions
+  local sessions
+  shopt -s nullglob
+  sessions=("$runtime_root"/targets/*/sessions/*)
+  shopt -u nullglob
+  if (( ${#sessions[@]} == 0 )) && [[ -s $bridge_pid_file ]]; then
+    local pid
+    pid=$(<"$bridge_pid_file")
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    rm -f "$bridge_pid_file"
+  fi
+  release_path_lock "$runtime_root/bridge.lock"
+}
+trap setup_cleanup EXIT
 acquire_lock
 clean_sessions
 ensure_bridge
-new_master=false
 if ! ssh -S "$control_socket" -O check "$target" >/dev/null 2>&1; then
-  new_master=true
-  rm -f "$control_socket"
+  rm -f "$control_socket" "$remote_audio_port_file" "$remote_input_port_file"
   ssh "${ssh_options[@]}" -o RemoteCommand=none -o ControlMaster=yes -o ControlPersist=no \
     -S "$control_socket" -N -f "$target"
+  created_master=true
 fi
 remote_home=$(ssh "${ssh_options[@]}" -S "$control_socket" -o RemoteCommand=none "$target" 'printf %s "$HOME"')
 remote_device_dir=${device_dir_override:-$remote_home/.cache/pi-voice/devices}
-remote_audio_socket=$remote_device_dir/$device_id.audio.sock
-remote_input_socket=$remote_device_dir/$device_id.input.sock
 remote_registration=$remote_device_dir/$device_id.json
 ssh "${ssh_options[@]}" -S "$control_socket" -o RemoteCommand=none "$target" \
   "mkdir -p $(shell_quote "$remote_device_dir") && chmod 700 $(shell_quote "$remote_device_dir")" >/dev/null
-if [[ $new_master == true ]]; then
-  ssh "${ssh_options[@]}" -S "$control_socket" -o RemoteCommand=none "$target" \
-    "rm -f $(shell_quote "$remote_audio_socket") $(shell_quote "$remote_input_socket")" >/dev/null
-  ssh -S "$control_socket" -O forward -R "$remote_audio_socket:127.0.0.1:$AUDIO_PORT" "$target" >/dev/null
-  ssh -S "$control_socket" -O forward -R "$remote_input_socket:127.0.0.1:$CONTROL_PORT" "$target" >/dev/null
+if [[ ! -s $remote_audio_port_file ]]; then
+  allocate_remote_port audio "$AUDIO_PORT" >"$remote_audio_port_file"
 fi
+if [[ ! -s $remote_input_port_file ]]; then
+  allocate_remote_port microphone "$CONTROL_PORT" >"$remote_input_port_file"
+fi
+remote_audio_port=$(<"$remote_audio_port_file")
+remote_input_port=$(<"$remote_input_port_file")
 now=$(date +%s000)
-printf -v registration '{"version":1,"id":"%s","name":"%s","platform":"%s","audioEndpoint":"unix://%s","inputEndpoint":"unix://%s","connectedAt":%s,"lastActive":%s}\n' \
-  "$device_id" "${device_name//\"/}" "$platform" "$remote_audio_socket" "$remote_input_socket" "$now" "$now"
+printf -v registration '{"version":1,"id":"%s","name":"%s","platform":"%s","audioEndpoint":"tcp://127.0.0.1:%s","inputEndpoint":"tcp://127.0.0.1:%s","connectedAt":%s,"lastActive":%s}\n' \
+  "$device_id" "${device_name//\"/}" "$platform" "$remote_audio_port" "$remote_input_port" "$now" "$now"
 printf '%s' "$registration" | ssh "${ssh_options[@]}" -S "$control_socket" -o RemoteCommand=none "$target" \
   "umask 077; cat >$(shell_quote "$remote_registration")"
 printf '%s\n' "$$" >"$session_file"
@@ -287,7 +328,7 @@ cleanup() {
   shopt -u nullglob
   if (( ${#target_sessions[@]} == 0 )); then
     ssh "${ssh_options[@]}" -S "$control_socket" -o RemoteCommand=none "$target" \
-      "rm -f $(shell_quote "$remote_registration") $(shell_quote "$remote_audio_socket") $(shell_quote "$remote_input_socket")" >/dev/null 2>&1 || true
+      "rm -f $(shell_quote "$remote_registration")" >/dev/null 2>&1 || true
     ssh -S "$control_socket" -O exit "$target" >/dev/null 2>&1 || true
     rm -rf "$target_state" "$control_socket"
   fi

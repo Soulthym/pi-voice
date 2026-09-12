@@ -97,7 +97,19 @@ log=$FAKE_SSH_LOG
 printf '%s\\0' "$*" >>"$log"
 case $* in
   *" -O check"*)
+    [[ -n \${FAKE_MASTER_STATE:-} && -e $FAKE_MASTER_STATE ]] && exit 0
     exit 255
+    ;;
+  *" -O exit"*)
+    [[ -n \${FAKE_MASTER_STATE:-} ]] && rm -f "$FAKE_MASTER_STATE"
+    exit 0
+    ;;
+  *" -O forward "*)
+    if [[ -n \${FAKE_ALLOCATION:-} ]]; then printf '%s\\n' "$FAKE_ALLOCATION"; exit 0; fi
+    if [[ \${FAKE_FORWARD_FAIL:-} == 1 ]]; then echo 'forwarding denied' >&2; exit 255; fi
+    if [[ $* == *":\${PI_VOICE_AUDIO_PORT:-8765}"* ]]; then printf '41001\\n';
+    else printf '41002\\n'; fi
+    exit 0
     ;;
 esac
 case $1 in
@@ -105,6 +117,7 @@ case $1 in
     printf 'hostname fakehost\\nuser fakeuser\\nport 22\\n'
     ;;
   *)
+    if [[ $* == *" -N -f "* && -n \${FAKE_MASTER_STATE:-} ]]; then touch "$FAKE_MASTER_STATE"; fi
     # The interactive session stays open briefly so a concurrent wrapper can
     # observe bridge reuse while this one is still alive.
     if [[ $* == *" -t "* ]]; then
@@ -114,8 +127,12 @@ case $1 in
     if [[ $* == *"printf %s"* ]]; then
       printf '/home/remote'
     fi
-    # Consume piped registrations without touching the network.
-    cat >/dev/null 2>&1 || true
+    # Capture or consume piped registrations without touching the network.
+    if [[ $* == *"umask 077; cat >"* && -n \${FAKE_REGISTRATION_LOG:-} ]]; then
+      cat >"$FAKE_REGISTRATION_LOG"
+    else
+      cat >/dev/null 2>&1 || true
+    fi
     ;;
 esac
 exit 0`;
@@ -145,6 +162,7 @@ async function scenario(
 		PI_VOICE_DEVICE_NAME: "testdev",
 		PI_VOICE_CLIENT_COMMAND: bridge,
 		FAKE_SSH_LOG: logFile,
+		FAKE_REGISTRATION_LOG: path.join(root, "registration.json"),
 		...envOverrides,
 	}, timeoutMs);
 	return {
@@ -265,6 +283,7 @@ test("stale bridge pid files are replaced; live bridges are reused", async () =>
 		HOME: root,
 		PI_VOICE_DEVICE_NAME: "t",
 		FAKE_SSH_LOG: path.join(root, "ssh.log"),
+		FAKE_MASTER_STATE: path.join(root, "master-state"),
 	};
 
 	const bridgePath = path.join(root, "counting-bridge");
@@ -312,6 +331,8 @@ test("stale bridge pid files are replaced; live bridges are reused", async () =>
 		});
 		assert.equal(second.code, 0, `run2 stderr: ${second.stderr}`);
 		assert.equal(startsLog(), 1, "a live bridge must not be restarted");
+		const sshLog = fs.readFileSync(env.FAKE_SSH_LOG, "utf8").split("\0");
+		assert.equal(sshLog.filter(line => line.includes(" -O forward ")).length, 2, "shared master reuses both allocated ports");
 	} finally {
 		try {
 			process.kill(-background.pid!, "SIGKILL");
@@ -379,10 +400,15 @@ test("managed sessions register inside the override and export it remotely", asy
 		assert.equal(result.code, 0, `wrapper failed: ${result.stderr}`);
 		const log = result.log();
 
-		// Registration directory, sockets, and registration file live under the override.
+		// Registration remains in the override, while both managed endpoints use
+		// dynamically allocated server-loopback TCP forwards.
 		assert.ok(log.includes(`mkdir -p '${overrideDir}'`), `mkdir missing:\n${log}`);
-		assert.match(log, new RegExp(`-R ${overrideDir}/[a-z0-9._-]+\\.audio\\.sock:`));
-		assert.match(log, new RegExp(`-R ${overrideDir}/[a-z0-9._-]+\\.input\\.sock:`));
+		assert.match(log, /-R 127\.0\.0\.1:0:127\.0\.0\.1:8765/);
+		assert.match(log, /-R 127\.0\.0\.1:0:127\.0\.0\.1:8766/);
+		assert.doesNotMatch(log, /\.audio\.sock:|\.input\.sock:/);
+		const registration = JSON.parse(fs.readFileSync(path.join(root, "registration.json"), "utf8"));
+		assert.equal(registration.audioEndpoint, "tcp://127.0.0.1:41001");
+		assert.equal(registration.inputEndpoint, "tcp://127.0.0.1:41002");
 
 		// The final interactive environment exports the override for remote Pi.
 		const finalLine = log.split("\n").find(line => line.includes("-t u@h env PI_VOICE_DEVICE_ID="));
@@ -391,6 +417,23 @@ test("managed sessions register inside the override and export it remotely", asy
 		assert.doesNotMatch(log, new RegExp(`'${"/home/remote"}/\\.cache/pi-voice/devices'`));
 	} finally {
 		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("allocation failures never publish a device and close newly created masters", async () => {
+	for (const wrapper of [CLIENT_WRAPPER, TERMUX_WRAPPER]) {
+		for (const failure of [{ FAKE_FORWARD_FAIL: "1", FAKE_ALLOCATION: "" }, { FAKE_FORWARD_FAIL: "", FAKE_ALLOCATION: "not-a-port" }]) {
+			const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-voice-forward-failure-"));
+			try {
+				const result = await scenario(root, wrapper, ["u@h"], failure);
+				assert.notEqual(result.code, 0);
+				assert.match(result.stderr, /forwarding denied|valid remote audio forwarding port/);
+				assert.equal(fs.existsSync(path.join(root, "registration.json")), false);
+				assert.match(result.log(), /-O exit/);
+			} finally {
+				fs.rmSync(root, { recursive: true, force: true });
+			}
+		}
 	}
 });
 
