@@ -1970,6 +1970,7 @@ const chargeBackfillUnit = (): boolean => {
 		let committedSpeech = "";
 		let partialSpeech = "";
 		const renderPreview = (): void => {
+			if (talkEpoch !== contextEpoch || captureEpoch !== inputEpoch) return;
 			const speech = [committedSpeech, partialSpeech].filter(Boolean).join(" ");
 			ctx.ui.setEditorText(appendDictation(editorBase, speech));
 		};
@@ -1987,6 +1988,7 @@ const chargeBackfillUnit = (): boolean => {
 		try {
 			const capture = await phoneInput.capture(routed.input, {
 				onProgress: progress => {
+					if (talkEpoch !== contextEpoch || captureEpoch !== inputEpoch) return;
 					const elapsed = progress.elapsedSeconds.toFixed(1);
 					setInputProgress(
 						progress.speechDetected
@@ -1994,7 +1996,10 @@ const chargeBackfillUnit = (): boolean => {
 							: `🎙 Waiting for speech: ${elapsed}s — Alt+M to finish`,
 					);
 				},
-				onAudio: audio => live.push(audio),
+				onAudio: audio => {
+					if (talkEpoch !== contextEpoch || captureEpoch !== inputEpoch) return;
+					live.push(audio);
+				},
 			});
 			if (talkEpoch !== contextEpoch || captureEpoch !== inputEpoch || !activeContext) {
 				live.cancel();
