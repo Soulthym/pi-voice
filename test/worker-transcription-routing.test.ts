@@ -24,7 +24,16 @@ test("the real worker routes candidates and bounds full-sequence alignment",  { 
 	const stopped = Promise.withResolvers<void>();
 	const exits: unknown[] = [];
 	mock.method(process, "exit", (code?: unknown): never => { exits.push(code); return undefined as never; });
-	mock.module("node:child_process", { namedExports: { ...(await import("node:child_process")), spawn: () =>
+	mock.module("node:child_process", { namedExports: { ...(await import("node:child_process")),
+		fork: () => {
+			const child = Object.assign(new EventEmitter(), {
+				send: ({ id, operation }: any) => queueMicrotask(() => child.emit("message", { id,
+					audio: { pcm: new Float32Array((operation.text === "long" ? 31 : 30) * 24000), sampleRate: 24000 } })),
+				kill: () => {},
+			});
+			return child;
+		},
+		spawn: () =>
 		Object.assign(new EventEmitter(), {
 			exitCode: null, kill: () => { alignmentStops++; },
 			stdin: { write: () => { alignmentRequests++; return true; }, end: () => {} },

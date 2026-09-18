@@ -9,6 +9,7 @@ import { env as transformersEnv, pipeline } from "@huggingface/transformers";
 import { KokoroTTS } from "kokoro-js";
 import { createPlaybackController } from "./playback-controller.mjs";
 import { generateSentenceAudio } from "./sentence-audio.mjs";
+import { SentencePool } from "./sentence-pool.mjs";
 
 const DEFAULT_TTS_MODEL = "onnx-community/Kokoro-82M-v1.0-ONNX";
 const DEFAULT_TTS_DTYPE = "q8";
@@ -22,7 +23,7 @@ const audioCacheDir = process.env.PI_VOICE_AUDIO_CACHE_DIR ?? path.join(os.homed
 fs.mkdirSync(cacheDir, { recursive: true });
 transformersEnv.cacheDir = cacheDir;
 transformersEnv.allowLocalModels = true;
-transformersEnv.allowRemoteModels = true;
+transformersEnv.allowRemoteModels = process.env.HF_HUB_OFFLINE !== "1";
 transformersEnv.useBrowserCache = false;
 transformersEnv.logLevel = "error";
 if (transformersEnv.backends?.onnx) transformersEnv.backends.onnx.logLevel = "error";
@@ -35,9 +36,18 @@ let pumping = false;
 let cancelBarrier = Promise.resolve();
 let alignmentChild = null;
 let shuttingDown = false;
+const synthesisChild = Boolean(process.send && process.env.PI_VOICE_SENTENCE_CHILD === "1");
+const requestedWorkers = Number(process.env.PI_VOICE_TTS_WORKERS ?? 3);
+const synthesisWorkers = Number.isInteger(requestedWorkers) && requestedWorkers >= 1 && requestedWorkers <= 8 ? requestedWorkers : 3;
+const sentencePool = new SentencePool(synthesisWorkers, event => {
+	if (!playback.currentPlayer && !shuttingDown) send(event);
+});
+let activeOperation;
 
 function send(message) {
-	process.stdout.write(`${JSON.stringify(message)}\n`);
+	if (synthesisChild) {
+		if (process.connected) process.send({ event: message }, () => {});
+	} else process.stdout.write(`${JSON.stringify(message)}\n`);
 }
 
 const playback = createPlaybackController({ send });
@@ -218,6 +228,11 @@ async function audioForOperation(operation) {
 	if (file) {
 		const cached = await readCachedAudio(file);
 		if (cached) return { pcm: cached, sampleRate: DEFAULT_SAMPLE_RATE };
+	}
+	if (operation.type === "segment" && !synthesisChild) {
+		if (operation.epoch !== epoch) throw new Error("Sentence generation cancelled");
+		const { audioPromise, ...input } = operation;
+		return sentencePool.generate(input);
 	}
 	const operationEpoch = epoch;
 	const model = await getModel(operation.model, operation.dtype);
@@ -683,7 +698,7 @@ async function runOperation(operation) {
 	}
 	if (operation.type === "preload") {
 		try {
-			await getModel(operation.model, operation.dtype);
+			await Promise.all(Array.from({ length: synthesisWorkers }, () => sentencePool.generate(operation)));
 			send({ type: "ready", requestId: operation.requestId });
 		} catch (error) {
 			send({ type: "error", requestId: operation.requestId, message: error instanceof Error ? error.message : String(error) });
@@ -712,7 +727,7 @@ async function runOperation(operation) {
 		}
 		return;
 	}
-	const audio = await audioForOperation(operation);
+	const audio = await (operation.audioPromise ?? audioForOperation(operation));
 	if (operation.epoch !== epoch) return;
 	const sampleRate = audio.sampleRate;
 	const pcm = audio.pcm;
@@ -727,12 +742,31 @@ async function runOperation(operation) {
 	await writeAudio(sink, pcm);
 }
 
+function primeAudio() {
+	// Bound completed PCM as well as inference: paused playback retains at most this window.
+	let remaining = synthesisWorkers;
+	for (const operation of [activeOperation, ...queue]) {
+		if (!operation) continue;
+		if (operation.type === "end") continue;
+		if (operation.type !== "segment" || operation.epoch !== epoch || remaining-- <= 0) break;
+		if (!operation.audioPromise) {
+			operation.audioPromise = audioForOperation(operation);
+			// Later slots can fail before the ordered consumer reaches them.
+			void operation.audioPromise.catch(() => {});
+		}
+	}
+}
+
 async function pump() {
 	if (pumping) return;
 	pumping = true;
 	try {
 		while (queue.length > 0 && !shuttingDown) {
 			const operation = queue.shift();
+			await cancelBarrier;
+			if (shuttingDown || (operation.epoch !== epoch && ["segment", "end", "measure"].includes(operation.type))) continue;
+			activeOperation = operation;
+			primeAudio();
 			try {
 				await runOperation(operation);
 			} catch (error) {
@@ -748,12 +782,14 @@ async function pump() {
 			}
 		}
 	} finally {
+		activeOperation = undefined;
 		pumping = false;
 		if (queue.length > 0 && !shuttingDown) void cancelBarrier.then(() => pump());
 	}
 }
 
 function enqueue(operation) {
+	if (shuttingDown) return;
 	const queued = { ...operation, epoch };
 	if (operation.type === "measure") queue.push(queued);
 	else {
@@ -761,6 +797,7 @@ function enqueue(operation) {
 		if (backgroundAt < 0) queue.push(queued);
 		else queue.splice(backgroundAt, 0, queued);
 	}
+	primeAudio();
 	void cancelBarrier.then(() => pump());
 }
 
@@ -768,6 +805,7 @@ function scheduleCancel(cancelId) {
 	// Invalidate queued/current synthesis synchronously so segment messages that
 	// arrive in the same stdin chunk are stamped with the replacement epoch.
 	epoch += 1;
+	sentencePool.cancel();
 	cancelAlignment();
 	playback.resetPlayerPaused();
 	queue = queue
@@ -788,11 +826,25 @@ function shutdown() {
 	shuttingDown = true;
 	// Wait for transport stop before exiting; otherwise children can outlive the speech lease.
 	void scheduleCancel().finally(() => {
+		sentencePool.close();
 		stopAlignment();
 		process.exit(0);
 	});
 }
 
+if (synthesisChild) {
+	process.on("disconnect", () => process.exit(0));
+	process.on("message", async ({ id, operation }) => {
+		let response;
+		try {
+			const audio = operation.type === "preload"
+				? (await getModel(operation.model, operation.dtype), undefined)
+				: await audioForOperation({ ...operation, type: "synthesis" });
+			response = { id, audio };
+		} catch (error) { response = { id, error: String(error) }; }
+		if (process.connected) process.send(response, error => { if (error) process.exit(1); });
+	});
+} else {
 const lines = readline.createInterface({ input: process.stdin });
 lines.on("line", line => {
 	let message;
@@ -876,3 +928,4 @@ lines.on("line", line => {
 	}
 });
 lines.on("close", shutdown);
+}

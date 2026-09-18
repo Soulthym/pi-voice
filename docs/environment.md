@@ -8,6 +8,8 @@
 | --- | --- | --- |
 | `PI_VOICE_CONFIG` | `~/.pi/agent/pi-voice.json` | Alternate configuration file. |
 | `PI_VOICE_CACHE_DIR` | `~/.cache/pi-voice/models` | Model-weight cache. |
+| `PI_VOICE_TTS_WORKERS` | `3` | Host sentence synthesis/lookahead limit, integer 1–8. Set before starting Pi; benchmark other hardware/models before increasing it. |
+| `HF_HUB_OFFLINE` | unset | Set to `1` to prohibit model downloads in voice workers. |
 | `PI_VOICE_AUDIO_CACHE_DIR` | `~/.cache/pi-voice/audio` | Content-addressed Opus cache. |
 | `PI_VOICE_COORDINATOR_DIR` | `~/.cache/pi-voice/coordinator` | Cross-session presence, leases, and attention. |
 | `PI_VOICE_DEVICE_DIR` | `~/.cache/pi-voice/devices` | Device registry scanned by the extension. On clients it doubles as the intended remote registry for managed wrappers; on the Pi host pass the same absolute path to `pi-voice-ssh --device-dir`. |
