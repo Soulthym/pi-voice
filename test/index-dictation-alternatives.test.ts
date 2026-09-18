@@ -4,13 +4,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { mock, test } from "node:test";
 import { PhoneInputClient, type PhoneCapture, type PhoneCaptureOptions } from "../src/phone-input.js";
-import { formatAsrCandidates } from "../src/prompt-editor.js";
+import { formatAsrCandidates, buildCandidateResolutionRequest, buildSpokenEditRequest } from "../src/prompt-editor.js";
+import { formatAsrDisplay } from "../src/asr-display.js";
 import { FakeVoiceHost, MockedVoiceWorkerClient } from "./helpers/fake-voice-host.js";
 
 mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: MockedVoiceWorkerClient } });
 const settle = async () => { for (let i = 0; i < 12; i++) await new Promise(resolve => setImmediate(resolve)); };
 
-test("live/final evidence matches LLM syntax, and manual edits or Stop prevent stale submission", async t => {
+test("compact live/final preview leaves model evidence intact; manual edits and Stop remain safe", async t => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-voice-alternatives-"));
 	const names = ["PI_VOICE_CONFIG", "PI_VOICE_COORDINATOR_DIR", "PI_VOICE_DEVICE_DIR"] as const;
 	const old = Object.fromEntries(names.map(name => [name, process.env[name]]));
@@ -37,7 +38,7 @@ test("live/final evidence matches LLM syntax, and manual edits or Stop prevent s
 	});
 	mock.method(PhoneInputClient.prototype, "cancel", async () => {});
 	mock.method(MockedVoiceWorkerClient.prototype, "transcribePcmCandidates", async () => ["clear cash", "clear cache"]);
-	const finalCandidates = ["Clear the cash.", "Clear the cache."];
+	const finalCandidates = ["Clear the cash today.", "Clear the cache tomorrow.", "Clear the cash tomorrow."];
 	mock.method(MockedVoiceWorkerClient.prototype, "transcribe", async () => finalCandidates);
 	const answer = { role: "assistant", content: [{ type: "text", text: "Clear the cache." }], stopReason: "stop" };
 	t.after(async () => {
@@ -60,12 +61,15 @@ test("live/final evidence matches LLM syntax, and manual edits or Stop prevent s
 	};
 	const finishCapture = async () => { capture.resolve({ type: "audio", data: Buffer.from("mock audio") }); await settle(); };
 	await begin();
-	assert.ok(editor.includes(formatAsrCandidates(["clear cash", "clear cache"])), editor);
+	assert.equal(editor, "Existing draft. clear [cash|cache]");
 	await finishCapture();
-	assert.ok(editor.includes(formatAsrCandidates(finalCandidates)), editor);
+	assert.equal(editor, `Existing draft. ${formatAsrDisplay(finalCandidates)}`);
+	assert.equal(editor.includes("asr_candidates_json"), false);
 	assert.equal(host.modelRequests.length, 1);
-	const requestText = JSON.stringify(host.modelRequests[0]!.context.messages);
-	assert.ok(requestText.includes(JSON.stringify(formatAsrCandidates(finalCandidates)).slice(1, -1)));
+	const requestText = () => (host.modelRequests.at(-1)!.context.messages[0]!.content as { text: string }[])[0]!.text;
+	assert.equal(requestText(), buildCandidateResolutionRequest("Existing draft.", finalCandidates));
+	assert.ok(requestText().includes(formatAsrCandidates(finalCandidates)));
+	assert.deepEqual(JSON.parse(requestText().match(/<asr_candidates_json>\n([\s\S]*?)\n<\/asr_candidates_json>/)![1]!), finalCandidates);
 	resolution.resolve(answer); await settle();
 	assert.equal(editor, "Existing draft. Clear the cache.");
 	assert.equal(submissions, 0);
@@ -74,6 +78,13 @@ test("live/final evidence matches LLM syntax, and manual edits or Stop prevent s
 	await settle();
 	assert.ok(terminations > previousTerminations, "review completion must arm the idle worker shutdown");
 
+	await host.command("edit smart");
+	await begin(); await finishCapture();
+	assert.equal(requestText(), buildSpokenEditRequest("Existing draft. Clear the cache.", finalCandidates));
+	resolution.resolve(answer); await settle();
+	assert.equal(editor, "Clear the cache.", "resolved smart draft is ordinary text, not an expression");
+	assert.deepEqual(finalCandidates, ["Clear the cash today.", "Clear the cache tomorrow.", "Clear the cash tomorrow."]);
+	await host.command("edit append");
 	await host.command("submit auto");
 	await begin(); await finishCapture();
 	editor = "Manual changes while resolving";

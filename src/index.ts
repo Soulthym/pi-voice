@@ -60,7 +60,8 @@ import { prioritizeFromCurrent, processConcurrently, resolveTimingConcurrency } 
 import { SpeakableStream, type FencedCodeBlock, type SpeakableSourceRange } from "./speakable.js";
 import { pendingPlaybackTiming, voiceProgressLines } from "./status-text.js";
 import { anchorLineForMessage, computeAutoScrollTop, isManualScrollAway } from "./auto-scroll.js";
-import { applySpokenEdit, formatAsrCandidates, parseEditModelSelector, resolveDictationCandidates } from "./prompt-editor.js";
+import { applySpokenEdit, parseEditModelSelector, resolveDictationCandidates } from "./prompt-editor.js";
+import { formatAsrDisplay } from "./asr-display.js";
 import { narrationRenderKey } from "./render-identity.js";
 import { invalidateNarrationMarkdown } from "./narration-render.js";
 import { SessionCoordinator, type WaitingSession } from "./session-coordinator.js";
@@ -2043,7 +2044,7 @@ const chargeBackfillUnit = (): boolean => {
 		const committed: string[][] = [];
 		let partial: string[] = [];
 		const renderPreview = (): void => {
-			const evidence = [...committed, ...(partial.length ? [partial] : [])].map(formatAsrCandidates).join("\n\n");
+			const evidence = [...committed, ...(partial.length ? [partial] : [])].map(formatAsrDisplay).join("\n\n");
 			writeEditor(appendDictation(editorBase, evidence));
 		};
 		const live = new LiveTranscriptionSession(audio => vocalizer.transcribePcmCandidates(audio), {
@@ -2111,7 +2112,7 @@ const chargeBackfillUnit = (): boolean => {
 				ctx.ui.notify("No speech recognized", "warning");
 				return;
 			}
-			if (!writeEditor(appendDictation(editorBase, formatAsrCandidates(candidates)))) {
+			if (!writeEditor(appendDictation(editorBase, formatAsrDisplay(candidates)))) {
 				releaseSpeechOwnership(false);
 				ctx.ui.notify("Dictation left your manual edits untouched; review the draft before submitting", "info");
 				return;

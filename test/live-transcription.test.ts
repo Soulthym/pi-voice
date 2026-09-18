@@ -15,6 +15,23 @@ test("a preview failure stays awaitable until recording finishes", async () => {
 	await assert.rejects(session.finish(), /synthetic preview failure/);
 });
 
+test("candidate callbacks retain original evidence while the committed transcript stays ordinary text", async () => {
+	const candidates = ["follow my advice", "follow the advice", "follow their advice"];
+	const partials: string[][] = [];
+	const segments: string[][] = [];
+	const session = new LiveTranscriptionSession(async () => candidates, {
+		onPartialCandidates: values => partials.push(values),
+		onSegmentCandidates: values => segments.push(values),
+	});
+	session.push(samples(0.7, 0.1));
+	await new Promise(resolve => setImmediate(resolve));
+	assert.deepEqual(partials, [candidates]);
+	session.push(samples(0.7, 0));
+	assert.equal(await session.finish(), candidates[0]);
+	assert.deepEqual(segments, [candidates]);
+	assert.deepEqual(candidates, ["follow my advice", "follow the advice", "follow their advice"]);
+});
+
 test("emits revisable partial text and commits speech at a pause", async () => {
 	const partials: string[] = [];
 	const segments: string[] = [];
