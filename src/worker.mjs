@@ -10,6 +10,7 @@ import { KokoroTTS } from "kokoro-js";
 import { createPlaybackController } from "./playback-controller.mjs";
 import { generateSentenceAudio } from "./sentence-audio.mjs";
 import { SentencePool } from "./sentence-pool.mjs";
+import { MAX_ALIGNMENT_BYTES, MAX_ALIGNMENT_TEXT } from "./alignment-windows.mjs";
 
 const DEFAULT_TTS_MODEL = "onnx-community/Kokoro-82M-v1.0-ONNX";
 const DEFAULT_TTS_DTYPE = "q8";
@@ -35,6 +36,7 @@ let queue = [];
 let pumping = false;
 let cancelBarrier = Promise.resolve();
 let alignmentChild = null;
+const pendingAlignmentPreloads = new Set();
 let shuttingDown = false;
 const synthesisChild = Boolean(process.send && process.env.PI_VOICE_SENTENCE_CHILD === "1");
 const requestedWorkers = Number(process.env.PI_VOICE_TTS_WORKERS ?? 3);
@@ -54,28 +56,39 @@ const playback = createPlaybackController({ send });
 
 function ensureAlignmentChild() {
 	if (alignmentChild && alignmentChild.exitCode === null) return alignmentChild;
+	stopAlignment();
 	const child = spawn(process.execPath, [fileURLToPath(new URL("./alignment-worker.mjs", import.meta.url))], {
 		// Alignment events bypass this synthesis process and reach Pi directly,
 		// even while native Kokoro inference is blocking this event loop.
-		stdio: ["pipe", "inherit", "ignore"],
+		stdio: ["pipe", "inherit", "ignore", "ipc"],
 		env: { ...process.env },
 	});
 	alignmentChild = child;
+	child.stdin.on?.("error", () => {
+		if (alignmentChild === child) stopAlignment();
+	});
+	child.on("message", message => {
+		if (alignmentChild === child &&
+			(message.type === "alignment-ready" || message.type === "alignment-preload-error") &&
+			pendingAlignmentPreloads.delete(message.requestId)) send(message);
+	});
 	child.on("error", () => {
-		if (alignmentChild === child) alignmentChild = null;
+		if (alignmentChild === child) stopAlignment();
 	});
 	child.on("exit", () => {
-		if (alignmentChild === child) alignmentChild = null;
+		if (alignmentChild === child) stopAlignment();
 	});
 	return child;
 }
 
 function preloadAlignment(requestId, model, dtype) {
 	try {
-		ensureAlignmentChild().stdin.write(
-			`${JSON.stringify({ type: "preload", epoch, requestId, model, dtype })}\n`,
-		);
+		const input = ensureAlignmentChild().stdin;
+		if (input.writableNeedDrain || input.writableLength > 0 || input.destroyed) throw new Error("Alignment busy; estimated timings remain available");
+		pendingAlignmentPreloads.add(requestId);
+		input.write(`${JSON.stringify({ type: "preload", epoch, requestId, model, dtype })}\n`);
 	} catch (error) {
+		pendingAlignmentPreloads.delete(requestId);
 		send({
 			type: "alignment-preload-error",
 			requestId,
@@ -85,11 +98,13 @@ function preloadAlignment(requestId, model, dtype) {
 }
 
 function requestAlignment(operation, pcm, sampleRate) {
-	// ponytail: full-sequence CTC grows quadratically; use estimated words above 30s until windowed alignment exists.
-	if (pcm.length / sampleRate > 30) return;
 	try {
+		if (pcm.byteLength > MAX_ALIGNMENT_BYTES || operation.text.length > MAX_ALIGNMENT_TEXT) throw new Error("Alignment resource limit");
+		const input = ensureAlignmentChild().stdin;
+		// Never wait for alignment. At most one bounded JSON/PCM write may be buffered.
+		if (input.writableNeedDrain || input.writableLength > 0 || input.destroyed) throw new Error("Alignment overloaded");
 		const bytes = Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength);
-		ensureAlignmentChild().stdin.write(
+		input.write(
 			`${JSON.stringify({
 				type: "align",
 				epoch,
@@ -102,22 +117,25 @@ function requestAlignment(operation, pcm, sampleRate) {
 				dtype: operation.alignmentDtype,
 			})}\n`,
 		);
-	} catch {
-		// Estimated word timings remain available if the aligner cannot start.
+	} catch (error) {
+		send({ type: "alignment-error", epoch, segmentId: operation.segmentId, quality: "estimated",
+			message: error instanceof Error ? error.message : String(error) });
 	}
 }
 
 function cancelAlignment() {
-	try {
-		alignmentChild?.stdin.write(`${JSON.stringify({ type: "cancel", epoch })}\n`);
-	} catch {
-		// Best effort.
-	}
+	// Terminate native inference and buffered stdin too, rather than queue a cancel
+	// behind megabytes of PCM. The next request lazily starts a fresh child.
+	stopAlignment();
 }
 
 function stopAlignment() {
 	const child = alignmentChild;
 	alignmentChild = null;
+	for (const requestId of pendingAlignmentPreloads) {
+		send({ type: "alignment-preload-error", requestId, message: "Speech alignment worker stopped before setup completed" });
+	}
+	pendingAlignmentPreloads.clear();
 	if (!child) return;
 	try {
 		child.stdin.end(`${JSON.stringify({ type: "shutdown" })}\n`);
@@ -486,12 +504,15 @@ function createLocalSink(sampleRate, utterance) {
 		ready,
 		stopped: false,
 		async close() {
-			this.stopPlaybackClock();
-			await ready;
-			if (child.exitCode !== null) return;
-			const exited = new Promise(resolve => child.once("exit", resolve));
-			child.stdin.end();
-			await exited;
+			try {
+				await ready;
+				if (child.exitCode !== null) return;
+				const exited = new Promise(resolve => child.once("exit", resolve));
+				child.stdin.end();
+				await exited;
+			} finally {
+				this.stopPlaybackClock();
+			}
 		},
 		stop() {
 			this.stopped = true;
@@ -510,7 +531,10 @@ function createLocalSink(sampleRate, utterance) {
 	child.stdin.on("error", error => {
 		if (playback.currentPlayer === sink && !shuttingDown) send({ type: "error", message: error.message, utterance });
 	});
+	child.on("error", () => sink.stopPlaybackClock());
 	child.on("exit", code => {
+		sink.stopPlaybackClock();
+		if (!sink.stopped && code === 0) sink.reportPlayback(sink.samplesWritten / sampleRate, true);
 		if (playback.currentPlayer === sink) playback.clearCurrentPlayer();
 		if (code !== 0 && code !== null && !shuttingDown) {
 			send({ type: "error", message: stderr.trim() || `Audio player exited with code ${code}`, utterance });
@@ -737,9 +761,12 @@ async function runOperation(operation) {
 	if (operation.epoch !== epoch || sink.stopped) return;
 	const start = sink.samplesWritten / sampleRate;
 	const duration = pcm.length / sampleRate;
-	send({ type: "segment-audio", utterance: operation.utterance, segmentId: operation.segmentId, start, duration });
-	requestAlignment(operation, pcm, sampleRate);
-	await writeAudio(sink, pcm);
+	send({ type: "segment-audio", utterance: operation.utterance, segmentId: operation.segmentId, start, duration, timingQuality: "estimated" });
+	const writing = writeAudio(sink, pcm);
+	// Let playback submit PCM before spending CPU on optional alignment encoding.
+	await Promise.resolve();
+	if (operation.epoch === epoch && !sink.stopped) requestAlignment(operation, pcm, sampleRate);
+	await writing;
 }
 
 function primeAudio() {

@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { mock, test } from "node:test";
 
-test("the real worker routes candidates and bounds full-sequence alignment",  { timeout: 10_000 }, async t => {
+test("the real worker routes candidates and bounds alignment writes",  { timeout: 10_000 }, async t => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-voice-worker-routing-"));
 	const oldCache = process.env.PI_VOICE_CACHE_DIR;
 	process.env.PI_VOICE_CACHE_DIR = root;
@@ -21,6 +21,10 @@ test("the real worker routes candidates and bounds full-sequence alignment",  { 
 	}) } } });
 	let alignmentRequests = 0;
 	let alignmentStops = 0;
+	let audioWrites = 0;
+	const alignmentInput = { writableNeedDrain: false, writableLength: 0,
+		write: () => { assert.ok(audioWrites > 0, "playback is submitted before alignment encoding");
+			alignmentRequests++; alignmentInput.writableNeedDrain = true; return false; }, end: () => {} };
 	const stopped = Promise.withResolvers<void>();
 	const exits: unknown[] = [];
 	mock.method(process, "exit", (code?: unknown): never => { exits.push(code); return undefined as never; });
@@ -28,7 +32,7 @@ test("the real worker routes candidates and bounds full-sequence alignment",  { 
 		fork: () => {
 			const child = Object.assign(new EventEmitter(), {
 				send: ({ id, operation }: any) => queueMicrotask(() => child.emit("message", { id,
-					audio: { pcm: new Float32Array((operation.text === "long" ? 31 : 30) * 24000), sampleRate: 24000 } })),
+					audio: { pcm: new Float32Array(operation.text === "oversized" ? 4 * 1024 * 1024 + 1 : (operation.text === "long" ? 31 : 30) * 24000), sampleRate: 24000 } })),
 				kill: () => {},
 			});
 			return child;
@@ -36,12 +40,12 @@ test("the real worker routes candidates and bounds full-sequence alignment",  { 
 		spawn: () =>
 		Object.assign(new EventEmitter(), {
 			exitCode: null, kill: () => { alignmentStops++; },
-			stdin: { write: () => { alignmentRequests++; return true; }, end: () => {} },
+			stdin: alignmentInput,
 		}),
 	} });
 	mock.module("../src/playback-controller.mjs", { namedExports: { createPlaybackController: () => ({
 		startPlayer: () => ({ ready: Promise.resolve(), stopped: false, samplesWritten: 0 }),
-		writeAudio: async () => {},
+		writeAudio: async () => { audioWrites++; },
 		resetPlayerPaused: () => {},
 		stopPlayer: () => stopped.promise,
 	}) } });
@@ -73,11 +77,20 @@ test("the real worker routes candidates and bounds full-sequence alignment",  { 
 	const segment = { type: "segment", utterance: 1, segmentId: 1, voice: "af_heart", speed: 1, text: "long" };
 	lines.emit("line", JSON.stringify(segment));
 	await audioReady.promise;
-	assert.equal(alignmentRequests, 0, "long sentences must not allocate unbounded full-sequence CTC attention");
+	await new Promise(resolve => setImmediate(resolve));
+	assert.equal(alignmentRequests, 1, "long units are sent for bounded window refinement");
 	audioReady = Promise.withResolvers<void>();
 	lines.emit("line", JSON.stringify({ ...segment, segmentId: 2, text: "short" }));
 	await audioReady.promise;
-	assert.equal(alignmentRequests, 1, "normal sentences retain actual forced alignment");
+	await new Promise(resolve => setImmediate(resolve));
+	assert.equal(alignmentRequests, 1, "backpressured alignment must not queue PCM or delay playback");
+	alignmentInput.writableNeedDrain = false;
+	audioReady = Promise.withResolvers<void>();
+	lines.emit("line", JSON.stringify({ ...segment, segmentId: 3, text: "oversized" }));
+	await audioReady.promise;
+	await new Promise(resolve => setImmediate(resolve));
+	assert.equal(alignmentRequests, 1, "per-unit PCM budget must be checked before encoding/writing");
+	assert.equal(audioWrites, 3, "overload never drops sentence playback");
 	lines.emit("line", JSON.stringify({ type: "shutdown" }));
 	lines.emit("close");
 	await new Promise(resolve => setImmediate(resolve));

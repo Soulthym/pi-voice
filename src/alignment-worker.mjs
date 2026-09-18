@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
 import { env as transformersEnv, pipeline } from "@huggingface/transformers";
+import { MAX_ALIGNMENT_BYTES, MAX_ALIGNMENT_TEXT, alignmentWindows, estimatedWords, mergeWindow } from "./alignment-windows.mjs";
 
 const DEFAULT_ALIGNMENT_MODEL = "onnx-community/wav2vec2-base-960h-ONNX";
 const DEFAULT_ALIGNMENT_DTYPE = "q8";
@@ -22,7 +23,10 @@ let pumping = false;
 let shuttingDown = false;
 
 function send(message) {
-	process.stdout.write(`${JSON.stringify(message)}\n`);
+	// The parent owns preload settlement; alignment timings still bypass synthesis.
+	if (process.send && (message.type === "alignment-ready" || message.type === "alignment-preload-error")) {
+		if (process.connected) process.send(message, () => {});
+	} else process.stdout.write(`${JSON.stringify(message)}\n`);
 }
 
 async function getAligner(modelId, dtype) {
@@ -89,7 +93,7 @@ function forceAlign(logits, targets, blankId, duration) {
 	const vocabulary = dimensions[1] ?? 0;
 	if (frames <= 0 || vocabulary <= 0 || targets.length === 0) return undefined;
 	const states = targets.length * 2 + 1;
-	if (states > frames * 2 + 1) return undefined;
+	if (states > frames * 2 + 1 || frames > 2_000 || states * frames > 4_000_000) return undefined;
 	const emissions = logits.data;
 	const backpointers = Array.from({ length: frames }, () => new Uint8Array(states));
 	let previous = new Float64Array(states).fill(Number.NEGATIVE_INFINITY);
@@ -151,23 +155,69 @@ async function align(operation) {
 	}
 	const inputRate = Number(operation.sampleRate) || 24_000;
 	const targetRate = aligner.processor?.feature_extractor?.config?.sampling_rate ?? 16_000;
-	const audio = resample(decodePcm(operation.audio), inputRate, targetRate);
-	const inputs = await aligner.processor(audio);
-	const output = await aligner.model(inputs);
-	if (operation.epoch !== epoch) return;
-	const logits = output.logits?.[0];
-	const target = alignmentTargets(aligner.tokenizer, operation.text);
-	const duration = Number(operation.duration) || audio.length / targetRate;
-	const alignment = logits
-		? forceAlign(logits, target.tokens, Number(aligner.model.config.pad_token_id ?? 0), duration)
-		: undefined;
-	if (!alignment) throw new Error("The CTC model could not align this synthesized segment");
-	const words = target.spans.map(span => ({
-		text: span.text,
-		start: alignment.starts[span.start] ?? 0,
-		end: alignment.ends[span.end - 1] ?? duration,
-	}));
-	send({ type: "alignment", epoch: operation.epoch, segmentId: operation.segmentId, words });
+	const pcm = decodePcm(operation.audio);
+	operation.audio = undefined;
+	const duration = pcm.length / inputRate;
+	const words = estimatedWords(operation.text, duration);
+	const blank = Number(aligner.model.config.pad_token_id ?? 0);
+	for (const window of alignmentWindows(duration)) {
+		if (operation.epoch !== epoch || shuttingDown) return;
+		// Give newly arrived/current speech priority over further historical windows.
+		if (queue.length > 0) break;
+		try {
+			const audio = resample(pcm.subarray(Math.round(window.start * inputRate), Math.round(window.end * inputRate)), inputRate, targetRate);
+			const inputs = await aligner.processor(audio);
+			if (operation.epoch !== epoch) return;
+			const output = await aligner.model(inputs);
+			if (operation.epoch !== epoch) return;
+			const logits = output.logits?.[0];
+			let text = operation.text;
+			if (duration > 30) {
+				// Long windows have no known transcript boundaries. Only refine unique
+				// source phrases independently recognized with confident CTC emissions.
+				text = recognizedText(logits, aligner.tokenizer, blank);
+			}
+			const target = alignmentTargets(aligner.tokenizer, text);
+			const alignment = logits && forceAlign(logits, target.tokens, blank, window.end - window.start);
+			if (!alignment) continue;
+			const refined = target.spans.map(span => ({ text: span.text,
+				start: alignment.starts[span.start], end: alignment.ends[span.end - 1], quality: "ctc-refined" }));
+			if (duration <= 30) {
+				if (refined.length === words.length) words.splice(0, words.length, ...refined);
+			} else mergeWindow(words, refined, window, duration);
+		} catch {
+			// A failed window must not discard estimates or successful earlier windows.
+		}
+		await new Promise(resolve => setImmediate(resolve));
+	}
+	if (operation.epoch !== epoch || shuttingDown) return;
+	const refined = words.filter(word => word.quality === "ctc-refined").length;
+	send({ type: "alignment", epoch: operation.epoch, segmentId: operation.segmentId, words,
+		quality: refined === 0 ? "estimated" : refined === words.length ? "ctc-refined" : "mixed" });
+}
+
+function recognizedText(logits, tokenizer, blank) {
+	const [frames, vocabulary] = logits?.dims ?? [];
+	if (!frames || frames > 2_000 || !vocabulary) return "";
+	const ids = [];
+	let previous = -1;
+	for (let frame = 0; frame < frames; frame++) {
+		const row = frame * vocabulary;
+		let best = 0;
+		for (let token = 1; token < vocabulary; token++) {
+			if (logits.data[row + token] > logits.data[row + best]) best = token;
+		}
+		if (best !== blank && best !== previous) {
+			let denominator = 0;
+			for (let token = 0; token < vocabulary; token++) denominator += Math.exp(logits.data[row + token] - logits.data[row + best]);
+			if (1 / denominator < 0.5) return "";
+		}
+		// Keep blanks until the tokenizer's CTC decoder collapses repeats. Removing
+		// them here would turn legitimate repeated letters (e.g. BOOK) into BOK.
+		ids.push(best);
+		previous = best;
+	}
+	return tokenizer.decode(ids, { skip_special_tokens: false });
 }
 
 async function pump() {
@@ -184,6 +234,7 @@ async function pump() {
 						type: "alignment-error",
 						epoch: operation.epoch,
 						segmentId: operation.segmentId,
+						quality: "estimated",
 						message: error instanceof Error ? error.message : String(error),
 					});
 				}
@@ -204,6 +255,7 @@ lines.on("line", line => {
 		return;
 	}
 	if (message.type === "preload") {
+		if (Number.isInteger(message.epoch) && message.epoch < epoch) return;
 		epoch = Number.isInteger(message.epoch) ? message.epoch : epoch;
 		void getAligner(message.model ?? DEFAULT_ALIGNMENT_MODEL, message.dtype ?? DEFAULT_ALIGNMENT_DTYPE).then(
 			() => send({ type: "alignment-ready", requestId: message.requestId }),
@@ -215,8 +267,18 @@ lines.on("line", line => {
 				}),
 		);
 	} else if (message.type === "align") {
-		epoch = Number.isInteger(message.epoch) ? message.epoch : epoch;
-		queue.push({
+		const incomingEpoch = Number.isInteger(message.epoch) ? message.epoch : epoch;
+		if (incomingEpoch < epoch || shuttingDown) return;
+		epoch = incomingEpoch;
+		if (typeof message.audio !== "string" || message.audio.length > Math.ceil(MAX_ALIGNMENT_BYTES / 3) * 4 ||
+			typeof message.text !== "string" || message.text.length > MAX_ALIGNMENT_TEXT ||
+			!Number.isFinite(message.sampleRate) || message.sampleRate < 8_000 || message.sampleRate > 96_000) {
+			send({ type: "alignment-error", epoch, segmentId: message.segmentId, quality: "estimated", message: "Alignment resource limit" });
+			return;
+		}
+		for (const skipped of queue) send({ type: "alignment-error", epoch: skipped.epoch, segmentId: skipped.segmentId,
+			quality: "estimated", message: "Alignment superseded by upcoming speech" });
+		queue = [{
 			type: "align",
 			epoch,
 			segmentId: message.segmentId,
@@ -226,10 +288,10 @@ lines.on("line", line => {
 			duration: message.duration,
 			model: message.model ?? DEFAULT_ALIGNMENT_MODEL,
 			dtype: message.dtype ?? DEFAULT_ALIGNMENT_DTYPE,
-		});
+		}];
 		void pump();
 	} else if (message.type === "cancel") {
-		epoch = Number.isInteger(message.epoch) ? message.epoch : epoch + 1;
+		epoch = Number.isInteger(message.epoch) ? Math.max(epoch, message.epoch) : epoch + 1;
 		queue = [];
 	} else if (message.type === "shutdown") {
 		shuttingDown = true;

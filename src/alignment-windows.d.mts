@@ -1,0 +1,10 @@
+export const MAX_ALIGNMENT_BYTES: number;
+export const MAX_ALIGNMENT_TEXT: number;
+export const WINDOW_SECONDS: number;
+export const WINDOW_STRIDE: number;
+export type AlignmentWord = { text: string; start: number; end: number; quality: "estimated" | "ctc-refined" };
+export type AlignmentWindow = { start: number; end: number };
+export function sourceWords(text: string): string[];
+export function estimatedWords(text: string, duration: number): AlignmentWord[];
+export function alignmentWindows(duration: number): Generator<AlignmentWindow>;
+export function mergeWindow(words: AlignmentWord[], recognized: Array<{ text: string; start: number; end: number }>, window: AlignmentWindow, duration: number): AlignmentWord[];
