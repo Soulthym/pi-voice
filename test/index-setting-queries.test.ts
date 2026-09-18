@@ -84,4 +84,34 @@ test("setter queries reflect live settings, automatic routing and reload-only sh
 	await query("edit-model", "edit-model: current → unavailable");
 	host.ctx.model = { ...host.model, id: "changed" };
 	await query("edit-model", "edit-model: current → test/changed");
+
+	for (const [settings, expected, microphoneKeys] of [
+		[{ talkShortcut: "alt+t" }, "f5", ["f5"]],
+		[{ talkShortcut: "f5" }, "f5", ["f5"]],
+		[{ talkShortcut: "alt+m", scrollToShortcut: "f5" }, "alt+m", ["alt+m"]],
+		[{ talkShortcut: "f5", scrollBottomShortcut: "f5" }, "none", []],
+		[{ talkShortcut: "alt+t", scrollToShortcut: "f5" }, "none", []],
+		[{ talkShortcut: "disabled" }, "disabled", []],
+	] as const) {
+		await t.test(`shortcut collisions: ${JSON.stringify(settings)}`, async () => {
+			await fs.writeFile(env.PI_VOICE_CONFIG, JSON.stringify(settings));
+			const collisionHost = new FakeVoiceHost(path.join(root, "project"), "collisions");
+			try {
+				await collisionHost.start();
+				// Inspect the final host map, not merely the configured registration requests.
+				assert.deepEqual([...collisionHost.shortcuts].filter(([, shortcut]) =>
+					(shortcut as { description?: string }).description === "Start or stop a prompt with the phone microphone",
+				).map(([key]) => key), microphoneKeys);
+				await collisionHost.command("shortcut");
+				assert.deepEqual(collisionHost.notices.at(-1), { message: `shortcut: ${expected}`, level: "info" });
+				await collisionHost.command("shortcut alt+x");
+				await collisionHost.command("shortcut");
+				assert.deepEqual(collisionHost.notices.at(-1), {
+					message: `shortcut: ${expected}; configured=alt+x (run /reload to apply)`, level: "info",
+				});
+			} finally {
+				await collisionHost.shutdown();
+			}
+		});
+	}
 });

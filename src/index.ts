@@ -2701,8 +2701,10 @@ const chargeBackfillUnit = (): boolean => {
 	});
 
 	const registeredTalkShortcut = config.talkShortcut;
+	const effectiveTalkShortcuts = new Set<string>();
 	if (config.talkShortcut !== "disabled") {
 		const registerTalkShortcut = (key: Exclude<VoiceConfig["talkShortcut"], "disabled">): void => {
+			effectiveTalkShortcuts.add(key);
 			pi.registerShortcut(key, {
 				description: "Start or stop a prompt with the phone microphone",
 				handler: ctx => {
@@ -2729,12 +2731,14 @@ const chargeBackfillUnit = (): boolean => {
 			description: "Scroll to the current narrated position",
 			handler: scrollToNarration,
 		});
+		effectiveTalkShortcuts.delete(config.scrollToShortcut);
 	}
 	if (config.scrollBottomShortcut !== "disabled") {
 		pi.registerShortcut(config.scrollBottomShortcut, {
 			description: "Pin the transcript to its end and follow new output",
 			handler: scrollToBottom,
 		});
+		effectiveTalkShortcuts.delete(config.scrollBottomShortcut);
 	}
 
 	pi.registerCommand("voice", {
@@ -2960,7 +2964,10 @@ const chargeBackfillUnit = (): boolean => {
 					"timing-preprocess": () => `${config.timingPreprocessConcurrency} → ${resolveTimingConcurrency(config.timingPreprocessConcurrency, config.ttsDtype)}${timingPreprocessing ? `; active batch=${timingWorkers.length}` : ""}`,
 					"audio-cache": () => config.audioCache,
 					"audio-bitrate": () => `${config.audioCacheBitrate} kbps`,
-					shortcut: () => `${registeredTalkShortcut}${registeredTalkShortcut !== "disabled" && registeredTalkShortcut !== "f5" ? " (also f5)" : ""}${registeredTalkShortcut !== config.talkShortcut ? `; configured=${config.talkShortcut} (run /reload to apply)` : ""}`,
+					shortcut: () => {
+						const [primary, fallback] = effectiveTalkShortcuts;
+						return `${primary ?? (registeredTalkShortcut === "disabled" ? "disabled" : "none")}${fallback ? ` (also ${fallback})` : ""}${registeredTalkShortcut !== config.talkShortcut ? `; configured=${config.talkShortcut} (run /reload to apply)` : ""}`;
+					},
 					submit: () => config.submitMode,
 					edit: () => config.editMode,
 				};
