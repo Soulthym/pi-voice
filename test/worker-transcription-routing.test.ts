@@ -20,12 +20,21 @@ test("the real worker routes candidates and bounds full-sequence alignment",  { 
 		generate: async (text: string) => new hf.RawAudio(new Float32Array((text === "long" ? 31 : 30) * 24000), 24000),
 	}) } } });
 	let alignmentRequests = 0;
+	let alignmentStops = 0;
+	const stopped = Promise.withResolvers<void>();
+	const exits: unknown[] = [];
+	mock.method(process, "exit", (code?: unknown): never => { exits.push(code); return undefined as never; });
 	mock.module("node:child_process", { namedExports: { ...(await import("node:child_process")), spawn: () =>
-		Object.assign(new EventEmitter(), { exitCode: null, stdin: { write: () => { alignmentRequests++; return true; } } }),
+		Object.assign(new EventEmitter(), {
+			exitCode: null, kill: () => { alignmentStops++; },
+			stdin: { write: () => { alignmentRequests++; return true; }, end: () => {} },
+		}),
 	} });
 	mock.module("../src/playback-controller.mjs", { namedExports: { createPlaybackController: () => ({
 		startPlayer: () => ({ ready: Promise.resolve(), stopped: false, samplesWritten: 0 }),
 		writeAudio: async () => {},
+		resetPlayerPaused: () => {},
+		stopPlayer: () => stopped.promise,
 	}) } });
 	let response = Promise.withResolvers<{ candidates: string[] }>();
 	let audioReady = Promise.withResolvers<void>();
@@ -60,4 +69,12 @@ test("the real worker routes candidates and bounds full-sequence alignment",  { 
 	lines.emit("line", JSON.stringify({ ...segment, segmentId: 2, text: "short" }));
 	await audioReady.promise;
 	assert.equal(alignmentRequests, 1, "normal sentences retain actual forced alignment");
+	lines.emit("line", JSON.stringify({ type: "shutdown" }));
+	lines.emit("close");
+	await new Promise(resolve => setImmediate(resolve));
+	assert.deepEqual(exits, [], "worker exit must wait for player stop acknowledgement");
+	stopped.resolve();
+	await new Promise(resolve => setImmediate(resolve));
+	assert.deepEqual(exits, [0], "shutdown and stdin close must share one idempotent teardown");
+	assert.equal(alignmentStops, 1);
 });

@@ -783,6 +783,16 @@ function scheduleCancel(cancelId) {
 	return cancelBarrier;
 }
 
+function shutdown() {
+	if (shuttingDown) return;
+	shuttingDown = true;
+	// Wait for transport stop before exiting; otherwise children can outlive the speech lease.
+	void scheduleCancel().finally(() => {
+		stopAlignment();
+		process.exit(0);
+	});
+}
+
 const lines = readline.createInterface({ input: process.stdin });
 lines.on("line", line => {
 	let message;
@@ -861,15 +871,8 @@ lines.on("line", line => {
 			void scheduleCancel(message.cancelId);
 			break;
 		case "shutdown":
-			shuttingDown = true;
-			cancel();
-			stopAlignment();
-			process.exit(0);
+			shutdown();
+			break;
 	}
 });
-lines.on("close", () => {
-	shuttingDown = true;
-	stopPlayer();
-	stopAlignment();
-	process.exit(0);
-});
+lines.on("close", shutdown);
