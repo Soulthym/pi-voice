@@ -146,6 +146,7 @@ Speak after pressing the microphone key. Recording normally stops after about 1.
 /voice scroll-to
 /voice bottom
 /voice device auto|local|<device-id>
+/voice reconnect  # adopt current attachment for this session; no playback
 /voice setup
 ```
 

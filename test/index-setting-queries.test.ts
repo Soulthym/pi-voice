@@ -22,6 +22,9 @@ test("setter queries reflect live settings, automatic routing and reload-only sh
 		version: 1 as const, id: "phone", name: "Phone", platform: "termux" as const,
 		audioEndpoint: "unix:///test/audio", inputEndpoint: "unix:///test/input", connectedAt: 1, lastActive: 1,
 	};
+	await fs.mkdir(env.PI_VOICE_DEVICE_DIR);
+	await fs.writeFile(path.join(env.PI_VOICE_DEVICE_DIR, "phone.json"), JSON.stringify(device));
+	mock.method(DeviceRouter.prototype, "resolveCurrentConnection", async () => ({ kind: "device" as const, id: "phone" }));
 	mock.method(DeviceRouter.prototype, "connected", () => [device]);
 	const claim = mock.method(DeviceRouter.prototype, "claim", () => device);
 	const host = new FakeVoiceHost(path.join(root, "project"), "queries");

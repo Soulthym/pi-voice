@@ -26,6 +26,9 @@ test("cancelled dictation ignores late decoder progress, PCM and ASR results dur
 	}));
 	const phone = { version: 1 as const, id: "phone", name: "Phone", platform: "termux" as const,
 		audioEndpoint: "local", inputEndpoint: "local", connectedAt: 1, lastActive: 1 };
+	await fs.mkdir(process.env.PI_VOICE_DEVICE_DIR!);
+	await fs.writeFile(path.join(process.env.PI_VOICE_DEVICE_DIR!, "phone.json"), JSON.stringify(phone));
+	mock.method(DeviceRouter.prototype, "resolveCurrentConnection", async () => ({ kind: "device" as const, id: "phone" }));
 	const newer = { ...phone, id: "newer", name: "Newer" };
 	let devices = [phone];
 	mock.method(DeviceRouter.prototype, "connected", () => devices);

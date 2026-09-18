@@ -214,17 +214,19 @@ function playbackTimingSnapshots(ctx: ExtensionContext): PlaybackTimingSnapshot[
 	return snapshots;
 }
 
-function sessionDeviceSelection(ctx: ExtensionContext): VoiceDeviceSelection {
+function sessionDeviceSelection(ctx: ExtensionContext): { selection: VoiceDeviceSelection; pin?: string } {
 	let selection: VoiceDeviceSelection = "auto";
+	let pin: string | undefined;
 	for (const entry of ctx.sessionManager.getBranch()) {
 		if (entry.type !== "custom" || entry.customType !== DEVICE_SELECTION_ENTRY) continue;
 		const data = entry.data;
 		if (!data || typeof data !== "object" || !("selection" in data) || typeof data.selection !== "string") continue;
 		if (data.selection === "auto" || data.selection === "local" || /^[a-zA-Z0-9._-]{1,128}$/.test(data.selection)) {
 			selection = data.selection;
+			pin = "pin" in data && typeof data.pin === "string" && /^[a-zA-Z0-9._-]{1,128}$/.test(data.pin) ? data.pin : undefined;
 		}
 	}
-	return selection;
+	return { selection, pin };
 }
 
 function codeDescriptionSnapshots(ctx: ExtensionContext): unknown[] {
@@ -303,6 +305,7 @@ export default async function (pi: ExtensionAPI) {
 	let pendingNotification: WaitingSession | undefined;
 	let pausedForAttention = false;
 	let attentionSuppressed = false;
+	let deviceRetryRequired = false;
 	let disabledAttentionPending = false;
 	let speechBlocked = false;
 	let blockedMessageHasSpeech = false;
@@ -416,19 +419,19 @@ export default async function (pi: ExtensionAPI) {
 	};
 	const narration = new NarrationProgress(requestNarrationRender);
 
-	const routedVoiceConfig = (claim = false): VoiceConfig => {
-		const pinnedSelection = activeDeviceId && (ownsSpeech || inputInProgress) ? activeDeviceId : deviceSelection;
-		const device = claim ? deviceRouter.claim(deviceSelection) : deviceRouter.resolve(pinnedSelection);
-		activeDeviceId = device?.id;
-		return {
-			...config,
-			output: config.output === "auto" ? (device?.audioEndpoint ?? "local") : config.output,
-			input: config.input === "auto" ? (device?.inputEndpoint ?? "local") : config.input,
-		};
-	};
+	let outputEndpoint = "disabled";
+	const routedVoiceConfig = (): VoiceConfig => ({
+		...config,
+		output: config.output === "auto" ? outputEndpoint : config.output,
+		input: config.input === "auto" ? (activeInputEndpoint ?? "disabled") : config.input,
+	});
 
 	const claimOutputDevice = (): VoiceConfig => {
-		const routed = routedVoiceConfig(true);
+		const selection = activeDeviceId ?? deviceSelection;
+		const route = deviceRouter.routeMetadata(selection, "output", config.output);
+		outputEndpoint = route.endpoint;
+		if (route.kind === "device") deviceRouter.claim(selection);
+		const routed = routedVoiceConfig();
 		refreshStatus();
 		return routed;
 	};
@@ -1335,15 +1338,18 @@ const chargeBackfillUnit = (): boolean => {
 						event.utterance === pausedOwnerUtterance ||
 						event.utterance === projectPrefixUtterance)
 				) {
-					playbackPaused = false;
-					pausedOwnerUtterance = undefined;
+					attentionSuppressed = true;
+					deviceRetryRequired = true;
+					queuedPausedMessages.length = 0;
+					coordinator?.setAttentionEnabled(false);
+					const cancelId = clearPlaybackTransport();
 					if (speechPurpose === "turn" && !ownerTurnEnded) {
 						speechBlocked = true;
 						blockedSpeechText = ownedSpeechText;
 						blockedMessageHasSpeech = hasSpeakableAudio(ownedSpeechText);
 					}
 					ownerTurnEnded = true;
-					if (ownsSpeech) releaseSpeechOwnership(false);
+					if (ownsSpeech) releaseAfterTransportCancellation(cancelId, false);
 				}
 				state = "error";
 				if (event.message !== lastError) {
@@ -1584,9 +1590,18 @@ const chargeBackfillUnit = (): boolean => {
 	const activateSpeechOwnership = (
 		purpose: "turn" | "replay",
 		announceProject: boolean,
+		output = true,
 	): boolean => {
+		try { if (output) claimOutputDevice(); } catch (error) {
+			attentionSuppressed = true;
+			deviceRetryRequired = true;
+			const cancelId = clearPlaybackTransport();
+			if (ownsSpeech) releaseAfterTransportCancellation(cancelId, false);
+			else coordinator?.releaseSpeech();
+			activeContext?.ui.notify(`Voice device: ${error instanceof Error ? error.message : String(error)}`, "error");
+			return false;
+		}
 		if (!coordinator) return true;
-		claimOutputDevice();
 		if (voiceWorkerIdleTimer) clearTimeout(voiceWorkerIdleTimer);
 		voiceWorkerIdleTimer = null;
 		cancelTimingWorkers();
@@ -1614,14 +1629,14 @@ const chargeBackfillUnit = (): boolean => {
 	};
 
 	const acquireSpeech = (purpose: "turn" | "replay", announceProject = true): boolean => {
-		if (attentionSuppressed || !interactiveVoiceSession) return false;
+		if (attentionSuppressed || deviceRetryRequired || !interactiveVoiceSession || deviceRebind) return false;
 		if (!coordinator) return true;
 		const alreadyOwned = ownsSpeech && coordinator.ownsSpeech();
 		if (!alreadyOwned && !coordinator.tryAcquireSpeech()) return false;
 		return activateSpeechOwnership(purpose, announceProject);
 	};
 
-	const forceAcquireSpeech = async (purpose: "turn" | "replay", announceProject = true): Promise<boolean> => {
+	const forceAcquireSpeech = async (purpose: "turn" | "replay", announceProject = true, output = true): Promise<boolean> => {
 		const owner = coordinator;
 		const epoch = playbackRequestEpoch;
 		const captureEpoch = inputEpoch;
@@ -1629,7 +1644,7 @@ const chargeBackfillUnit = (): boolean => {
 		const alreadyOwned = ownsSpeech && owner.ownsSpeech();
 		if (!alreadyOwned && !(await owner.forceAcquireSpeech())) return false;
 		if (owner !== coordinator || epoch !== playbackRequestEpoch || captureEpoch !== inputEpoch || !interactiveVoiceSession) return false;
-		return activateSpeechOwnership(purpose, announceProject);
+		return activateSpeechOwnership(purpose, announceProject, output);
 	};
 
 	const announceProjectForSpeech = (): void => {
@@ -1646,7 +1661,7 @@ const chargeBackfillUnit = (): boolean => {
 	const reserveSpeechForInput = async (dictation = false): Promise<boolean> => {
 		if (!dictation && !config.enabled) return true;
 		if (!coordinator) return true;
-		if (!(await forceAcquireSpeech("turn", false))) return false;
+		if (!(await forceAcquireSpeech("turn", false, false))) return false;
 		speechReservedForInput = true;
 		projectAnnouncementPending = !coordinator.attentionIsCurrent();
 		return true;
@@ -1695,7 +1710,7 @@ const chargeBackfillUnit = (): boolean => {
 	};
 
 	const pollWaitingAttention = (): void => {
-		if (!coordinator) return;
+		if (!coordinator || deviceRebind || deviceRetryRequired) return;
 		if (ownsSpeech && coordinator.consumeSpeechPreemptionRequest()) {
 			handleSpeechPreemption();
 		}
@@ -1720,13 +1735,60 @@ const chargeBackfillUnit = (): boolean => {
 		// Announcements never interrupt a transport or announce our own response.
 		const waiting = coordinator.tryAcquireWaitingAnnouncement();
 		if (!waiting) return;
-		claimOutputDevice();
+		try { claimOutputDevice(); } catch (error) {
+			coordinator.releaseSpeech();
+			attentionSuppressed = true;
+			deviceRetryRequired = true;
+			activeContext?.ui.notify(`Voice device: ${error instanceof Error ? error.message : String(error)}`, "error");
+			return;
+		}
 		if (voiceWorkerIdleTimer) clearTimeout(voiceWorkerIdleTimer);
 		voiceWorkerIdleTimer = null;
 		cancelTimingWorkers();
 		ownsSpeech = true;
 		completingOwnerSpeech = false;
 		speakAttentionNotification(waiting);
+	};
+
+	let deviceRebind: Promise<void> | undefined;
+	// Persist only session metadata. Reattachment alone never changes an existing pin.
+	const adoptCurrentConnection = async (epoch: number, force = false): Promise<boolean> => {
+		if (!force && (deviceSelection === "local" || config.output !== "auto")) {
+			deviceRetryRequired = false;
+			return true;
+		}
+		const ctx = activeContext;
+		try {
+			if (deviceRebind) await deviceRebind;
+			if (epoch !== playbackRequestEpoch || ctx !== activeContext) return false;
+			const connection = await deviceRouter.resolveCurrentConnection();
+			if (epoch !== playbackRequestEpoch || ctx !== activeContext || !interactiveVoiceSession) return false;
+			const selection = connection.kind === "device" ? connection.id : "local";
+			// Pin identity even if its registration is temporarily absent; operations validate their own direction.
+			// A reconnect is metadata adoption, never a readiness claim.
+			if (selection !== (activeDeviceId ?? deviceSelection) && (ownsSpeech || inputInProgress)) {
+				// Termination, not a TCP accept or a cancellation timeout, proves the old sink is gone.
+				const stopping = Promise.all([vocalizer.shutdown(), cancelActiveInput()]).then(() => {});
+				deviceRebind = stopping;
+				try { await stopping; } finally { if (deviceRebind === stopping) deviceRebind = undefined; }
+				if (epoch !== playbackRequestEpoch || ctx !== activeContext) return false;
+				pausedOwnerUtterance = undefined;
+				lastOwnerUtterance = undefined;
+			}
+			if (force) deviceSelection = "auto";
+			activeDeviceId = selection;
+			deviceRouter.setEnvironmentDevice(connection.kind === "device" ? connection.id : undefined);
+			pi.appendEntry(DEVICE_SELECTION_ENTRY, { version: 1, selection: deviceSelection, pin: selection });
+			if (!force && selection !== "local") await deviceRouter.route(selection, "output", config.output);
+			if (epoch !== playbackRequestEpoch || ctx !== activeContext) return false;
+			deviceRetryRequired = false;
+			return true;
+		} catch (error) {
+			if (epoch !== playbackRequestEpoch || ctx !== activeContext) return false;
+			deviceRetryRequired = true;
+			ctx?.ui.notify(`Voice device: ${error instanceof Error ? error.message : String(error)} Explicitly reconnect/retry.`, "error");
+			return false;
+		}
 	};
 
 	const playTarget = async (
@@ -1783,6 +1845,16 @@ const chargeBackfillUnit = (): boolean => {
 			if (pendingReplay !== request || request.epoch !== playbackRequestEpoch) return;
 		}
 
+		if (deviceRebind) await deviceRebind;
+		if (!queued && !request.paused && !await adoptCurrentConnection(request.epoch)) {
+			if (pendingReplay === request) {
+				pendingReplay = undefined;
+				vocalizer.setPlaybackPaused(true);
+				playbackPaused = true;
+			}
+			return;
+		}
+		if (pendingReplay !== request || request.epoch !== playbackRequestEpoch) return;
 		let acquired = true;
 		let newlyAcquired = false;
 		if (coordinator && !(ownsSpeech && coordinator.ownsSpeech())) {
@@ -1810,7 +1882,10 @@ const chargeBackfillUnit = (): boolean => {
 			return;
 		}
 
-		activateSpeechOwnership(continueLiveTurn ? "turn" : "replay", true);
+		if (!activateSpeechOwnership(continueLiveTurn ? "turn" : "replay", true)) {
+			pendingReplay = undefined;
+			return;
+		}
 		pendingReplay = undefined;
 		liveTurnNarrationActive = continueLiveTurn;
 		if (continueLiveTurn) {
@@ -2146,8 +2221,21 @@ const chargeBackfillUnit = (): boolean => {
 			void cancelActiveInput();
 			return;
 		}
-		const routed = claimOutputDevice();
+		const captureEpoch = inputPhase === "idle" ? ++inputEpoch : inputEpoch;
+		if (inputPhase === "idle") beginInputProgress();
+		let routed: VoiceConfig;
+		try {
+			const route = await deviceRouter.route(activeDeviceId ?? deviceSelection, "input", config.input);
+			if (talkEpoch !== contextEpoch || captureEpoch !== inputEpoch) return;
+			routed = { ...config, input: route.endpoint };
+		} catch (error) {
+			if (captureEpoch !== inputEpoch) return;
+			clearInputProgress();
+			ctx.ui.notify(`Voice microphone: ${error instanceof Error ? error.message : String(error)}`, "error");
+			return;
+		}
 		if (routed.input === "disabled") {
+			clearInputProgress();
 			ctx.ui.notify("Voice microphone input is disabled", "warning");
 			return;
 		}
@@ -2164,8 +2252,6 @@ const chargeBackfillUnit = (): boolean => {
 			ctx.ui.notify("The previous voice recording is still being transcribed", "info");
 			return;
 		}
-		const captureEpoch = ++inputEpoch;
-		beginInputProgress();
 		cancelTimingWorkers();
 		const playbackCancelId = clearPlaybackTransport();
 		narration.finish();
@@ -2347,6 +2433,7 @@ const chargeBackfillUnit = (): boolean => {
 		clearPlaybackTransport();
 		ownsSpeech = false;
 		attentionSuppressed = false;
+		deviceRetryRequired = false;
 		disabledAttentionPending = false;
 		queueIncomingWhilePaused = false;
 		queuedPausedMessages.length = 0;
@@ -2362,8 +2449,15 @@ const chargeBackfillUnit = (): boolean => {
 		coordinator.setSessionName(pi.getSessionName());
 		coordinator.start();
 		coordinator.setAttentionEnabled(config.enabled);
-		deviceSelection = sessionDeviceSelection(ctx);
-		activeDeviceId = deviceRouter.resolve(deviceSelection)?.id;
+		const savedDevice = sessionDeviceSelection(ctx);
+		deviceSelection = savedDevice.selection;
+		activeDeviceId = savedDevice.pin ?? (deviceSelection === "auto" || deviceSelection === "local" ? undefined : deviceSelection);
+		deviceRouter.setEnvironmentDevice(undefined);
+		if (deviceSelection === "auto" && !activeDeviceId) {
+			const epoch = playbackRequestEpoch;
+			await adoptCurrentConnection(epoch, true);
+			if (epoch !== playbackRequestEpoch || activeContext !== ctx) return;
+		}
 		inputProgressMessage = undefined;
 		// Remove progress widgets from versions before the unified, ordered display.
 		ctx.ui.setWidget("pi-voice-input", undefined);
@@ -2729,8 +2823,7 @@ const chargeBackfillUnit = (): boolean => {
 		return true;
 	};
 
-	// Future device repinning must distinguish resume/navigation from pause-only
-	// F8 here, and must not repin automatic queued speech in playTarget().
+	// Resolve identity after preview, never in this shared scroll/control path.
 	const preparePlaybackAction = async (ctx: ExtensionContext, pauseResume = false): Promise<number | undefined> => {
 		if (!requireEnabledVoice(ctx)) return;
 		const epoch = ++playbackRequestEpoch;
@@ -2745,7 +2838,7 @@ const chargeBackfillUnit = (): boolean => {
 		return epoch === playbackRequestEpoch && interactiveVoiceSession ? epoch : undefined;
 	};
 
-	const replaySelected = async (ctx: ExtensionContext): Promise<void> => {
+	const replaySelected = async (ctx: ExtensionContext, automatic = false): Promise<void> => {
 		const request = await preparePlaybackAction(ctx);
 		if (request === undefined || !await preparePlaybackMessages(ctx, request) || request !== playbackRequestEpoch) return;
 		syncPlaybackMessages(ctx, pausedForAttention);
@@ -2755,12 +2848,12 @@ const chargeBackfillUnit = (): boolean => {
 			return;
 		}
 		playbackPaused = false;
-		playTarget(target, !playbackHistory.hasCompleteTimingFor(target.id), true);
+		playTarget(target, !playbackHistory.hasCompleteTimingFor(target.id), true, automatic);
 	};
 
 	playRequestedAttention = ctx => {
 		pausedForAttention = true;
-		replaySelected(ctx);
+		replaySelected(ctx, true);
 	};
 
 	const attendNextProject = async (ctx: ExtensionContext): Promise<void> => {
@@ -2865,6 +2958,11 @@ const chargeBackfillUnit = (): boolean => {
 			if (requestEpoch === undefined || requestEpoch !== playbackRequestEpoch) return;
 			if (pendingReplay) {
 				const request = pendingReplay;
+				if (request.paused) {
+					playbackPaused = false;
+					void playTarget(request.target, request.recordTimings, request.previewTarget);
+					return;
+				}
 				request.paused = !request.paused;
 				playbackPaused = request.paused;
 				vocalizer.setPlaybackPaused(request.paused);
@@ -2886,6 +2984,10 @@ const chargeBackfillUnit = (): boolean => {
 			restoreBottomAfterSpeech = false;
 			bottomPinned = false;
 			if (playbackPaused) {
+				armNarrationFollow();
+				flushNarrationRender();
+				requestNarrationAutoScroll(true);
+				if (!await adoptCurrentConnection(requestEpoch) || requestEpoch !== playbackRequestEpoch) return;
 				playbackPaused = false;
 				if (speechPurpose === "notification" && completedOwnerUtterance === pausedOwnerUtterance) {
 					vocalizer.setPlaybackPaused(false);
@@ -3030,6 +3132,7 @@ const chargeBackfillUnit = (): boolean => {
 				"audio-cache",
 				"audio-bitrate",
 				"device",
+				"reconnect",
 			];
 			const parts = prefix.trimStart().split(/\s+/);
 			if (parts.length <= 1) {
@@ -3064,7 +3167,7 @@ const chargeBackfillUnit = (): boolean => {
 			}
 			if (parts[0] === "device") {
 				return [
-					{ value: "device auto", label: "auto", description: "Use this SSH client, then the latest connected device" },
+					{ value: "device auto", label: "auto", description: "Pin the current connection; never fall back to another device" },
 					{ value: "device local", label: "local", description: "Use devices on the machine running Pi" },
 					...deviceRouter.connected().map(device => ({
 						value: `device ${device.id}`,
@@ -3217,9 +3320,17 @@ const chargeBackfillUnit = (): boolean => {
 					edit: () => config.editMode,
 				};
 				if (normalizedAction === "device" || normalizedAction === "output" || normalizedAction === "input") {
-					// routedVoiceConfig updates activeDeviceId; resolve without claiming or pinning here.
-					const selection = activeDeviceId && (ownsSpeech || inputInProgress) ? activeDeviceId : deviceSelection;
-					const device = deviceRouter.resolve(selection);
+					// Metadata only: no attachment lookup, claim, transport, or selection mutation.
+					const selection = activeDeviceId ?? deviceSelection;
+					if (normalizedAction !== "device" && config[normalizedAction] !== "auto") {
+						ctx.ui.notify(`${normalizedAction}: ${config[normalizedAction]} → ${config[normalizedAction]}`, "info");
+						return;
+					}
+					let device;
+					try { device = deviceRouter.resolve(selection); } catch (error) {
+						ctx.ui.notify(`${normalizedAction}: ${normalizedAction === "device" ? selection : config[normalizedAction]} → unavailable (${error instanceof Error ? error.message : String(error)}); metadata only`, "info");
+						return;
+					}
 					const current = normalizedAction === "device"
 						? `${deviceSelection} → ${device ? `${device.id} (${device.name})` : "local"}`
 						: `${config[normalizedAction]} → ${normalizedAction === "output"
@@ -3326,6 +3437,20 @@ const chargeBackfillUnit = (): boolean => {
 					ctx.ui.notify(`Final ASR candidate count set to ${count}`, "info");
 					return;
 				}
+				case "reconnect": {
+					const epoch = ++playbackRequestEpoch;
+					pendingReplay = undefined;
+					if (ownsSpeech) {
+						playbackPaused = true;
+						vocalizer.setPlaybackPaused(true);
+					}
+					if (await adoptCurrentConnection(epoch, true)) {
+						playbackPaused = ownsSpeech;
+						vocalizer.setPlaybackPaused(playbackPaused);
+						ctx.ui.notify(`Voice pinned to ${activeDeviceId ?? deviceSelection}; no playback started (metadata only)`, "info");
+					}
+					return;
+				}
 				case "device": {
 					const requested = value.trim();
 					if (
@@ -3342,10 +3467,15 @@ const chargeBackfillUnit = (): boolean => {
 					releaseAfterTransportCancellation(cancelId);
 					deviceSelection = requested;
 					pi.appendEntry(DEVICE_SELECTION_ENTRY, { version: 1, selection: requested });
-					const device = deviceRouter.claim(deviceSelection);
-					activeDeviceId = device?.id;
+					activeDeviceId = undefined;
+					if (requested === "auto" && !await adoptCurrentConnection(playbackRequestEpoch, true)) return;
+					let device;
+					try { device = deviceRouter.resolve(activeDeviceId ?? deviceSelection); } catch (error) {
+						ctx.ui.notify(`Voice device: ${error instanceof Error ? error.message : String(error)}`, "warning");
+						return;
+					}
 					ctx.ui.notify(
-						device ? `Voice device set to ${device.name}` : "Voice device set to local input/output",
+						device ? `Voice device set to ${device.name} (metadata only)` : "Voice device set to local input/output",
 						"info",
 					);
 					refreshStatus();
@@ -3704,7 +3834,8 @@ const chargeBackfillUnit = (): boolean => {
 					coordinator?.setAttentionEnabled(true);
 					clearPlaybackTransport();
 					narration.finish();
-					if (!await preparePlaybackAction(ctx)) return;
+					const epoch = await preparePlaybackAction(ctx);
+					if (epoch === undefined || !await adoptCurrentConnection(epoch)) return;
 					if (!(await forceAcquireSpeech("replay", true))) return;
 					ownerContentExpected = true;
 					announceProjectForSpeech();
@@ -3725,7 +3856,7 @@ const chargeBackfillUnit = (): boolean => {
 					return;
 				default:
 					ctx.ui.notify(
-						"Usage: /voice [on|off|toggle|status|stop|setup|test|talk|attention|mode|voice|speed|tts-model|tts-dtype|tts-workers|stt-model|stt-dtype|stt-candidates|alignment-model|alignment-dtype|edit-model|highlight|autoscroll|scroll-to|bottom|timing|code-narration|code-budget|code-retry|code-preprocess|timing-preprocess|audio-cache|audio-bitrate|device|output|input|shortcut|submit|edit]",
+						"Usage: /voice [on|off|toggle|status|stop|setup|test|talk|attention|mode|voice|speed|tts-model|tts-dtype|tts-workers|stt-model|stt-dtype|stt-candidates|alignment-model|alignment-dtype|edit-model|highlight|autoscroll|scroll-to|bottom|timing|code-narration|code-budget|code-retry|code-preprocess|timing-preprocess|audio-cache|audio-bitrate|device|reconnect|output|input|shortcut|submit|edit]",
 						"error",
 					);
 			}

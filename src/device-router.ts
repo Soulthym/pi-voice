@@ -169,6 +169,11 @@ export class DeviceRouter {
 		direction: DeviceDirection,
 		configured = "auto",
 	): Promise<DeviceRoute> {
+		return this.routeMetadata(selection, direction, configured);
+	}
+
+	/** Same metadata decision for synchronous worker configuration callbacks. No transport I/O. */
+	routeMetadata(selection: VoiceDeviceSelection, direction: DeviceDirection, configured = "auto"): DeviceRoute {
 		if (configured === "disabled") return { kind: "disabled", endpoint: "disabled" };
 		if (configured === "local" || (configured === "auto" && selection === "local")) return { kind: "intentional_local", endpoint: "local" };
 		if (configured !== "auto") return { kind: "custom", endpoint: configured };

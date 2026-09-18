@@ -87,5 +87,7 @@ test("worker events drive speaking styling, idle completion, and error notices",
 	const errorCountBefore = host.notices.filter(notice => notice.message.startsWith("Voice mode:")).length;
 	instance!.emit({ type: "error", message: "synthesis exploded", utterance: failed.utterance } as never);
 	assert.equal(host.notices.filter(notice => notice.message.startsWith("Voice mode:")).length, errorCountBefore + 1);
+	// Cancellation acknowledgement releases the lease asynchronously.
+	await new Promise(resolve => setImmediate(resolve));
 	await assert.rejects(fs.stat(path.join(root, "coordinator", "speech.lock", "lease.json")));
 });

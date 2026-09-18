@@ -2,17 +2,15 @@
 
 [← README](../README.md) · [Installation](installation.md) · [Endpoint protocol](endpoint-protocol.md)
 
-## Routing order
+## Session pinning
 
-With `input`/`output` set to `auto`, Pi Voice selects:
+With `input`/`output` set to `auto`, a new session pins its current connection's device. Reloading/resuming a session restores its saved pin; merely attaching another client does not change it. Pins are stored in the existing session device entry, never global configuration. A genuinely local, non-SSH/non-tmux connection can pin local I/O.
 
-1. the device ID inherited by the current `pi-voice-ssh` session;
-2. the most recently active connected client;
-3. local Linux or Termux devices on the Pi host.
+`/voice reconnect` adopts the **current attachment** without starting playback. Replay, resume, playback-requesting navigation and `/voice test` also adopt the current connection before speaking. Pause-only and paused navigation do not look up or change identity; navigation previews remain immediate. Automatic narration, dictation and attention use the existing pin. An active old transport is terminated before rebinding; reconnect leaves playback paused.
 
-Explicit `/voice device local` pins the session locally. `/voice device <id>` pins a registered client. Output-producing keybindings and voice commands claim the selected device and update its activity time. A device remains pinned during active speech or microphone capture so a newly connected client cannot move an utterance mid-stream.
+There is **no fallback** to another client or host I/O when the pin is missing or the connection identity is unavailable/ambiguous. Transport failures stop the affected operation: reconnect/fix the client and explicitly retry. `/voice device`, `/voice output` and `/voice input` without arguments are read-only metadata reports: a listed registration or endpoint does **not** mean connected or ready. Routing never opens a test socket (even an empty connection can kill an existing client player); SSH accepting a reverse connection does not prove client readiness.
 
-Explicit `local`, `disabled`, `tcp://…`, and `unix:///…` endpoint settings bypass automatic routing.
+Explicit `/voice device local` selects local I/O; `/voice device <id>` selects a registered client until an explicit playback action repins it. Explicit `local`, `disabled`, `tcp://…`, and `unix:///…` endpoint settings bypass automatic routing for that direction. `/voice reconnect` resets the device selection to auto with the new pin, but does not change endpoint settings.
 
 ## Managed SSH topology
 
@@ -56,7 +54,7 @@ Copy this file when migrating a client if it should retain the same explicit dev
 
 `PI_VOICE_DEVICE_NAME` controls the human-readable registered name. The default is the short hostname, with ` (Termux)` appended on Android.
 
-The wrapper exports `PI_VOICE_DEVICE_ID` into the remote shell so Pi can prefer the current client's device. Existing multiplexer processes may preserve an older environment; most-recently-active routing and `/voice device <id>` provide fallbacks.
+The wrapper exports `PI_VOICE_DEVICE_ID` and target identity into the remote shell. Direct SSH uses that connection's environment. For tmux, Pi reads the current attached client's identity using the pane/socket and checks that the attachment did not change during lookup; it does not trust the long-lived Pi process's startup device ID. Multiple clients, no attached client, unreadable identity, or unresolved nested tmux fail closed rather than guessing.
 
 ## Wrapper syntax
 
@@ -83,7 +81,7 @@ Set `PI_VOICE_SSH_DRY_RUN=1` to print resolved identity/platform/target informat
 
 ## Legacy bridge compatibility
 
-If no managed registration exists but loopback listeners are present on ports 8765 and 8766, automatic routing exposes a `legacy-loopback` Termux device. This permits old fixed-port wrappers to keep working during migration. New installations use managed per-device dynamic TCP forwards. Existing Unix-socket registrations remain readable for compatibility; exit all old wrappers before upgrading.
+If loopback listeners are present on ports 8765 and 8766, the device menu can expose a `legacy-loopback` Termux candidate for explicit selection. Automatic routing never falls back to this candidate. New installations use managed per-device dynamic TCP forwards. Existing Unix-socket registrations remain readable for compatibility; exit all old wrappers before upgrading.
 
 ## Multiple Pi sessions
 
@@ -93,7 +91,7 @@ Interactive TUI sessions coordinate through `~/.cache/pi-voice/coordinator`:
 - tool-only and headless child/subagent sessions do not request attention;
 - waiting responses never start automatically;
 - manual input and playback controls can preempt ownership;
-- F11 and `/voice attention` route cross-process requests to waiting sessions;
+- F11/↺ and `/voice attention` replay this project's response; queued attention does not interrupt current speech;
 - paused sessions remain paused until explicit user action.
 
 Project labels use the root directory name and add the shortest parent suffix needed to distinguish duplicates.
