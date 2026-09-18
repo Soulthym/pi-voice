@@ -341,9 +341,11 @@ export class SessionCoordinator {
 		}
 	}
 
-	shutdown(): void {
+	shutdown(deferRelease = false): void {
 		this.#stopped = true;
 		this.cancelSpeechAcquisition();
+		// Keep presence and leases live until the transports acknowledge shutdown.
+		if (deferRelease) return;
 		if (this.#heartbeat) clearInterval(this.#heartbeat);
 		this.#heartbeat = undefined;
 		this.releaseSpeech();

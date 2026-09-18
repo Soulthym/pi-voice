@@ -1471,6 +1471,10 @@ const chargeBackfillUnit = (): boolean => {
 		cancelPendingDictation = undefined;
 		finishPendingDictation = undefined;
 		const cancelled = phoneInput.cancel();
+		if (speechReservedForInput) {
+			speechReservedForInput = false;
+			if (lastOwnerUtterance === undefined) releaseAfterTransportCancellation(undefined, false, cancelled);
+		}
 		activeInputEndpoint = undefined;
 		clearInputProgress();
 		return cancelled;
@@ -1557,8 +1561,10 @@ const chargeBackfillUnit = (): boolean => {
 		completingOwnerSpeech = true;
 		if (speechPurpose === "notification") {
 			if (pendingNotification) coordinator?.markAnnounced(pendingNotification.instanceId);
-			relinquishSpeech();
-			return;
+			if (queuedPausedMessages.length === 0) {
+				relinquishSpeech();
+				return;
+			}
 		}
 		completingOwnerSpeech = false;
 		const queued = queuedPausedMessages.shift();
@@ -1769,6 +1775,7 @@ const chargeBackfillUnit = (): boolean => {
 		} else requestNarrationRender();
 		refreshPlaybackTimeline();
 
+		const continueLiveTurn = queued && queueIncomingWhilePaused && livePlaybackId === target.id;
 		const displacedLiveTurn = ownsSpeech && speechPurpose === "turn" && !ownerTurnEnded;
 		const displacedLiveText = displacedLiveTurn ? ownedSpeechText : "";
 		if (inputInProgress) {
@@ -1803,10 +1810,14 @@ const chargeBackfillUnit = (): boolean => {
 			return;
 		}
 
-		activateSpeechOwnership("replay", true);
+		activateSpeechOwnership(continueLiveTurn ? "turn" : "replay", true);
 		pendingReplay = undefined;
-		liveTurnNarrationActive = false;
-		if (displacedLiveTurn) {
+		liveTurnNarrationActive = continueLiveTurn;
+		if (continueLiveTurn) {
+			queueIncomingWhilePaused = false;
+			ownedSpeechText = target.text;
+		}
+		if (displacedLiveTurn && !continueLiveTurn) {
 			// Keep the streaming response independent from this completed snapshot.
 			// Later deltas are collected for attention instead of joining replay audio.
 			speechBlocked = true;
@@ -1832,8 +1843,11 @@ const chargeBackfillUnit = (): boolean => {
 		refreshPlaybackTimeline();
 		ownerContentExpected = hasSpeakableAudio(suffix);
 		if (ownerContentExpected) announceProjectForSpeech();
-		vocalizer.speakFrom(suffix, sourceOffset, target.skipUnits ?? 0);
-		ownerTurnEnded = true;
+		if (continueLiveTurn) {
+			vocalizer.setNarrationSourceOffset(sourceOffset);
+			vocalizer.pushDelta(suffix);
+		} else vocalizer.speakFrom(suffix, sourceOffset, target.skipUnits ?? 0);
+		ownerTurnEnded = !continueLiveTurn;
 		completeOwnerSpeech();
 	};
 
@@ -2048,7 +2062,7 @@ const chargeBackfillUnit = (): boolean => {
 	// Dirty current assets keep their lease and frozen target, but cannot resume
 	// their obsolete sink. Explicit resume rebuilds with the current dependencies.
 	const pauseDirtyPlayback = (): void => {
-		if (!ownsSpeech && !pendingReplay) return;
+		if ((!ownsSpeech || speechReservedForInput) && !pendingReplay) return;
 		if (speechPurpose === "turn" && !ownerTurnEnded) {
 			queueIncomingWhilePaused = true;
 			if (livePlaybackId) playbackHistory.updateText(livePlaybackId, ownedSpeechText);
@@ -2155,8 +2169,12 @@ const chargeBackfillUnit = (): boolean => {
 		cancelTimingWorkers();
 		const playbackCancelId = clearPlaybackTransport();
 		narration.finish();
+		const leaseEpoch = speechLeaseEpoch;
 		await waitForTransportCancellation(playbackCancelId);
-		if (captureEpoch !== inputEpoch || talkEpoch !== contextEpoch) return;
+		if (captureEpoch !== inputEpoch || talkEpoch !== contextEpoch) {
+			if (talkEpoch === contextEpoch && leaseEpoch === speechLeaseEpoch) releaseSpeechOwnership(false);
+			return;
+		}
 		releaseSpeechOwnership(false);
 		const reserved = await reserveSpeechForInput(true);
 		if (captureEpoch !== inputEpoch || talkEpoch !== contextEpoch) return;
@@ -2392,7 +2410,7 @@ const chargeBackfillUnit = (): boolean => {
 		clearPlaybackTransport();
 		const retiringCoordinator = coordinator;
 		coordinator = null;
-		retiringCoordinator?.shutdown();
+		retiringCoordinator?.shutdown(true);
 		cancelPendingDictation?.();
 		if (interactiveVoiceSession) persistPendingDescriptions();
 		if (descriptionPersistTimer) clearImmediate(descriptionPersistTimer);
@@ -2403,6 +2421,7 @@ const chargeBackfillUnit = (): boolean => {
 		contextEpoch += 1;
 		if (!interactiveVoiceSession) {
 			activeContext = null;
+			retiringCoordinator?.shutdown();
 			return;
 		}
 		interactiveVoiceSession = false;
@@ -2437,6 +2456,7 @@ const chargeBackfillUnit = (): boolean => {
 		const inputCancelled = cancelActiveInput();
 		const workers = timingWorkers.splice(0);
 		await Promise.all([inputCancelled, ...workers.map(worker => worker.terminate()), vocalizer.shutdown()]);
+		retiringCoordinator?.shutdown();
 		if (!interactiveVoiceSession) ownsSpeech = false;
 	});
 
@@ -2867,6 +2887,11 @@ const chargeBackfillUnit = (): boolean => {
 			bottomPinned = false;
 			if (playbackPaused) {
 				playbackPaused = false;
+				if (speechPurpose === "notification" && completedOwnerUtterance === pausedOwnerUtterance) {
+					vocalizer.setPlaybackPaused(false);
+					completeOwnerSpeech();
+					return;
+				}
 				if (pausedOwnerUtterance === undefined || completedOwnerUtterance === pausedOwnerUtterance) {
 					const target = playbackHistory.resumeTarget();
 					if (target) playTarget(target, false, false, true);
