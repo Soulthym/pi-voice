@@ -839,8 +839,9 @@ lines.on("line", line => {
 			});
 			break;
 		case "transcribe":
+		case "transcribe-pcm":
 			enqueue({
-				type: "transcribe",
+				type: message.type,
 				requestId: message.requestId,
 				audio: message.audio,
 				model: message.model ?? DEFAULT_STT_MODEL,
@@ -849,15 +850,6 @@ lines.on("line", line => {
 					Number.isInteger(message.candidateCount) && message.candidateCount >= 1 && message.candidateCount <= 8
 						? message.candidateCount
 						: 1,
-			});
-			break;
-		case "transcribe-pcm":
-			enqueue({
-				type: "transcribe-pcm",
-				requestId: message.requestId,
-				audio: message.audio,
-				model: message.model ?? DEFAULT_STT_MODEL,
-				dtype: message.dtype ?? DEFAULT_STT_DTYPE,
 			});
 			break;
 		case "pause":
