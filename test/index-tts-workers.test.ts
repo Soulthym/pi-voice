@@ -44,15 +44,38 @@ test("real tts-workers command persists and reaches the worker protocol without 
 		await fs.rm(root, { recursive: true, force: true });
 	});
 	await host.start();
+	const query = async (expected: number) => {
+		const configBefore = await fs.readFile(env.PI_VOICE_CONFIG, "utf8");
+		const statBefore = await fs.stat(env.PI_VOICE_CONFIG);
+		const packetsBefore = packets.length;
+		const spawnedBefore = spawned;
+		const entriesBefore = JSON.stringify(host.entries);
+		const widgetsBefore = host.widgetOperations.length;
+		for (const command of ["tts-workers", "tts-worker", " TTS-WORKER  "]) {
+			await host.command(command);
+			assert.deepEqual(host.notices.at(-1), { message: `tts-workers concurrency: ${expected}`, level: "info" });
+		}
+		assert.equal(await fs.readFile(env.PI_VOICE_CONFIG, "utf8"), configBefore);
+		assert.equal((await fs.stat(env.PI_VOICE_CONFIG)).mtimeMs, statBefore.mtimeMs, "queries must not save config");
+		assert.equal(packets.length, packetsBefore, "no worker or playback commands");
+		assert.equal(spawned, spawnedBefore, "no workers started");
+		assert.equal(JSON.stringify(host.entries), entriesBefore);
+		assert.equal(host.widgetOperations.length, widgetsBefore);
+	};
+	await query(8);
 	await host.command("tts-workers 2");
+	await query(2);
 	assert.equal(spawned, 0, "idle setting must not spawn models");
 	assert.equal(JSON.parse(await fs.readFile(env.PI_VOICE_CONFIG, "utf8")).ttsWorkers, 2);
 	const command = host.commands.get("voice") as any;
 	assert.deepEqual(command.getArgumentCompletions("tts-workers ").map((item: any) => item.label), ["1", "2", "3", "4", "5", "6", "7", "8"]);
 	assert.ok(command.getArgumentCompletions("tts-w").some((item: any) => item.value === "tts-workers"));
-	for (const value of ["", "0", "9", "1.5", "NaN", "2 extra"]) {
-		await host.command(`tts-workers ${value}`);
-		assert.match(host.notices.at(-1)!.message, /Usage:/);
+	assert.deepEqual(command.getArgumentCompletions("tts-worker ").map((item: any) => item.label), ["1", "2", "3", "4", "5", "6", "7", "8"]);
+	for (const action of ["tts-workers", "tts-worker"]) {
+		for (const value of ["0", "9", "1.5", "NaN", "2 extra"]) {
+			await host.command(`${action} ${value}`);
+			assert.match(host.notices.at(-1)!.message, /Usage:/);
+		}
 	}
 	assert.equal(JSON.parse(await fs.readFile(env.PI_VOICE_CONFIG, "utf8")).ttsWorkers, 2);
 	host.addMessage("user", null, { role: "user", content: "Hello", timestamp: 1 });
@@ -64,7 +87,9 @@ test("real tts-workers command persists and reaches the worker protocol without 
 	assert.ok(owner);
 	const before = packets.length;
 	const entries = JSON.stringify(host.entries);
-	await host.command("tts-workers 1");
+	await query(2);
+	await host.command("tts-worker 1");
+	await query(1);
 	assert.deepEqual(packets.slice(before), [{ type: "tts-workers", workers: 1 }], "no cancel, pause, resume, or regenerated segments");
 	assert.equal(JSON.stringify(host.entries), entries, "no asset metadata invalidation");
 	assert.equal(JSON.parse(await fs.readFile(leasePath, "utf8")).instanceId, owner, "speech ownership retained");

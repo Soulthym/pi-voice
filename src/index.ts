@@ -2760,6 +2760,7 @@ const chargeBackfillUnit = (): boolean => {
 				"tts-model",
 				"tts-dtype",
 				"tts-workers",
+				"tts-worker",
 				"stt-model",
 				"stt-dtype",
 				"stt-candidates",
@@ -2847,7 +2848,7 @@ const chargeBackfillUnit = (): boolean => {
 					.filter(value => value.startsWith(parts[1] ?? ""))
 					.map(value => ({ value: `code-retry ${value}`, label: value }));
 			}
-			if (parts[0] === "code-preprocess" || parts[0] === "timing-preprocess" || parts[0] === "tts-workers") {
+			if (parts[0] === "code-preprocess" || parts[0] === "timing-preprocess" || parts[0] === "tts-workers" || parts[0] === "tts-worker") {
 				const choices = ["1", "2", "3", "4", "5", "6", "7", "8"];
 				if (parts[0] === "timing-preprocess") choices.unshift("auto");
 				return choices
@@ -2930,7 +2931,7 @@ const chargeBackfillUnit = (): boolean => {
 			const args = rawArgs.trim();
 			const [action = "status", value = "", ...restArgs] = args.split(/\s+/);
 			const normalizedAction = action.toLowerCase();
-			if (!["", "status", "timing", "bottom", "tts-workers"].includes(normalizedAction)) {
+			if (!["", "status", "timing", "bottom", "tts-workers", "tts-worker"].includes(normalizedAction)) {
 				restoreBottomAfterSpeech = false;
 				bottomPinned = false;
 			}
@@ -3062,7 +3063,12 @@ const chargeBackfillUnit = (): boolean => {
 					ctx.ui.notify(`Opus audio cache bitrate set to ${bitrate} kbps`, "info");
 					return;
 				}
+				case "tts-worker":
 				case "tts-workers": {
+					if (!value && restArgs.length === 0) {
+						ctx.ui.notify(`tts-workers concurrency: ${config.ttsWorkers}`, "info");
+						return;
+					}
 					const workers = /^[1-8]$/.test(value) && restArgs.length === 0 ? normalizeWorkerCount(Number(value)) : undefined;
 					if (workers === undefined) {
 						ctx.ui.notify("Usage: /voice tts-workers <1..8>", "error");

@@ -149,9 +149,12 @@ test("TUI follows exact words, permits in-band framing, and seek/resume controls
 	// word updates cannot pull it back to the narrated position.
 	await host.command("bottom");
 	assert.equal(host.scrollView.scrollTop, 260);
-	worker!.emit({ type: "playback", utterance: replay.utterance, position: 2.25 } as never);
-	await new Promise(resolve => setTimeout(resolve, 120));
-	assert.equal(host.scrollView.scrollTop, 260);
+	for (const command of ["tts-workers", "tts-worker"]) {
+		await host.command(command);
+		worker!.emit({ type: "playback", utterance: replay.utterance, position: 2.25 } as never);
+		await new Promise(resolve => setTimeout(resolve, 120));
+		assert.equal(host.scrollView.scrollTop, 260, `${command} query must retain bottom pinning`);
+	}
 	await host.shortcut("alt+v");
 	await waitForScroll(host, 177);
 	await host.shortcut("alt+t");
