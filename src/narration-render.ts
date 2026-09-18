@@ -14,8 +14,9 @@ export function invalidateNarrationMarkdown(
 		const value = pending.pop();
 		if (!value || typeof value !== "object" || visited.has(value)) continue;
 		visited.add(value);
-		const node = value as { children?: unknown[]; text?: unknown; invalidate?: () => void; setText?: unknown };
+		const node = value as { children?: unknown[]; child?: unknown; text?: unknown; invalidate?: () => void; setText?: unknown };
 		if (Array.isArray(node.children)) pending.push(...node.children);
+		if (node.child) pending.push(node.child); // Pi wraps expanded thinking in MouseRegion.
 		// Pi Markdown stores its source in `text`; Container.invalidate() would also rebuild siblings.
 		const text = node.text;
 		if (typeof text === "string" && typeof node.setText === "function" &&

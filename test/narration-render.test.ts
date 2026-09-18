@@ -35,4 +35,13 @@ test("narration invalidates only affected Markdown, retaining historical parse c
 	transcript.render(100);
 	assert.equal(transforms, 1, "description arrival invalidates only Markdown containing its code");
 	assert.equal(invalidateNarrationMarkdown({}, new Set()), false, "unknown TUI shapes need compatibility fallback");
+	const thinking = new Markdown("Private thinking", 0, 0, theme, undefined, {
+		transform: text => { transforms++; return text; },
+	});
+	thinking.render(100);
+	transforms = 0;
+	// MouseRegion wraps thinking in a single `child`, not a Container.children array.
+	invalidateNarrationMarkdown({ children: [{ child: thinking }] }, new Set(["Private thinking"]));
+	thinking.render(100);
+	assert.equal(transforms, 1, "thinking wrapped in MouseRegion must also refresh");
 });
