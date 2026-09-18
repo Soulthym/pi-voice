@@ -11,7 +11,7 @@ Updated incrementally. Companion: `PLAN.md`. Reorganize freely while preserving 
 - Performance fixes are implemented and validated: lazy historical context, block-only render fast path, targeted Markdown-leaf invalidation, no unchanged-session timing rescans from the 200ms poll, and deduplicated progress widget updates. Added `test/index-render-cost.test.ts` and `test/narration-render.test.ts`. Typecheck and full suite pass: **149/149 tests**. Live-session latency remains unmeasured; `/reload` is required to activate extension changes.
 - Performance commit: `f504597` (149 tests/typecheck passed).
 - **Implemented and committed:** `fc521e5` fixes wrapped thinking invalidation; `7d970da` shows exact live/final ASR evidence and protects draft/cancellation ownership; `a17782e` makes description identities independent of LLM selection and preserves compatible legacy timing keys via persisted aliases.
-- **Validation:** typecheck and **159/159 tests pass**, log `/tmp/pi-voice-reviewed-tests.log` (followed by an expanded worker-routing/alignment safety test, also passing). Docs updated. Existing single-string ASR APIs remain compatible. Fresh per-event context integration and legacy assets across model changes/reload are tested.
+- **Validation:** typecheck and **160/160 tests pass**, log `/tmp/pi-voice-sentence-phase-tests.log`. Whole-sentence generation, review corrections, bounded alignment, awaited shutdown and cold-worker pause are covered. Docs updated. Existing single-string ASR APIs remain compatible. Fresh per-event context integration and legacy assets across model changes/reload are tested.
 - **Legacy limitation:** snapshots without source metadata can only be adopted when their original model/prefix hash is reconstructable under current settings. Unmatchable older hashes can require one initial regeneration; subsequent changes no longer invalidate newly stored/adopted assets.
 - **New requested follow-up, after current work:** whole-sentence or literal-newline TTS generation; benchmark sequential vs 2/3/4/... parallel sentence inference, maximize aggregate throughput subject to ≤2× ordered-output latency; convert ±10s controls to sentence/newline navigation and remove `10` from Termux button symbols. Detailed acceptance criteria and ordering are in `PLAN.md`. Whole-unit generation is committed (`8c5a05b`), the actual benchmark selected 4 workers, and long-unit alignment is bounded (`a9b0b0c`). **Production parallel scheduling and sentence navigation/Termux labels remain unfinished.**
 - Additional read-only UX audit completed with source traces/mocked reproductions; see UX-1 through UX-6 and SCROLL-4. These remain decisions, not silently applied fixes.
@@ -41,7 +41,7 @@ Latest review corrections: `eb9e9ca` forwards PCM candidate count through the re
 ### PERF-2 — Narration invalidates the entire Pi component tree every word tick
 - Status: fixed; native-Markdown regression and full suite pass.
 - `requestNarrationRender()` called root `TUI.invalidate()` every ~80ms. Pi invalidates all Markdown caches and rebuilds every assistant component in response.
-- New helper `src/narration-render.ts` traverses mounted nodes but invalidates only affected source Markdown leaves (including previous narration sources) or changed code descriptions. Full invalidation remains for actual global display setting changes and unsupported TUI shapes.
+- Helper `src/narration-render.ts` traverses mounted nodes but invalidates only affected source Markdown leaves (including previous narration sources) or changed code descriptions. Full invalidation remains for actual global display setting changes and unsupported TUI shapes.
 - Native Pi Markdown regression benchmark: 1,000 messages, **9.7ms full invalidation vs 0.7ms targeted**, and **1,000 transforms vs 1**. This excludes the extra extension-transform overhead measured in PERF-1.
 
 ### PERF-3 — Idle ownership polling rebuilds all timing identities at 5Hz
@@ -112,13 +112,18 @@ Latest review corrections: `eb9e9ca` forwards PCM candidate count through the re
 - Existing `index-auto-scroll.test.ts` exercises an oversized playback timestamp, not an actual `idle` completion. User reports surprising no-op here; needs a genuine completion test/UI inspection.
 
 ### PLAY-1 — Cold worker drops pause intent [P1]
-- Status: source-traced.
+- Status: fixed in `47f1602` as a sentence-generation startup prerequisite. Actual worker-client spawn/restart protocol test verifies pause is sent before audio; cancellation resets it.
 - `worker-client.ts` pause before process exists is discarded. F11 during handoff → F8 → ownership arrives can play audibly while UI says paused.
 - Current handoff mock records calls but misses real worker lifecycle. Preserve desired pause across startup.
 
 ### PLAY-2 — Pending replay survives shutdown [P1]
 - Status: audit delayed-handoff reproduction.
 - `index.ts` shutdown leaves `pendingReplay` valid. Late acquisition can reacquire ownership/enqueue after shutdown. Invalidate pending requests and fence async acquisition by session epoch.
+
+### PLAY-7 — Worker shutdown calls a nonexistent function [P1]
+- Status: fixed in `5961fe0` as required for safe long-unit shutdown. Real worker protocol test verifies exit waits for transport acknowledgement, stops alignment, and is idempotent across shutdown + stdin close.
+- Before the fix, `worker.mjs` shutdown case called `cancel()`, but the worker only defines `scheduleCancel()`. The resulting ReferenceError skips orderly player/alignment teardown. A mere non-awaited substitution would still exit before the asynchronous player-stop acknowledgement.
+- Future parallel inference children must join this awaited shutdown path; current regression covers player/alignment teardown.
 
 ### PLAY-3 — Input-setting change releases lease without stopping TTS [P1]
 - Status: source-traced.
@@ -234,7 +239,8 @@ Latest review corrections: `eb9e9ca` forwards PCM candidate count through the re
 - Live speech includes thinking, finalized replay source excludes it. Merely hashing voice mode does not fix replay within `all` mode.
 
 ### CACHE-8 — Non-BMP text corrupts source offsets [P2]
-- Status: audit reproduction: emoji before fence produced range 2..18 instead of UTF-16 3..19, truncating closing fence in contextual lookup.
+- Status: fixed by whole-unit source mapping in `8c5a05b`; prose and emoji-before-fence regressions verify UTF-16 slices retain the complete fence.
+- Original audit reproduction: emoji before fence produced range 2..18 instead of UTF-16 3..19, truncating closing fence in contextual lookup.
 - `speakable.ts` increments by code points; consumers slice UTF-16. Use consistent UTF-16 offsets.
 
 ### CACHE-9 — Duplicate-block retry defeats coalescing [P2]
@@ -263,12 +269,12 @@ Latest review corrections: `eb9e9ca` forwards PCM candidate count through the re
 - Fixed in `8c5a05b`: removed clause/length cuts, retain literal newline boundaries, never idle-flush unfinished prose, keep short sentences separate, and split code narration at sentences while preserving cue offsets. UTF-16 source offsets corrected along this path. Navigation and labels are still pending.
 - Timing render identity bumped to 3 and audio-generation identity to 2: one necessary format transition because old clause durations and potentially truncated audio are not compatible. LLM selection still does not invalidate descriptions or compatible assets.
 - Kokoro's ordinary `generate()` silently truncates past ~510 phonemes. Committed `sentence-audio.mjs` reuses Kokoro phonemization with truncation disabled, generates bounded native windows, and joins them before exposing a complete sentence audio unit. Shared model is not mutated; cancellation stops remaining windows. A deterministic 1,200-phoneme preservation test passes; actual short-sentence inference exercised by benchmark.
-- Actual offline long-input check: **1,302 tokens**, native windows **512/512/282**, all 1,300 non-padding tokens retained, **72.175s audio generated in 52.20s**. No audio saved. This demonstrates both intact endings and the unavoidable first-audio cost of demanding a very long sentence as one unit.
+- Actual offline long-input check: **1,302 tokens**, native windows **512/512/282**, all 1,300 non-padding tokens retained, **72.175s audio generated in 52.20s**. No audio saved. This demonstrates intact endings and the measured first-audio cost with serial internal windows; it is not a hardware-independent lower bound.
 - `a9b0b0c`: units over 30 seconds use existing duration-weighted word estimates rather than potentially unbounded quadratic CTC attention. A real-worker routing test covers both 31-second skip and 30-second alignment paths with mocked inference.
 - Important limitation: exceptionally long sentences cannot physically fit one Kokoro inference call. They can still be one atomic playback/alignment/navigation unit; internal window seams may affect prosody. No PCM is persisted.
 
 ### SENTENCE-2 — Actual offline CPU concurrency benchmark
-- New runnable script: `node scripts/benchmark-sentences.mjs`. Uses current q8 Kokoro / af_heart / speed 1, eight synthetic sentences, three warmed rounds per level, separate CPU processes, no audio playback/cache/remote downloads/provider calls. All benchmark children cleaned up.
+- Runnable script committed in `d0b0e33`: `node scripts/benchmark-sentences.mjs`. Uses current q8 Kokoro / af_heart / speed 1, eight synthetic sentences, three warmed rounds per level, separate CPU processes, no audio playback/cache/remote downloads/provider calls. All benchmark children cleaned up.
 - Output: `/tmp/pi-voice-sentence-benchmark.log`. Latency is maximum ratio of median ordered-prefix readiness to sequential (includes first playable sentence). Throughput is generated audio seconds per wall second.
 
 | Workers | Throughput | First sentence | Worst ordered latency ratio |

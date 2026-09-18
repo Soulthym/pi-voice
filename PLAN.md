@@ -48,4 +48,4 @@ Do this **after** the responsiveness/dictation/cache implementation and current 
 - [x] Audit scrolling/buttons/shortcuts; actual idle-completion F10 test passes; remaining findings await decisions.
 - [x] Audit pause/timing-generation races; unresolved control/ownership defects recorded.
 - [x] Implement model-independent reuse and audit remaining invalidation.
-- [x] Complete initial regression/full-suite validation and report findings (159 tests; subsequent whole-sentence safety test expanded).
+- [x] Complete initial regression/full-suite validation and report findings (160 tests, including whole-sentence safety and real worker control-path regressions).

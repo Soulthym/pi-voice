@@ -94,4 +94,9 @@ test("short sentences stay separate and source offsets use UTF-16", () => {
 	assert.deepEqual(speech(items), ["Hi.", "🦊 Done.", "Next line"]);
 	assert.equal(text.slice(items[1]!.source.start, items[1]!.source.end).trim(), "🦊 Done.");
 	assert.equal(text.slice(items[2]!.source.start, items[2]!.source.end), "Next line");
+	const fenced = "🦊\n```ts\nrun();\n```";
+	const parser = new SpeakableStream();
+	const code = [...parser.push(fenced), ...parser.flush()].find(item => item.kind === "code")!;
+	assert.equal(code.source.start, 3);
+	assert.equal(fenced.slice(code.source.start, code.source.end), "```ts\nrun();\n```");
 });
