@@ -14,6 +14,7 @@ Pi Voice reads `~/.pi/agent/pi-voice.json` by default. Unknown or invalid values
 | `speed` | `1` | `0.5..2`. |
 | `ttsModel` | `onnx-community/Kokoro-82M-v1.0-ONNX` | `kokoro-js`-compatible Hugging Face repository. |
 | `ttsDtype` | `q8` | `fp32`, `q8`, or `q4`, if supplied by the repository. |
+| `ttsWorkers` | `3` | Playback synthesis/lookahead limit, integer `1..8`; change live with `/voice tts-workers <1..8>`. Not an asset dependency. |
 | `sttModel` | `onnx-community/whisper-tiny.en` | Transformers.js ASR repository. |
 | `sttDtype` | `fp32` | `fp32`, `q8`, or `q4`. |
 | `sttCandidates` | `3` | Final ASR hypotheses, `1..8`. |
@@ -39,6 +40,8 @@ Pi Voice reads `~/.pi/agent/pi-voice.json` by default. Unknown or invalid values
 | `audioCacheBitrate` | `32` | VBR Opus target in kbps, `12..128`. |
 
 Changing model, dtype, voice, speed, narration dependencies, or cache bitrate changes render identity. Pi Voice rebuilds only affected timing/audio data.
+
+For playback concurrency, a valid persisted `ttsWorkers` wins over legacy `PI_VOICE_TTS_WORKERS`; if absent/invalid, a valid environment value is used, then `3`. Saving settings persists the effective value, so later environment changes no longer override it. Runtime changes apply to this Pi session immediately and future sessions on load, not other already-running sessions.
 
 The three shortcut settings are registered when the extension loads, so edit their JSON values and run `/reload`. The old `ctrl+e` and `alt+end` bottom defaults are migrated because Pi reserves Ctrl+E for editor line-end and compact Termux keyboards may have no End key. The current defaults avoid Ctrl, Shift, and an End key.
 

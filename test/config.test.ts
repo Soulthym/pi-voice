@@ -6,6 +6,7 @@ import test from "node:test";
 import {
 	DEFAULT_VOICE_CONFIG,
 	loadVoiceConfig,
+	saveVoiceConfig,
 	normalizeAudioCacheBitrate,
 	normalizeBackfillBudget,
 	normalizePreprocessScope,
@@ -20,6 +21,36 @@ import {
 	normalizeVoiceOutput,
 	normalizeWorkerCount,
 } from "../src/config.js";
+
+test("TTS workers validate, persist, and override the legacy environment fallback", async t => {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-voice-workers-"));
+	const previous = { config: process.env.PI_VOICE_CONFIG, workers: process.env.PI_VOICE_TTS_WORKERS };
+	const target = path.join(root, "voice.json");
+	process.env.PI_VOICE_CONFIG = target;
+	delete process.env.PI_VOICE_TTS_WORKERS;
+	t.after(async () => {
+		for (const [key, value] of [["PI_VOICE_CONFIG", previous.config], ["PI_VOICE_TTS_WORKERS", previous.workers]]) {
+			if (value === undefined) delete process.env[key!]; else process.env[key!] = value;
+		}
+		await fs.rm(root, { recursive: true, force: true });
+	});
+	assert.equal((await loadVoiceConfig()).ttsWorkers, 3);
+	process.env.PI_VOICE_TTS_WORKERS = "2";
+	assert.equal((await loadVoiceConfig()).ttsWorkers, 2);
+	for (const value of [0, 9, -1, 1.5, "4", null]) {
+		await fs.writeFile(target, JSON.stringify({ ttsWorkers: value }));
+		assert.equal((await loadVoiceConfig()).ttsWorkers, 2);
+	}
+	for (const value of ["0", "9", "1.5", "bad", ""]) {
+		process.env.PI_VOICE_TTS_WORKERS = value;
+		assert.equal((await loadVoiceConfig()).ttsWorkers, 3);
+	}
+	for (const workers of [1, 8]) {
+		await saveVoiceConfig({ ...DEFAULT_VOICE_CONFIG, ttsWorkers: workers });
+		process.env.PI_VOICE_TTS_WORKERS = "2";
+		assert.equal((await loadVoiceConfig()).ttsWorkers, workers);
+	}
+});
 
 test("normalizes preprocessing scope and backfill budget", () => {
 	assert.equal(normalizePreprocessScope("since-compaction"), "since-compaction");

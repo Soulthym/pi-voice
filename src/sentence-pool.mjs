@@ -6,7 +6,13 @@ export class SentencePool {
 	#queue = [];
 	#nextId = 0;
 	#closed = false;
-	constructor(size = 3, onEvent = () => {}) { this.size = size; this.onEvent = onEvent; }
+	constructor(size = 3, onEvent = () => {}) { this.onEvent = onEvent; this.resize(size); }
+
+	resize(size) {
+		if (!Number.isInteger(size) || size < 1 || size > 8) throw new RangeError("Sentence workers must be 1–8");
+		this.size = size;
+		this.#pump();
+	}
 
 	generate(operation) {
 		if (this.#closed) return Promise.reject(new Error("Sentence pool closed"));
@@ -47,7 +53,15 @@ export class SentencePool {
 	}
 
 	#pump() {
+		// Retire only idle models; already-started synthesis keeps its ordered result.
+		for (const slot of [...this.#workers]) {
+			if (this.#workers.length <= this.size) break;
+			if (slot.job) continue;
+			this.#workers.splice(this.#workers.indexOf(slot), 1);
+			slot.child.kill("SIGKILL");
+		}
 		while (!this.#closed && this.#queue.length) {
+			if (this.#workers.length > this.size) return;
 			let slot = this.#workers.find(worker => !worker.job);
 			if (!slot && this.#workers.length < this.size) {
 				try { slot = this.#spawn(); }

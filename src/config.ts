@@ -22,6 +22,8 @@ export interface VoiceConfig {
 	/** Hugging Face repository for kokoro-js synthesis. */
 	ttsModel: string;
 	ttsDtype: VoiceModelDtype;
+	/** Playback synthesis concurrency and sentence lookahead (1–8). */
+	ttsWorkers: number;
 	/** Hugging Face repository for Transformers.js automatic speech recognition. */
 	sttModel: string;
 	sttDtype: VoiceModelDtype;
@@ -75,6 +77,7 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
 	speed: 1,
 	ttsModel: "onnx-community/Kokoro-82M-v1.0-ONNX",
 	ttsDtype: "q8",
+	ttsWorkers: 3,
 	sttModel: "onnx-community/whisper-tiny.en",
 	sttDtype: "fp32",
 	sttCandidates: 3,
@@ -262,6 +265,8 @@ export function normalizeTalkShortcut(value: unknown): KeyId | "disabled" | unde
 }
 
 export async function loadVoiceConfig(): Promise<VoiceConfig> {
+	// Legacy environment value is a fallback, never an override of persisted settings.
+	const ttsWorkers = normalizeWorkerCount(Number(process.env.PI_VOICE_TTS_WORKERS)) ?? DEFAULT_VOICE_CONFIG.ttsWorkers;
 	try {
 		const parsed = JSON.parse(await fs.readFile(getVoiceConfigPath(), "utf8")) as Partial<VoiceConfig>;
 		return {
@@ -274,6 +279,7 @@ export async function loadVoiceConfig(): Promise<VoiceConfig> {
 					: DEFAULT_VOICE_CONFIG.speed,
 			ttsModel: normalizeModelId(parsed.ttsModel) ?? DEFAULT_VOICE_CONFIG.ttsModel,
 			ttsDtype: normalizeModelDtype(parsed.ttsDtype) ?? DEFAULT_VOICE_CONFIG.ttsDtype,
+			ttsWorkers: normalizeWorkerCount(parsed.ttsWorkers) ?? ttsWorkers,
 			sttModel: normalizeModelId(parsed.sttModel) ?? DEFAULT_VOICE_CONFIG.sttModel,
 			sttDtype: normalizeModelDtype(parsed.sttDtype) ?? DEFAULT_VOICE_CONFIG.sttDtype,
 			sttCandidates: normalizeSttCandidates(parsed.sttCandidates) ?? DEFAULT_VOICE_CONFIG.sttCandidates,
@@ -323,7 +329,7 @@ export async function loadVoiceConfig(): Promise<VoiceConfig> {
 				normalizeAudioCacheBitrate(parsed.audioCacheBitrate) ?? DEFAULT_VOICE_CONFIG.audioCacheBitrate,
 		};
 	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return { ...DEFAULT_VOICE_CONFIG };
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return { ...DEFAULT_VOICE_CONFIG, ttsWorkers };
 		throw error;
 	}
 }

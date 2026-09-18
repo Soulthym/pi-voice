@@ -25,12 +25,15 @@ Bare `/voice` is an alias for `/voice status`.
 /voice mode assistant|all|yield
 /voice voice [voice-id]
 /voice speed <0.5..2>
+/voice tts-workers <1..8>
 /voice highlight on|off
 /voice autoscroll on|off
 /voice code-narration guided|summary
 ```
 
 `assistant` streams normal assistant text. `all` includes thinking. `yield` waits for the completed final response. `guided` code narration synchronizes line/bold focus; `summary` shows and speaks a plain description. `autoscroll` persists the exact-word TUI follow setting; it defaults to `on`.
+
+`tts-workers` persists playback synthesis concurrency (default 3) and applies immediately without restarting Pi. Lowering it bounds new lookahead immediately; already-started sentences finish and play in order, and excess model workers retire when idle. Increasing it fills the larger lookahead lazily. It does not stop/resume audio, release ownership, invalidate assets, or change separate timing/description preprocessing limits. `/voice status` shows `ttsWorkers`.
 
 ## Models
 

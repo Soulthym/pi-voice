@@ -5,6 +5,7 @@
   "speed": 1,
   "ttsModel": "onnx-community/Kokoro-82M-v1.0-ONNX",
   "ttsDtype": "q8",
+  "ttsWorkers": 3,
   "sttModel": "onnx-community/whisper-tiny.en",
   "sttDtype": "fp32",
   "sttCandidates": 3,

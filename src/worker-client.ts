@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import * as readline from "node:readline";
-import type { VoiceConfig } from "./config.js";
+import { normalizeWorkerCount, type VoiceConfig } from "./config.js";
 
 export type WorkerEvent =
 	| { type: "loading" }
@@ -46,6 +46,7 @@ export class VoiceWorkerClient {
 	#nextRequestId = 0;
 	#nextCancelId = 0;
 	#paused = false;
+	#ttsWorkers: number | undefined;
 	#activeUtterance: number | undefined;
 	#onEvent: (event: WorkerEvent) => void;
 
@@ -54,6 +55,7 @@ export class VoiceWorkerClient {
 	}
 
 	sendSegment(utterance: number, segmentId: number, text: string, config: VoiceConfig): void {
+		this.setTtsWorkers(config.ttsWorkers);
 		this.#activeUtterance = utterance;
 		this.#send({
 			type: "segment",
@@ -74,6 +76,14 @@ export class VoiceWorkerClient {
 
 	endUtterance(utterance: number): void {
 		this.#send({ type: "end", utterance });
+	}
+
+	setTtsWorkers(workers: number): void {
+		if (normalizeWorkerCount(workers) === undefined) throw new RangeError("TTS workers must be 1–8");
+		if (this.#ttsWorkers === workers) return;
+		this.#ttsWorkers = workers;
+		// Settings alone must not launch a worker or resume playback.
+		if (this.#child) this.#send({ type: "tts-workers", workers });
 	}
 
 	setPlaybackPaused(paused: boolean): void {
@@ -163,6 +173,7 @@ export class VoiceWorkerClient {
 	}
 
 	preload(config: VoiceConfig): Promise<void> {
+		this.setTtsWorkers(config.ttsWorkers);
 		return this.#requestPreload("Kokoro", {
 			type: "preload",
 			model: config.ttsModel,
@@ -257,6 +268,9 @@ export class VoiceWorkerClient {
 			}
 		});
 		child.stdin.write(`${JSON.stringify({ type: "pause", paused: this.#paused })}\n`);
+		if (this.#ttsWorkers !== undefined) {
+			child.stdin.write(`${JSON.stringify({ type: "tts-workers", workers: this.#ttsWorkers })}\n`);
+		}
 		return child;
 	}
 

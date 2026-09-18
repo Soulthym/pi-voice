@@ -38,7 +38,7 @@ let alignmentChild = null;
 let shuttingDown = false;
 const synthesisChild = Boolean(process.send && process.env.PI_VOICE_SENTENCE_CHILD === "1");
 const requestedWorkers = Number(process.env.PI_VOICE_TTS_WORKERS ?? 3);
-const synthesisWorkers = Number.isInteger(requestedWorkers) && requestedWorkers >= 1 && requestedWorkers <= 8 ? requestedWorkers : 3;
+let synthesisWorkers = Number.isInteger(requestedWorkers) && requestedWorkers >= 1 && requestedWorkers <= 8 ? requestedWorkers : 3;
 const sentencePool = new SentencePool(synthesisWorkers, event => {
 	if (!playback.currentPlayer && !shuttingDown) send(event);
 });
@@ -743,7 +743,8 @@ async function runOperation(operation) {
 }
 
 function primeAudio() {
-	// Bound completed PCM as well as inference: paused playback retains at most this window.
+	// Bound new PCM/inference lookahead, even while paused. A decrease retains
+	// already-started promises outside the smaller window until ordered playback drains them.
 	let remaining = synthesisWorkers;
 	for (const operation of [activeOperation, ...queue]) {
 		if (!operation) continue;
@@ -854,6 +855,13 @@ lines.on("line", line => {
 		return;
 	}
 	switch (message.type) {
+		case "tts-workers":
+			if (Number.isInteger(message.workers) && message.workers >= 1 && message.workers <= 8) {
+				synthesisWorkers = message.workers;
+				sentencePool.resize(synthesisWorkers);
+				primeAudio();
+			}
+			break;
 		case "segment":
 			enqueue({
 				type: "segment",

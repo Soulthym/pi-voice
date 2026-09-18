@@ -44,12 +44,16 @@ test("real playback queue bounds lookahead, preserves order, fences cancellation
 	for (let id = 1; id <= 8; id++) enqueue(id);
 	await tick();
 	assert.equal(requests.length, 4);
+	lines.emit("line", JSON.stringify({ type: "tts-workers", workers: 1 }));
+	assert.ok(children.every(child => !child.killed), "resize must not interrupt in-flight inference");
+	for (const workers of [0, 9, 1.5, "8"]) lines.emit("line", JSON.stringify({ type: "tts-workers", workers }));
 	const complete = (request: any) => request.child.emit("message", { id: request.id,
 		audio: { pcm: Float32Array.of(request.operation.segmentId), sampleRate: 24000 } });
 	for (const request of requests.slice(1, 4)) complete(request);
 	await tick();
 	assert.equal(events.filter(event => event.type === "segment-audio").length, 0);
 	assert.equal(requests.length, 4, "completed out-of-order PCM must not expand the lookahead window");
+	assert.equal(children.filter(child => child.killed).length, 3, "excess workers retire after producing results");
 	complete(requests[0]);
 	await tick();
 	assert.deepEqual(played, [1]);
@@ -57,7 +61,10 @@ test("real playback queue bounds lookahead, preserves order, fences cancellation
 	written.resolve();
 	await tick();
 	assert.deepEqual(played.slice(0, 4), [1, 2, 3, 4]);
-	assert.ok(requests.length <= 8);
+	assert.equal(requests.length, 5, "decrease bounds new lookahead without regenerating retained sentences");
+	lines.emit("line", JSON.stringify({ type: "tts-workers", workers: 3 }));
+	await tick();
+	assert.equal(requests.length, 7, "increase primes additional sentences during active playback");
 	lines.emit("line", JSON.stringify({ type: "cancel", cancelId: 1 }));
 	enqueue(9);
 	await tick();

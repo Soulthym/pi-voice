@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | `PI_VOICE_CONFIG` | `~/.pi/agent/pi-voice.json` | Alternate configuration file. |
 | `PI_VOICE_CACHE_DIR` | `~/.cache/pi-voice/models` | Model-weight cache. |
-| `PI_VOICE_TTS_WORKERS` | `3` | Host sentence synthesis/lookahead limit, integer 1–8. Set before starting Pi; benchmark other hardware/models before increasing it. |
+| `PI_VOICE_TTS_WORKERS` | `3` | Legacy fallback for playback synthesis/lookahead, integer 1–8. Valid persisted `ttsWorkers` takes precedence; `/voice tts-workers <1..8>` changes it live and persists it. Benchmark other hardware/models before increasing it. |
 | `HF_HUB_OFFLINE` | unset | Set to `1` to prohibit model downloads in voice workers. |
 | `PI_VOICE_AUDIO_CACHE_DIR` | `~/.cache/pi-voice/audio` | Content-addressed Opus cache. |
 | `PI_VOICE_COORDINATOR_DIR` | `~/.cache/pi-voice/coordinator` | Cross-session presence, leases, and attention. |

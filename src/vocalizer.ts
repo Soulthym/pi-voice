@@ -39,6 +39,7 @@ type VoiceWorker = Pick<
 > & {
 	cancel(): number | undefined | void;
 	setPlaybackPaused?(paused: boolean): void;
+	setTtsWorkers?(workers: number): void;
 	transcribePcmCandidates?: VoiceWorkerClient["transcribePcmCandidates"];
 };
 
@@ -154,6 +155,10 @@ export class Vocalizer {
 		this.#nextSourceOffset = this.#sourceOffset;
 		this.#pushItems(this.#speakable.push(text));
 		this.flush();
+	}
+
+	setTtsWorkers(workers: number): void {
+		this.#worker.setTtsWorkers?.(workers);
 	}
 
 	setPlaybackPaused(paused: boolean): void {

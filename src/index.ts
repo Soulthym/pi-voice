@@ -2759,6 +2759,7 @@ const chargeBackfillUnit = (): boolean => {
 				"edit",
 				"tts-model",
 				"tts-dtype",
+				"tts-workers",
 				"stt-model",
 				"stt-dtype",
 				"stt-candidates",
@@ -2846,7 +2847,7 @@ const chargeBackfillUnit = (): boolean => {
 					.filter(value => value.startsWith(parts[1] ?? ""))
 					.map(value => ({ value: `code-retry ${value}`, label: value }));
 			}
-			if (parts[0] === "code-preprocess" || parts[0] === "timing-preprocess") {
+			if (parts[0] === "code-preprocess" || parts[0] === "timing-preprocess" || parts[0] === "tts-workers") {
 				const choices = ["1", "2", "3", "4", "5", "6", "7", "8"];
 				if (parts[0] === "timing-preprocess") choices.unshift("auto");
 				return choices
@@ -2929,7 +2930,7 @@ const chargeBackfillUnit = (): boolean => {
 			const args = rawArgs.trim();
 			const [action = "status", value = "", ...restArgs] = args.split(/\s+/);
 			const normalizedAction = action.toLowerCase();
-			if (!["", "status", "timing", "bottom"].includes(normalizedAction)) {
+			if (!["", "status", "timing", "bottom", "tts-workers"].includes(normalizedAction)) {
 				restoreBottomAfterSpeech = false;
 				bottomPinned = false;
 			}
@@ -3060,6 +3061,20 @@ const chargeBackfillUnit = (): boolean => {
 					await updateConfig({ ...config, audioCacheBitrate: bitrate });
 					ctx.ui.notify(`Opus audio cache bitrate set to ${bitrate} kbps`, "info");
 					return;
+				}
+				case "tts-workers": {
+					const workers = /^[1-8]$/.test(value) && restArgs.length === 0 ? normalizeWorkerCount(Number(value)) : undefined;
+					if (workers === undefined) {
+						ctx.ui.notify("Usage: /voice tts-workers <1..8>", "error");
+						break;
+					}
+					const next = { ...config, ttsWorkers: workers };
+					await saveVoiceConfig(next);
+					config = next;
+					// Scheduling only: do not reset playback, assets, preprocessing or its budget.
+					vocalizer.setTtsWorkers(workers);
+					ctx.ui.notify(`tts-workers concurrency set to ${workers}`, "info");
+					break;
 				}
 				case "code-preprocess": {
 					const concurrency = normalizeWorkerCount(Number(value));
@@ -3408,13 +3423,13 @@ const chargeBackfillUnit = (): boolean => {
 				case "status":
 				case "":
 					ctx.ui.notify(
-						`Voice ${config.enabled ? "on" : "off"}; mode=${config.mode}; voice=${config.voice}; speed=${config.speed}; tts=${config.ttsModel}@${config.ttsDtype}; stt=${config.sttModel}@${config.sttDtype}; sttCandidates=${config.sttCandidates}; alignment=${config.alignmentModel}@${config.alignmentDtype}; editModel=${config.editModel}; highlight=${config.playbackHighlight ? "on" : "off"}; autoScroll=${config.autoScroll ? "on" : "off"}; scrollToShortcut=${config.scrollToShortcut}; bottomShortcut=${config.scrollBottomShortcut}; codeNarration=${config.codeNarration}; codeContext=${config.codeDescriptionContext}; codePreprocess=${config.codeDescriptionPreprocessConcurrency}; codeScope=${config.codeDescriptionPreprocessScope}; codeBudget=${backfillAllowance}; timingPreprocess=${config.timingPreprocessConcurrency}; audioCache=${config.audioCache ? `${config.audioCacheBitrate}kbps` : "off"}; device=${deviceSelection}${activeDeviceId ? `→${activeDeviceId}` : "→local"}; output=${config.output}; input=${config.input}; shortcut=${config.talkShortcut}; submit=${config.submitMode}; edit=${config.editMode}`,
+						`Voice ${config.enabled ? "on" : "off"}; mode=${config.mode}; voice=${config.voice}; speed=${config.speed}; tts=${config.ttsModel}@${config.ttsDtype}; ttsWorkers=${config.ttsWorkers}; stt=${config.sttModel}@${config.sttDtype}; sttCandidates=${config.sttCandidates}; alignment=${config.alignmentModel}@${config.alignmentDtype}; editModel=${config.editModel}; highlight=${config.playbackHighlight ? "on" : "off"}; autoScroll=${config.autoScroll ? "on" : "off"}; scrollToShortcut=${config.scrollToShortcut}; bottomShortcut=${config.scrollBottomShortcut}; codeNarration=${config.codeNarration}; codeContext=${config.codeDescriptionContext}; codePreprocess=${config.codeDescriptionPreprocessConcurrency}; codeScope=${config.codeDescriptionPreprocessScope}; codeBudget=${backfillAllowance}; timingPreprocess=${config.timingPreprocessConcurrency}; audioCache=${config.audioCache ? `${config.audioCacheBitrate}kbps` : "off"}; device=${deviceSelection}${activeDeviceId ? `→${activeDeviceId}` : "→local"}; output=${config.output}; input=${config.input}; shortcut=${config.talkShortcut}; submit=${config.submitMode}; edit=${config.editMode}`,
 						"info",
 					);
 					return;
 				default:
 					ctx.ui.notify(
-						"Usage: /voice [on|off|toggle|status|stop|setup|test|talk|attention|mode|voice|speed|tts-model|tts-dtype|stt-model|stt-dtype|stt-candidates|alignment-model|alignment-dtype|edit-model|highlight|autoscroll|scroll-to|bottom|timing|code-narration|code-budget|code-retry|code-preprocess|timing-preprocess|audio-cache|audio-bitrate|device|output|input|shortcut|submit|edit]",
+						"Usage: /voice [on|off|toggle|status|stop|setup|test|talk|attention|mode|voice|speed|tts-model|tts-dtype|tts-workers|stt-model|stt-dtype|stt-candidates|alignment-model|alignment-dtype|edit-model|highlight|autoscroll|scroll-to|bottom|timing|code-narration|code-budget|code-retry|code-preprocess|timing-preprocess|audio-cache|audio-bitrate|device|output|input|shortcut|submit|edit]",
 						"error",
 					);
 			}
