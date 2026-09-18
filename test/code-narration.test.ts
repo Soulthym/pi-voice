@@ -31,6 +31,17 @@ test("parses compact control-and-speech records", () => {
 	assert.ok(chunks.at(-1)?.cues.some(cue => cue.operations.some(operation => operation.kind === "reset")));
 });
 
+test("code narration splits whole sentences while retaining cue offsets and final reset", () => {
+	const chunks = chunkCodeNarration({ guided: true, records: [
+		{ speech: "First sentence.", operations: [{ kind: "line-add", id: "first", range: { startLine: 1, endLine: 1 } }] },
+		{ speech: "Second sentence.\n\n", operations: [{ kind: "line-add", id: "second", range: { startLine: 2, endLine: 2 } }] },
+	] });
+	assert.deepEqual(chunks.map(chunk => chunk.text), ["First sentence.", "Second sentence."]);
+	assert.equal(chunks[0]!.cues[0]!.offset, 0);
+	assert.equal(chunks[1]!.cues[0]!.offset, 0);
+	assert.deepEqual(chunks[1]!.cues.at(-1), { offset: "Second sentence.".length, operations: [{ kind: "reset" }] });
+});
+
 test("resolves Tree-sitter handles to exact source ranges", async () => {
 	const targetCode = "const total = items.reduce((sum, item) => sum + item.price, 0);";
 	const catalog = await buildCodeTargetCatalog("ts", targetCode);

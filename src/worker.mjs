@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { env as transformersEnv, pipeline } from "@huggingface/transformers";
 import { KokoroTTS } from "kokoro-js";
 import { createPlaybackController } from "./playback-controller.mjs";
+import { generateSentenceAudio } from "./sentence-audio.mjs";
 
 const DEFAULT_TTS_MODEL = "onnx-community/Kokoro-82M-v1.0-ONNX";
 const DEFAULT_TTS_DTYPE = "q8";
@@ -129,7 +130,7 @@ function audioCachePath(operation) {
 	const key = createHash("sha256")
 		.update(
 			JSON.stringify([
-				1,
+				2, // Older audio can contain silently truncated phonemes.
 				operation.model,
 				operation.dtype,
 				operation.voice,
@@ -216,8 +217,10 @@ async function audioForOperation(operation) {
 		const cached = await readCachedAudio(file);
 		if (cached) return { pcm: cached, sampleRate: DEFAULT_SAMPLE_RATE };
 	}
+	const operationEpoch = epoch;
 	const model = await getModel(operation.model, operation.dtype);
-	const output = await model.generate(operation.text, { voice: operation.voice, speed: operation.speed });
+	const output = await generateSentenceAudio(model, operation.text,
+		{ voice: operation.voice, speed: operation.speed }, () => operationEpoch !== epoch);
 	const sampleRate = output.sampling_rate || DEFAULT_SAMPLE_RATE;
 	const pcm = Array.isArray(output.audio) ? output.audio[0] : output.audio;
 	if (file && pcm instanceof Float32Array && sampleRate === DEFAULT_SAMPLE_RATE) {

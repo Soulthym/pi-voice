@@ -61,7 +61,7 @@ Changing a dependency invalidates only affected messages. Legacy timing versions
 
 Audio caching is enabled by default under `~/.cache/pi-voice/audio`. Each synthesized segment is encoded as 32 kbps VBR Opus unless configured otherwise.
 
-Cache keys include model, dtype, voice, speed, text, and bitrate. A cache hit avoids loading or running Kokoro. Newly encoded Opus is decoded before alignment/playback so first playback analyzes the same representation as later cache hits.
+Cache keys include the audio-generation format version, TTS model, dtype, voice, speed, text, and bitrate. The whole-sentence upgrade changes timing identity and bumps audio format identity once: previous audio may have silently truncated long phoneme sequences, and clause-based durations no longer describe the same generation boundaries. This necessary one-time regeneration is separate from LLM selection, which does not invalidate descriptions or compatible assets. A cache hit avoids loading or running Kokoro. Newly encoded Opus is decoded before alignment/playback so first playback analyzes the same representation as later cache hits.
 
 No raw PCM is persisted. Disabling caching prevents new reads/writes but does not delete existing Opus files. Configure with:
 

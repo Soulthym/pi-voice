@@ -24,13 +24,13 @@ test("emits fenced code for description while preserving its spoken position", (
 	]);
 });
 
-test("joins model-inserted prose line wraps without splitting intonation", () => {
+test("literal prose newlines are generation boundaries", () => {
 	const stream = new SpeakableStream();
 	const items = [
 		...stream.push("This explanation continues across a\nline wrap before the sentence ends."),
 		...stream.flush(),
 	];
-	assert.deepEqual(speech(items), ["This explanation continues across a line wrap before the sentence ends."]);
+	assert.deepEqual(speech(items), ["This explanation continues across a", "line wrap before the sentence ends."]);
 });
 
 test("retains real Markdown block boundaries", () => {
@@ -63,13 +63,13 @@ test("recognizes fenced blocks split across streaming deltas", () => {
 	]);
 });
 
-test("speaks Markdown table cells as separate sentences and skips separator cells", () => {
+test("speaks Markdown table rows as newline units and skips separator rows", () => {
 	const stream = new SpeakableStream();
 	const items = [
 		...stream.push("| Name | Status |\n| :--- | ---: |\n| API | Ready |"),
 		...stream.flush(),
 	];
-	assert.deepEqual(speech(items), ["Name.", "Status.", "API.", "Ready."]);
+	assert.deepEqual(speech(items), [". Name. Status.", ". API. Ready."]);
 });
 
 test("speaks link labels and URL hosts instead of full URLs", () => {
@@ -78,10 +78,20 @@ test("speaks link labels and URL hosts instead of full URLs", () => {
 	assert.deepEqual(speech(items), ["Read the guide.", "Visit pi.dev next."]);
 });
 
-test("keeps every emitted speech segment below Kokoro's input budget", () => {
+test("never fragments long sentences, even across stalled streaming deltas", () => {
 	const stream = new SpeakableStream();
-	const items = [...stream.push("word ".repeat(300)), ...stream.flush()];
-	const segments = speech(items);
-	assert.ok(segments.length > 1);
-	assert.ok(segments.every(segment => segment.length <= 280));
+	const prefix = "word ".repeat(300);
+	assert.deepEqual(stream.push(prefix), []);
+	assert.deepEqual(stream.flushIdle(), []);
+	assert.deepEqual(speech(stream.push("ends here. Next")), [prefix + "ends here."]);
+	assert.deepEqual(speech(stream.flush()), ["Next"]);
+});
+
+test("short sentences stay separate and source offsets use UTF-16", () => {
+	const stream = new SpeakableStream();
+	const text = "Hi. 🦊 Done.\nNext line";
+	const items = [...stream.push(text), ...stream.flush()];
+	assert.deepEqual(speech(items), ["Hi.", "🦊 Done.", "Next line"]);
+	assert.equal(text.slice(items[1]!.source.start, items[1]!.source.end).trim(), "🦊 Done.");
+	assert.equal(text.slice(items[2]!.source.start, items[2]!.source.end), "Next line");
 });

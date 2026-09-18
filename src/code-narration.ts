@@ -1,4 +1,5 @@
 import type { CodeNarrationTarget } from "./code-targets.js";
+import { findSentenceCut } from "./speakable.js";
 
 export interface CodeLineRange {
 	startLine: number;
@@ -164,31 +165,33 @@ export function chunkCodeNarration(plan: CodeNarrationPlan): CodeNarrationChunk[
 	const chunks: CodeNarrationChunk[] = [];
 	if (plan.omitted) return chunks;
 	let text = "";
-	let cues: CodeNarrationCue[] = [];
-	const flush = (): void => {
-		if (!text.trim()) return;
-		chunks.push({ text: text.trim(), cues });
-		text = "";
-		cues = [];
-	};
+	const cues: CodeNarrationCue[] = [];
 	for (const record of plan.records) {
-		const joiner = text && record.speech ? " " : "";
-		if (record.speech && text.length + joiner.length + record.speech.length > MAX_CHUNK) flush();
 		const offset = text.length + (text && record.speech ? 1 : 0);
 		if (record.operations.length > 0) cues.push({ offset, operations: record.operations });
 		if (record.speech) text += `${text ? " " : ""}${record.speech}`;
 	}
 	if (plan.guided) cues.push({ offset: text.length, operations: [{ kind: "reset" }] });
-	flush();
-	if (plan.guided && chunks.length > 1) {
-		// Move the automatic reset to the final chunk.
-		for (const chunk of chunks.slice(0, -1)) {
-			chunk.cues = chunk.cues.filter(cue => !cue.operations.some(operation => operation.kind === "reset"));
+	const ranges: Array<{ start: number; end: number }> = [];
+	for (let start = 0; start < text.length;) {
+		const remaining = text.slice(start);
+		const sentence = findSentenceCut(remaining);
+		const newline = remaining.indexOf("\n");
+		const end = start + Math.min(sentence < 0 ? remaining.length : sentence, newline < 0 ? remaining.length : newline + 1);
+		const raw = text.slice(start, end);
+		const spoken = raw.trim();
+		const sourceStart = start + raw.length - raw.trimStart().length;
+		if (spoken) {
+			chunks.push({ text: spoken, cues: [] });
+			ranges.push({ start: sourceStart, end });
 		}
-		const last = chunks[chunks.length - 1];
-		if (!last.cues.some(cue => cue.operations.some(operation => operation.kind === "reset"))) {
-			last.cues.push({ offset: last.text.length, operations: [{ kind: "reset" }] });
-		}
+		start = end;
+	}
+	for (const cue of cues) {
+		const found = ranges.findIndex(range => cue.offset < range.end);
+		const index = found < 0 ? chunks.length - 1 : found;
+		if (index < 0) continue;
+		chunks[index].cues.push({ ...cue, offset: Math.max(0, Math.min(chunks[index].text.length, cue.offset - ranges[index].start)) });
 	}
 	return chunks;
 }

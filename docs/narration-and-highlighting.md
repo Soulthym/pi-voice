@@ -4,11 +4,13 @@
 
 ## Prose and Markdown
 
-Pi Voice converts streaming Markdown into bounded speech segments. It starts with a short first segment, then uses sentence and clause boundaries so Kokoro inputs stay manageable. Single prose newlines are treated as soft model line wraps, while blank lines, headings, lists, tables, and fences retain real block boundaries.
+Pi Voice buffers streaming Markdown until a complete sentence or literal newline is available. It does not force early clause/word cuts or flush unfinished sentences during a generation stall. Terminal soft wrapping is not a boundary; message end drains the final unterminated unit.
+
+Kokoro cannot infer more than roughly 510 phonemes in one call. Long sentences are phonemized without truncation, generated in internal windows, then joined into one playback/alignment unit. This avoids dropped endings, but very long sentences take longer before playback begins and internal seams may affect prosody.
 
 It avoids reading most Markdown syntax, preserves link labels while shortening URLs to useful host names, and leaves fence markers and link destinations untouched during terminal styling.
 
-Markdown tables are narrated cell by cell. Each `|` ends a spoken sentence, separator cells stay silent, and highlighting advances through the rendered row.
+Markdown table rows are newline-delimited narration units. Cell separators become spoken pauses and separator-only rows stay silent.
 
 Fences tagged `text`, `txt`, `plain`, `plaintext`, `md`, `markdown`, or `mdown` are treated as prose and receive normal sentence/word highlighting.
 
@@ -48,7 +50,7 @@ JavaScript/TypeScript-family fences use Tree-sitter target IDs so the model sele
 For each spoken segment, Pi Voice retains source ranges, synthesized duration, optional CTC word alignment, and actual player position.
 
 - Unread words are dim.
-- The active sentence or clause receives a continuous background, including whitespace.
+- The active sentence/newline unit receives a continuous background, including whitespace.
 - Reached words return to normal.
 - Guided code operations activate against playback time.
 
