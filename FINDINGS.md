@@ -11,17 +11,17 @@ Updated incrementally. Companion: `PLAN.md`. Reorganize freely while preserving 
 - Performance fixes are implemented and validated: lazy historical context, block-only render fast path, targeted Markdown-leaf invalidation, no unchanged-session timing rescans from the 200ms poll, and deduplicated progress widget updates. Added `test/index-render-cost.test.ts` and `test/narration-render.test.ts`. Typecheck and full suite pass: **149/149 tests**. Live-session latency remains unmeasured; `/reload` is required to activate extension changes.
 - Performance commit: `f504597` (149 tests/typecheck passed).
 - **Implemented and committed:** `fc521e5` fixes wrapped thinking invalidation; `7d970da` shows exact live/final ASR evidence and protects draft/cancellation ownership; `a17782e` makes description identities independent of LLM selection and preserves compatible legacy timing keys via persisted aliases.
-- **Validation:** typecheck and **160/160 tests pass**, log `/tmp/pi-voice-sentence-phase-tests.log`. Whole-sentence generation, review corrections, bounded alignment, awaited shutdown and cold-worker pause are covered. Docs updated. Existing single-string ASR APIs remain compatible. Fresh per-event context integration and legacy assets across model changes/reload are tested.
+- **Latest validation:** typecheck and **169/169 tests pass**, log `/tmp/pi-voice-parallel-nav-final.log`. Ordered synthesis, cancellation/cleanup, code-unit navigation/cues, no-timing navigation, pause retention, real replay ticks/completion, large snapshots and Termux label migration are covered. Follow-up read-only review found no remaining blocking defects. Existing ASR APIs and model-independent asset reuse remain covered.
 - **Legacy limitation:** snapshots without source metadata can only be adopted when their original model/prefix hash is reconstructable under current settings. Unmatchable older hashes can require one initial regeneration; subsequent changes no longer invalidate newly stored/adopted assets.
-- **New requested follow-up, after current work:** whole-sentence or literal-newline TTS generation; benchmark sequential vs 2/3/4/... parallel sentence inference, maximize aggregate throughput subject to ≤2× ordered-output latency; convert ±10s controls to sentence/newline navigation and remove `10` from Termux button symbols. Detailed acceptance criteria and ordering are in `PLAN.md`. Whole-unit generation is committed (`8c5a05b`), the actual benchmark selected 4 workers, and long-unit alignment is bounded (`a9b0b0c`). **Production parallel scheduling and sentence navigation/Termux labels remain unfinished.**
+- **Requested follow-up implemented:** whole units (`8c5a05b`), bounded long alignment (`a9b0b0c`), production parallel synthesis (`5e2b14c`), sentence/newline controls and Termux labels (`f003991`), completed-cursor fencing (`b8ffd3a`). The production-pool benchmark selected **3 workers**, superseding the initial standalone experiment's 4: approximately **1.76× throughput** at **1.75× ordered latency**. Four breached the 2× ceiling in this recheck. See SENTENCE-3; actual phone playback latency is not claimed measured.
 - Additional read-only UX audit completed with source traces/mocked reproductions; see UX-1 through UX-6 and SCROLL-4. These remain decisions, not silently applied fixes.
 - Baseline validation from preceding work: 147 tests and typecheck passed.
 
 ## Immediate resume instructions
 
-1. Finish the **production parallel synthesis pipeline**, using the measured limit of 4 and bounded lookahead. `worker.mjs` still pumps synthesis sequentially. Reuse existing model loading/audio caching; keep playback/alignment delivery ordered even when generation completes out of order. Preserve pause intent and cancel/fence queued/current work on Stop, handoff and shutdown; avoid retaining unbounded completed PCM or leaving model children alive after parent exit. Benchmark is an experiment, not proof that production scheduling changed.
-2. Implement sentence/newline navigation and only then remove `10` from Termux labels. `PlaybackHistory` distinguishes segment checkpoints (`duration > 0`) from word checkpoints (`duration === 0`), but code-description sentences can share a source offset. Navigation must distinguish those units, preserve inherited code cues, and not replay literal source from inside a fence. Incomplete timing must not become falsely complete just because a suffix finished generating. Snapshot downsampling currently can discard segment boundaries; account for this before relying on them exclusively.
-3. Repeat full checks and review; report outstanding UX decisions. Do not silently fix every unrelated audit item.
+1. Requested implementation is complete; do not reimplement parallel scheduling or sentence controls. Stop playback and reload Pi to activate it. Updated Termux clients migrate old labels on their next process start; `docs/usage.md` also has a local-Termux one-liner that needs no SSH reconnect. No live client/session was restarted during this work.
+2. Validate perceived latency, pause/seek and handoff on actual phone/SSH playback when authorized. The production-pool benchmark includes IPC/native inference, not device playback, Opus transport or live token-arrival scheduling. Other hardware/models may need `PI_VOICE_TTS_WORKERS` tuning.
+3. Ask for decisions on the remaining audit items, especially UX-2/UX-3, pending replay/test cancellation, microphone acquisition and ownership exclusions, paused layout anchors, and caching/budget/context issues. Long (>30s) units still use estimated word timings. Do not silently fix every unrelated item.
 
 Latest review corrections: `eb9e9ca` forwards PCM candidate count through the real worker router; `81131d1` restores an untouched draft when candidate preview is cancelled; `7c0cda9` schedules idle model cleanup after reviewed dictation; `95776e4` prevents an early live-ASR rejection from becoming unhandled while recording continues. These have regression coverage; the routing check reproduced **1 instead of 3** candidates before the fix.
 
@@ -59,6 +59,11 @@ Latest review corrections: `eb9e9ca` forwards PCM candidate count through the re
 - Isolated pre-fix worktree at `a17782e`: 400-message warm render **270.9ms**, 400 branch traversals (cached contexts still serialized/hashed again). After: **3.5ms**, zero branch/entry reads. Cold render: 366.8ms before, 211.4ms after (historical contexts still need one initial resolution).
 - Cache the completed-message index per session/leaf/mode and memoize contextual description keys for immutable completed source messages, not mutable streaming partials. Resolve alias/plan/omission state at display time so cache arrivals and explicit retries remain visible.
 - Baseline log `/tmp/pi-voice-context-before.log`; disposable detached worktree `/tmp/pi-voice-context-before`.
+
+### PERF-7 — Existing alignment backlog has no queue budget [P2]
+- Status: source-traced during final integration review; not reproduced with live device/model load, awaiting decision.
+- Synthesis lookahead is bounded, but the separate pre-existing alignment path writes without waiting for stdin backpressure and `alignment-worker.mjs` queues audio strings without a count/byte limit. Cached replay bursts can therefore outpace alignment and retain extra audio in RAM.
+- Decide between bounded alignment backpressure (possibly delaying delivery) and retaining estimated timings when overloaded. This is separate from the new bounded synthesis window; do not claim the entire downstream pipeline has a fixed memory bound.
 
 ## B. Requested dictation display
 
@@ -123,7 +128,7 @@ Latest review corrections: `eb9e9ca` forwards PCM candidate count through the re
 ### PLAY-7 — Worker shutdown calls a nonexistent function [P1]
 - Status: fixed in `5961fe0` as required for safe long-unit shutdown. Real worker protocol test verifies exit waits for transport acknowledgement, stops alignment, and is idempotent across shutdown + stdin close.
 - Before the fix, `worker.mjs` shutdown case called `cancel()`, but the worker only defines `scheduleCancel()`. The resulting ReferenceError skips orderly player/alignment teardown. A mere non-awaited substitution would still exit before the asynchronous player-stop acknowledgement.
-- Future parallel inference children must join this awaited shutdown path; current regression covers player/alignment teardown.
+- Parallel children now join this shutdown path in `5e2b14c`; regressions cover bounded lookahead, old-result fencing, busy-child interruption and complete child cleanup.
 
 ### PLAY-3 — Input-setting change releases lease without stopping TTS [P1]
 - Status: source-traced.
@@ -134,7 +139,7 @@ Latest review corrections: `eb9e9ca` forwards PCM candidate count through the re
 - `message_start` sets `playbackPaused=false` without resuming worker. Paused tool-use response continuing into next message needs two F8 presses to resume.
 
 ### TIME-1 — Seek on incomplete timing can prevent completion while paused [P2]
-- Status: audit reproduction (replacement generated fully, duration stayed at first two seconds).
+- Status: full timing completion during a paused suffix remains deferred. Sentence controls now work without complete timings and never mislabel a suffix as complete; replay from the first unit can rebuild full timing. Original audit: replacement generated fully, duration stayed at first two seconds.
 - Seek cancels original generation, replacement uses `recordTimings=false`, background timing blocked by retained lease. Existing partial-timing test checks no premature tail but not eventual completion.
 
 ### PLAY-5 — Resume fallback creates another paused transport [P2]
@@ -158,11 +163,11 @@ Latest review corrections: `eb9e9ca` forwards PCM candidate count through the re
 - Alignment recomputes source anchor from frozen timestamp. Duration refinement is legitimate; highlight movement conflicts with F8 viewport/anchor expectations. Decision: freeze displayed anchor until resume vs document exception.
 
 ### TIME-4 — Continued-message word offsets use global coordinates [P2]
-- Status: source-traced.
+- Status: fixed in `f003991` as required for consistent sentence/source metadata. Capture origins and source bases now normalize both segment and word offsets; regression covers global word coordinates and protects sentence boundaries during refinement.
 - Segment offsets subtract `sourceBase`, word offsets do not. Seeking in a queued second message can clamp beyond its end to an empty suffix/no-op.
 
 ### TIME-5 — Code-description words are not Markdown source positions [P2]
-- Status: source-traced.
+- Status: fixed in `f003991`; description-word checkpoints are omitted, while whole description units retain source offset plus ordinal. Regression verifies no description-relative word offset enters the Markdown timing snapshot.
 - Description-relative offsets enter history as assistant-Markdown offsets. Seeking code narration can jump to unrelated prose or inside a fence. Map to concerned block or omit description-word checkpoints.
 
 ### TIME-6 — Local playback clock ends before audio drain [P2]
@@ -263,10 +268,10 @@ Latest review corrections: `eb9e9ca` forwards PCM candidate count through the re
 - Status: audit reproduction: speed A→B→A measured three times despite persisted compatible A snapshot.
 - Timing restoration only at startup. Try matching snapshots after invalidation before scheduling missing work.
 
-## E. Whole-sentence follow-up — implementation in progress
+## E. Whole-sentence follow-up — implemented and regression-validated
 
 ### SENTENCE-1 — Existing chunker deliberately splits sentences
-- Fixed in `8c5a05b`: removed clause/length cuts, retain literal newline boundaries, never idle-flush unfinished prose, keep short sentences separate, and split code narration at sentences while preserving cue offsets. UTF-16 source offsets corrected along this path. Navigation and labels are still pending.
+- Fixed in `8c5a05b`: removed clause/length cuts, retain literal newline boundaries, never idle-flush unfinished prose, keep short sentences separate, and split code narration at sentences while preserving cue offsets. UTF-16 source offsets corrected along this path. Navigation and labels are implemented in `f003991`.
 - Timing render identity bumped to 3 and audio-generation identity to 2: one necessary format transition because old clause durations and potentially truncated audio are not compatible. LLM selection still does not invalidate descriptions or compatible assets.
 - Kokoro's ordinary `generate()` silently truncates past ~510 phonemes. Committed `sentence-audio.mjs` reuses Kokoro phonemization with truncation disabled, generates bounded native windows, and joins them before exposing a complete sentence audio unit. Shared model is not mutated; cancellation stops remaining windows. A deterministic 1,200-phoneme preservation test passes; actual short-sentence inference exercised by benchmark.
 - Actual offline long-input check: **1,302 tokens**, native windows **512/512/282**, all 1,300 non-padding tokens retained, **72.175s audio generated in 52.20s**. No audio saved. This demonstrates intact endings and the measured first-audio cost with serial internal windows; it is not a hardware-independent lower bound.
@@ -285,12 +290,32 @@ Latest review corrections: `eb9e9ca` forwards PCM candidate count through the re
 | **4** | **2.999×** | **5.591s** | **1.882×** |
 | 5 | 3.016× | 6.518s | **2.194× — rejected** |
 
-- **Measured choice: 4**, approximately 1.97× sequential throughput. Stopped at 5 because latency breached the 2× ceiling. Additional worker cold start/warm-up was 3.8–4.6s, excluded from warm latency.
-- This is an inference benchmark, not an installed parallel playback pipeline. Real live-arrival scheduling, startup latency, source mapping, cancellation, ordering and the coordinator still need integration/testing. Do not claim playback concurrency changed yet.
+- **Historical standalone choice: 4**, approximately 1.97× sequential throughput. Stopped at 5 because latency breached the 2× ceiling. Additional worker cold start/warm-up was 3.8–4.6s, excluded from warm latency.
+- These are the original standalone-inference results, not production playback measurements. They are retained as historical evidence; the production pool is now integrated and its recheck below supersedes this concurrency choice.
+
+### SENTENCE-3 — Production integration, navigation and recheck
+- Implemented in `5e2b14c` and `f003991`; completion fencing in `b8ffd3a`. The worker now uses separate model processes with ordered consumption and a bounded synthesis lookahead. Cancellation kills busy inference children and fences late results, idle models can remain warm, and shutdown/IPC disconnect cleans up children. Parent-side Opus cache hits avoid launching TTS model processes. No new dependency or raw-PCM persistence.
+- `scripts/benchmark-sentences.mjs` now exercises the **production synthesis pool**, including IPC audio delivery. Same eight synthetic sentences, q8/af_heart/speed 1, three warmed rounds, offline weights, no playback/cache/provider calls. Log: `/tmp/pi-voice-production-benchmark.log`.
+
+| Workers | Throughput | First sentence | Worst ordered latency ratio |
+|---|---:|---:|---:|
+| 1 | 1.509× real time | 2.831s | 1.000× |
+| 2 | 2.407× | 3.545s | 1.252× |
+| **3** | **2.657×** | **4.963s** | **1.753×** |
+| 4 | 2.699× | 5.875s | **2.075× — rejected** |
+
+- **Current default: 3**, approximately **1.76× sequential throughput**. Four offered little extra throughput and exceeded the latency bound in this recheck. Configure 1–8 with `PI_VOICE_TTS_WORKERS`; calibration is model/hardware/load-specific, not a universal latency guarantee. Pool warm-up at each level took 4.2–6.9s and is excluded from the warm comparison.
+- A separate real four-process cold smoke check returned four valid 24kHz PCM arrays (3.100/2.475/2.525/2.500 seconds) in 7.44s without playback or saved PCM. This was an interoperability check, not the selected concurrency or a phone-latency result.
+- F7 selects the previous sentence/newline unit (also when mid-unit), clamping at the first. F9 selects the next, advances into the next message at a known end, or follows the latest transcript tail. Returning backward from tail selects the final unit even after ownership release. Terminal wrapping never defines a unit.
+- Navigation works without durations. Code descriptions use block source offset plus sentence ordinal, preserve inherited focus/reset cues, skip terminal omissions, and never replay from inside a fence. Paused movement remains paused. Incomplete suffix captures do not claim whole-message completeness; first-unit/full replay can rebuild timing.
+- Snapshots no longer uniformly discard sentence boundaries. Word refinement protects positive-duration boundaries and normalizes source bases; description-relative words are not Markdown source coordinates (TIME-4/TIME-5). Playback completion advances the cursor and rejects late clock packets.
+- Both client variants migrate the old numbered Termux labels on startup, preserving custom layout and symlinks. Docs include an immediate local-Termux migration command without reconnecting. No active SSH session was interrupted or client deployed by this work.
+- Final review caught and fixed suffix-relative cursor drift, omitted-description dead ends, stale completion cursors and ownership-dependent tail navigation. Regressions cover these paths, code cue inheritance, large timing snapshots, out-of-order generation, backpressure, cancellation and child cleanup. **Typecheck and all 169 tests pass**; follow-up review reported no remaining blocking introduced defects.
+- Still unmeasured: actual phone/SSH end-to-end playback latency and live-arrival throughput. Existing alignment backlog (PERF-7), long-unit timing estimates, and unrelated audit findings remain explicit follow-ups.
 
 ## Validation / next actions
 
-1. Initial performance, dictation, cache-policy and audit work completed; review corrections regression-tested. Continue with the remaining parallel playback and sentence-navigation integration above.
+1. Requested performance, dictation, cache-policy, parallel synthesis and sentence navigation are implemented; reload/deploy and perform live device validation when authorized.
 2. Confirm relevant audit reproductions in committed tests before changing behavior.
 3. Implement authorized UI/caching requirements with safety guards, recording any inseparable fixes explicitly.
 4. Run typecheck and full tests; record commands/results and commits here.

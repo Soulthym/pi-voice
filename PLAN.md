@@ -19,10 +19,12 @@ Do this **after** the responsiveness/dictation/cache implementation and current 
 10. **Record results and outstanding decisions.** Add benchmark data, selected concurrency/latency tradeoff, navigation semantics, tests, and any newly found bugs to `FINDINGS.md`; update user-facing usage/shortcut documentation.
 
 - [x] Whole-sentence/newline generation (`8c5a05b`); native long-sentence preservation checked. Long-unit alignment bounded in `a9b0b0c`.
-- [x] Sequential vs parallel benchmark: 4 workers selected; 5 exceeded the latency ceiling.
-- [ ] Wire the measured parallelism into actual ordered playback (the production worker is still sequential).
-- [ ] Sentence/newline navigation and Termux symbol labels.
-- [ ] Follow-up validation and findings report.
+- [x] Sequential vs parallel benchmark: initial standalone inference selected 4; the production-pool recheck selected **3** (1.76× throughput, 1.75× ordered latency). Four exceeded the 2× ceiling in the production recheck.
+- [x] Ordered parallel playback with bounded lookahead, cache reuse, cancellation and child cleanup (`5e2b14c`). `PI_VOICE_TTS_WORKERS=1..8`, default 3.
+- [x] Sentence/newline navigation, code-unit ordinals/cues, missing-timing support, pause retention and Termux symbol migration (`f003991`). Late completion ticks fenced in `b8ffd3a`.
+- [x] Follow-up validation and review: typecheck and **169/169 tests pass**; production-pool offline benchmark recorded in `FINDINGS.md`.
+- [ ] Deployment/live phone-and-SSH listening check; no active SSH sessions were interrupted.
+- [ ] User decisions on unrelated audit findings below/in `FINDINGS.md`.
 
 ## Updated instructions after reload
 
