@@ -232,7 +232,23 @@ export function codeDescriptionUsesActivePrompt(ctx: ExtensionContext, modelSele
 	return ctx.model?.provider === model.provider && ctx.model.id === model.id;
 }
 
+/** Source identity deliberately excludes the generator and its runtime system/tool prefix. */
 export function codeDescriptionCacheKey(
+	_ctx: ExtensionContext,
+	block: FencedCodeBlock,
+	_modelSelector = "current",
+	mode: "guided" | "summary" = "guided",
+	transcript = "",
+	contextMode: VoiceCodeDescriptionContext = "conversation",
+): string {
+	return createHash("sha256").update(JSON.stringify([
+		CODE_DESCRIPTION_PROMPT_VERSION, "source-v1", mode, contextMode,
+		contextMode === "conversation" ? transcript : "", block.language, block.code,
+	])).digest("hex");
+}
+
+/** Retained solely for adopting compatible pre-source-identity snapshots. */
+export function legacyCodeDescriptionCacheKey(
 	ctx: ExtensionContext,
 	block: FencedCodeBlock,
 	modelSelector = "current",

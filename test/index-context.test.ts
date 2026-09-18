@@ -4,6 +4,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { VoiceWorkerClient } from "../src/worker-client.js";
+import { legacyCodeDescriptionCacheKey } from "../src/code-describer.js";
+import { plainCodeNarration } from "../src/code-narration.js";
+import { loadVoiceConfig } from "../src/config.js";
+import { narrationRenderKey } from "../src/render-identity.js";
+import { SpeakableStream } from "../src/speakable.js";
 import { FakeVoiceHost, assistant, streamCompletedResponse, type ModelRequest } from "./helpers/fake-voice-host.js";
 
 async function settle(): Promise<void> {
@@ -128,6 +133,64 @@ test("live, rendering, replay, and timing share one contextual description reque
 		assert.doesNotMatch(JSON.stringify(finalRequest), /run\(\);/);
 		assert.equal(JSON.stringify(concernedAssistant).split("run();").length - 1, 1);
 	}
+});
+
+test("legacy descriptions and timing survive model changes/reload with fresh per-event contexts", async t => {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-voice-source-cache-"));
+	const restoreEnvironment = await configure(root, "block-only");
+	const restoreWorker = mockWorker();
+	let measurements = 0;
+	VoiceWorkerClient.prototype.measureSegment = async () => { measurements++; return 1; };
+	const host = new FakeVoiceHost(root, "source-cache", async () => modelResponse());
+	const restarted = new FakeVoiceHost(root, "source-cache", async () => modelResponse());
+	for (const instance of [host, restarted]) {
+		instance.emit = async (name, event) => {
+			for (const handler of instance.handlers.get(name) ?? []) await handler(event, Object.create(instance.ctx));
+		};
+	}
+	t.after(async () => {
+		await host.shutdown().catch(() => {}); await restarted.shutdown().catch(() => {});
+		restoreWorker(); await restoreEnvironment();
+	});
+	const text = "```ts\nrun();\n```";
+	const parser = new SpeakableStream();
+	const item = [...parser.push(text), ...parser.flush()].find(item => item.kind === "code");
+	assert.ok(item?.kind === "code");
+	const legacy = legacyCodeDescriptionCacheKey(host.ctx, item.block, "current", "summary", "", "block-only");
+	host.addMessage("answer", null, assistant(text));
+	host.entries.push({ type: "custom", id: "description", parentId: "answer", customType: "pi-voice.code-description",
+		data: { version: 1, key: legacy, plan: plainCodeNarration("The legacy description explains the configured action.") } });
+	const renderKey = narrationRenderKey(text, await loadVoiceConfig(), [JSON.stringify([legacy, "ready"])]);
+	host.entries.push({ type: "custom", id: "timing", parentId: "description", customType: "pi-voice.playback-timing",
+		data: { version: 3, messageId: "answer", renderKey, duration: 1, checkpoints: [{ time: 0, duration: 1, sourceOffset: 0 }] } });
+	await host.start(); await settle();
+	assert.match(host.render(text), /legacy description/);
+	assert.equal(measurements, 0, "adopting a legacy plan must retain its old timing key");
+	assert.equal(host.modelRequests.length, 0);
+	assert.ok(host.entries.some(entry => entry.customType === "pi-voice.code-description" && entry.data.identity));
+	host.ctx.model = { ...host.model, provider: "other", id: "replacement" };
+	host.ctx.getSystemPrompt = () => "A different model-specific prefix";
+	await host.command("edit-model other/pinned");
+	host.ctx.thinkingLevel = "high";
+	await host.emit("agent_settled", { type: "agent_settled" }); await settle();
+	assert.match(host.render(text), /legacy description/);
+	assert.equal(measurements, 0);
+	assert.equal(host.modelRequests.length, 0);
+	await host.shutdown();
+	restarted.entries.push(...structuredClone(host.entries));
+	restarted.ctx.model = host.ctx.model;
+	await restarted.start(); await settle();
+	assert.match(restarted.render(text), /legacy description/);
+	assert.equal(measurements, 0);
+	assert.equal(restarted.modelRequests.length, 0);
+	// New source still generates; the generator setting is not frozen globally.
+	await restarted.command("edit-model current");
+	restarted.addMessage("new-answer", restarted.entries.at(-1)?.id ?? null, assistant("```ts\nnewAction();\n```"));
+	await restarted.emit("agent_settled", { type: "agent_settled" }); await settle();
+	assert.equal(restarted.modelRequests.length, 1);
+	assert.equal((restarted.modelRequests[0]!.model as { id: string }).id, "replacement");
+	assert.ok(restarted.entries.some(entry => entry.customType === "pi-voice.code-description" && entry.data.key !== legacy),
+		"fresh event contexts must not suppress cache persistence");
 });
 
 test("extension narration uses the compaction summary applicable before a historical block", async t => {

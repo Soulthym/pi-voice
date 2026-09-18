@@ -3,6 +3,8 @@ import type { CodeNarrationOperation, CodeNarrationPlan } from "./code-narration
 export interface CodeDescriptionCacheSnapshot {
 	version: 1;
 	key: string;
+	/** Source identity alias for an adopted legacy key (preserves existing timing identity). */
+	identity?: string;
 	plan: CodeNarrationPlan;
 }
 
@@ -56,23 +58,41 @@ export function parseCodeDescriptionCacheSnapshot(value: unknown): CodeDescripti
 	if (!("version" in value) || value.version !== 1) return undefined;
 	if (!("key" in value) || typeof value.key !== "string" || !/^[a-f0-9]{64}$/.test(value.key)) return undefined;
 	if (!("plan" in value) || !isPlan(value.plan)) return undefined;
-	return { version: 1, key: value.key, plan: value.plan };
+	const identity = "identity" in value && typeof value.identity === "string" && /^[a-f0-9]{64}$/.test(value.identity)
+		? value.identity : undefined;
+	return { version: 1, key: value.key, plan: value.plan, ...(identity ? { identity } : {}) };
 }
 
 /** Content-addressed, in-flight-coalescing narration cache for one Pi session. */
 export class CodeDescriptionCache {
 	#plans = new Map<string, CodeNarrationPlan>();
+	#identities = new Map<string, string>();
 	#pending = new Map<string, Promise<CodeNarrationPlan>>();
 	#generation = 0;
 
 	restore(values: readonly unknown[]): void {
 		this.#generation += 1;
 		this.#plans.clear();
+		this.#identities.clear();
 		this.#pending.clear();
 		for (const value of values) {
 			const snapshot = parseCodeDescriptionCacheSnapshot(value);
-			if (snapshot) this.#plans.set(snapshot.key, snapshot.plan);
+			if (snapshot) {
+				this.#plans.set(snapshot.key, snapshot.plan);
+				if (snapshot.identity) this.#identities.set(snapshot.identity, snapshot.key);
+			}
 		}
+	}
+
+	resolveKey(identity: string): string {
+		return this.#identities.get(identity) ?? identity;
+	}
+
+	adopt(identity: string, key: string): CodeDescriptionCacheSnapshot | undefined {
+		const plan = this.#plans.get(key);
+		if (!plan) return undefined;
+		this.#identities.set(identity, key);
+		return { version: 1, key, identity, plan };
 	}
 
 	get(key: string): CodeNarrationPlan | undefined {

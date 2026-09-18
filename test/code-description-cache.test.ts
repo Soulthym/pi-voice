@@ -42,6 +42,21 @@ test("coalesces simultaneous descriptions and persists the generated plan once",
 	assert.deepEqual(stored, [{ version: 1, key: KEY, plan: PLAN }]);
 });
 
+test("adopts a legacy key without invalidating timing dependencies and restores its source alias", async () => {
+	const identity = "b".repeat(64);
+	const cache = new CodeDescriptionCache();
+	cache.restore([{ version: 1, key: KEY, plan: PLAN }]);
+	const adopted = cache.adopt(identity, KEY);
+	assert.ok(adopted);
+	assert.equal(cache.resolveKey(identity), KEY);
+	const restored = new CodeDescriptionCache();
+	restored.restore([adopted]);
+	assert.equal(restored.resolveKey(identity), KEY);
+	assert.deepEqual(await restored.getOrCreate(restored.resolveKey(identity), async () => {
+		throw new Error("a model switch must not regenerate the restored plan");
+	}), PLAN);
+});
+
 test("rejects malformed persisted descriptions", () => {
 	assert.equal(parseCodeDescriptionCacheSnapshot({ version: 1, key: "short", plan: PLAN }), undefined);
 	assert.equal(

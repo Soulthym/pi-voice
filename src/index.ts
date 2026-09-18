@@ -12,6 +12,7 @@ import {
 import { CodeDescriptionCache, type CodeDescriptionCacheSnapshot } from "./code-description-cache.js";
 import {
 	codeDescriptionCacheKey,
+	legacyCodeDescriptionCacheKey,
 	CodeDescriptionBudgetExhaustedError,
 	classifyCodeDescriptionFailure,
 	CodeDescriptionContextOverflowError,
@@ -310,6 +311,23 @@ export default async function (pi: ExtensionAPI) {
 	const codeDescriptionCache = new CodeDescriptionCache();
 	const codeDescriptionText = new Map<string, string>();
 	const pendingCodeDescriptions = new Map<string, CodeDescriptionCacheSnapshot>();
+	let descriptionPersistTimer: NodeJS.Immediate | undefined;
+	const persistPendingDescriptions = (): void => {
+		for (const [key, snapshot] of pendingCodeDescriptions) {
+			try {
+				pi.appendEntry(CODE_DESCRIPTION_CACHE_ENTRY, snapshot);
+				pendingCodeDescriptions.delete(key);
+			} catch { break; } // Leave unwritten snapshots pending for a later safe flush.
+		}
+	};
+	const scheduleDescriptionPersistence = (): void => {
+		if (descriptionPersistTimer) return;
+		const epoch = contextEpoch;
+		descriptionPersistTimer = setImmediate(() => {
+			descriptionPersistTimer = undefined;
+			if (epoch === contextEpoch && activeContext?.isIdle()) persistPendingDescriptions();
+		});
+	};
 	const reportedDescriptionOverflows = new Set<string>();
 	/** Runtime-only failed-description records; retry commands clear them. */
 	const codeDescriptionOmissions = new Map<string, { reason: "quality" | "provider"; message: string }>();
@@ -422,15 +440,27 @@ export default async function (pi: ExtensionAPI) {
 		return JSON.stringify({ context, systemPrompt: ctx.getSystemPrompt(), tools: activePromptTools() });
 	};
 
-	const descriptionCacheKey = (ctx: ExtensionContext, block: FencedCodeBlock, identityContext: string): string =>
-		codeDescriptionCacheKey(
-			ctx,
-			block,
-			config.editModel,
-			config.codeNarration,
-			contextualCodeDescription(ctx, identityContext),
-			config.codeDescriptionContext,
-		);
+	const descriptionCacheKey = (ctx: ExtensionContext, block: FencedCodeBlock, identityContext: string): string => {
+		const identity = codeDescriptionCacheKey(ctx, block, config.editModel, config.codeNarration,
+			identityContext, config.codeDescriptionContext);
+		const known = codeDescriptionCache.resolveKey(identity);
+		if (known !== identity || codeDescriptionCache.get(identity)) return known;
+		// Adopt resolvable old snapshots without changing their timing dependency key.
+		try {
+			const legacy = legacyCodeDescriptionCacheKey(ctx, block, config.editModel, config.codeNarration,
+				contextualCodeDescription(ctx, identityContext), config.codeDescriptionContext);
+			const adopted = codeDescriptionCache.adopt(identity, legacy);
+			if (adopted) {
+				pendingCodeDescriptions.set(legacy, adopted);
+				scheduleDescriptionPersistence();
+				return legacy;
+			}
+		} catch { /* Cached source identities remain usable without an available generator. */ }
+		return identity;
+	};
+
+	const isCurrentContext = (ctx: ExtensionContext): boolean =>
+		activeContext?.sessionManager.getSessionId() === ctx.sessionManager.getSessionId();
 
 	const requestCodeDescription = async (
 		ctx: ExtensionContext,
@@ -440,9 +470,14 @@ export default async function (pi: ExtensionAPI) {
 		options?: { chargeBackfill?: () => boolean },
 ): Promise<CodeNarrationPlan> => {
 		const fallback = plainCodeNarration(fallbackCodeDescription(block));
+		const requestEpoch = contextEpoch;
 		let resolvedKey: string | undefined;
 		let lastOverflowModel = "";
 		try {
+			const key = descriptionCacheKey(ctx, block, identityContext);
+			resolvedKey = key;
+			const cached = codeDescriptionCache.get(key);
+			if (cached) return cached;
 			const editModel = config.editModel;
 			const narrationMode = config.codeNarration;
 			const contextMode = config.codeDescriptionContext;
@@ -450,12 +485,6 @@ export default async function (pi: ExtensionAPI) {
 				contextMode === "conversation" && codeDescriptionUsesActivePrompt(ctx, editModel);
 			const systemPrompt = reusesActivePrompt ? ctx.getSystemPrompt() : undefined;
 			const tools = reusesActivePrompt ? activePromptTools() : undefined;
-			const contextualIdentity =
-				contextMode === "conversation"
-					? reusesActivePrompt
-						? JSON.stringify({ context: identityContext, systemPrompt, tools })
-						: identityContext
-					: "";
 			const conversation =
 				contextMode === "conversation"
 					? {
@@ -471,15 +500,6 @@ export default async function (pi: ExtensionAPI) {
 								: {}),
 						}
 					: undefined;
-			const key = codeDescriptionCacheKey(
-				ctx,
-				block,
-				editModel,
-				narrationMode,
-				contextualIdentity,
-				contextMode,
-			);
-			resolvedKey = key;
 			lastOverflowModel = editModel;
 			return await codeDescriptionCache
 				.getOrCreate(
@@ -511,7 +531,7 @@ export default async function (pi: ExtensionAPI) {
 							: generate();
 					},
 					snapshot => {
-						if (activeContext !== ctx) return;
+						if (requestEpoch !== contextEpoch || !isCurrentContext(ctx)) return;
 						try {
 							if (ctx.isIdle()) pi.appendEntry(CODE_DESCRIPTION_CACHE_ENTRY, snapshot);
 							else pendingCodeDescriptions.set(snapshot.key, snapshot);
@@ -521,13 +541,14 @@ export default async function (pi: ExtensionAPI) {
 					},
 				)
 				.then(plan => {
-					if (activeContext === ctx && !plan.omitted) {
+					if (requestEpoch === contextEpoch && isCurrentContext(ctx) && !plan.omitted) {
 						codeDescriptionText.set(key, descriptionText(plan));
 						requestNarrationRender(block.code);
 					}
 					return plan;
 				});
 		} catch (outerError) {
+			if (requestEpoch !== contextEpoch || !isCurrentContext(ctx)) return fallback;
 			if (outerError === BACKFILL_EXHAUSTED || outerError instanceof CodeDescriptionBudgetExhaustedError) throw BACKFILL_EXHAUSTED;
 			if (!resolvedKey) return fallback;
 			if (outerError instanceof CodeDescriptionContextOverflowError) {
@@ -536,7 +557,7 @@ export default async function (pi: ExtensionAPI) {
 				if (!reportedDescriptionOverflows.has(overflowId)) {
 					reportedDescriptionOverflows.add(overflowId);
 					try {
-						if (activeContext === ctx) {
+						if (isCurrentContext(ctx)) {
 							ctx.ui.notify(
 								`Voice used local code narration because ${lastOverflowModel} has insufficient context`,
 								"warning",
@@ -679,9 +700,9 @@ const chargeBackfillUnit = (): boolean => {
 		refreshPreprocessingProgress();
 		const concurrency = config.codeDescriptionPreprocessConcurrency;
 		codeDescriptionPreprocessing = processConcurrently(queuedMessages, concurrency, async items => {
-			if (epoch !== contextEpoch || workEpoch !== codeWorkEpoch || activeContext !== ctx) return;
+			if (epoch !== contextEpoch || workEpoch !== codeWorkEpoch || !isCurrentContext(ctx)) return;
 			for (const item of items) {
-				if (epoch !== contextEpoch || workEpoch !== codeWorkEpoch || activeContext !== ctx) return;
+				if (epoch !== contextEpoch || workEpoch !== codeWorkEpoch || !isCurrentContext(ctx)) return;
 				try {
 					await requestCodeDescription(ctx, item.block, item.identityContext, item.providerMessagesThroughBlock, { chargeBackfill: chargeBackfillUnit });
 				} catch (error) {
@@ -717,7 +738,7 @@ const chargeBackfillUnit = (): boolean => {
 				codeDescriptionPreprocessing = undefined;
 				codePreprocessingProgress = undefined;
 				refreshPreprocessingProgress();
-				if (epoch === contextEpoch && workEpoch !== codeWorkEpoch && activeContext === ctx) {
+				if (epoch === contextEpoch && workEpoch !== codeWorkEpoch && isCurrentContext(ctx)) {
 					scheduleMissingCodeDescriptions(ctx);
 				}
 			});
@@ -1763,7 +1784,7 @@ const chargeBackfillUnit = (): boolean => {
 		const epoch = contextEpoch;
 		const timer = setTimeout(
 			() => {
-				if (epoch !== contextEpoch || activeContext !== ctx) return;
+				if (epoch !== contextEpoch || !isCurrentContext(ctx)) return;
 				try {
 					finalizePlaybackMessage(ctx, playbackId, text, attempt + 1);
 				} catch {
@@ -1806,7 +1827,7 @@ const chargeBackfillUnit = (): boolean => {
 		const measurementConfig = config;
 		timingPreprocessing = processConcurrently(missing, concurrency, async (message, lane) => {
 			const processMessage = async (): Promise<void> => {
-				if (epoch !== contextEpoch || workEpoch !== timingWorkEpoch || activeContext !== ctx) return;
+				if (epoch !== contextEpoch || workEpoch !== timingWorkEpoch || !isCurrentContext(ctx)) return;
 				const contextual = contextualById.get(message.id);
 				if (!contextual) return;
 				let checkpoints: PlaybackTimingSnapshot["checkpoints"] = [];
@@ -1823,7 +1844,7 @@ const chargeBackfillUnit = (): boolean => {
 						contextual.assistantMessage,
 					)) {
 						const duration = await workers[lane].measureSegment(item.text, measurementConfig);
-						if (epoch !== contextEpoch || workEpoch !== timingWorkEpoch || activeContext !== ctx) return;
+						if (epoch !== contextEpoch || workEpoch !== timingWorkEpoch || !isCurrentContext(ctx)) return;
 						if (!Number.isFinite(duration) || duration <= 0) continue;
 						checkpoints.push({ time, duration, sourceOffset: item.source.start });
 						if (item.wordTimings) {
@@ -1848,7 +1869,7 @@ const chargeBackfillUnit = (): boolean => {
 					// Live speech and microphone actions preempt low-priority timing work.
 					return;
 				}
-				if (checkpoints.length === 0 || epoch !== contextEpoch || activeContext !== ctx) return;
+				if (checkpoints.length === 0 || epoch !== contextEpoch || !isCurrentContext(ctx)) return;
 				checkpoints.sort((left, right) => left.time - right.time);
 				if (checkpoints.length > 2_000) {
 					const all = checkpoints;
@@ -1895,7 +1916,7 @@ const chargeBackfillUnit = (): boolean => {
 				const completedWorkers = timingWorkers.splice(0);
 				void Promise.all(completedWorkers.map(worker => worker.terminate())).catch(() => {});
 				refreshPreprocessingProgress();
-				if (timingRescheduleRequested && epoch === contextEpoch && activeContext === ctx) {
+				if (timingRescheduleRequested && epoch === contextEpoch && isCurrentContext(ctx)) {
 					timingRescheduleRequested = false;
 					scheduleMissingTimings(ctx);
 				}
@@ -1917,7 +1938,6 @@ const chargeBackfillUnit = (): boolean => {
 			previous.voice !== config.voice ||
 			previous.speed !== config.speed ||
 			previous.codeNarration !== config.codeNarration ||
-			previous.editModel !== config.editModel ||
 			previous.audioCache !== config.audioCache ||
 			previous.audioCacheBitrate !== config.audioCacheBitrate;
 		if (renderDependenciesChanged) {
@@ -2175,6 +2195,10 @@ const chargeBackfillUnit = (): boolean => {
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
+		if (interactiveVoiceSession) persistPendingDescriptions();
+		if (descriptionPersistTimer) clearImmediate(descriptionPersistTimer);
+		descriptionPersistTimer = undefined;
+		conversationBeforeCache.delete(ctx.sessionManager);
 		contextEpoch += 1;
 		if (!interactiveVoiceSession) {
 			activeContext = null;
@@ -2412,11 +2436,8 @@ const chargeBackfillUnit = (): boolean => {
 	});
 
 	pi.on("agent_settled", (_event, ctx) => {
-		if (!interactiveVoiceSession || activeContext !== ctx) return;
-		for (const snapshot of pendingCodeDescriptions.values()) {
-			pi.appendEntry(CODE_DESCRIPTION_CACHE_ENTRY, snapshot);
-		}
-		pendingCodeDescriptions.clear();
+		if (!interactiveVoiceSession || !isCurrentContext(ctx)) return;
+		persistPendingDescriptions();
 		syncPlaybackMessages(ctx);
 		scheduleMissingCodeDescriptions(ctx);
 		scheduleMissingTimings(ctx);

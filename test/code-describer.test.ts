@@ -26,6 +26,16 @@ test("keys identical blocks by their transcript context", () => {
 	);
 });
 
+test("description identities survive generator/thinking changes and unavailable models", () => {
+	const block = { language: "ts", code: "const answer = 42;" };
+	const first = { model: { provider: "a", id: "first" }, thinkingLevel: "high" } as never;
+	const second = { model: { provider: "b", id: "second" }, thinkingLevel: "low" } as never;
+	const key = codeDescriptionCacheKey(first, block, "current", "guided", "historical context");
+	assert.equal(codeDescriptionCacheKey(second, block, "other/pinned", "guided", "historical context"), key);
+	assert.equal(codeDescriptionCacheKey({} as never, block, "missing/model", "guided", "historical context"), key);
+	assert.notEqual(codeDescriptionCacheKey(second, block, "current", "summary", "historical context"), key);
+});
+
 test("extends the normal prompt prefix and sends the concerned block exactly once", async () => {
 	const model = { provider: "test", id: "model", contextWindow: 8_192, maxTokens: 1_024 };
 	const prior = { role: "user", content: [{ type: "text", text: "Explain this example." }], timestamp: 1 };
