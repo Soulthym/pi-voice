@@ -339,6 +339,8 @@ export default async function (pi: ExtensionAPI) {
 	let liveTurnNarrationActive = false;
 	let nextLivePlaybackId = 0;
 	let playbackPaused = false;
+	let queueIncomingWhilePaused = false;
+	const queuedPausedMessages: PlaybackTarget[] = [];
 	let pausedOwnerUtterance: number | undefined;
 	let playbackRequestEpoch = 0;
 	let pendingReplay:
@@ -1416,6 +1418,7 @@ const chargeBackfillUnit = (): boolean => {
 	const clearPlaybackTransport = (): number | undefined => {
 		playbackRequestEpoch += 1;
 		coordinator?.cancelSpeechAcquisition();
+		if (!ownsSpeech) coordinator?.releaseSpeech();
 		pendingReplay = undefined;
 		const cancelId = vocalizer.clear();
 		playbackPaused = false;
@@ -1442,9 +1445,9 @@ const chargeBackfillUnit = (): boolean => {
 		});
 	};
 
-	const releaseAfterTransportCancellation = (cancelId: number | undefined, announceNext = false): void => {
+	const releaseAfterTransportCancellation = (cancelId: number | undefined, announceNext = false, inputCancelled = Promise.resolve()): void => {
 		const leaseEpoch = speechLeaseEpoch;
-		void waitForTransportCancellation(cancelId).then(() => {
+		void Promise.all([waitForTransportCancellation(cancelId), inputCancelled]).then(() => {
 			if (ownsSpeech && speechLeaseEpoch === leaseEpoch) releaseSpeechOwnership(announceNext);
 		});
 	};
@@ -1461,6 +1464,7 @@ const chargeBackfillUnit = (): boolean => {
 		}
 	};
 	const cancelActiveInput = (): Promise<void> => {
+		if (inputPhase === "acquiring" && !ownsSpeech) coordinator?.releaseSpeech();
 		inputEpoch += 1;
 		cancelPendingDictation?.();
 		cancelPendingDictation = undefined;
@@ -1560,6 +1564,11 @@ const chargeBackfillUnit = (): boolean => {
 			return;
 		}
 		completingOwnerSpeech = false;
+		const queued = queuedPausedMessages.shift();
+		if (queued) {
+			void playTarget(queued, !playbackHistory.hasCompleteTimingFor(queued.id), false, true);
+			return;
+		}
 		releaseSpeechOwnership(true);
 	};
 
@@ -1721,7 +1730,9 @@ const chargeBackfillUnit = (): boolean => {
 		target: PlaybackTarget,
 		recordTimings: boolean,
 		previewTarget = false,
+		queued = false,
 	): Promise<void> => {
+		if (!interactiveVoiceSession) return;
 		restoreBottomAfterSpeech = false;
 		const sourceOffset = Math.max(0, Math.min(target.text.length, target.sourceOffset));
 		const suffix = target.text.slice(sourceOffset);
@@ -1731,6 +1742,7 @@ const chargeBackfillUnit = (): boolean => {
 			return;
 		}
 
+		if (!queued) queuedPausedMessages.length = 0;
 		attentionSuppressed = false;
 		coordinator?.setAttentionEnabled(config.enabled);
 		coordinator?.cancelSpeechAcquisition();
@@ -1870,6 +1882,9 @@ const chargeBackfillUnit = (): boolean => {
 
 	const syncPlaybackMessages = (ctx: ExtensionContext, selectLatest = false): PlaybackMessage[] => {
 		const messages = playbackMessages(ctx);
+		const selected = playbackHistory.selected();
+		const updated = messages.find(message => message.id === selected?.id);
+		if (selected && updated && selected.text !== updated.text) pauseDirtyPlayback();
 		playbackHistory.sync(messages, selectLatest);
 		return messages;
 	};
@@ -2033,9 +2048,30 @@ const chargeBackfillUnit = (): boolean => {
 		await vocalizer.warm();
 	};
 
+	// Dirty current assets keep their lease and frozen target, but cannot resume
+	// their obsolete sink. Explicit resume rebuilds with the current dependencies.
+	const pauseDirtyPlayback = (): void => {
+		if (!ownsSpeech && !pendingReplay) return;
+		if (speechPurpose === "turn" && !ownerTurnEnded) queueIncomingWhilePaused = true;
+		clearPlaybackTransport();
+		vocalizer.setPlaybackPaused(true);
+		playbackPaused = true;
+		state = "idle";
+		hideFollowHint();
+		autoScrollForceOnce = false;
+		refreshStatus();
+		refreshPlaybackTimeline();
+	};
+
 	const updateConfig = async (next: VoiceConfig): Promise<void> => {
 		const previous = config;
 		const wasEnabled = config.enabled;
+		const currentText = playbackHistory.selected()?.text ?? ownedSpeechText;
+		const currentAssetConfig = /```|~~~/.test(currentText) ? next : { ...next, codeNarration: previous.codeNarration };
+		if (narrationRenderKey(currentText, previous, []) !== narrationRenderKey(currentText, currentAssetConfig, []) ||
+			(previous.mode !== next.mode && (previous.mode === "all" || next.mode === "all"))) {
+			pauseDirtyPlayback();
+		}
 		await saveVoiceConfig(next);
 		config = next;
 		const renderDependenciesChanged =
@@ -2054,7 +2090,9 @@ const chargeBackfillUnit = (): boolean => {
 		backfillUsed = 0;
 		backfillExhaustionReported = false;
 		if (wasEnabled && !config.enabled) {
-			disabledAttentionPending = pausedForAttention || (coordinator?.isWaiting() ?? false);
+			disabledAttentionPending = queuedPausedMessages.length > 0 || pausedForAttention || (coordinator?.isWaiting() ?? false);
+			queueIncomingWhilePaused = false;
+			queuedPausedMessages.length = 0;
 			coordinator?.setAttentionEnabled(false);
 			const cancelId = clearPlaybackTransport();
 			narration.finish();
@@ -2290,6 +2328,8 @@ const chargeBackfillUnit = (): boolean => {
 		ownsSpeech = false;
 		attentionSuppressed = false;
 		disabledAttentionPending = false;
+		queueIncomingWhilePaused = false;
+		queuedPausedMessages.length = 0;
 		contextEpoch += 1;
 		interactiveVoiceSession = supportsInteractiveVoice(ctx.mode);
 		activeContext = interactiveVoiceSession ? ctx : null;
@@ -2404,7 +2444,8 @@ const chargeBackfillUnit = (): boolean => {
 	});
 
 	pi.on("input", async () => {
-		if (!interactiveVoiceSession) return;
+		if (!interactiveVoiceSession || playbackPaused) return;
+		queuedPausedMessages.length = 0;
 		restoreBottomAfterSpeech = false;
 		bottomPinned = false;
 		coordinator?.clearWaiting();
@@ -2423,7 +2464,7 @@ const chargeBackfillUnit = (): boolean => {
 	});
 
 	pi.on("before_agent_start", async () => {
-		if (!interactiveVoiceSession) return;
+		if (!interactiveVoiceSession || playbackPaused) return;
 		speechBlocked = false;
 		blockedMessageHasSpeech = false;
 		blockedWarningIssued = false;
@@ -2441,6 +2482,8 @@ const chargeBackfillUnit = (): boolean => {
 		if (interactiveVoiceSession && (event.message as { role?: string })?.role === "assistant") {
 			attentionSuppressed = false;
 			coordinator?.setAttentionEnabled(config.enabled);
+			queueIncomingWhilePaused = config.enabled && playbackPaused;
+			if (queueIncomingWhilePaused) return;
 		}
 		if (
 			interactiveVoiceSession &&
@@ -2488,7 +2531,7 @@ const chargeBackfillUnit = (): boolean => {
 	});
 
 	pi.on("message_update", event => {
-		if (!interactiveVoiceSession || !config.enabled || attentionSuppressed || config.mode === "yield") return;
+		if (!interactiveVoiceSession || !config.enabled || attentionSuppressed || queueIncomingWhilePaused || config.mode === "yield") return;
 		speechAssistantMessage = event.message;
 		vocalizer.setCodeDescriptionMessages(contextualAssistantMessages(speechConversationMessages, event.message));
 		const delta = event.assistantMessageEvent;
@@ -2524,6 +2567,15 @@ const chargeBackfillUnit = (): boolean => {
 		if (!interactiveVoiceSession) return;
 		const completedText = assistantText(event.message);
 		const stopReason = assistantStopReason(event.message);
+		if (queueIncomingWhilePaused) {
+			// Use the existing eligible snapshots here; canonical thinking/context
+			// targets and paused timing/viewport refinement remain separate work.
+			if (config.enabled && !attentionSuppressed && requiresVoiceAttention(completedText, config.mode, stopReason)) {
+				const message = activeContext && playbackMessages(activeContext).findLast(item => item.text === completedText);
+				queuedPausedMessages.push({ id: message?.id ?? `live:${++nextLivePlaybackId}`, text: completedText, time: 0, sourceOffset: 0 });
+			}
+			return;
+		}
 		if (completedText && stopReason !== undefined && stopReason !== "aborted" && stopReason !== "error" && activeContext) {
 			scheduleCodeDescriptionsInText(activeContext, completedText);
 			if (livePlaybackId) finalizePlaybackMessage(activeContext, livePlaybackId, completedText);
@@ -2548,7 +2600,7 @@ const chargeBackfillUnit = (): boolean => {
 	});
 
 	pi.on("turn_end", (event, ctx) => {
-		if (!interactiveVoiceSession) return;
+		if (!interactiveVoiceSession || queueIncomingWhilePaused) return;
 		const stopReason = assistantStopReason(event.message);
 		const completedTurn = stopReason !== "aborted" && stopReason !== "error" && stopReason !== undefined;
 		if (!config.enabled && !attentionSuppressed && requiresVoiceAttention(assistantText(event.message), config.mode, stopReason)) {
@@ -2654,6 +2706,7 @@ const chargeBackfillUnit = (): boolean => {
 			ctx.ui.notify("There is no completed assistant message to replay yet", "warning");
 			return;
 		}
+		playbackPaused = false;
 		playTarget(target, !playbackHistory.hasCompleteTimingFor(target.id), true);
 	};
 
@@ -2775,17 +2828,22 @@ const chargeBackfillUnit = (): boolean => {
 				ctx.ui.notify("Voice device handoff is still stopping the previous transport", "warning");
 				return;
 			}
+			if (atTranscriptTail && !attentionSuppressed && (pausedOwnerUtterance === undefined || !ownsSpeech)) {
+				await replaySelected(ctx);
+				return;
+			}
 			restoreBottomAfterSpeech = false;
 			bottomPinned = false;
 			if (playbackPaused) {
-				if (pausedOwnerUtterance === undefined) {
+				playbackPaused = false;
+				if (pausedOwnerUtterance === undefined || completedOwnerUtterance === pausedOwnerUtterance) {
 					const target = playbackHistory.resumeTarget();
-					if (target) playTarget(target, false);
+					if (target) playTarget(target, false, false, true);
 					return;
 				}
 				if (!ownsSpeech || !(coordinator?.ownsSpeech() ?? true)) {
 					const target = playbackHistory.resumeTarget();
-					if (target) playTarget(target, false);
+					if (target) playTarget(target, false, false, true);
 					return;
 				}
 				lastOwnerUtterance = pausedOwnerUtterance;
@@ -3138,6 +3196,8 @@ const chargeBackfillUnit = (): boolean => {
 					return;
 				case "stop": {
 					attentionSuppressed = true;
+					queueIncomingWhilePaused = false;
+					queuedPausedMessages.length = 0;
 					disabledAttentionPending = false;
 					pausedForAttention = false;
 					speechBlocked = false;
@@ -3147,9 +3207,9 @@ const chargeBackfillUnit = (): boolean => {
 					if (speechPreemptionTimer) clearTimeout(speechPreemptionTimer);
 					const cancelId = clearPlaybackTransport();
 					narration.finish();
-					void cancelActiveInput();
-					// Explicit stop must not immediately start an attention announcement.
-					releaseAfterTransportCancellation(cancelId);
+					const inputCancelled = cancelActiveInput();
+					// Return promptly, but retain the lease until both devices acknowledge stop.
+					releaseAfterTransportCancellation(cancelId, false, inputCancelled);
 					state = "idle";
 					refreshStatus();
 					return;
@@ -3177,10 +3237,7 @@ const chargeBackfillUnit = (): boolean => {
 						ctx.ui.notify(`Usage: /voice ${action} <huggingface-repo>`, "error");
 						return;
 					}
-					if (inputInProgress) await cancelActiveInput();
-					const cancelId = clearPlaybackTransport();
-					narration.finish();
-					releaseAfterTransportCancellation(cancelId);
+					if (inputInProgress && action.toLowerCase() === "stt-model") await cancelActiveInput();
 					if (action.toLowerCase() === "tts-model") await updateConfig({ ...config, ttsModel: model });
 					else if (action.toLowerCase() === "stt-model") await updateConfig({ ...config, sttModel: model });
 					else await updateConfig({ ...config, alignmentModel: model });
@@ -3195,10 +3252,7 @@ const chargeBackfillUnit = (): boolean => {
 						ctx.ui.notify(`Usage: /voice ${action} fp32|q8|q4`, "error");
 						return;
 					}
-					if (inputInProgress) await cancelActiveInput();
-					const cancelId = clearPlaybackTransport();
-					narration.finish();
-					releaseAfterTransportCancellation(cancelId);
+					if (inputInProgress && action.toLowerCase() === "stt-dtype") await cancelActiveInput();
 					if (action.toLowerCase() === "tts-dtype") await updateConfig({ ...config, ttsDtype: dtype });
 					else if (action.toLowerCase() === "stt-dtype") await updateConfig({ ...config, sttDtype: dtype });
 					else await updateConfig({ ...config, alignmentDtype: dtype });
@@ -3334,6 +3388,11 @@ const chargeBackfillUnit = (): boolean => {
 						return found;
 					};
 					const retryKeys = (keys: Set<string>): number => {
+						// Fence the currently narrated asset when it becomes dirty, not when
+						// the replacement plan eventually arrives. Retry coalescing is separate.
+						if (collectFailed().some(failed => failed.messageId === playbackHistory.selected()?.id && keys.has(failed.key))) {
+							pauseDirtyPlayback();
+						}
 						let scheduled = 0;
 						for (const failed of collectFailed()) {
 							if (!keys.has(failed.key)) continue;
@@ -3489,10 +3548,6 @@ const chargeBackfillUnit = (): boolean => {
 						ctx.ui.notify("Usage: /voice mode assistant|all|yield", "error");
 						return;
 					}
-					if (inputInProgress) await cancelActiveInput();
-					const cancelId = clearPlaybackTransport();
-					narration.finish();
-					releaseAfterTransportCancellation(cancelId);
 					await updateConfig({ ...config, mode });
 					ctx.ui.notify(`Voice mode set to ${mode}`, "info");
 					return;
@@ -3503,10 +3558,6 @@ const chargeBackfillUnit = (): boolean => {
 						ctx.ui.notify("Unknown voice. Use /voice voice <voice-id>; completion lists available voices.", "error");
 						return;
 					}
-					if (inputInProgress) await cancelActiveInput();
-					const cancelId = clearPlaybackTransport();
-					narration.finish();
-					releaseAfterTransportCancellation(cancelId);
 					await updateConfig({ ...config, voice: selected });
 					ctx.ui.notify(`Kokoro voice set to ${selected}`, "info");
 					return;
@@ -3579,8 +3630,8 @@ const chargeBackfillUnit = (): boolean => {
 						ctx.ui.notify("Usage: /voice input auto|local|disabled|tcp://host:port|unix:///path", "error");
 						return;
 					}
-					await cancelActiveInput();
-					releaseSpeechOwnership(false);
+					if (inputInProgress) await cancelActiveInput();
+					if (speechReservedForInput) releaseSpeechOwnership(false);
 					await updateConfig({ ...config, input });
 					ctx.ui.notify(`Voice input set to ${input}`, "info");
 					return;
@@ -3591,6 +3642,7 @@ const chargeBackfillUnit = (): boolean => {
 						return;
 					}
 					const text = args.slice(action.length).trim() || "Pi voice mode is ready.";
+					queuedPausedMessages.length = 0;
 					attentionSuppressed = false;
 					coordinator?.setAttentionEnabled(true);
 					clearPlaybackTransport();

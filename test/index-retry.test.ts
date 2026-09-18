@@ -42,20 +42,26 @@ test("failed descriptions render retry errors, stay silent, and recover via code
 		return 1;
 	};
 	const originalSend = VoiceWorkerClient.prototype.sendSegment;
-	VoiceWorkerClient.prototype.sendSegment = function (): void {};
+	let spoken = 0;
+	VoiceWorkerClient.prototype.sendSegment = function (): void { spoken++; };
+	const originalPause = VoiceWorkerClient.prototype.setPlaybackPaused;
+	const pauses: boolean[] = [];
+	VoiceWorkerClient.prototype.setPlaybackPaused = function (paused): void { pauses.push(paused); };
+	const healthyResult = Promise.withResolvers<any>();
 
 	const host = new FakeVoiceHost(path.join(root, "project"), "retry", async (_request: ModelRequest) => {
 		calls.push(new Date().toISOString());
 		if (!providerHealthy) {
 			return { role: "assistant", content: [{ type: "text", text: "A JSON file contains 4 lines." }], stopReason: "stop" };
 		}
-		return { role: "assistant", content: [{ type: "text", text: "It registers the toggle shortcuts." }], stopReason: "stop" };
+		return healthyResult.promise;
 	});
 
 	t.after(async () => {
 		await host.shutdown().catch(() => {});
 		VoiceWorkerClient.prototype.measureSegment = originalMeasure;
 		VoiceWorkerClient.prototype.sendSegment = originalSend;
+		VoiceWorkerClient.prototype.setPlaybackPaused = originalPause;
 		if (previous.config === undefined) delete process.env.PI_VOICE_CONFIG;
 		else process.env.PI_VOICE_CONFIG = previous.config;
 		if (previous.coordinator === undefined) delete process.env.PI_VOICE_COORDINATOR_DIR;
@@ -82,11 +88,19 @@ test("failed descriptions render retry errors, stay silent, and recover via code
 	// Recovery through the command after the provider improves.
 	providerHealthy = true;
 	const before = calls.length;
+	await host.shortcut("f11"); await settle();
+	const spokenBefore = spoken;
 	await host.command("code-retry historical all");
+	assert.equal(pauses.at(-1), true, "retry pauses the dirty current asset before its replacement exists");
+	healthyResult.resolve({ role: "assistant", content: [{ type: "text", text: "It registers the toggle shortcuts." }], stopReason: "stop" });
 	await new Promise(resolve => setTimeout(resolve, 150));
 	await settle();
 
 	const recovered = host.render(text);
 	assert.match(recovered, /toggle shortcuts/);
 	assert.doesNotMatch(recovered, /No semantic description available/);
+	assert.equal(pauses.at(-1), true, "regeneration completion must not resume");
+	assert.equal(spoken, spokenBefore);
+	await host.shortcut("f8"); await settle();
+	assert.equal(pauses.at(-1), false, "one resume rebuilds the current description");
 });
