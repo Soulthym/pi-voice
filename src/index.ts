@@ -2056,7 +2056,15 @@ const chargeBackfillUnit = (): boolean => {
 			},
 		});
 		const resolution = new AbortController();
-		const cancel = (): void => { live.cancel(); resolution.abort(); };
+		const cancel = (): void => {
+			try {
+				if (talkEpoch === contextEpoch && !manuallyEdited && ctx.ui.getEditorText() === lastPreview) {
+					ctx.ui.setEditorText(editorBase);
+				}
+			} catch { /* UI may already be unmounted during session replacement. */ }
+			live.cancel();
+			resolution.abort();
+		};
 		cancelPendingDictation = cancel;
 		try {
 			const capture = await phoneInput.capture(routed.input, {
@@ -2143,7 +2151,7 @@ const chargeBackfillUnit = (): boolean => {
 			if (ctx.isIdle()) pi.sendUserMessage(prompt);
 			else pi.sendUserMessage(prompt, { deliverAs: "steer" });
 		} catch (error) {
-			live.cancel();
+			cancel();
 			if (talkEpoch !== contextEpoch || captureEpoch !== inputEpoch || !activeContext) return;
 			activeInputEndpoint = undefined;
 			releaseSpeechOwnership(false);
@@ -2162,6 +2170,7 @@ const chargeBackfillUnit = (): boolean => {
 	};
 
 	pi.on("session_start", async (_event, ctx) => {
+		cancelPendingDictation?.();
 		contextEpoch += 1;
 		interactiveVoiceSession = supportsInteractiveVoice(ctx.mode);
 		activeContext = interactiveVoiceSession ? ctx : null;
@@ -2211,6 +2220,7 @@ const chargeBackfillUnit = (): boolean => {
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
+		cancelPendingDictation?.();
 		if (interactiveVoiceSession) persistPendingDescriptions();
 		if (descriptionPersistTimer) clearImmediate(descriptionPersistTimer);
 		descriptionPersistTimer = undefined;

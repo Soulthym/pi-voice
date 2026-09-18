@@ -77,6 +77,7 @@ test("live/final evidence matches LLM syntax, and manual edits or Stop prevent s
 	await begin(); await finishCapture();
 	const signal = host.modelRequests.at(-1)!.options.signal as AbortSignal;
 	await host.command("stop");
+	assert.equal(editor, "Manual changes while resolving", "cancelled evidence must not become the next capture's draft");
 	assert.equal(signal.aborted, true, "Stop must abort provider resolution as well as the microphone");
 	editor = "New draft after Stop";
 	resolution.resolve(answer); await settle();
