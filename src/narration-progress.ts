@@ -690,6 +690,11 @@ export class NarrationProgress {
 		return transformed;
 	}
 
+	/** Source blocks whose cached Markdown may carry narration styling. */
+	get sourceTexts(): string[] {
+		return this.#blocks.map(block => block.text.trim());
+	}
+
 	get cursor(): number {
 		return this.#cursor;
 	}

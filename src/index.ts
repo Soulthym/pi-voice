@@ -61,6 +61,7 @@ import { pendingPlaybackTiming, voiceProgressLines } from "./status-text.js";
 import { anchorLineForMessage, computeAutoScrollTop, isManualScrollAway } from "./auto-scroll.js";
 import { applySpokenEdit, resolveDictationCandidates } from "./prompt-editor.js";
 import { narrationRenderKey } from "./render-identity.js";
+import { invalidateNarrationMarkdown } from "./narration-render.js";
 import { SessionCoordinator, type WaitingSession } from "./session-coordinator.js";
 import { supportsInteractiveVoice } from "./session-mode.js";
 import { Vocalizer } from "./vocalizer.js";
@@ -131,7 +132,7 @@ function liveConversationBefore(ctx: ExtensionContext): ResolvedCodeContext {
 	return resolvedSessionContext(ctx.sessionManager.getEntries(), leafId);
 }
 
-function completedAssistantMessages(ctx: ExtensionContext, mode: VoiceMode): ContextualPlaybackMessage[] {
+function completedAssistantMessages(ctx: ExtensionContext, mode: VoiceMode, includeContext = false): ContextualPlaybackMessage[] {
 	const messages: ContextualPlaybackMessage[] = [];
 	for (const entry of ctx.sessionManager.getBranch()) {
 		if (entry.type !== "message") continue;
@@ -141,11 +142,12 @@ function completedAssistantMessages(ctx: ExtensionContext, mode: VoiceMode): Con
 		if (mode === "yield" && stopReason === "toolUse") continue;
 		const text = assistantText(entry.message);
 		if (text) {
-			const before = contextBeforeEntry(ctx, entry.parentId);
 			messages.push({
 				id: entry.id,
 				text,
-				conversationMessages: before.messages,
+				get conversationMessages() {
+					return includeContext ? contextBeforeEntry(ctx, entry.parentId).messages : [];
+				},
 				assistantMessage: entry.message,
 			});
 		}
@@ -311,13 +313,28 @@ export default async function (pi: ExtensionAPI) {
 	const reportedDescriptionOverflows = new Set<string>();
 	/** Runtime-only failed-description records; retry commands clear them. */
 	const codeDescriptionOmissions = new Map<string, { reason: "quality" | "provider"; message: string }>();
-	let scheduleMissingTimings: (ctx: ExtensionContext) => void = () => {};
+	let scheduleMissingTimings: (ctx: ExtensionContext, force?: boolean) => void = () => {};
 
-	const requestNarrationRender = (): void => {
+	let renderedNarrationSources = new Set<string>();
+	const changedDescriptionCode = new Set<string>();
+	let invalidateAllNarration = false;
+	const invalidateNarration = (): void => {
+		const sources = new Set(narration.sourceTexts);
+		const affected = new Set([...renderedNarrationSources, ...sources]);
+		if (invalidateAllNarration || !invalidateNarrationMarkdown(narrationTui, affected, changedDescriptionCode)) {
+			narrationTui?.invalidate();
+		}
+		renderedNarrationSources = sources;
+		changedDescriptionCode.clear();
+		invalidateAllNarration = false;
+	};
+	const requestNarrationRender = (changedCode?: string | true): void => {
+		if (changedCode === true) invalidateAllNarration = true;
+		else if (changedCode) changedDescriptionCode.add(changedCode);
 		if (!narrationTui || narrationRenderTimer) return;
 		narrationRenderTimer = setTimeout(() => {
 			narrationRenderTimer = null;
-			narrationTui?.invalidate();
+			invalidateNarration();
 			narrationTui?.requestRender();
 		}, 80);
 		narrationRenderTimer.unref?.();
@@ -325,7 +342,7 @@ export default async function (pi: ExtensionAPI) {
 	const flushNarrationRender = (): void => {
 		if (narrationRenderTimer) clearTimeout(narrationRenderTimer);
 		narrationRenderTimer = null;
-		narrationTui?.invalidate();
+		invalidateNarration();
 		narrationTui?.requestRender(true);
 	};
 	const narration = new NarrationProgress(requestNarrationRender);
@@ -347,6 +364,7 @@ export default async function (pi: ExtensionAPI) {
 		return routed;
 	};
 
+	let progressWidgetKey: string | undefined;
 	const refreshProgressWidget = (): void => {
 		const ctx = activeContext;
 		if (!ctx) return;
@@ -372,7 +390,10 @@ export default async function (pi: ExtensionAPI) {
 					? line.text
 					: ctx.ui.theme.fg(line.kind === "playback" && state === "speaking" ? "accent" : "dim", line.text),
 			);
+			const key = JSON.stringify([contextEpoch, lines]);
+			if (key === progressWidgetKey) return;
 			ctx.ui.setWidget("pi-voice-progress", lines.length > 0 ? lines : undefined, { placement: "belowEditor" });
+			progressWidgetKey = key;
 		} catch {
 			// The active context can become stale just before session shutdown runs.
 		}
@@ -502,7 +523,7 @@ export default async function (pi: ExtensionAPI) {
 				.then(plan => {
 					if (activeContext === ctx && !plan.omitted) {
 						codeDescriptionText.set(key, descriptionText(plan));
-						requestNarrationRender();
+						requestNarrationRender(block.code);
 					}
 					return plan;
 				});
@@ -601,7 +622,7 @@ const chargeBackfillUnit = (): boolean => {
 
 	/** Background work honors the scope; playback and replay always see everything. */
 	const scopedCompletedMessages = (ctx: ExtensionContext, mode: VoiceMode): ContextualPlaybackMessage[] => {
-		const all = completedAssistantMessages(ctx, mode);
+		const all = completedAssistantMessages(ctx, mode, config.codeDescriptionContext === "conversation");
 		if (config.codeDescriptionPreprocessScope !== "since-compaction") return all;
 		const retained = retainedMessageIds(ctx);
 		return retained ? all.filter(message => retained.has(message.id)) : all;
@@ -703,7 +724,7 @@ const chargeBackfillUnit = (): boolean => {
 	};
 
 	const scheduleCodeDescriptionsInText = (ctx: ExtensionContext, text: string): void => {
-		const message = completedAssistantMessages(ctx, "assistant").findLast(candidate => candidate.text === text);
+		const message = completedAssistantMessages(ctx, "assistant", config.codeDescriptionContext === "conversation").findLast(candidate => candidate.text === text);
 		if (!message) return; // agent_settled retries after the session entry is committed
 		for (const item of describableCodeItems(text)) {
 			const providerMessages = contextualAssistantMessagesThroughText(
@@ -725,8 +746,11 @@ const chargeBackfillUnit = (): boolean => {
 				const ctx = activeContext;
 				if (!ctx) return undefined;
 				try {
-					const completed = completedAssistantMessages(ctx, "assistant").findLast(message => message.text === markdown);
-					const providerMessages = completed
+					const contextual = config.codeDescriptionContext === "conversation";
+					const completed = contextual
+						? completedAssistantMessages(ctx, "assistant", true).findLast(message => message.text === markdown)
+						: undefined;
+					const providerMessages = !contextual ? [] : completed
 						? contextualAssistantMessagesThroughText(
 								completed.conversationMessages,
 								completed.assistantMessage,
@@ -1571,7 +1595,7 @@ const chargeBackfillUnit = (): boolean => {
 			if (timingPreprocessing) cancelTimingWorkers();
 			return;
 		}
-		if (!owner && activeContext && !timingPreprocessing) scheduleMissingTimings(activeContext);
+		if (!owner && activeContext && !timingPreprocessing) scheduleMissingTimings(activeContext, false);
 		if (!config.enabled || ownsSpeech) return;
 		// The waiting session may be the only process polling after the previous
 		// owner releases. Let it announce its own wait rather than leaving the
@@ -1679,7 +1703,7 @@ const chargeBackfillUnit = (): boolean => {
 		vocalizer.setPlaybackPaused(request.paused);
 		playbackHistory.beginCapture(target.id, target.text, target.time, recordTimings);
 		const contextual = activeContext
-			? completedAssistantMessages(activeContext, config.mode).find(message => message.id === target.id)
+			? completedAssistantMessages(activeContext, config.mode, config.codeDescriptionContext === "conversation").find(message => message.id === target.id)
 			: undefined;
 		speechConversationMessages = contextual?.conversationMessages ?? [];
 		speechAssistantMessage = contextual?.assistantMessage;
@@ -1715,7 +1739,7 @@ const chargeBackfillUnit = (): boolean => {
 	};
 
 	const playbackMessages = (ctx: ExtensionContext): PlaybackMessage[] =>
-		completedAssistantMessages(ctx, config.mode).map(message => ({
+		completedAssistantMessages(ctx, config.mode, config.codeDescriptionContext === "conversation").map(message => ({
 			id: message.id,
 			text: message.text,
 			renderKey: renderKeyFor(ctx, message),
@@ -1758,9 +1782,13 @@ const chargeBackfillUnit = (): boolean => {
 	};
 
 	let timingPreprocessing: Promise<void> | undefined;
-	scheduleMissingTimings = (ctx: ExtensionContext): void => {
-		if (timingPreprocessing) return;
+	let lastTimingScan = "";
+	scheduleMissingTimings = (ctx: ExtensionContext, force = true): void => {
+		if (timingPreprocessing || config.timingPreprocessConcurrency === 0) return;
 		if (coordinator?.speechOwner()) return;
+		const scan = JSON.stringify([ctx.sessionManager.getSessionId(), ctx.sessionManager.getLeafId(), timingWorkEpoch]);
+		if (!force && scan === lastTimingScan) return;
+		lastTimingScan = scan;
 		const epoch = contextEpoch;
 		const scoped = scopedCompletedMessages(ctx, config.mode);
 		const contextualById = new Map(scoped.map(message => [message.id, message]));
@@ -2213,10 +2241,9 @@ const chargeBackfillUnit = (): boolean => {
 			event.message.role === "assistant"
 		) {
 			blockedWarningIssued = false;
-			if (activeContext) {
-				const before = liveConversationBefore(activeContext);
-				speechConversationMessages = before.messages;
-			}
+			speechConversationMessages = activeContext && config.codeDescriptionContext === "conversation"
+				? liveConversationBefore(activeContext).messages
+				: [];
 			speechAssistantMessage = event.message;
 			const continuingTurn =
 				liveTurnNarrationActive && ownsSpeech && speechPurpose === "turn" && (coordinator?.ownsSpeech() ?? true);
@@ -2317,7 +2344,7 @@ const chargeBackfillUnit = (): boolean => {
 		if (config.enabled && config.mode === "yield" && completedTurn) {
 			const text = assistantText(event.message);
 			if (text && acquireSpeech("turn")) {
-				const contextual = completedAssistantMessages(ctx, config.mode).findLast(message => message.text === text);
+				const contextual = completedAssistantMessages(ctx, config.mode, config.codeDescriptionContext === "conversation").findLast(message => message.text === text);
 				const messages = playbackMessages(ctx);
 				const completed = messages.findLast(message => message.text === text);
 				if (completed) {
@@ -3133,7 +3160,7 @@ const chargeBackfillUnit = (): boolean => {
 					}
 					await updateConfig({ ...config, playbackHighlight: normalized === "on" });
 					if (normalized === "off" && !config.autoScroll) narration.finish();
-					requestNarrationRender();
+					requestNarrationRender(true);
 					ctx.ui.notify(`Spoken-word highlighting ${normalized === "on" ? "enabled" : "disabled"}`, "info");
 					return;
 				}
@@ -3147,7 +3174,7 @@ const chargeBackfillUnit = (): boolean => {
 					if (normalized === "on" && ownsSpeech && !playbackPaused) armNarrationFollow();
 					else hideFollowHint();
 					if (normalized === "off" && !config.playbackHighlight) narration.finish();
-					requestNarrationRender();
+					requestNarrationRender(true);
 					ctx.ui.notify(`Spoken-text auto-scroll ${normalized === "on" ? "enabled" : "disabled"}`, "info");
 					return;
 				}
