@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { Message, Tool } from "@earendil-works/pi-ai";
 import { getMarkdownTheme, highlightCode, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Markdown } from "@earendil-works/pi-tui";
@@ -506,8 +507,8 @@ export default async function (pi: ExtensionAPI) {
 		if (known !== identity || codeDescriptionCache.get(identity)) return known;
 		// Adopt resolvable old snapshots without changing their timing dependency key.
 		try {
-			const legacySettings = JSON.stringify([contextEpoch, config.editModel, ctx.model?.provider, ctx.model?.id,
-				codeDescriptionUsesActivePrompt(ctx, config.editModel) ? [ctx.getSystemPrompt(), activePromptTools()] : null]);
+			const legacySettings = createHash("sha256").update(JSON.stringify([contextEpoch, config.editModel, ctx.model?.provider, ctx.model?.id,
+				codeDescriptionUsesActivePrompt(ctx, config.editModel) ? [ctx.getSystemPrompt(), activePromptTools()] : null])).digest("hex");
 			if (memo.legacySettings !== legacySettings) {
 				memo.legacy = legacyCodeDescriptionCacheKey(ctx, block, config.editModel, config.codeNarration,
 					contextualCodeDescription(ctx, context()), config.codeDescriptionContext);
@@ -1772,7 +1773,7 @@ const chargeBackfillUnit = (): boolean => {
 		const displacedLiveText = displacedLiveTurn ? ownedSpeechText : "";
 		if (inputInProgress) {
 			await finishInputForPlayback();
-			if (pendingReplay !== request) return;
+			if (pendingReplay !== request || request.epoch !== playbackRequestEpoch) return;
 		}
 
 		let acquired = true;
@@ -1784,7 +1785,7 @@ const chargeBackfillUnit = (): boolean => {
 				newlyAcquired = acquired;
 			}
 		}
-		if (pendingReplay !== request || owner !== coordinator || !interactiveVoiceSession) {
+		if (pendingReplay !== request || request.epoch !== playbackRequestEpoch || owner !== coordinator || !interactiveVoiceSession) {
 			// A newer playback request can reuse this lease. A non-playback action
 			// that superseded the wait has no use for it and must release it.
 			if (newlyAcquired && owner !== coordinator) owner?.releaseSpeech();
@@ -1861,9 +1862,8 @@ const chargeBackfillUnit = (): boolean => {
 		}));
 
 	// ponytail: yield between historical messages; a single large context/hash is still synchronous.
-	const preparePlaybackMessages = async (ctx: ExtensionContext): Promise<boolean> => {
+	const preparePlaybackMessages = async (ctx: ExtensionContext, request = playbackRequestEpoch): Promise<boolean> => {
 		const epoch = contextEpoch;
-		const request = playbackRequestEpoch;
 		let sliceStart = performance.now();
 		for (const message of completedAssistantMessages(ctx, config.mode, config.codeDescriptionContext === "conversation")) {
 			if (performance.now() - sliceStart >= 8) {
@@ -1924,8 +1924,10 @@ const chargeBackfillUnit = (): boolean => {
 		if (!force && scan === lastTimingScan) return;
 		lastTimingScan = scan;
 		const epoch = contextEpoch;
+		const workEpoch = timingWorkEpoch;
 		timingPreprocessing = (async () => {
 			if (!await preparePlaybackMessages(ctx)) return;
+			if (epoch !== contextEpoch || workEpoch !== timingWorkEpoch || !isCurrentContext(ctx) || coordinator?.speechOwner()) return;
 			const scoped = scopedCompletedMessages(ctx, config.mode);
 			const contextualById = new Map(scoped.map(message => [message.id, message]));
 			const scopedIds = new Set(scoped.map(message => message.id));
@@ -1943,7 +1945,6 @@ const chargeBackfillUnit = (): boolean => {
 			};
 			refreshPreprocessingProgress();
 			const concurrency = resolveTimingConcurrency(config.timingPreprocessConcurrency, config.ttsDtype);
-			const workEpoch = timingWorkEpoch;
 			const workers = ensureTimingWorkers(concurrency);
 			const measurementConfig = config;
 			let sliceStart = performance.now();
@@ -2605,6 +2606,7 @@ const chargeBackfillUnit = (): boolean => {
 		}
 		if (!config.enabled || attentionSuppressed || stopReason === undefined || !ownsSpeech || speechPurpose !== "turn") return;
 		if (stopReason === "aborted" || stopReason === "error") {
+			liveTurnNarrationActive = false;
 			const cancelId = clearPlaybackTransport();
 			narration.finish();
 			livePlaybackId = undefined;
@@ -2709,21 +2711,23 @@ const chargeBackfillUnit = (): boolean => {
 
 	// Future device repinning must distinguish resume/navigation from pause-only
 	// F8 here, and must not repin automatic queued speech in playTarget().
-	const preparePlaybackAction = async (ctx: ExtensionContext): Promise<boolean> => {
-		if (!requireEnabledVoice(ctx)) return false;
-		const epoch = playbackRequestEpoch;
+	const preparePlaybackAction = async (ctx: ExtensionContext, pauseResume = false): Promise<number | undefined> => {
+		if (!requireEnabledVoice(ctx)) return;
+		const epoch = ++playbackRequestEpoch;
+		// Pause/resume edits the pending replay rather than superseding it.
+		if (pauseResume && pendingReplay) pendingReplay.epoch = epoch;
 		try {
 			if (inputInProgress) await finishInputForPlayback();
 		} catch (error) {
 			ctx.ui.notify(`Voice microphone: ${error instanceof Error ? error.message : String(error)}`, "error");
-			return false;
+			return;
 		}
-		return epoch === playbackRequestEpoch && interactiveVoiceSession;
+		return epoch === playbackRequestEpoch && interactiveVoiceSession ? epoch : undefined;
 	};
 
 	const replaySelected = async (ctx: ExtensionContext): Promise<void> => {
-		if (!await preparePlaybackAction(ctx)) return;
-		if (!await preparePlaybackMessages(ctx)) return;
+		const request = await preparePlaybackAction(ctx);
+		if (request === undefined || !await preparePlaybackMessages(ctx, request) || request !== playbackRequestEpoch) return;
 		syncPlaybackMessages(ctx, pausedForAttention);
 		const target = playbackHistory.restartTarget();
 		if (!target) {
@@ -2748,7 +2752,8 @@ const chargeBackfillUnit = (): boolean => {
 	pi.registerShortcut("f6", {
 		description: "Play the previous assistant message",
 		handler: async ctx => {
-			if (!await preparePlaybackAction(ctx) || !await preparePlaybackMessages(ctx)) return;
+			const request = await preparePlaybackAction(ctx);
+			if (request === undefined || !await preparePlaybackMessages(ctx, request) || request !== playbackRequestEpoch) return;
 			syncPlaybackMessages(ctx);
 			const message = playbackHistory.move(-1);
 			if (message) playTarget({ ...message, time: 0, sourceOffset: 0 }, !playbackHistory.hasCompleteTimingFor(message.id), true);
@@ -2756,7 +2761,8 @@ const chargeBackfillUnit = (): boolean => {
 	});
 
 	const stepSentence = async (ctx: ExtensionContext, direction: -1 | 1): Promise<void> => {
-		if (!await preparePlaybackAction(ctx) || !await preparePlaybackMessages(ctx)) return;
+		const request = await preparePlaybackAction(ctx);
+		if (request === undefined || !await preparePlaybackMessages(ctx, request) || request !== playbackRequestEpoch) return;
 		syncPlaybackMessages(ctx);
 		const selected = playbackHistory.selected();
 		if (!selected) { ctx.ui.notify("There is no completed assistant message", "warning"); return; }
@@ -2835,7 +2841,8 @@ const chargeBackfillUnit = (): boolean => {
 	pi.registerShortcut("f8", {
 		description: "Pause or resume regenerated voice playback",
 		handler: async ctx => {
-			if (!await preparePlaybackAction(ctx)) return;
+			const requestEpoch = await preparePlaybackAction(ctx, true);
+			if (requestEpoch === undefined || requestEpoch !== playbackRequestEpoch) return;
 			if (pendingReplay) {
 				const request = pendingReplay;
 				request.paused = !request.paused;
@@ -2896,7 +2903,8 @@ const chargeBackfillUnit = (): boolean => {
 	pi.registerShortcut("f10", {
 		description: "Play the next assistant message; pause and follow transcript tail after the latest",
 		handler: async ctx => {
-			if (!await preparePlaybackAction(ctx) || !await preparePlaybackMessages(ctx)) return;
+			const request = await preparePlaybackAction(ctx);
+			if (request === undefined || !await preparePlaybackMessages(ctx, request) || request !== playbackRequestEpoch) return;
 			syncPlaybackMessages(ctx);
 			const before = playbackHistory.status();
 			if (before && before.messageIndex === before.messageCount - 1) {
