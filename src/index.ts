@@ -301,6 +301,8 @@ export default async function (pi: ExtensionAPI) {
 	let projectAnnouncementPending = false;
 	let pendingNotification: WaitingSession | undefined;
 	let pausedForAttention = false;
+	let attentionSuppressed = false;
+	let disabledAttentionPending = false;
 	let speechBlocked = false;
 	let blockedMessageHasSpeech = false;
 	let blockedWarningIssued = false;
@@ -1413,6 +1415,7 @@ const chargeBackfillUnit = (): boolean => {
 	);
 	const clearPlaybackTransport = (): number | undefined => {
 		playbackRequestEpoch += 1;
+		coordinator?.cancelSpeechAcquisition();
 		pendingReplay = undefined;
 		const cancelId = vocalizer.clear();
 		playbackPaused = false;
@@ -1504,7 +1507,7 @@ const chargeBackfillUnit = (): boolean => {
 	};
 
 	const speakAttentionNotification = (waiting: WaitingSession): void => {
-		if (!coordinator) return;
+		if (!coordinator || attentionSuppressed || !config.enabled || waiting.instanceId === coordinator.instanceId) return;
 		speechPurpose = "notification";
 		ownerTurnEnded = true;
 		pendingNotification = waiting;
@@ -1521,7 +1524,7 @@ const chargeBackfillUnit = (): boolean => {
 	releaseSpeechOwnership = (announceNext = true): void => {
 		if (!ownsSpeech || !coordinator) return;
 		restoreFollowAfterSpeech();
-		if (announceNext) {
+		if (announceNext && config.enabled && !attentionSuppressed && !playbackPaused) {
 			const waiting = coordinator.nextUnannouncedWaiting();
 			if (waiting) {
 				speakAttentionNotification(waiting);
@@ -1533,7 +1536,7 @@ const chargeBackfillUnit = (): boolean => {
 
 	const completeOwnerSpeech = (): void => {
 		const expectedUtterance = ownerContentExpected ? lastOwnerUtterance : projectPrefixUtterance;
-		if (!ownsSpeech || !ownerTurnEnded || completingOwnerSpeech) return;
+		if (!ownsSpeech || !ownerTurnEnded || completingOwnerSpeech || playbackPaused) return;
 		if (expectedUtterance === undefined) {
 			projectAnnouncementPending = false;
 			releaseSpeechOwnership(true);
@@ -1589,6 +1592,7 @@ const chargeBackfillUnit = (): boolean => {
 	};
 
 	const acquireSpeech = (purpose: "turn" | "replay", announceProject = true): boolean => {
+		if (attentionSuppressed || !interactiveVoiceSession) return false;
 		if (!coordinator) return true;
 		const alreadyOwned = ownsSpeech && coordinator.ownsSpeech();
 		if (!alreadyOwned && !coordinator.tryAcquireSpeech()) return false;
@@ -1596,9 +1600,12 @@ const chargeBackfillUnit = (): boolean => {
 	};
 
 	const forceAcquireSpeech = async (purpose: "turn" | "replay", announceProject = true): Promise<boolean> => {
-		if (!coordinator) return true;
-		const alreadyOwned = ownsSpeech && coordinator.ownsSpeech();
-		if (!alreadyOwned && !(await coordinator.forceAcquireSpeech())) return false;
+		const owner = coordinator;
+		const epoch = playbackRequestEpoch;
+		if (!owner) return interactiveVoiceSession;
+		const alreadyOwned = ownsSpeech && owner.ownsSpeech();
+		if (!alreadyOwned && !(await owner.forceAcquireSpeech())) return false;
+		if (owner !== coordinator || epoch !== playbackRequestEpoch || !interactiveVoiceSession) return false;
 		return activateSpeechOwnership(purpose, announceProject);
 	};
 
@@ -1669,7 +1676,7 @@ const chargeBackfillUnit = (): boolean => {
 		if (ownsSpeech && coordinator.consumeSpeechPreemptionRequest()) {
 			handleSpeechPreemption();
 		}
-		if (coordinator.hasAttentionRequest() && activeContext) {
+		if (config.enabled && !attentionSuppressed && !playbackPaused && coordinator.hasAttentionRequest() && activeContext) {
 			try {
 				if (coordinator.consumeAttentionRequest()) {
 					playRequestedAttention(activeContext);
@@ -1686,10 +1693,8 @@ const chargeBackfillUnit = (): boolean => {
 			return;
 		}
 		if (!owner && activeContext && !timingPreprocessing) scheduleMissingTimings(activeContext, false);
-		if (!config.enabled || ownsSpeech) return;
-		// The waiting session may be the only process polling after the previous
-		// owner releases. Let it announce its own wait rather than leaving the
-		// response silent until manual interaction.
+		if (!config.enabled || attentionSuppressed || ownsSpeech) return;
+		// Announcements never interrupt a transport or announce our own response.
 		const waiting = coordinator.tryAcquireWaitingAnnouncement();
 		if (!waiting) return;
 		claimOutputDevice();
@@ -1715,6 +1720,10 @@ const chargeBackfillUnit = (): boolean => {
 			return;
 		}
 
+		attentionSuppressed = false;
+		coordinator?.setAttentionEnabled(config.enabled);
+		coordinator?.cancelSpeechAcquisition();
+		const owner = coordinator;
 		const request = {
 			epoch: ++playbackRequestEpoch,
 			target: { ...target, sourceOffset },
@@ -1757,10 +1766,11 @@ const chargeBackfillUnit = (): boolean => {
 				newlyAcquired = acquired;
 			}
 		}
-		if (pendingReplay !== request) {
+		if (pendingReplay !== request || owner !== coordinator || !interactiveVoiceSession) {
 			// A newer playback request can reuse this lease. A non-playback action
 			// that superseded the wait has no use for it and must release it.
-			if (newlyAcquired && !pendingReplay && !ownsSpeech) coordinator?.releaseSpeech();
+			if (newlyAcquired && owner !== coordinator) owner?.releaseSpeech();
+			else if (newlyAcquired && !pendingReplay && !ownsSpeech) owner?.releaseSpeech();
 			return;
 		}
 		if (!acquired) {
@@ -2034,11 +2044,17 @@ const chargeBackfillUnit = (): boolean => {
 		backfillUsed = 0;
 		backfillExhaustionReported = false;
 		if (wasEnabled && !config.enabled) {
+			disabledAttentionPending = pausedForAttention || (coordinator?.isWaiting() ?? false);
+			coordinator?.setAttentionEnabled(false);
 			const cancelId = clearPlaybackTransport();
 			narration.finish();
 			if (!inputInProgress) releaseAfterTransportCancellation(cancelId);
 		}
-		state = "idle";
+		if (!wasEnabled && config.enabled && !attentionSuppressed) {
+			coordinator?.setAttentionEnabled(true);
+			if (disabledAttentionPending) coordinator?.markWaiting();
+			disabledAttentionPending = false;
+		}
 		refreshStatus();
 		refreshPlaybackTimeline();
 		if (activeContext) {
@@ -2242,7 +2258,11 @@ const chargeBackfillUnit = (): boolean => {
 	};
 
 	pi.on("session_start", async (_event, ctx) => {
-		cancelPendingDictation?.();
+		void cancelActiveInput();
+		clearPlaybackTransport();
+		ownsSpeech = false;
+		attentionSuppressed = false;
+		disabledAttentionPending = false;
 		contextEpoch += 1;
 		interactiveVoiceSession = supportsInteractiveVoice(ctx.mode);
 		activeContext = interactiveVoiceSession ? ctx : null;
@@ -2254,6 +2274,7 @@ const chargeBackfillUnit = (): boolean => {
 		coordinator = new SessionCoordinator(ctx.cwd, ctx.sessionManager.getSessionId());
 		coordinator.setSessionName(pi.getSessionName());
 		coordinator.start();
+		coordinator.setAttentionEnabled(config.enabled);
 		deviceSelection = sessionDeviceSelection(ctx);
 		activeDeviceId = deviceRouter.resolve(deviceSelection)?.id;
 		inputProgressMessage = undefined;
@@ -2299,6 +2320,10 @@ const chargeBackfillUnit = (): boolean => {
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
+		clearPlaybackTransport();
+		const retiringCoordinator = coordinator;
+		coordinator = null;
+		retiringCoordinator?.shutdown();
 		cancelPendingDictation?.();
 		if (interactiveVoiceSession) persistPendingDescriptions();
 		if (descriptionPersistTimer) clearImmediate(descriptionPersistTimer);
@@ -2343,9 +2368,7 @@ const chargeBackfillUnit = (): boolean => {
 		const inputCancelled = cancelActiveInput();
 		const workers = timingWorkers.splice(0);
 		await Promise.all([inputCancelled, ...workers.map(worker => worker.terminate()), vocalizer.shutdown()]);
-		coordinator?.shutdown();
-		coordinator = null;
-		ownsSpeech = false;
+		if (!interactiveVoiceSession) ownsSpeech = false;
 	});
 
 	pi.on("session_info_changed", event => {
@@ -2365,9 +2388,11 @@ const chargeBackfillUnit = (): boolean => {
 		cancelTimingWorkers();
 		const cancelId = clearPlaybackTransport();
 		narration.finish();
+		const request = playbackRequestEpoch;
 		await waitForTransportCancellation(cancelId);
+		if (request !== playbackRequestEpoch || !interactiveVoiceSession) return;
 		releaseSpeechOwnership(false);
-		await reserveSpeechForInput();
+		if (!attentionSuppressed) await reserveSpeechForInput();
 	});
 
 	pi.on("before_agent_start", async () => {
@@ -2379,11 +2404,17 @@ const chargeBackfillUnit = (): boolean => {
 		cancelTimingWorkers();
 		const cancelId = clearPlaybackTransport();
 		narration.finish();
+		const request = playbackRequestEpoch;
 		await waitForTransportCancellation(cancelId);
+		if (request !== playbackRequestEpoch || !interactiveVoiceSession) return;
 		if (!speechReservedForInput) releaseSpeechOwnership(false);
 	});
 
 	pi.on("message_start", event => {
+		if (interactiveVoiceSession && (event.message as { role?: string })?.role === "assistant") {
+			attentionSuppressed = false;
+			coordinator?.setAttentionEnabled(config.enabled);
+		}
 		if (
 			interactiveVoiceSession &&
 			config.enabled &&
@@ -2430,7 +2461,7 @@ const chargeBackfillUnit = (): boolean => {
 	});
 
 	pi.on("message_update", event => {
-		if (!interactiveVoiceSession || !config.enabled || config.mode === "yield") return;
+		if (!interactiveVoiceSession || !config.enabled || attentionSuppressed || config.mode === "yield") return;
 		speechAssistantMessage = event.message;
 		vocalizer.setCodeDescriptionMessages(contextualAssistantMessages(speechConversationMessages, event.message));
 		const delta = event.assistantMessageEvent;
@@ -2471,12 +2502,12 @@ const chargeBackfillUnit = (): boolean => {
 			if (livePlaybackId) finalizePlaybackMessage(activeContext, livePlaybackId, completedText);
 			livePlaybackId = undefined;
 		}
-		if (config.enabled && speechBlocked && requiresVoiceAttention(completedText, config.mode, stopReason)) {
+		if (config.enabled && !attentionSuppressed && speechBlocked && requiresVoiceAttention(completedText, config.mode, stopReason)) {
 			blockedMessageHasSpeech = true;
 			pausedForAttention = true;
 			refreshStatus();
 		}
-		if (!config.enabled || stopReason === undefined || !ownsSpeech || speechPurpose !== "turn") return;
+		if (!config.enabled || attentionSuppressed || stopReason === undefined || !ownsSpeech || speechPurpose !== "turn") return;
 		if (stopReason === "aborted" || stopReason === "error") {
 			const cancelId = clearPlaybackTransport();
 			narration.finish();
@@ -2493,7 +2524,10 @@ const chargeBackfillUnit = (): boolean => {
 		if (!interactiveVoiceSession) return;
 		const stopReason = assistantStopReason(event.message);
 		const completedTurn = stopReason !== "aborted" && stopReason !== "error" && stopReason !== undefined;
-		if (config.enabled && config.mode === "yield" && completedTurn) {
+		if (!config.enabled && !attentionSuppressed && requiresVoiceAttention(assistantText(event.message), config.mode, stopReason)) {
+			disabledAttentionPending = true;
+		}
+		if (config.enabled && !attentionSuppressed && config.mode === "yield" && completedTurn) {
 			const text = assistantText(event.message);
 			if (text && acquireSpeech("turn")) {
 				const contextual = completedAssistantMessages(ctx, config.mode, config.codeDescriptionContext === "conversation").findLast(message => message.text === text);
@@ -2516,7 +2550,7 @@ const chargeBackfillUnit = (): boolean => {
 				pausedForAttention = true;
 			}
 		}
-		if (config.enabled && completedTurn) {
+		if (config.enabled && !attentionSuppressed && completedTurn) {
 			if (ownsSpeech && speechPurpose === "turn") {
 				ownerTurnEnded = true;
 				completeOwnerSpeech();
@@ -2592,28 +2626,7 @@ const chargeBackfillUnit = (): boolean => {
 	const attendNextProject = async (ctx: ExtensionContext): Promise<void> => {
 		restoreBottomAfterSpeech = false;
 		bottomPinned = false;
-		if (!coordinator) {
-			replaySelected(ctx);
-			return;
-		}
-		const waiting = coordinator.waitingSessions();
-		const own = waiting.find(session => session.instanceId === coordinator?.instanceId);
-		if (own) {
-			playRequestedAttention(ctx);
-			return;
-		}
-		const next = waiting[0];
-		if (!next) {
-			replaySelected(ctx);
-			return;
-		}
-		if (inputInProgress) await cancelActiveInput();
-		const cancelId = clearPlaybackTransport();
-		narration.finish();
-		await waitForTransportCancellation(cancelId);
-		releaseSpeechOwnership(false);
-		coordinator.requestAttention(next.instanceId);
-		ctx.ui.notify(`Switching voice attention to project ${coordinator.projectLabel(next.cwd, next.sessionId, next.sessionName)}`, "info");
+		await replaySelected(ctx);
 	};
 
 	pi.registerShortcut("f6", {
@@ -2775,7 +2788,7 @@ const chargeBackfillUnit = (): boolean => {
 	});
 
 	pi.registerShortcut("f11", {
-		description: "Play this or the next waiting project's response",
+		description: "Replay this project's response",
 		handler: attendNextProject,
 	});
 
@@ -3085,9 +3098,17 @@ const chargeBackfillUnit = (): boolean => {
 					await toggle(ctx);
 					return;
 				case "stop": {
+					attentionSuppressed = true;
+					disabledAttentionPending = false;
+					pausedForAttention = false;
+					speechBlocked = false;
+					blockedMessageHasSpeech = false;
+					coordinator?.setAttentionEnabled(false);
+					pendingSpeechPreemption = undefined;
+					if (speechPreemptionTimer) clearTimeout(speechPreemptionTimer);
 					const cancelId = clearPlaybackTransport();
 					narration.finish();
-					if (inputInProgress) await cancelActiveInput();
+					void cancelActiveInput();
 					// Explicit stop must not immediately start an attention announcement.
 					releaseAfterTransportCancellation(cancelId);
 					state = "idle";
@@ -3531,6 +3552,8 @@ const chargeBackfillUnit = (): boolean => {
 						return;
 					}
 					const text = args.slice(action.length).trim() || "Pi voice mode is ready.";
+					attentionSuppressed = false;
+					coordinator?.setAttentionEnabled(true);
 					clearPlaybackTransport();
 					narration.finish();
 					if (!(await forceAcquireSpeech("replay", true))) return;

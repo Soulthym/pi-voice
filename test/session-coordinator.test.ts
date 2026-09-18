@@ -93,18 +93,40 @@ test("forced acquisition waits for the previous process to acknowledge transport
 	}
 });
 
-test("lets a waiting session announce itself after the previous owner releases", () => {
+test("only another session announces a waiting project after the previous owner releases", () => {
 	const { root, first, second } = coordinators();
 	try {
 		assert.equal(first.tryAcquireSpeech(), true);
 		second.markWaiting();
 		assert.equal(second.tryAcquireWaitingAnnouncement(), undefined);
 		first.releaseSpeech();
-		assert.equal(second.tryAcquireWaitingAnnouncement()?.instanceId, second.instanceId);
-		assert.equal(second.ownsSpeech(), true);
+		assert.equal(second.tryAcquireWaitingAnnouncement(), undefined);
+		assert.equal(first.tryAcquireWaitingAnnouncement()?.instanceId, second.instanceId);
+		assert.equal(first.ownsSpeech(), true);
 	} finally {
 		first.shutdown();
 		second.shutdown();
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("shutdown and cancellation prevent delayed acquisition without releasing a newer owner", async () => {
+	const { root, first, second } = coordinators();
+	const realOwner = first.speechOwner.bind(first);
+	try {
+		for (const shutdown of [false, true]) {
+			first.speechOwner = () => ({ interactive: true, instanceId: "remote", pid: process.ppid, cwd: "/remote", updatedAt: Date.now() });
+			const pending = first.forceAcquireSpeech();
+			if (shutdown) first.shutdown(); else first.cancelSpeechAcquisition();
+			first.speechOwner = realOwner;
+			assert.equal(second.tryAcquireSpeech(), true);
+			assert.equal(await pending, false);
+			assert.equal(second.ownsSpeech(), true);
+			second.releaseSpeech();
+		}
+		assert.equal(first.tryAcquireSpeech(), false);
+	} finally {
+		first.shutdown(); second.shutdown();
 		fs.rmSync(root, { recursive: true, force: true });
 	}
 });

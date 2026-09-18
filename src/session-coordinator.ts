@@ -13,6 +13,7 @@ export interface SessionPresence {
 	sessionId?: string;
 	/** Human-readable Pi session title; used for spoken labels. */
 	sessionName?: string;
+	attentionEnabled?: boolean;
 }
 
 export interface WaitingSession extends SessionPresence {
@@ -67,6 +68,21 @@ export class SessionCoordinator {
 	#heartbeat: NodeJS.Timeout | undefined;
 	#stopped = false;
 	#speechLease = false;
+	#speechRequestEpoch = 0;
+	#attentionEnabled = true;
+
+	cancelSpeechAcquisition(): void {
+		this.#speechRequestEpoch += 1;
+	}
+
+	setAttentionEnabled(enabled: boolean): void {
+		this.#attentionEnabled = enabled;
+		if (!enabled) {
+			this.clearWaiting();
+			this.consumeAttentionRequest();
+		}
+		if (!this.#stopped) this.#writePresence();
+	}
 	#resourceLeases = new Set<string>();
 
 	readonly sessionId: string;
@@ -138,6 +154,7 @@ export class SessionCoordinator {
 	}
 
 	tryAcquireSpeech(): boolean {
+		if (this.#stopped) return false;
 		if (this.ownsSpeech()) {
 			this.#speechLease = true;
 			return true;
@@ -149,6 +166,9 @@ export class SessionCoordinator {
 
 	/** Manual user action requests an acknowledged handoff before taking the lease. */
 	async forceAcquireSpeech(): Promise<boolean> {
+		const epoch = ++this.#speechRequestEpoch;
+		const current = () => !this.#stopped && epoch === this.#speechRequestEpoch;
+		if (!current()) return false;
 		if (this.ownsSpeech()) {
 			this.#speechLease = true;
 			return true;
@@ -163,10 +183,11 @@ export class SessionCoordinator {
 			// can release. Poll asynchronously so playback controls can supersede this
 			// request while the TUI remains responsive.
 			const deadline = Date.now() + SPEECH_HANDOFF_TIMEOUT_MS;
-			while (Date.now() < deadline && this.speechOwner()?.instanceId === owner.instanceId) {
+			while (current() && Date.now() < deadline && this.speechOwner()?.instanceId === owner.instanceId) {
 				await new Promise(resolve => setTimeout(resolve, SPEECH_HANDOFF_POLL_MS));
 			}
 		}
+		if (!current()) return false;
 		const remaining = this.speechOwner();
 		if (remaining?.instanceId === this.instanceId) {
 			this.#speechLease = true;
@@ -226,7 +247,7 @@ export class SessionCoordinator {
 			waitingSince: existing?.waitingSince ?? Date.now(),
 			announced: existing?.announced ?? false,
 		};
-		writeJson(file, waiting);
+		if (!this.#stopped && this.#attentionEnabled) writeJson(file, waiting);
 		return waiting;
 	}
 
@@ -241,15 +262,15 @@ export class SessionCoordinator {
 	waitingSessions(): WaitingSession[] {
 		this.#cleanStaleFiles();
 		return this.#jsonFiles<WaitingSession>(this.#waitingDir())
-			.filter(waiting => this.#isLive(waiting))
+			.filter(waiting => this.#isLive(waiting) && readJson<SessionPresence>(this.#presenceFile(waiting.instanceId))?.attentionEnabled !== false)
 			.sort((left, right) => left.waitingSince - right.waitingSince || left.instanceId.localeCompare(right.instanceId));
 	}
 
 	nextUnannouncedWaiting(): WaitingSession | undefined {
-		return this.waitingSessions().find(waiting => !waiting.announced);
+		return this.waitingSessions().find(waiting => waiting.instanceId !== this.instanceId && !waiting.announced);
 	}
 
-	/** Claims the free speech channel to announce the next wait, including this session's own wait. */
+	/** Claims the free speech channel to announce another project's wait. */
 	tryAcquireWaitingAnnouncement(): WaitingSession | undefined {
 		const waiting = this.nextUnannouncedWaiting();
 		if (!waiting || !this.tryAcquireSpeech()) return undefined;
@@ -310,6 +331,7 @@ export class SessionCoordinator {
 
 	shutdown(): void {
 		this.#stopped = true;
+		this.cancelSpeechAcquisition();
 		if (this.#heartbeat) clearInterval(this.#heartbeat);
 		this.#heartbeat = undefined;
 		this.releaseSpeech();
@@ -338,6 +360,7 @@ export class SessionCoordinator {
 			cwd: this.cwd,
 			updatedAt: Date.now(),
 			sessionId: this.sessionId,
+			attentionEnabled: this.#attentionEnabled,
 			...(this.#sessionName ? { sessionName: this.#sessionName } : {}),
 		};
 	}

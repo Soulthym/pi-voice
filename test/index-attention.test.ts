@@ -53,7 +53,7 @@ function mockWorker(spoken: string[]): () => void {
 	};
 }
 
-test("extension attention ignores tool-only turns, warns once per response, and announces after owner release", async t => {
+test("extension attention ignores tool-only turns, warns once per response, and never self-announces", async t => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-voice-index-attention-"));
 	const restoreEnvironment = await configureTestEnvironment(root);
 	const spoken: string[] = [];
@@ -81,7 +81,7 @@ test("extension attention ignores tool-only turns, warns once per response, and 
 
 	owner.releaseSpeech();
 	await new Promise(resolve => setTimeout(resolve, 350));
-	assert.equal(spoken.filter(text => text.includes("requires attention next")).length, 1);
+	assert.equal(spoken.filter(text => text.includes("requires attention next")).length, 0);
 });
 
 test("project name is announced only when audible attention changes", async t => {
