@@ -44,7 +44,7 @@ export interface ResolvedCodeContext {
 export function resolvedSessionContext(entries: readonly SessionEntry[], leafId?: string | null): ResolvedCodeContext {
 	const resolved = buildSessionContext([...entries], leafId).messages;
 	return {
-		transcript: contextTranscript(resolved),
+		get transcript() { return contextTranscript(resolved); },
 		messages: convertToLlm(resolved),
 	};
 }

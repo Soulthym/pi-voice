@@ -4,6 +4,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { VoiceWorkerClient } from "../src/worker-client.js";
+import { CodeDescriptionCache } from "../src/code-description-cache.js";
+import { PlaybackHistory } from "../src/playback-history.js";
 import { legacyCodeDescriptionCacheKey } from "../src/code-describer.js";
 import { plainCodeNarration } from "../src/code-narration.js";
 import { loadVoiceConfig } from "../src/config.js";
@@ -174,6 +176,66 @@ test("live, rendering, replay, and timing share one contextual description reque
 		assert.doesNotMatch(JSON.stringify(finalRequest), /run\(\);/);
 		assert.equal(JSON.stringify(concernedAssistant).split("run();").length - 1, 1);
 	}
+});
+
+test("render and timing dependencies stay live when a missing plan becomes ready or its content changes under the same key", async t => {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-voice-plan-content-"));
+	const restoreEnvironment = await configure(root, "block-only");
+	const restoreWorker = mockWorker();
+	const response = Promise.withResolvers<any>();
+	const host = new FakeVoiceHost(root, "plan-content", () => response.promise);
+	host.sessionManager.getEntry = (id: string) => host.entries.find(entry => entry.id === id);
+	t.after(async () => {
+		response.resolve(modelResponse());
+		await host.shutdown().catch(() => {});
+		restoreWorker();
+		await restoreEnvironment();
+	});
+	const renderKeys: string[] = [];
+	const sync = PlaybackHistory.prototype.sync;
+	t.mock.method(PlaybackHistory.prototype, "sync", function (this: PlaybackHistory, ...args: Parameters<typeof sync>) {
+		const message = args[0].find(message => message.id === "answer");
+		if (message?.renderKey) renderKeys.push(message.renderKey);
+		return sync.apply(this, args);
+	});
+	const measured: string[] = [];
+	VoiceWorkerClient.prototype.measureSegment = async text => { measured.push(text); return 1; };
+	const text = "```ts\nrun();\n```";
+	host.addMessage("answer", null, assistant(text));
+	await host.start(); await settle();
+	const missingKey = renderKeys.at(-1);
+	assert.ok(missingKey);
+	assert.equal(host.modelRequests.length, 1);
+	assert.deepEqual(measured, []);
+
+	response.resolve(modelResponse("The first description."));
+	await settle();
+	const description = host.entries.find(entry => entry.customType === "pi-voice.code-description");
+	assert.ok(description);
+	const config = await loadVoiceConfig();
+	assert.equal(missingKey, narrationRenderKey(text, config, [JSON.stringify([description.data.key, "missing"])]));
+	const timings = () => host.entries.filter(entry => entry.customType === "pi-voice.playback-timing");
+	assert.equal(timings().length, 1);
+	const firstKey = timings()[0].data.renderKey;
+	assert.notEqual(firstKey, missingKey, "missing-to-ready must invalidate the render dependency");
+	assert.equal(firstKey, narrationRenderKey(text, config, [JSON.stringify([description.data.key, description.data.plan])]));
+	assert.deepEqual(measured, ["The first description."]);
+
+	const replacement = plainCodeNarration("A different description.");
+	const get = CodeDescriptionCache.prototype.get;
+	t.mock.method(CodeDescriptionCache.prototype, "get", function (this: CodeDescriptionCache, key: string) {
+		return key === description.data.key ? replacement : get.call(this, key);
+	});
+	await host.emit("agent_settled", { type: "agent_settled" }); await settle();
+	assert.equal(timings().length, 2, "ready-to-ready content changes must discard old timing");
+	const secondKey = timings()[1].data.renderKey;
+	assert.notEqual(secondKey, firstKey);
+	assert.equal(secondKey, narrationRenderKey(text, config, [JSON.stringify([description.data.key, replacement])]));
+	assert.equal(renderKeys.at(-1), secondKey);
+	assert.deepEqual(measured, ["The first description.", "A different description."]);
+	await host.emit("agent_settled", { type: "agent_settled" }); await settle();
+	assert.equal(timings().length, 2, "unchanged content must reuse its timing");
+	assert.equal(host.modelRequests.length, 1);
 });
 
 test("legacy descriptions and timing survive model changes/reload with fresh per-event contexts", async t => {
