@@ -2765,7 +2765,6 @@ const chargeBackfillUnit = (): boolean => {
 				"tts-model",
 				"tts-dtype",
 				"tts-workers",
-				"tts-worker",
 				"stt-model",
 				"stt-dtype",
 				"stt-candidates",

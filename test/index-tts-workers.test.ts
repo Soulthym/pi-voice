@@ -81,11 +81,13 @@ test("real tts-workers command persists and reaches the worker protocol without 
 	const actionsAndReports = ["on", "off", "toggle", "status", "stop", "setup", "test", "talk", "attention", "scroll-to", "bottom", "timing", "code-retry"];
 	assert.deepEqual(
 		command.getArgumentCompletions("").map((item: any) => item.value).sort(),
-		[...voiceQueryCases.map(([name]) => name), ...actionsAndReports].sort(),
+		[...voiceQueryCases.map(([name]) => name).filter(name => name !== "tts-worker"), ...actionsAndReports].sort(),
 		"every advertised command must be audited as a setting query or an intentional action/report",
 	);
 	assert.deepEqual(command.getArgumentCompletions("tts-workers ").map((item: any) => item.label), ["1", "2", "3", "4", "5", "6", "7", "8"]);
-	assert.ok(command.getArgumentCompletions("tts-w").some((item: any) => item.value === "tts-workers"));
+	for (const prefix of ["tts-w", "tts-worker"]) {
+		assert.deepEqual(command.getArgumentCompletions(prefix).map((item: any) => item.value), ["tts-workers"], "aliases must not duplicate command suggestions");
+	}
 	assert.deepEqual(command.getArgumentCompletions("tts-worker ").map((item: any) => item.label), ["1", "2", "3", "4", "5", "6", "7", "8"]);
 	for (const action of ["tts-workers", "tts-worker"]) {
 		for (const value of ["0", "9", "1.5", "NaN", "2 extra"]) {
