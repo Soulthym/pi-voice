@@ -2446,6 +2446,7 @@ const chargeBackfillUnit = (): boolean => {
 
 	pi.on("input", async () => {
 		if (!interactiveVoiceSession || playbackPaused) return;
+		disabledAttentionPending = false;
 		queuedPausedMessages.length = 0;
 		restoreBottomAfterSpeech = false;
 		bottomPinned = false;

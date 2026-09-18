@@ -83,6 +83,11 @@ test("disabled waiting sessions leave the queue and re-enable only outstanding a
 	assert.equal(owner.waitingSessions().length, 1);
 	await host.command("off"); assert.equal(owner.waitingSessions().length, 0);
 	await host.command("on"); assert.equal(owner.waitingSessions().length, 1);
+	await host.command("off");
+	await host.emit("input", { text: "Handled that response" });
+	await host.command("on"); assert.equal(owner.waitingSessions().length, 0, "a new prompt handles the disabled session's old wait");
+	await streamBlockedResponse(host, "A genuinely new waiting response.");
+	assert.equal(owner.waitingSessions().length, 1);
 	await host.command("stop"); await host.command("off"); await host.command("on");
 	assert.equal(owner.waitingSessions().length, 0);
 });
