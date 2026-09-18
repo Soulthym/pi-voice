@@ -91,6 +91,47 @@ function requestText(request: ModelRequest): string {
 	return text.join("\n");
 }
 
+test("paused sentence navigation uses cached code units without timings or new model requests", async t => {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-voice-sentence-controls-"));
+	const restoreEnvironment = await configure(root, "block-only");
+	await fs.writeFile(process.env.PI_VOICE_CONFIG!, JSON.stringify({ enabled: true, input: "disabled", output: "local",
+		codeNarration: "summary", codeDescriptionPreprocessConcurrency: 0, timingPreprocessConcurrency: 0 }));
+	const restoreWorker = mockWorker();
+	const originalPause = VoiceWorkerClient.prototype.setPlaybackPaused;
+	const sent: string[] = []; const pauses: boolean[] = [];
+	VoiceWorkerClient.prototype.sendSegment = function (_utterance, _id, text): void { sent.push(text); };
+	VoiceWorkerClient.prototype.setPlaybackPaused = function (paused): void { pauses.push(paused); };
+	const host = new FakeVoiceHost(path.join(root, "project"), "sentence-controls", async request =>
+		modelResponse(requestText(request).includes("fail()") ? "" : "It calls run. The call has no arguments."));
+	t.after(async () => { await host.shutdown().catch(() => {}); restoreWorker(); VoiceWorkerClient.prototype.setPlaybackPaused = originalPause; await restoreEnvironment(); });
+	host.addMessage("answer", null, assistant("Intro.\n```ts\nrun();\n```\nOutro."));
+	await host.start(); await host.shortcut("f11"); await settle();
+	assert.equal(host.modelRequests.length, 1);
+	await host.shortcut("f8");
+	assert.equal(pauses.at(-1), true);
+	sent.length = 0;
+	await host.shortcut("f9"); await settle();
+	assert.ok(sent.includes("It calls run."));
+	sent.length = 0;
+	await host.shortcut("f9"); await settle();
+	assert.deepEqual(sent.filter(text => !text.startsWith("Project ")), ["The call has no arguments.", "Outro."]);
+	assert.equal(pauses.at(-1), true, "sentence steps retain pause intent");
+	await host.shortcut("f7"); await settle();
+	assert.ok(sent.includes("It calls run."));
+	await host.shortcut("f9"); await settle();
+	await host.shortcut("f9"); await settle();
+	const beforeTail = sent.length;
+	await host.shortcut("f9"); await settle();
+	assert.equal(sent.length, beforeTail, "stepping past the latest sentence follows the tail without more speech");
+	assert.equal(host.modelRequests.length, 1);
+	host.addMessage("failed", "answer", assistant("Last prose.\n```ts\nfail();\n```"));
+	await host.shortcut("f10"); await settle();
+	const omittedCount = sent.length;
+	await host.shortcut("f9"); await settle();
+	assert.equal(sent.length, omittedCount, "a terminal omission is not a pending playable unit");
+	assert.doesNotMatch(host.notices.at(-1)?.message ?? "", /boundaries.*pending/);
+});
+
 test("live, rendering, replay, and timing share one contextual description request", async t => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-voice-index-context-"));
 	const restoreEnvironment = await configure(root, "conversation");

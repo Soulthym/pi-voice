@@ -8,6 +8,27 @@ import test from "node:test";
 
 const CLIENT_DIR = path.resolve("client");
 
+test("both Termux clients migrate only old voice labels, once", async t => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-voice-keyboard-"));
+	t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+	const tools = restrictedPath(root, { "termux-reload-settings": 'printf "reload\\n" >> "$HOME/reloads"' });
+	for (const script of [path.join(CLIENT_DIR, "pi-voice-client"), path.resolve("termux/pi-voice-phone")]) {
+		const home = fs.mkdtempSync(path.join(root, "home-"));
+		fs.mkdirSync(path.join(home, ".termux"));
+		const file = path.join(home, ".termux/termux.properties");
+		fs.writeFileSync(file, "custom = keep this\nextra-keys = [[{key:'F7',display:'↶10'},{key:'F9',display:'10↷'}]]\n");
+		fs.renameSync(file, path.join(home, "properties"));
+		fs.symlinkSync(path.join(home, "properties"), file);
+		for (let repeat = 0; repeat < 2; repeat++) {
+			const result = await runScript(script, [], "", { HOME: home, PREFIX: "/data/com.termux/files/usr", PATH: tools });
+			assert.equal(result.code, 1, "fixture intentionally lacks audio commands; no bridge is launched");
+		}
+		assert.equal(fs.readFileSync(file, "utf8"), "custom = keep this\nextra-keys = [[{key:'F7',display:'↶'},{key:'F9',display:'↷'}]]\n");
+		assert.equal(fs.readFileSync(path.join(home, "reloads"), "utf8"), "reload\n");
+		assert.equal(fs.lstatSync(file).isSymbolicLink(), true);
+	}
+});
+
 interface RunResult {
 	code: number | null;
 	signal: string | null;
@@ -78,7 +99,7 @@ function makeFakeBin(root: string, scripts: Record<string, string>): string {
 
 /** Coreutils the client scripts legitimately need; everything else stays absent. */
 const RESTRICTED_TOOLS = [
-	"bash", "sh", "basename", "cat", "cmp", "dd", "dirname", "env", "head", "id", "kill",
+	"bash", "sh", "basename", "cat", "cmp", "dd", "dirname", "env", "grep", "sed", "head", "id", "kill",
 	"mkdir", "mkfifo", "printf", "readlink", "rm", "sh", "sleep", "stat", "tail", "timeout", "touch", "tr", "base64", "setsid", "ps",
 ];
 

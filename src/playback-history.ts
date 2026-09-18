@@ -1,3 +1,4 @@
+import { SpeakableStream } from "./speakable.js";
 import type { NarrationSegment } from "./narration-progress.js";
 
 export interface PlaybackMessage {
@@ -6,9 +7,15 @@ export interface PlaybackMessage {
 	renderKey?: string;
 }
 
+export interface PlaybackUnit {
+	sourceOffset: number;
+	skipUnits: number;
+}
+
 export interface PlaybackTarget extends PlaybackMessage {
 	time: number;
 	sourceOffset: number;
+	skipUnits?: number;
 }
 
 export interface PlaybackStatus {
@@ -40,12 +47,20 @@ type MessageRecord = PlaybackMessage & {
 	duration: number;
 	position: number;
 	timingsComplete: boolean;
+	cursor?: PlaybackUnit;
 };
 
 type Capture = {
 	record: MessageRecord;
 	baseTime: number;
 	recordTimings: boolean;
+	origin: PlaybackUnit;
+	segments: CapturedSegment[];
+};
+
+type CapturedSegment = {
+	capture: Capture; utterance: number; sourceOffset: number; skipUnits: number;
+	audioStart?: number; wordOffsets: Set<number>; sourceBase: number; code: boolean;
 };
 
 /** Keeps only text-source timing metadata; replayed audio is always regenerated. */
@@ -54,10 +69,7 @@ export class PlaybackHistory {
 	#order: string[] = [];
 	#selectedId: string | undefined;
 	#capture: Capture | undefined;
-	#segments = new Map<
-		number,
-		{ capture: Capture; utterance: number; sourceOffset: number; audioStart?: number; wordOffsets: Set<number> }
-	>();
+	#segments = new Map<number, CapturedSegment>();
 	#utterances = new Map<number, Capture>();
 	#endedUtterances = new Set<number>();
 	#activeUtterance: number | undefined;
@@ -72,6 +84,7 @@ export class PlaybackHistory {
 					existing.checkpoints = [];
 					existing.duration = 0;
 					existing.position = 0;
+					if (existing.text !== message.text) existing.cursor = undefined;
 					existing.timingsComplete = false;
 				}
 				existing.text = message.text;
@@ -91,7 +104,7 @@ export class PlaybackHistory {
 				!record ||
 				!record.renderKey ||
 				snapshot.renderKey !== record.renderKey ||
-				!Array.isArray(snapshot.checkpoints) || snapshot.checkpoints.length > 2_000) continue;
+				!Array.isArray(snapshot.checkpoints) || snapshot.checkpoints.length > 100_000) continue;
 			const checkpoints = snapshot.checkpoints.filter(
 				checkpoint =>
 					Number.isFinite(checkpoint.time) &&
@@ -105,12 +118,11 @@ export class PlaybackHistory {
 			if (checkpoints.length === 0) continue;
 			record.checkpoints = checkpoints.map(checkpoint => ({ ...checkpoint })).sort((left, right) => left.time - right.time);
 			record.duration = snapshot.duration;
-			record.position = 0;
 			record.timingsComplete = true;
 		}
 	}
 
-	beginCapture(id: string, text: string, baseTime = 0, recordTimings = true): void {
+	beginCapture(id: string, text: string, baseTime = 0, recordTimings = true, sourceOffset = 0, skipUnits = 0): void {
 		let record = this.#records.get(id);
 		if (!record) {
 			record = { id, text, checkpoints: [], duration: 0, position: baseTime, timingsComplete: false };
@@ -125,7 +137,8 @@ export class PlaybackHistory {
 			record.timingsComplete = false;
 		}
 		this.#selectedId = id;
-		this.#capture = { record, baseTime, recordTimings };
+		record.cursor = { sourceOffset, skipUnits };
+		this.#capture = { record, baseTime, recordTimings, origin: record.cursor, segments: [] };
 		this.#activeUtterance = undefined;
 	}
 
@@ -148,12 +161,17 @@ export class PlaybackHistory {
 	registerSegment(segment: NarrationSegment): void {
 		const capture = this.#capture;
 		if (!capture) return;
-		this.#segments.set(segment.id, {
-			capture,
-			utterance: segment.utterance,
-			sourceOffset: segment.source.start,
-			wordOffsets: new Set(),
-		});
+		// The extension registers suffix-relative ranges; navigation uses whole-message ranges.
+		const sourceOffset = segment.source.start + capture.origin.sourceOffset;
+		const previous = capture.segments.at(-1);
+		const skipUnits = previous?.sourceOffset === sourceOffset ? previous.skipUnits + 1
+			: capture.origin.sourceOffset === sourceOffset ? capture.origin.skipUnits : 0;
+		const tracked: CapturedSegment = {
+			capture, utterance: segment.utterance, sourceOffset, skipUnits, wordOffsets: new Set(),
+			sourceBase: segment.sourceBase ?? 0, code: Boolean(segment.code || segment.codeDescription),
+		};
+		this.#segments.set(segment.id, tracked);
+		capture.segments.push(tracked);
 		this.#utterances.set(segment.utterance, capture);
 		this.#activeUtterance = segment.utterance;
 	}
@@ -179,11 +197,11 @@ export class PlaybackHistory {
 
 	setWordTimings(segmentId: number, words: Array<{ time: number; sourceOffset: number }>): void {
 		const tracked = this.#segments.get(segmentId);
-		if (!tracked?.capture.recordTimings || tracked.audioStart === undefined || words.length === 0) return;
+		if (!tracked?.capture.recordTimings || tracked.code || tracked.audioStart === undefined || words.length === 0) return;
 		const record = tracked.capture.record;
 		if (tracked.wordOffsets.size > 0) {
 			record.checkpoints = record.checkpoints.filter(
-				checkpoint => !tracked.wordOffsets.has(checkpoint.sourceOffset),
+				checkpoint => checkpoint.duration > 0 || !tracked.wordOffsets.has(checkpoint.sourceOffset),
 			);
 			tracked.wordOffsets.clear();
 		}
@@ -191,9 +209,10 @@ export class PlaybackHistory {
 		for (const word of words) {
 			if (!Number.isFinite(word.time) || word.time < 0 || !Number.isInteger(word.sourceOffset)) continue;
 			const absoluteTime = tracked.capture.baseTime + tracked.audioStart + word.time;
-			if (word.sourceOffset === tracked.sourceOffset || absoluteTime - lastTime < 0.4) continue;
-			record.checkpoints.push({ time: absoluteTime, duration: 0, sourceOffset: word.sourceOffset });
-			tracked.wordOffsets.add(word.sourceOffset);
+			const sourceOffset = word.sourceOffset - tracked.sourceBase + tracked.capture.origin.sourceOffset;
+			if (sourceOffset < 0 || sourceOffset === tracked.sourceOffset || absoluteTime - lastTime < 0.4) continue;
+			record.checkpoints.push({ time: absoluteTime, duration: 0, sourceOffset });
+			tracked.wordOffsets.add(sourceOffset);
 			lastTime = absoluteTime;
 		}
 		record.checkpoints.sort((left, right) => left.time - right.time);
@@ -212,12 +231,8 @@ export class PlaybackHistory {
 		}
 		this.#persistedUtterances.add(utterance);
 		if (!capture.record.renderKey) return undefined;
-		const all = capture.record.checkpoints;
-		const persisted = all.length <= 2_000
-			? all
-			: Array.from({ length: 2_000 }, (_value, index) =>
-					all[Math.round((index * (all.length - 1)) / 1_999)] as TimingCheckpoint,
-			);
+		// Keep sentence boundaries intact; word checkpoints are already rate-limited.
+		const persisted = capture.record.checkpoints;
 		return {
 			version: 3,
 			messageId: capture.record.id,
@@ -237,8 +252,10 @@ export class PlaybackHistory {
 		this.#endedUtterances.add(utterance);
 		this.#completeTimingsIfReady(utterance);
 		const capture = this.#utterances.get(utterance);
-		if (!capture || capture.record.duration <= 0) return;
-		capture.record.position = capture.record.duration;
+		if (!capture) return;
+		const last = capture.segments.at(-1);
+		if (last) capture.record.cursor = { sourceOffset: last.sourceOffset, skipUnits: last.skipUnits };
+		if (capture.record.timingsComplete) capture.record.position = capture.record.duration;
 	}
 
 	#completeTimingsIfReady(utterance: number): void {
@@ -257,6 +274,8 @@ export class PlaybackHistory {
 		const capture = this.#utterances.get(utterance);
 		if (!capture || utterance !== this.#activeUtterance || !Number.isFinite(position)) return;
 		capture.record.position = Math.max(0, capture.baseTime + position);
+		const segment = capture.segments.findLast(segment => segment.audioStart !== undefined && segment.audioStart <= position);
+		if (segment) capture.record.cursor = { sourceOffset: segment.sourceOffset, skipUnits: segment.skipUnits };
 	}
 
 	selected(): PlaybackMessage | undefined {
@@ -315,8 +334,35 @@ export class PlaybackHistory {
 		return Boolean(record?.checkpoints.some(checkpoint => checkpoint.time > record.position));
 	}
 
+	/** Whole source units work before timing exists; code descriptions supply per-block ordinals. */
+	sentenceTarget(direction: -1 | 1, units?: PlaybackUnit[], fromTail = false): PlaybackTarget | undefined {
+		const record = this.#selectedId ? this.#records.get(this.#selectedId) : undefined;
+		if (!record) return undefined;
+		if (!units) {
+			const stream = new SpeakableStream();
+			units = [...stream.push(record.text), ...stream.flush()].map(item => ({ sourceOffset: item.source.start, skipUnits: 0 }));
+		}
+		if (!units.length) return undefined;
+		const cursor = record.cursor ?? { sourceOffset: 0, skipUnits: 0 };
+		let current = units.findLastIndex(unit => unit.sourceOffset < cursor.sourceOffset ||
+			(unit.sourceOffset === cursor.sourceOffset && unit.skipUnits <= cursor.skipUnits));
+		current = Math.max(0, current);
+		const next = fromTail && direction < 0 ? units.length - 1 : Math.max(0, current + direction);
+		if (next >= units.length) return undefined;
+		return this.#unitTarget(record, units[next]);
+	}
+
+	#unitTarget(record: MessageRecord, unit: PlaybackUnit): PlaybackTarget {
+		const checkpoint = record.checkpoints.filter(point => point.duration > 0 && point.sourceOffset === unit.sourceOffset)[unit.skipUnits];
+		const time = checkpoint?.time ?? 0;
+		record.cursor = unit;
+		record.position = time;
+		return { id: record.id, text: record.text, time, sourceOffset: unit.sourceOffset, skipUnits: unit.skipUnits };
+	}
+
 	resumeTarget(): PlaybackTarget | undefined {
-		return this.seekTarget(0) ?? this.restartTarget();
+		const record = this.#selectedId ? this.#records.get(this.#selectedId) : undefined;
+		return record?.cursor ? this.#unitTarget(record, record.cursor) : this.restartTarget();
 	}
 
 	hasTimingFor(messageId: string): boolean {

@@ -157,4 +157,20 @@ test("starts code description early while preserving spoken order", async () => 
 	await immediate();
 	await immediate();
 	assert.deepEqual(events, ["speech:Before.", "speech:The code defines a constant value.", "speech:After.", "end"]);
+	// A sentence seek inside a description retains earlier focus operations without speaking earlier text.
+	events.length = 0;
+	const segments: any[] = [];
+	const skipped = new Vocalizer(() => ({ ...DEFAULT_VOICE_CONFIG, enabled: true }), () => {}, async () => ({
+		guided: true, records: [
+			{ speech: "First sentence.", operations: [{ kind: "line-add", id: "one", range: { startLine: 1, endLine: 1 } }] },
+			{ speech: "Second sentence.", operations: [] },
+		],
+	}), segment => segments.push(segment), worker);
+	skipped.speakFrom("```ts\nconst value = 1;\n```\nAfter.", 50, 1);
+	await immediate(); await immediate();
+	assert.deepEqual(events, ["speech:Second sentence.", "speech:After.", "end"]);
+	assert.equal(segments[0].source.start, 50);
+	assert.equal(segments[0].codeDescription.offset, "First sentence. ".length);
+	assert.equal(segments[0].code.cues[0].operations[0].id, "one");
+	assert.equal(segments[0].code.cues.at(-1).operations[0].kind, "reset");
 });

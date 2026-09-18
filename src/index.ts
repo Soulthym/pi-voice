@@ -840,6 +840,7 @@ const chargeBackfillUnit = (): boolean => {
 	let autoScrollForceOnce = false;
 	let restoreBottomAfterSpeech = false;
 	let bottomPinned = false;
+	let atTranscriptTail = false;
 	let followHintVisible = false;
 	const markdownLineCache = new Map<string, number>();
 	let belowCacheKey = "";
@@ -947,6 +948,7 @@ const chargeBackfillUnit = (): boolean => {
 	};
 
 	const armNarrationFollow = (forceCanonicalAnchor = false): void => {
+		atTranscriptTail = false;
 		bottomPinned = false;
 		lastAutoScrollTop = undefined;
 		autoScrollForceOnce = forceCanonicalAnchor;
@@ -969,6 +971,7 @@ const chargeBackfillUnit = (): boolean => {
 			return;
 		}
 		scrollView.scrollToEnd();
+		atTranscriptTail = true;
 		bottomPinned = ownsSpeech;
 		restoreBottomAfterSpeech = ownsSpeech;
 		lastAutoScrollTop = scrollView.scrollTop;
@@ -1671,7 +1674,7 @@ const chargeBackfillUnit = (): boolean => {
 		pendingReplay = request;
 		// Keep the requested target usable by F6–F10 and F8 while another process
 		// acknowledges shutdown. Do not destroy the current sink before ownership.
-		playbackHistory.beginCapture(target.id, target.text, target.time, false);
+		playbackHistory.beginCapture(target.id, target.text, target.time, false, sourceOffset, target.skipUnits ?? 0);
 		playbackPaused = request.paused;
 		pausedOwnerUtterance = undefined;
 		narration.finish();
@@ -1736,7 +1739,7 @@ const chargeBackfillUnit = (): boolean => {
 		// Timeline movement replaces the sink without changing transport state.
 		// Sticky worker pause applies even before the replacement sink exists.
 		vocalizer.setPlaybackPaused(request.paused);
-		playbackHistory.beginCapture(target.id, target.text, target.time, recordTimings);
+		playbackHistory.beginCapture(target.id, target.text, target.time, recordTimings, sourceOffset, target.skipUnits ?? 0);
 		const contextual = activeContext
 			? completedAssistantMessages(activeContext, config.mode, config.codeDescriptionContext === "conversation").find(message => message.id === target.id)
 			: undefined;
@@ -1748,7 +1751,7 @@ const chargeBackfillUnit = (): boolean => {
 		refreshPlaybackTimeline();
 		ownerContentExpected = hasSpeakableAudio(suffix);
 		if (ownerContentExpected) announceProjectForSpeech();
-		vocalizer.speakFrom(suffix, sourceOffset);
+		vocalizer.speakFrom(suffix, sourceOffset, target.skipUnits ?? 0);
 		ownerTurnEnded = true;
 		completeOwnerSpeech();
 	};
@@ -1891,12 +1894,7 @@ const chargeBackfillUnit = (): boolean => {
 				}
 				if (checkpoints.length === 0 || epoch !== contextEpoch || !isCurrentContext(ctx)) return;
 				checkpoints.sort((left, right) => left.time - right.time);
-				if (checkpoints.length > 2_000) {
-					const all = checkpoints;
-					checkpoints = Array.from({ length: 2_000 }, (_value, index) =>
-						all[Math.round((index * (all.length - 1)) / 1_999)] as PlaybackTimingSnapshot["checkpoints"][number],
-					);
-				}
+				// Preserve all sentence starts; dropping them shifts code-description unit ordinals.
 				try {
 					const resolvedRenderKey = renderKeyFor(ctx, contextual);
 					if (resolvedRenderKey !== message.renderKey) {
@@ -2504,7 +2502,7 @@ const chargeBackfillUnit = (): boolean => {
 			ctx.ui.notify("There is no completed assistant message to replay yet", "warning");
 			return;
 		}
-		playTarget(target, !playbackHistory.hasTimings(), true);
+		playTarget(target, !playbackHistory.hasCompleteTimingFor(target.id), true);
 	};
 
 	playRequestedAttention = ctx => {
@@ -2545,21 +2543,53 @@ const chargeBackfillUnit = (): boolean => {
 			if (!requireEnabledVoice(ctx)) return;
 			syncPlaybackMessages(ctx);
 			const message = playbackHistory.move(-1);
-			if (message) playTarget({ ...message, time: 0, sourceOffset: 0 }, !playbackHistory.hasTimings(), true);
+			if (message) playTarget({ ...message, time: 0, sourceOffset: 0 }, !playbackHistory.hasCompleteTimingFor(message.id), true);
 		},
 	});
 
-	pi.registerShortcut("f7", {
-		description: "Regenerate playback from about 10 seconds earlier",
-		handler: ctx => {
-			if (!requireEnabledVoice(ctx)) return;
-			const target = playbackHistory.seekTarget(-10);
-			if (target) playTarget(target, false, true);
-			else {
-				scheduleMissingTimings(ctx);
-				ctx.ui.notify("Timing preprocessing for this message has not finished yet", "warning");
+	const stepSentence = (ctx: ExtensionContext, direction: -1 | 1): void => {
+		if (!requireEnabledVoice(ctx)) return;
+		syncPlaybackMessages(ctx);
+		const selected = playbackHistory.selected();
+		if (!selected) { ctx.ui.notify("There is no completed assistant message", "warning"); return; }
+		const contextual = config.codeDescriptionContext === "conversation"
+			? completedAssistantMessages(ctx, "assistant", true).find(message => message.id === selected.id) : undefined;
+		const stream = new SpeakableStream();
+		const units: Array<{ sourceOffset: number; skipUnits: number }> = [];
+		let complete = true;
+		for (const item of [...stream.push(selected.text), ...stream.flush()]) {
+			let count = 1;
+			if (item.kind === "code") {
+				const messages = contextual ? contextualAssistantMessagesThroughText(
+					contextual.conversationMessages, contextual.assistantMessage, item.source.end) : [];
+				const key = descriptionCacheKey(ctx, item.block, structuredContextIdentity(messages));
+				const plan = codeDescriptionCache.get(key);
+				const omitted = plan?.omitted || (!plan && codeDescriptionOmissions.has(key));
+				if (!plan && !omitted) complete = false;
+				count = omitted ? 0 : plan ? Math.max(1, chunkCodeNarration(plan).length) : 1;
 			}
-		},
+			for (let skipUnits = 0; skipUnits < count; skipUnits++) units.push({ sourceOffset: item.source.start, skipUnits });
+		}
+		const target = playbackHistory.sentenceTarget(direction, units, atTranscriptTail);
+		if (target) {
+			const fullCapture = target.sourceOffset === units[0]?.sourceOffset && !target.skipUnits;
+			void playTarget(target, fullCapture && !playbackHistory.hasCompleteTimingFor(target.id), true);
+		} else if (direction > 0 && complete) {
+			const before = playbackHistory.status();
+			if (before && before.messageIndex === before.messageCount - 1) followTranscriptTail(ctx);
+			else {
+				const next = playbackHistory.move(1);
+				if (next) void playTarget({ ...next, time: 0, sourceOffset: 0 }, !playbackHistory.hasCompleteTimingFor(next.id), true);
+			}
+		} else {
+			scheduleMissingTimings(ctx);
+			ctx.ui.notify("Sentence boundaries for this code description are still pending", "info");
+		}
+	};
+
+	pi.registerShortcut("f7", {
+		description: "Play the previous sentence or literal newline unit",
+		handler: ctx => stepSentence(ctx, -1),
 	});
 
 	const pauseCurrentPlayback = (preserveViewport: boolean): boolean => {
@@ -2646,32 +2676,8 @@ const chargeBackfillUnit = (): boolean => {
 	});
 
 	pi.registerShortcut("f9", {
-		description: "Seek forward; pause and follow transcript tail after the final checkpoint",
-		handler: ctx => {
-			if (!requireEnabledVoice(ctx)) return;
-			syncPlaybackMessages(ctx);
-			const before = playbackHistory.status();
-			// Treat transcript-tail following as the timeline position immediately
-			// after the final checkpoint of the latest completed message.
-			if (
-				before?.hasTimings &&
-				before.timingsComplete &&
-				before.messageIndex === before.messageCount - 1 &&
-				!playbackHistory.canSeekForward()
-			) {
-				followTranscriptTail(ctx);
-				return;
-			}
-			const target = playbackHistory.seekTarget(10);
-			if (target) {
-				if (!before?.timingsComplete) scheduleMissingTimings(ctx);
-				playTarget(target, false, true);
-			}
-			else {
-				scheduleMissingTimings(ctx);
-				ctx.ui.notify("Timing preprocessing for this message has not finished yet", "warning");
-			}
-		},
+		description: "Play the next sentence/newline; after the latest message, pause and follow the transcript tail",
+		handler: ctx => stepSentence(ctx, 1),
 	});
 
 	pi.registerShortcut("f10", {
@@ -2685,7 +2691,7 @@ const chargeBackfillUnit = (): boolean => {
 				return;
 			}
 			const message = playbackHistory.move(1);
-			if (message) playTarget({ ...message, time: 0, sourceOffset: 0 }, !playbackHistory.hasTimings(), true);
+			if (message) playTarget({ ...message, time: 0, sourceOffset: 0 }, !playbackHistory.hasCompleteTimingFor(message.id), true);
 		},
 	});
 

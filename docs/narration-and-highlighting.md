@@ -6,6 +6,8 @@
 
 Pi Voice buffers streaming Markdown until a complete sentence or literal newline is available. It does not force early clause/word cuts or flush unfinished sentences during a generation stall. Terminal soft wrapping is not a boundary; message end drains the final unterminated unit.
 
+The playback worker generates up to three sentences concurrently by default and delivers their audio in source order. Lookahead is bounded to the selected worker count even while paused; Stop cancels queued inference and interrupts busy model processes. Cached Opus can play without launching a TTS model process. `PI_VOICE_TTS_WORKERS=1..8` tunes this host-side limit (default 3, measured using the production pool on the current q8 CPU setup). Microphone transcription is not parallelized.
+
 Kokoro cannot infer more than roughly 510 phonemes in one call. Long sentences are phonemized without truncation, generated in internal windows, then joined into one playback/alignment unit. This avoids dropped endings, but very long sentences take longer before playback begins and internal seams may affect prosody. Units longer than 30 seconds use duration-weighted word estimates instead of full-sequence CTC alignment, whose memory cost grows quadratically.
 
 It avoids reading most Markdown syntax, preserves link labels while shortening URLs to useful host names, and leaves fence markers and link destinations untouched during terminal styling.
@@ -60,7 +62,7 @@ Subsequent assistant messages do not reset earlier message styling while queued 
 
 ## Auto-scroll
 
-With `autoScroll: true` (the default), Pi Voice attaches an invisible location marker to the **currently timed word** and finds that marker in Pi's rendered TUI document. New live narration initially places that word 20% down from the top. Message and ±10-second controls preview their target immediately, before regenerated audio begins: the viewport stays put when that target is already inside 20–80%, otherwise it snaps to 20%. Pausing itself never moves the viewport, and timeline movement while paused updates highlighting and framing without resuming audio. Near the start or end of the transcript, targets are clamped to the available scroll range instead of creating nonexistent space.
+With `autoScroll: true` (the default), Pi Voice attaches an invisible location marker to the **currently timed word** and finds that marker in Pi's rendered TUI document. New live narration initially places that word 20% down from the top. Message and sentence/newline controls preview their target immediately, before regenerated audio begins: the viewport stays put when that target is already inside 20–80%, otherwise it snaps to 20%. Pausing itself never moves the viewport, and timeline movement while paused updates highlighting and framing without resuming audio. Near the start or end of the transcript, targets are clamped to the available scroll range instead of creating nonexistent space.
 
 After that initial placement, no scrolling occurs while the word remains in the 20–80% visible band. Each time a new spoken word moves past the 80% mark, it is re-anchored at 20%. F6/F7/F9/F10/F11 replay and seek actions, F8 resume, `/voice attention`, and `/voice scroll-to` all re-arm this behavior. The first marker lookup establishes the active message's transcript position; subsequent words render only that message, with periodic full-layout resynchronization, rather than rerendering a long transcript twice on every playback tick.
 

@@ -38,13 +38,15 @@ Examples for smart mode include “replace port 8000 with 8080,” “scratch th
 | Key | Action |
 | --- | --- |
 | `F6` | Select and play the previous completed assistant message |
-| `F7` | Seek approximately 10 seconds backward |
+| `F7` | Play the previous sentence or literal-newline unit; clamp at the first |
 | `F8` | Pause or resume the existing audio player |
-| `F9` | Seek approximately 10 seconds forward; after the latest message's confirmed final checkpoint, pause and follow the transcript tail |
+| `F9` | Play the next sentence/newline unit; advance to the next message or pause and follow the latest transcript tail |
 | `F10` | Select and play the next completed assistant message; from the latest message, pause and follow the transcript tail |
 | `F11` | Play this session's waiting response, route attention to the oldest waiting project, or replay the selected message |
 | `Alt+V` | Re-anchor the current narrated position (`/voice scroll-to`) |
 | `Alt+T` | Pin to transcript end and follow new output (`/voice bottom`) |
+
+F7/F9 use source sentences and actual newlines, never terminal soft wraps. They work before durations are known and retain pause intent. Code-description sentences are separate steps, with existing focus cues preserved; terminal omissions are skipped. F7 from transcript-tail follow selects the final unit of the selected message.
 
 F6/F10 navigate Pi Voice's selected-message history; merely scrolling the terminal viewport does not change that selection. Navigation is available while Pi is idle. The destination message is highlighted and exposed immediately, before regenerated audio starts, and Pi Voice invalidates any marker cached in the previously selected message before locating the destination.
 
@@ -52,7 +54,7 @@ F8 preserves the current audio connection, highlighting position, and transcript
 
 F7/F9 use duration estimates first and replace them with aligned source-word checkpoints when alignment arrives, usually landing within a fraction of the requested ten seconds. Unchanged messages reuse valid timing maps and cached Opus segments. Message and time movement preserves the transport's paused versus unpaused state: while paused it updates the highlighted position and queues the replacement sink in paused state; from idle, message replay starts unpaused.
 
-Transcript-tail following acts as the timeline position after the latest completed message. F10 while that message is selected, or F9 after its final available checkpoint, pauses active playback before behaving like `Alt+T`/`/voice bottom`: it snaps to the transcript end and follows new output without restarting or regenerating audio. If playback is already paused or complete, the transport is left untouched.
+Transcript-tail following acts as the timeline position after the latest completed message. F10 while that message is selected, or F9 from its final known sentence/newline unit, pauses active playback before behaving like `Alt+T`/`/voice bottom`: it snaps to the transcript end and follows new output without restarting or regenerating audio. If playback is already paused or complete, the transport is left untouched.
 
 ## Highlighting and status
 
@@ -79,7 +81,9 @@ Manual prompt submission, replay controls, F11, and `/voice attention` take prio
 
 The extended row provides one-tap access to dictation and every F6–F11 playback control:
 
-![Termux extended keyboard row showing microphone, previous message, rewind 10 seconds, pause or resume, forward 10 seconds, next message, and replay](assets/pi-voice-ssh-termux-extended-kb.jpg)
+The screenshot below is from the older time-jump layout; current sentence buttons use `↶` and `↷` without numbers.
+
+![Older Termux extended keyboard row with microphone, message navigation, playback controls and replay](assets/pi-voice-ssh-termux-extended-kb.jpg)
 
 Add the row to `extra-keys` in `~/.termux/termux.properties`. Insert this before the configuration's final `]]`:
 
@@ -87,9 +91,9 @@ Add the row to `extra-keys` in `~/.termux/termux.properties`. Insert this before
   ], [\
     {key: 'F5',  display: '🎙'},\
     {key: 'F6',  display: '⏮'},\
-    {key: 'F7',  display: '↶10'},\
+    {key: 'F7',  display: '↶'},\
     {key: 'F8',  display: '⏯'},\
-    {key: 'F9',  display: '10↷'},\
+    {key: 'F9',  display: '↷'},\
     {key: 'F10', display: '⏭'},\
     {key: 'F11', display: '↺'}\
   ]]
@@ -101,4 +105,11 @@ Apply it with:
 termux-reload-settings
 ```
 
-The row maps to microphone, previous, rewind, pause/resume, forward, next, and attention/restart. F5 is registered only when `talkShortcut` is not `disabled`.
+Updated clients automatically replace the old `↶10`/`10↷` labels on their next start, without replacing your keyboard layout. To update the existing row immediately in a local Termux shell (no SSH reconnect needed):
+
+```bash
+sed -i --follow-symlinks 's/↶10/↶/g; s/10↷/↷/g' ~/.termux/termux.properties
+termux-reload-settings
+```
+
+The row maps to microphone, previous message, previous sentence, pause/resume, next sentence, next message, and attention/restart. F5 is registered only when `talkShortcut` is not `disabled`.

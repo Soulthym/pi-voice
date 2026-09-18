@@ -36,7 +36,7 @@ Failed model requests use local structural narration. Before inference, `block-o
 
 ## Speech timing
 
-A timing pass converts speakable text and persisted code narration into segments, obtains each segment's synthesized duration, and stores segment starts plus duration-weighted prose word checkpoints under a complete render identity. Live playback replaces estimates with sampled Wav2Vec2-aligned word checkpoints when alignment arrives. This gives ±10-second scrubbing useful precision without retaining audio.
+A timing pass converts speakable text and persisted code narration into segments, obtains each segment's synthesized duration, and stores segment starts plus duration-weighted prose word checkpoints under a complete render identity. Live playback replaces estimates with sampled Wav2Vec2-aligned word checkpoints when alignment arrives. Sentence navigation uses complete generation units, not these sampled word checkpoints. All sentence starts are retained in snapshots so code-description unit ordinals remain stable.
 
 `timingPreprocessConcurrency` accepts `auto` or `1..8`. Each lane is an independent CPU Kokoro worker because the runtime does not batch concurrent synthesis in one process. `auto` considers available RAM and CPU parallelism and caps at four. Kokoro is currently CPU-bound; VRAM is not used in this calculation.
 

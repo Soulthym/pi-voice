@@ -50,6 +50,7 @@ export class Vocalizer {
 	#utterance: number | null = null;
 	#nextUtterance = 0;
 	#nextSegment = 0;
+	#skipUnits = 0;
 	#onNarrationSegment: ((segment: NarrationSegment) => void) | undefined;
 	#onUtteranceAllocated: ((utterance: number) => void) | undefined;
 	#onUtteranceEnded: ((utterance: number) => void) | undefined;
@@ -144,8 +145,9 @@ export class Vocalizer {
 		return this.#nextUtterance > before ? this.#nextUtterance : undefined;
 	}
 
-	speakFrom(text: string, sourceOffset: number): void {
+	speakFrom(text: string, sourceOffset: number, skipUnits = 0): void {
 		if (!this.#getConfig().enabled) return;
+		this.#skipUnits = Math.max(0, Math.floor(skipUnits));
 		this.#speakable = new SpeakableStream();
 		this.#sourceText = text;
 		this.#sourceOffset = Math.max(0, sourceOffset);
@@ -166,6 +168,7 @@ export class Vocalizer {
 		this.#deliveryBarrier = null;
 		this.#sourceOffset = 0;
 		this.#nextSourceOffset = 0;
+		this.#skipUnits = 0;
 		this.#sourceText = "";
 		this.#codeDescriptionMessages = undefined;
 		for (const controller of this.#descriptionControllers) controller.abort();
@@ -275,12 +278,18 @@ export class Vocalizer {
 		utterance: number,
 		sourceBase: number,
 	): void {
+		const requestedSkip = this.#skipUnits;
+		this.#skipUnits = 0;
 		let chunks = chunkCodeNarration(plan);
 		if (plan.omitted) return; // No semantic description: stay silent rather than speak filler.
 		if (chunks.length === 0) chunks = chunkCodeNarration(plainCodeNarration(fallbackCodeDescription(block)));
 		const description = chunks.map(chunk => chunk.text).join(" ");
 		let descriptionOffset = 0;
-		for (const chunk of chunks) {
+		const skip = Math.min(requestedSkip, Math.max(0, chunks.length - 1));
+		const inherited = chunks.slice(0, skip).flatMap(chunk => chunk.cues.flatMap(cue => cue.operations));
+		for (const [index, chunk] of chunks.entries()) {
+			if (index < skip) { descriptionOffset += chunk.text.length + 1; continue; }
+			if (index === skip && inherited.length) chunk.cues.unshift({ offset: 0, operations: inherited });
 			this.#sendSegments(
 				[chunk.text],
 				utterance,

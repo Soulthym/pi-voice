@@ -5,6 +5,16 @@ AUDIO_PORT=${PI_VOICE_AUDIO_PORT:-8765}
 CONTROL_PORT=${PI_VOICE_CONTROL_PORT:-8766}
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
+# Migrate only the old voice-button labels, preserving the user's keyboard layout.
+keyboard=${HOME:-}/.termux/termux.properties
+if [[ ${PREFIX:-} == *com.termux* && -n ${HOME:-} && -f "$keyboard" ]] && grep -qE '↶10|10↷' "$keyboard"; then
+  if sed -i --follow-symlinks 's/↶10/↶/g; s/10↷/↷/g' "$keyboard"; then
+    termux-reload-settings >/dev/null 2>&1 || true
+  else
+    printf 'Could not update voice keyboard labels in %s\n' "$keyboard" >&2
+  fi
+fi
+
 for command in socat mpv ffmpeg; do
   if ! command -v "$command" >/dev/null 2>&1; then
     if [[ ${PREFIX:-} == *com.termux* ]]; then

@@ -124,9 +124,9 @@ See [Configuration](docs/configuration.md) for valid values and setting behavior
 | --- | --- |
 | `Alt+M` or `F5` | Start/stop microphone dictation |
 | `F6` | Previous assistant message |
-| `F7` | Seek about 10 seconds backward |
+| `F7` | Previous sentence or literal-newline unit |
 | `F8` | Pause/resume audio and highlighting |
-| `F9` | Seek about 10 seconds forward; at the confirmed latest endpoint, pause and follow the transcript tail |
+| `F9` | Next sentence/newline unit; at message end advance, or pause and follow the latest tail |
 | `F10` | Next assistant message; from the latest message, pause and follow the transcript tail |
 | `F11` | Play this or the next waiting project's response |
 | `Alt+V` | Re-anchor the current narrated position |
@@ -150,7 +150,7 @@ Speak after pressing the microphone key. Recording normally stops after about 1.
 
 ### Termux extended keyboard
 
-Termux can expose one-tap microphone, message navigation, ±10-second seeking, pause/resume, and replay controls through an optional F5–F11 extra-key row.
+Termux can expose one-tap microphone, message navigation, sentence/newline navigation, pause/resume, and replay controls through an optional F5–F11 extra-key row.
 
 [![Termux extended keyboard row for Pi Voice playback controls](docs/assets/pi-voice-ssh-termux-extended-kb.jpg)](docs/usage.md#optional-termux-function-key-row)
 
