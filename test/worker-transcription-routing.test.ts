@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { mock, test } from "node:test";
 
-test("the real worker PCM router forwards and validates candidate count", { timeout: 10_000 }, async t => {
+test("the real worker routes candidates and bounds full-sequence alignment",  { timeout: 10_000 }, async t => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-voice-worker-routing-"));
 	const oldCache = process.env.PI_VOICE_CACHE_DIR;
 	process.env.PI_VOICE_CACHE_DIR = root;
@@ -16,11 +16,24 @@ test("the real worker PCM router forwards and validates candidate count", { time
 	mock.module("@huggingface/transformers", { namedExports: { ...hf, pipeline: async () => transcriber } });
 	const lines = new EventEmitter();
 	mock.module("node:readline", { namedExports: { createInterface: () => lines } });
+	mock.module("kokoro-js", { namedExports: { KokoroTTS: { from_pretrained: async () => ({
+		generate: async (text: string) => new hf.RawAudio(new Float32Array((text === "long" ? 31 : 30) * 24000), 24000),
+	}) } } });
+	let alignmentRequests = 0;
+	mock.module("node:child_process", { namedExports: { ...(await import("node:child_process")), spawn: () =>
+		Object.assign(new EventEmitter(), { exitCode: null, stdin: { write: () => { alignmentRequests++; return true; } } }),
+	} });
+	mock.module("../src/playback-controller.mjs", { namedExports: { createPlaybackController: () => ({
+		startPlayer: () => ({ ready: Promise.resolve(), stopped: false, samplesWritten: 0 }),
+		writeAudio: async () => {},
+	}) } });
 	let response = Promise.withResolvers<{ candidates: string[] }>();
+	let audioReady = Promise.withResolvers<void>();
 	const stdout = mock.method(process.stdout, "write", (chunk: string | Uint8Array) => {
 		try {
 			const event = JSON.parse(String(chunk));
 			if (event.type === "transcript") response.resolve(event);
+			if (event.type === "segment-audio") audioReady.resolve();
 			if (event.type === "error") response.reject(new Error(event.message));
 		} catch { /* Non-protocol output is not part of this check. */ }
 		return true;
@@ -39,4 +52,12 @@ test("the real worker PCM router forwards and validates candidate count", { time
 	lines.emit("line", JSON.stringify({ ...message, requestId: "invalid", candidateCount: 99 }));
 	assert.equal((await response.promise).candidates.length, 1);
 	assert.equal(calls, 4);
+	const segment = { type: "segment", utterance: 1, segmentId: 1, voice: "af_heart", speed: 1, text: "long" };
+	lines.emit("line", JSON.stringify(segment));
+	await audioReady.promise;
+	assert.equal(alignmentRequests, 0, "long sentences must not allocate unbounded full-sequence CTC attention");
+	audioReady = Promise.withResolvers<void>();
+	lines.emit("line", JSON.stringify({ ...segment, segmentId: 2, text: "short" }));
+	await audioReady.promise;
+	assert.equal(alignmentRequests, 1, "normal sentences retain actual forced alignment");
 });

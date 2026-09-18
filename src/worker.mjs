@@ -75,6 +75,8 @@ function preloadAlignment(requestId, model, dtype) {
 }
 
 function requestAlignment(operation, pcm, sampleRate) {
+	// ponytail: full-sequence CTC grows quadratically; use estimated words above 30s until windowed alignment exists.
+	if (pcm.length / sampleRate > 30) return;
 	try {
 		const bytes = Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength);
 		ensureAlignmentChild().stdin.write(

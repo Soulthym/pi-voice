@@ -6,7 +6,7 @@
 
 Pi Voice buffers streaming Markdown until a complete sentence or literal newline is available. It does not force early clause/word cuts or flush unfinished sentences during a generation stall. Terminal soft wrapping is not a boundary; message end drains the final unterminated unit.
 
-Kokoro cannot infer more than roughly 510 phonemes in one call. Long sentences are phonemized without truncation, generated in internal windows, then joined into one playback/alignment unit. This avoids dropped endings, but very long sentences take longer before playback begins and internal seams may affect prosody.
+Kokoro cannot infer more than roughly 510 phonemes in one call. Long sentences are phonemized without truncation, generated in internal windows, then joined into one playback/alignment unit. This avoids dropped endings, but very long sentences take longer before playback begins and internal seams may affect prosody. Units longer than 30 seconds use duration-weighted word estimates instead of full-sequence CTC alignment, whose memory cost grows quadratically.
 
 It avoids reading most Markdown syntax, preserves link labels while shortening URLs to useful host names, and leaves fence markers and link destinations untouched during terminal styling.
 
