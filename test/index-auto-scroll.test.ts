@@ -354,6 +354,13 @@ test("TUI follows exact words, permits in-band framing, and seek/resume controls
 	worker!.emit({ type: "idle", utterance: manualReplay.utterance } as never);
 	assert.equal(host.scrollView.scrollTop, 72);
 	assert.equal(host.scrollView.isFollowingEnd, false);
+	const completedCount = worker!.sent.length;
+	await host.shortcut("f10");
+	assert.equal(host.scrollView.scrollTop, 260, "F10 after genuine idle completion follows the transcript tail");
+	assert.equal(host.scrollView.isFollowingEnd, true);
+	assert.equal(worker!.sent.length, completedCount, "tail-follow must not regenerate completed audio");
+	await host.shortcut("f11");
+	worker!.emit({ type: "idle", utterance: (worker!.sent.at(-1) as { utterance: number }).utterance } as never);
 
 	// Manual replay during a newly streaming turn must never append later live
 	// deltas to the historical replay transport.
