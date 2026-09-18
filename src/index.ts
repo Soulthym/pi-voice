@@ -71,7 +71,7 @@ import { isVoice, VOICES } from "./voices.js";
 import { VoiceWorkerClient, type WorkerEvent } from "./worker-client.js";
 
 type VoiceState = "downloading" | "error" | "idle" | "listening" | "loading" | "speaking";
-type InputPhase = "idle" | "recording" | "transcribing";
+type InputPhase = "idle" | "acquiring" | "recording" | "transcribing";
 type PreprocessingProgress = { label: string; processed: number; total: number };
 type SpeechPurpose = "turn" | "replay" | "notification";
 
@@ -1208,7 +1208,7 @@ const chargeBackfillUnit = (): boolean => {
 
 	const beginInputProgress = (): void => {
 		inputInProgress = true;
-		inputPhase = "recording";
+		inputPhase = "acquiring";
 		inputStartedAt = Date.now();
 		const update = (): void => {
 			const elapsed = Math.floor((Date.now() - inputStartedAt) / 1000);
@@ -1451,10 +1451,20 @@ const chargeBackfillUnit = (): boolean => {
 
 	const phoneInput = new PhoneInputClient();
 	let cancelPendingDictation: (() => void) | undefined;
+	let finishPendingDictation: (() => Promise<void>) | undefined;
+	const finishInputForPlayback = async (): Promise<void> => {
+		if (inputPhase === "acquiring") {
+			coordinator?.cancelSpeechAcquisition();
+			await cancelActiveInput();
+		} else {
+			await finishPendingDictation?.();
+		}
+	};
 	const cancelActiveInput = (): Promise<void> => {
 		inputEpoch += 1;
 		cancelPendingDictation?.();
 		cancelPendingDictation = undefined;
+		finishPendingDictation = undefined;
 		const cancelled = phoneInput.cancel();
 		activeInputEndpoint = undefined;
 		clearInputProgress();
@@ -1602,10 +1612,11 @@ const chargeBackfillUnit = (): boolean => {
 	const forceAcquireSpeech = async (purpose: "turn" | "replay", announceProject = true): Promise<boolean> => {
 		const owner = coordinator;
 		const epoch = playbackRequestEpoch;
+		const captureEpoch = inputEpoch;
 		if (!owner) return interactiveVoiceSession;
 		const alreadyOwned = ownsSpeech && owner.ownsSpeech();
 		if (!alreadyOwned && !(await owner.forceAcquireSpeech())) return false;
-		if (owner !== coordinator || epoch !== playbackRequestEpoch || !interactiveVoiceSession) return false;
+		if (owner !== coordinator || epoch !== playbackRequestEpoch || captureEpoch !== inputEpoch || !interactiveVoiceSession) return false;
 		return activateSpeechOwnership(purpose, announceProject);
 	};
 
@@ -1752,9 +1763,8 @@ const chargeBackfillUnit = (): boolean => {
 		const displacedLiveTurn = ownsSpeech && speechPurpose === "turn" && !ownerTurnEnded;
 		const displacedLiveText = displacedLiveTurn ? ownedSpeechText : "";
 		if (inputInProgress) {
-			await cancelActiveInput();
+			await finishInputForPlayback();
 			if (pendingReplay !== request) return;
-			activeContext?.ui.notify("Voice recording stopped for playback control", "info");
 		}
 
 		let acquired = true;
@@ -2077,6 +2087,11 @@ const chargeBackfillUnit = (): boolean => {
 		restoreBottomAfterSpeech = false;
 		bottomPinned = false;
 		const talkEpoch = contextEpoch;
+		if (inputPhase === "acquiring") {
+			coordinator?.cancelSpeechAcquisition();
+			void cancelActiveInput();
+			return;
+		}
 		const routed = claimOutputDevice();
 		if (routed.input === "disabled") {
 			ctx.ui.notify("Voice microphone input is disabled", "warning");
@@ -2111,6 +2126,7 @@ const chargeBackfillUnit = (): boolean => {
 			return;
 		}
 		activeInputEndpoint = routed.input;
+		inputPhase = "recording";
 		state = "listening";
 		refreshStatus();
 		const editorBase = ctx.ui.getEditorText();
@@ -2151,8 +2167,17 @@ const chargeBackfillUnit = (): boolean => {
 			} catch { /* UI may already be unmounted during session replacement. */ }
 			live.cancel();
 			resolution.abort();
+			finished.resolve();
 		};
 		cancelPendingDictation = cancel;
+		let reviewOnly = false;
+		const finished = Promise.withResolvers<void>();
+		const finishForPlayback = async (): Promise<void> => {
+			reviewOnly = true;
+			if (inputPhase === "recording") await phoneInput.stop(activeInputEndpoint ?? routed.input);
+			await finished.promise;
+		};
+		finishPendingDictation = finishForPlayback;
 		try {
 			const capture = await phoneInput.capture(routed.input, {
 				onProgress: progress => {
@@ -2229,7 +2254,7 @@ const chargeBackfillUnit = (): boolean => {
 				ctx.ui.notify("Dictation left your manual edits untouched; review the draft before submitting", "info");
 				return;
 			}
-			if (config.submitMode === "review") {
+			if (reviewOnly || config.submitMode === "review") {
 				releaseSpeechOwnership(false);
 				ctx.ui.notify("Dictation ready to review — press Enter to submit", "info");
 				return;
@@ -2247,6 +2272,8 @@ const chargeBackfillUnit = (): boolean => {
 			refreshStatus();
 			ctx.ui.notify(`Voice microphone: ${error instanceof Error ? error.message : String(error)}`, "error");
 		} finally {
+			finished.resolve();
+			if (finishPendingDictation === finishForPlayback) finishPendingDictation = undefined;
 			if (cancelPendingDictation === cancel) cancelPendingDictation = undefined;
 			if (current()) {
 				clearInputProgress();
@@ -2606,8 +2633,20 @@ const chargeBackfillUnit = (): boolean => {
 		return true;
 	};
 
+	const preparePlaybackAction = async (ctx: ExtensionContext): Promise<boolean> => {
+		if (!requireEnabledVoice(ctx)) return false;
+		const epoch = playbackRequestEpoch;
+		try {
+			if (inputInProgress) await finishInputForPlayback();
+		} catch (error) {
+			ctx.ui.notify(`Voice microphone: ${error instanceof Error ? error.message : String(error)}`, "error");
+			return false;
+		}
+		return epoch === playbackRequestEpoch && interactiveVoiceSession;
+	};
+
 	const replaySelected = async (ctx: ExtensionContext): Promise<void> => {
-		if (!requireEnabledVoice(ctx)) return;
+		if (!await preparePlaybackAction(ctx)) return;
 		if (!await preparePlaybackMessages(ctx)) return;
 		syncPlaybackMessages(ctx, pausedForAttention);
 		const target = playbackHistory.restartTarget();
@@ -2632,7 +2671,7 @@ const chargeBackfillUnit = (): boolean => {
 	pi.registerShortcut("f6", {
 		description: "Play the previous assistant message",
 		handler: async ctx => {
-			if (!requireEnabledVoice(ctx) || !await preparePlaybackMessages(ctx)) return;
+			if (!await preparePlaybackAction(ctx) || !await preparePlaybackMessages(ctx)) return;
 			syncPlaybackMessages(ctx);
 			const message = playbackHistory.move(-1);
 			if (message) playTarget({ ...message, time: 0, sourceOffset: 0 }, !playbackHistory.hasCompleteTimingFor(message.id), true);
@@ -2640,7 +2679,7 @@ const chargeBackfillUnit = (): boolean => {
 	});
 
 	const stepSentence = async (ctx: ExtensionContext, direction: -1 | 1): Promise<void> => {
-		if (!requireEnabledVoice(ctx) || !await preparePlaybackMessages(ctx)) return;
+		if (!await preparePlaybackAction(ctx) || !await preparePlaybackMessages(ctx)) return;
 		syncPlaybackMessages(ctx);
 		const selected = playbackHistory.selected();
 		if (!selected) { ctx.ui.notify("There is no completed assistant message", "warning"); return; }
@@ -2718,8 +2757,8 @@ const chargeBackfillUnit = (): boolean => {
 
 	pi.registerShortcut("f8", {
 		description: "Pause or resume regenerated voice playback",
-		handler: ctx => {
-			if (!requireEnabledVoice(ctx)) return;
+		handler: async ctx => {
+			if (!await preparePlaybackAction(ctx)) return;
 			if (pendingReplay) {
 				const request = pendingReplay;
 				request.paused = !request.paused;
@@ -2775,7 +2814,7 @@ const chargeBackfillUnit = (): boolean => {
 	pi.registerShortcut("f10", {
 		description: "Play the next assistant message; pause and follow transcript tail after the latest",
 		handler: async ctx => {
-			if (!requireEnabledVoice(ctx) || !await preparePlaybackMessages(ctx)) return;
+			if (!await preparePlaybackAction(ctx) || !await preparePlaybackMessages(ctx)) return;
 			syncPlaybackMessages(ctx);
 			const before = playbackHistory.status();
 			if (before && before.messageIndex === before.messageCount - 1) {
@@ -3556,6 +3595,7 @@ const chargeBackfillUnit = (): boolean => {
 					coordinator?.setAttentionEnabled(true);
 					clearPlaybackTransport();
 					narration.finish();
+					if (!await preparePlaybackAction(ctx)) return;
 					if (!(await forceAcquireSpeech("replay", true))) return;
 					ownerContentExpected = true;
 					announceProjectForSpeech();
