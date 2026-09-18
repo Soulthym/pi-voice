@@ -36,7 +36,11 @@ type VoiceWorker = Pick<
 	| "preload"
 	| "preloadAlignment"
 	| "terminate"
-> & { cancel(): number | undefined | void; setPlaybackPaused?(paused: boolean): void };
+> & {
+	cancel(): number | undefined | void;
+	setPlaybackPaused?(paused: boolean): void;
+	transcribePcmCandidates?: VoiceWorkerClient["transcribePcmCandidates"];
+};
 
 export class Vocalizer {
 	#worker: VoiceWorker;
@@ -179,6 +183,12 @@ export class Vocalizer {
 
 	transcribePcm(audio: Float32Array): Promise<string> {
 		return this.#worker.transcribePcm(audio, this.#getConfig());
+	}
+
+	async transcribePcmCandidates(audio: Float32Array): Promise<string[]> {
+		if (this.#worker.transcribePcmCandidates) return this.#worker.transcribePcmCandidates(audio, this.#getConfig());
+		const text = await this.transcribePcm(audio);
+		return text ? [text] : [];
 	}
 
 	preload(): Promise<void> {

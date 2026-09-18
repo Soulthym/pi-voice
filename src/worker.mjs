@@ -352,13 +352,13 @@ async function transcribePhoneAudio(encoded, modelId, dtype, candidateCount) {
 	return runTranscriber(audio, modelId, dtype, candidateCount);
 }
 
-async function transcribePcmAudio(encoded, modelId, dtype) {
+async function transcribePcmAudio(encoded, modelId, dtype, candidateCount) {
 	const bytes = Buffer.from(encoded, "base64");
 	const audio = new Float32Array(Math.floor(bytes.length / Float32Array.BYTES_PER_ELEMENT));
 	for (let index = 0; index < audio.length; index += 1) {
 		audio[index] = bytes.readFloatLE(index * Float32Array.BYTES_PER_ELEMENT);
 	}
-	return runTranscriber(audio, modelId, dtype, 1);
+	return runTranscriber(audio, modelId, dtype, candidateCount);
 }
 
 function executable(name) {
@@ -646,7 +646,7 @@ async function closePlayer(utterance) {
 async function runOperation(operation) {
 	if (operation.type === "transcribe-pcm") {
 		try {
-			const candidates = await transcribePcmAudio(operation.audio, operation.model, operation.dtype);
+			const candidates = await transcribePcmAudio(operation.audio, operation.model, operation.dtype, operation.candidateCount);
 			send({ type: "transcript", requestId: operation.requestId, text: candidates[0] ?? "", candidates, preview: true });
 		} catch (error) {
 			send({

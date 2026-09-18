@@ -82,13 +82,17 @@ export function buildSessionContextExcerpt(entries: readonly unknown[], maxChars
 	return items.join("\n\n");
 }
 
-function normalizeCandidates(candidates: string | readonly string[]): string[] {
+export function normalizeCandidates(candidates: string | readonly string[]): string[] {
 	const values = typeof candidates === "string" ? [candidates] : candidates;
 	return [...new Set(values.map(candidate => candidate.trim()).filter(Boolean))];
 }
 
+export function formatAsrCandidates(candidates: string | readonly string[]): string {
+	return `<asr_candidates_json>\n${JSON.stringify(normalizeCandidates(candidates), null, 2)}\n</asr_candidates_json>`;
+}
+
 function buildDictationRequest(draft: string, candidates: string | readonly string[], sessionContext = ""): string {
-	return `<recent_session_context_json>\n${JSON.stringify(sessionContext)}\n</recent_session_context_json>\n\n<existing_draft_json>\n${JSON.stringify(draft)}\n</existing_draft_json>\n\n<asr_candidates_json>\n${JSON.stringify(normalizeCandidates(candidates), null, 2)}\n</asr_candidates_json>`;
+	return `<recent_session_context_json>\n${JSON.stringify(sessionContext)}\n</recent_session_context_json>\n\n<existing_draft_json>\n${JSON.stringify(draft)}\n</existing_draft_json>\n\n${formatAsrCandidates(candidates)}`;
 }
 
 export function buildSpokenEditRequest(
@@ -126,7 +130,9 @@ async function completeDictationRequest(
 	request: string,
 	modelSelector: string,
 	maxTokens: number,
+	signal?: AbortSignal,
 ): Promise<string> {
+	signal?.throwIfAborted();
 	const selected = parseEditModelSelector(modelSelector);
 	const model = selected ? ctx.modelRegistry.find(selected.provider, selected.modelId) : ctx.model;
 	if (!model) throw new Error(`Voice editing model is unavailable: ${modelSelector}`);
@@ -143,7 +149,7 @@ async function completeDictationRequest(
 			model,
 			{ systemPrompt, messages: [message] },
 			{
-				signal: controller.signal,
+				signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal,
 				reasoningEffort: "minimal",
 				maxTokens,
 				cacheRetention: "none",
@@ -175,6 +181,7 @@ export async function resolveDictationCandidates(
 	draft: string,
 	candidates: readonly string[],
 	modelSelector = "current",
+	signal?: AbortSignal,
 ): Promise<string> {
 	if (normalizeCandidates(candidates).length === 0) return "";
 	return completeDictationRequest(
@@ -183,6 +190,7 @@ export async function resolveDictationCandidates(
 		buildCandidateResolutionRequest(draft, candidates, sessionContext(ctx)),
 		modelSelector,
 		1_024,
+		signal,
 	);
 }
 
@@ -192,6 +200,7 @@ export async function applySpokenEdit(
 	draft: string,
 	candidates: readonly string[],
 	modelSelector = "current",
+	signal?: AbortSignal,
 ): Promise<string> {
 	if (normalizeCandidates(candidates).length === 0) return draft;
 	return completeDictationRequest(
@@ -200,5 +209,6 @@ export async function applySpokenEdit(
 		buildSpokenEditRequest(draft, candidates, sessionContext(ctx)),
 		modelSelector,
 		4_096,
+		signal,
 	);
 }

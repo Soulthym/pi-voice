@@ -59,7 +59,7 @@ import { prioritizeFromCurrent, processConcurrently, resolveTimingConcurrency } 
 import { SpeakableStream, type FencedCodeBlock, type SpeakableSourceRange } from "./speakable.js";
 import { pendingPlaybackTiming, voiceProgressLines } from "./status-text.js";
 import { anchorLineForMessage, computeAutoScrollTop, isManualScrollAway } from "./auto-scroll.js";
-import { applySpokenEdit, resolveDictationCandidates } from "./prompt-editor.js";
+import { applySpokenEdit, formatAsrCandidates, resolveDictationCandidates } from "./prompt-editor.js";
 import { narrationRenderKey } from "./render-identity.js";
 import { invalidateNarrationMarkdown } from "./narration-render.js";
 import { SessionCoordinator, type WaitingSession } from "./session-coordinator.js";
@@ -1231,18 +1231,9 @@ const chargeBackfillUnit = (): boolean => {
 				// Duration-weighted word timing remains active as a fallback.
 				return;
 			case "transcribing":
-				inputPhase = "transcribing";
-				state = "listening";
-				if (inputProgressTimer) clearInterval(inputProgressTimer);
-				inputProgressTimer = null;
-				setInputProgress("♬ Transcribing locally…");
-				break;
 			case "transcript":
-				if (!event.preview) {
-					clearInputProgress();
-					state = "idle";
-				}
-				break;
+				// The epoch-fenced talk() request owns input UI state, not unscoped worker events.
+				return;
 			case "error":
 				if (event.preview) break;
 				if (
@@ -1364,8 +1355,11 @@ const chargeBackfillUnit = (): boolean => {
 	};
 
 	const phoneInput = new PhoneInputClient();
+	let cancelPendingDictation: (() => void) | undefined;
 	const cancelActiveInput = (): Promise<void> => {
 		inputEpoch += 1;
+		cancelPendingDictation?.();
+		cancelPendingDictation = undefined;
 		const cancelled = phoneInput.cancel();
 		activeInputEndpoint = undefined;
 		clearInputProgress();
@@ -1986,7 +1980,9 @@ const chargeBackfillUnit = (): boolean => {
 		await waitForTransportCancellation(playbackCancelId);
 		if (captureEpoch !== inputEpoch || talkEpoch !== contextEpoch) return;
 		releaseSpeechOwnership(false);
-		if (!(await reserveSpeechForInput(true))) {
+		const reserved = await reserveSpeechForInput(true);
+		if (captureEpoch !== inputEpoch || talkEpoch !== contextEpoch) return;
+		if (!reserved) {
 			clearInputProgress();
 			ctx.ui.notify("Another Pi session still owns the selected voice device", "warning");
 			return;
@@ -1995,24 +1991,37 @@ const chargeBackfillUnit = (): boolean => {
 		state = "listening";
 		refreshStatus();
 		const editorBase = ctx.ui.getEditorText();
-		let committedSpeech = "";
-		let partialSpeech = "";
-		const renderPreview = (): void => {
-			if (talkEpoch !== contextEpoch || captureEpoch !== inputEpoch) return;
-			const speech = [committedSpeech, partialSpeech].filter(Boolean).join(" ");
-			ctx.ui.setEditorText(appendDictation(editorBase, speech));
+		let lastPreview = editorBase;
+		let manuallyEdited = false;
+		const current = (): boolean => talkEpoch === contextEpoch && captureEpoch === inputEpoch && !!activeContext;
+		const writeEditor = (text: string): boolean => {
+			if (!current()) return false;
+			manuallyEdited ||= ctx.ui.getEditorText() !== lastPreview;
+			if (manuallyEdited) return false;
+			if (text !== lastPreview) ctx.ui.setEditorText(text);
+			lastPreview = text;
+			return true;
 		};
-		const live = new LiveTranscriptionSession(audio => vocalizer.transcribePcm(audio), {
-			onPartial: text => {
-				partialSpeech = text;
+		const committed: string[][] = [];
+		let partial: string[] = [];
+		const renderPreview = (): void => {
+			const evidence = [...committed, ...(partial.length ? [partial] : [])].map(formatAsrCandidates).join("\n\n");
+			writeEditor(appendDictation(editorBase, evidence));
+		};
+		const live = new LiveTranscriptionSession(audio => vocalizer.transcribePcmCandidates(audio), {
+			onPartialCandidates: candidates => {
+				partial = candidates;
 				renderPreview();
 			},
-			onSegment: text => {
-				committedSpeech = [committedSpeech, text].filter(Boolean).join(" ");
-				partialSpeech = "";
+			onSegmentCandidates: candidates => {
+				committed.push(candidates);
+				partial = [];
 				renderPreview();
 			},
 		});
+		const resolution = new AbortController();
+		const cancel = (): void => { live.cancel(); resolution.abort(); };
+		cancelPendingDictation = cancel;
 		try {
 			const capture = await phoneInput.capture(routed.input, {
 				onProgress: progress => {
@@ -2044,18 +2053,21 @@ const chargeBackfillUnit = (): boolean => {
 			} catch {
 				// The final whole-utterance pass below remains available as a fallback.
 			}
+			if (!current()) return;
 			let candidates =
 				capture.type === "audio" ? await vocalizer.transcribe(capture.data) : [capture.data.trim()];
 			candidates = [...new Set(candidates.map(candidate => candidate.replace(/\s+/g, " ").trim()).filter(Boolean))];
 			if (candidates.length === 0 && liveTranscript) candidates = [liveTranscript];
 			if (talkEpoch !== contextEpoch || captureEpoch !== inputEpoch || !activeContext) return;
-			clearInputProgress();
-			state = "idle";
-			refreshStatus();
 			if (candidates.length === 0) {
 				releaseSpeechOwnership(false);
-				ctx.ui.setEditorText(editorBase);
+				writeEditor(editorBase);
 				ctx.ui.notify("No speech recognized", "warning");
+				return;
+			}
+			if (!writeEditor(appendDictation(editorBase, formatAsrCandidates(candidates)))) {
+				releaseSpeechOwnership(false);
+				ctx.ui.notify("Dictation left your manual edits untouched; review the draft before submitting", "info");
 				return;
 			}
 			const editingModel = config.editModel === "current" ? (ctx.model?.id ?? "the current model") : config.editModel;
@@ -2068,23 +2080,26 @@ const chargeBackfillUnit = (): boolean => {
 			let prompt = appendDictation(editorBase, candidates[0]);
 			try {
 				if (config.editMode === "smart" && editorBase.trim()) {
-					prompt = await applySpokenEdit(ctx, editorBase, candidates, config.editModel);
+					prompt = await applySpokenEdit(ctx, editorBase, candidates, config.editModel, resolution.signal);
 				} else {
-					const resolved = await resolveDictationCandidates(ctx, editorBase, candidates, config.editModel);
+					const resolved = await resolveDictationCandidates(ctx, editorBase, candidates, config.editModel, resolution.signal);
 					prompt = appendDictation(editorBase, resolved);
 				}
 			} catch (error) {
+				if (!current()) return;
 				ctx.ui.notify(
 					`Voice dictation resolution failed; used the primary ASR candidate: ${error instanceof Error ? error.message : String(error)}`,
 					"warning",
 				);
-			} finally {
-				setInputProgress(undefined);
 			}
-			if (talkEpoch !== contextEpoch || captureEpoch !== inputEpoch || !activeContext) return;
+			if (!current()) return;
+			if (!writeEditor(prompt)) {
+				releaseSpeechOwnership(false);
+				ctx.ui.notify("Dictation left your manual edits untouched; review the draft before submitting", "info");
+				return;
+			}
 			if (config.submitMode === "review") {
 				releaseSpeechOwnership(false);
-				ctx.ui.setEditorText(prompt);
 				ctx.ui.notify("Dictation ready to review — press Enter to submit", "info");
 				return;
 			}
@@ -2092,14 +2107,21 @@ const chargeBackfillUnit = (): boolean => {
 			if (ctx.isIdle()) pi.sendUserMessage(prompt);
 			else pi.sendUserMessage(prompt, { deliverAs: "steer" });
 		} catch (error) {
-			activeInputEndpoint = undefined;
 			live.cancel();
 			if (talkEpoch !== contextEpoch || captureEpoch !== inputEpoch || !activeContext) return;
+			activeInputEndpoint = undefined;
 			releaseSpeechOwnership(false);
 			clearInputProgress();
 			state = "error";
 			refreshStatus();
 			ctx.ui.notify(`Voice microphone: ${error instanceof Error ? error.message : String(error)}`, "error");
+		} finally {
+			if (cancelPendingDictation === cancel) cancelPendingDictation = undefined;
+			if (current()) {
+				clearInputProgress();
+				if (state !== "error") state = "idle";
+				refreshStatus();
+			}
 		}
 	};
 

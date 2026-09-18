@@ -14,7 +14,9 @@ The default `submitMode` is `review`: the final prompt remains in the editor for
 
 ## Candidate resolution and spoken editing
 
-Final transcription requests up to `sttCandidates` hypotheses. `editModel` resolves technical ambiguity using the existing editor draft and a bounded, text-only excerpt of recent user/assistant context. Tool output is excluded.
+Live and final transcription request up to `sttCandidates` hypotheses. The editor displays the same `<asr_candidates_json>`-wrapped JSON array sent to `editModel`. During recording, independently decoded segments have separate arrays—alternatives are not combined into invented whole-utterance hypotheses. The final whole-utterance array replaces these while resolution runs.
+
+`editModel` resolves technical ambiguity using the original editor draft and a bounded, text-only excerpt of recent user/assistant context. Tool output is excluded. Candidate markup is only a preview: normal completion replaces it with resolved prose before any automatic submission. If you manually edit the preview or draft, Pi Voice preserves your edits and does not auto-submit that capture. Stop also cancels pending live decoding/resolution and fences late results.
 
 Both edit modes use the model:
 

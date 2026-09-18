@@ -49,6 +49,10 @@ export class MockedVoiceWorkerClient {
 	async transcribePcm(): Promise<string> {
 		return "";
 	}
+	async transcribePcmCandidates(): Promise<string[]> {
+		const text = await this.transcribePcm();
+		return text ? [text] : [];
+	}
 	async preload(): Promise<void> {}
 	async preloadAlignment(): Promise<void> {}
 	async terminate(): Promise<void> {}
@@ -170,6 +174,7 @@ export class FakeVoiceHost {
 		this.sessionManager = {
 			getSessionId: () => sessionId,
 			getEntries: () => this.entries,
+			buildContextEntries: () => this.entries,
 			getBranch: () => this.entries,
 			getLeafId: () => this.entries.at(-1)?.id ?? null,
 			getLeafEntry: () => this.entries.at(-1),

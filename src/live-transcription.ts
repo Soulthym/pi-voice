@@ -1,8 +1,11 @@
 import { StreamEndpointer, type EndpointerEvent } from "./endpointer.js";
+import { normalizeCandidates } from "./prompt-editor.js";
 
 export interface LiveTranscriptionCallbacks {
-	onPartial(text: string): void;
-	onSegment(text: string): void;
+	onPartial?(text: string): void;
+	onSegment?(text: string): void;
+	onPartialCandidates?(candidates: string[]): void;
+	onSegmentCandidates?(candidates: string[]): void;
 }
 
 /**
@@ -11,7 +14,7 @@ export interface LiveTranscriptionCallbacks {
  * decoded when inference is slower than incoming audio.
  */
 export class LiveTranscriptionSession {
-	readonly #transcribe: (audio: Float32Array) => Promise<string>;
+	readonly #transcribe: (audio: Float32Array) => Promise<string | string[]>;
 	readonly #callbacks: LiveTranscriptionCallbacks;
 	readonly #endpointer = new StreamEndpointer();
 	readonly #segments: Float32Array[] = [];
@@ -23,7 +26,7 @@ export class LiveTranscriptionSession {
 	#settled = false;
 	readonly #done = Promise.withResolvers<string>();
 
-	constructor(transcribe: (audio: Float32Array) => Promise<string>, callbacks: LiveTranscriptionCallbacks) {
+	constructor(transcribe: (audio: Float32Array) => Promise<string | string[]>, callbacks: LiveTranscriptionCallbacks) {
 		this.#transcribe = transcribe;
 		this.#callbacks = callbacks;
 	}
@@ -68,20 +71,26 @@ export class LiveTranscriptionSession {
 				if (this.#segments.length > 0) {
 					const audio = this.#segments.shift()!;
 					this.#pendingPartial = null;
-					const text = (await this.#transcribe(audio)).replace(/\s+/g, " ").trim();
+					const candidates = normalizeCandidates(await this.#transcribe(audio));
+					const text = candidates[0]?.replace(/\s+/g, " ") ?? "";
 					if (this.#cancelled) return;
 					if (text) {
 						this.#committed.push(text);
-						this.#callbacks.onSegment(text);
+						this.#callbacks.onSegment?.(text);
+						this.#callbacks.onSegmentCandidates?.(candidates);
 					}
 					continue;
 				}
 				if (this.#pendingPartial) {
 					const audio = this.#pendingPartial;
 					this.#pendingPartial = null;
-					const text = (await this.#transcribe(audio)).replace(/\s+/g, " ").trim();
+					const candidates = normalizeCandidates(await this.#transcribe(audio));
+					const text = candidates[0]?.replace(/\s+/g, " ") ?? "";
 					if (this.#cancelled) return;
-					if (this.#segments.length === 0 && text) this.#callbacks.onPartial(text);
+					if (this.#segments.length === 0 && text) {
+						this.#callbacks.onPartial?.(text);
+						this.#callbacks.onPartialCandidates?.(candidates);
+					}
 					continue;
 				}
 				break;

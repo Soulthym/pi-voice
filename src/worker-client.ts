@@ -126,15 +126,18 @@ export class VoiceWorkerClient {
 	}
 
 	async transcribePcm(audio: Float32Array, config: VoiceConfig): Promise<string> {
+		return (await this.transcribePcmCandidates(audio, { ...config, sttCandidates: 1 }))[0] ?? "";
+	}
+
+	transcribePcmCandidates(audio: Float32Array, config: VoiceConfig): Promise<string[]> {
 		const bytes = Buffer.from(audio.buffer, audio.byteOffset, audio.byteLength);
-		const candidates = await this.#requestTranscription({
+		return this.#requestTranscription({
 			type: "transcribe-pcm",
 			audio: bytes.toString("base64"),
 			model: config.sttModel,
 			dtype: config.sttDtype,
-			candidateCount: 1,
+			candidateCount: config.sttCandidates,
 		});
-		return candidates[0] ?? "";
 	}
 
 	#requestTranscription(message: {
