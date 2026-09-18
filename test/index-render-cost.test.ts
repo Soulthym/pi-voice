@@ -7,7 +7,7 @@ import { assistant, FakeVoiceHost, MockedVoiceWorkerClient } from "./helpers/fak
 
 mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: MockedVoiceWorkerClient } });
 
-test("block-only Markdown rendering does not traverse conversation history", async t => {
+for (const context of ["block-only", "conversation"] as const) test(`${context} rendering reuses historical identities`, async t => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-voice-render-cost-"));
 	const names = ["PI_VOICE_CONFIG", "PI_VOICE_COORDINATOR_DIR", "PI_VOICE_DEVICE_DIR"] as const;
 	const previous = Object.fromEntries(names.map(name => [name, process.env[name]]));
@@ -15,7 +15,7 @@ test("block-only Markdown rendering does not traverse conversation history", asy
 	process.env.PI_VOICE_COORDINATOR_DIR = path.join(root, "coordinator");
 	process.env.PI_VOICE_DEVICE_DIR = path.join(root, "devices");
 	await fs.writeFile(process.env.PI_VOICE_CONFIG, JSON.stringify({
-		enabled: false, codeDescriptionContext: "block-only", codeDescriptionPreprocessConcurrency: 0,
+		enabled: false, codeDescriptionContext: context, codeDescriptionPreprocessConcurrency: 0,
 		timingPreprocessConcurrency: 0, input: "disabled", output: "local",
 	}));
 	const host = new FakeVoiceHost(root, "render-cost");
@@ -37,8 +37,14 @@ test("block-only Markdown rendering does not traverse conversation history", asy
 	const start = performance.now();
 	for (const text of texts) host.render(text);
 	console.log(`400 fenced messages: ${(performance.now() - start).toFixed(1)}ms; branch=${branchReads}, entries=${entryReads}`);
-	assert.equal(branchReads, 0, "block-only rendering must not scan the branch for each fence");
-	assert.equal(entryReads, 0, "block-only rendering must not build historical provider contexts");
+	assert.equal(branchReads, context === "conversation" ? 1 : 0, "scan the unchanged branch at most once");
+	if (context === "block-only") assert.equal(entryReads, 0, "block-only rendering must not build historical provider contexts");
+	branchReads = entryReads = 0;
+	const warmStart = performance.now();
+	for (const text of texts) host.render(text);
+	console.log(`${context} warm render: ${(performance.now() - warmStart).toFixed(1)}ms; branch=${branchReads}, entries=${entryReads}`);
+	assert.equal(branchReads, 0, "word ticks must reuse the completed-message index");
+	assert.equal(entryReads, 0, "word ticks must reuse contextual source identities");
 	assert.equal(host.modelRequests.length, 0);
 	// The 200ms ownership poll must not repeatedly rescan a settled session.
 	host.entries.length = 0;

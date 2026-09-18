@@ -107,6 +107,7 @@ type ContextualPlaybackMessage = PlaybackMessage & {
 };
 
 const conversationBeforeCache = new WeakMap<object, Map<string, ResolvedCodeContext>>();
+const completedMessagesCache = new WeakMap<object, { leaf: string; messages: Map<string, ContextualPlaybackMessage[]> }>();
 
 function contextBeforeEntry(ctx: ExtensionContext, parentId: string | null): ResolvedCodeContext {
 	let cache = conversationBeforeCache.get(ctx.sessionManager);
@@ -134,6 +135,15 @@ function liveConversationBefore(ctx: ExtensionContext): ResolvedCodeContext {
 }
 
 function completedAssistantMessages(ctx: ExtensionContext, mode: VoiceMode, includeContext = false): ContextualPlaybackMessage[] {
+	const leaf = JSON.stringify([ctx.sessionManager.getSessionId(), ctx.sessionManager.getLeafId()]);
+	let cache = completedMessagesCache.get(ctx.sessionManager);
+	if (cache?.leaf !== leaf) {
+		cache = { leaf, messages: new Map() };
+		completedMessagesCache.set(ctx.sessionManager, cache);
+	}
+	const key = `${mode}:${includeContext}`;
+	const cached = cache.messages.get(key);
+	if (cached) return cached;
 	const messages: ContextualPlaybackMessage[] = [];
 	for (const entry of ctx.sessionManager.getBranch()) {
 		if (entry.type !== "message") continue;
@@ -153,6 +163,7 @@ function completedAssistantMessages(ctx: ExtensionContext, mode: VoiceMode, incl
 			});
 		}
 	}
+	cache.messages.set(key, messages);
 	return messages;
 }
 
@@ -757,6 +768,7 @@ const chargeBackfillUnit = (): boolean => {
 		}
 	};
 
+	let renderedDescriptionKeys = new WeakMap<object, Map<string, string>>();
 	const transformNarrationMarkdown = (markdown: string, messageType: NarrationMessageType): string =>
 		narration.transform(
 			markdown,
@@ -771,20 +783,24 @@ const chargeBackfillUnit = (): boolean => {
 					const completed = contextual
 						? completedAssistantMessages(ctx, "assistant", true).findLast(message => message.text === markdown)
 						: undefined;
-					const providerMessages = !contextual ? [] : completed
-						? contextualAssistantMessagesThroughText(
-								completed.conversationMessages,
-								completed.assistantMessage,
-								messageThroughBlock.length,
-							)
-						: speechAssistantMessage
-							? contextualAssistantMessagesThroughText(
-									speechConversationMessages,
-									speechAssistantMessage,
-									messageThroughBlock.length,
-								)
-							: [];
-					const key = descriptionCacheKey(ctx, block, structuredContextIdentity(providerMessages));
+					const source = completed?.assistantMessage;
+					const memo = source && typeof source === "object" ? renderedDescriptionKeys.get(source) : undefined;
+					const memoKey = JSON.stringify([contextEpoch, config.codeNarration, config.codeDescriptionContext, messageThroughBlock.length]);
+					const remembered = memo?.get(memoKey);
+					let key = remembered ? codeDescriptionCache.resolveKey(remembered) : undefined;
+					if (!key) {
+						const providerMessages = !contextual ? [] : completed
+							? contextualAssistantMessagesThroughText(completed.conversationMessages, completed.assistantMessage, messageThroughBlock.length)
+							: speechAssistantMessage
+								? contextualAssistantMessagesThroughText(speechConversationMessages, speechAssistantMessage, messageThroughBlock.length)
+								: [];
+						key = descriptionCacheKey(ctx, block, structuredContextIdentity(providerMessages));
+						if (source && typeof source === "object") {
+							const keys = memo ?? new Map<string, string>();
+							keys.set(memoKey, key);
+							renderedDescriptionKeys.set(source, keys);
+						}
+					}
 					const existing = codeDescriptionText.get(key);
 					if (existing !== undefined) return existing;
 					const omissionRecord = codeDescriptionOmissions.get(key);
@@ -2199,6 +2215,8 @@ const chargeBackfillUnit = (): boolean => {
 		if (descriptionPersistTimer) clearImmediate(descriptionPersistTimer);
 		descriptionPersistTimer = undefined;
 		conversationBeforeCache.delete(ctx.sessionManager);
+		completedMessagesCache.delete(ctx.sessionManager);
+		renderedDescriptionKeys = new WeakMap();
 		contextEpoch += 1;
 		if (!interactiveVoiceSession) {
 			activeContext = null;
