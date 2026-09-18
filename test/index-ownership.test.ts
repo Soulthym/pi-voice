@@ -86,4 +86,38 @@ test("sticky pause queues new responses; settings preserve ownership and dirty a
 	await host.shortcut("f8"); await settle();
 	assert.ok(segments.length > completed, "resume from completed tail recreates playback in one action");
 	assert.equal(worker.pauses.at(-1), false);
+
+	// Resume before the incoming response has finished: keep the lease between
+	// the old transport draining and the new response becoming playable.
+	await host.shortcut("f8");
+	const oldUtterance = segments.at(-1)!.utterance;
+	const late = assistant("Late queued response.");
+	await host.emit("before_agent_start", {});
+	await host.emit("message_start", { message: late });
+	await host.shortcut("f8");
+	worker.emit({ type: "idle", utterance: oldUtterance }); await settle();
+	assert.equal(observer.speechOwner()?.instanceId, ownerId);
+	host.addMessage("late", "second", late);
+	await host.emit("message_end", { message: late });
+	await host.emit("turn_end", { message: late }); await settle();
+	assert.equal(segments.at(-1)!.text, "Late queued response.");
+
+	// Dirty a live asset before message_end; its eventual completed text must
+	// remain resumable without either auto-starting or queueing a duplicate.
+	const dirty = assistant("Live dirty response.");
+	await host.emit("before_agent_start", {});
+	await host.emit("message_start", { message: dirty });
+	await host.emit("message_update", { message: dirty, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Live dirty response." } });
+	await host.command("speed 1.3");
+	const dirtyCount = segments.length;
+	host.addMessage("dirty", "late", dirty);
+	await host.emit("message_end", { message: dirty });
+	await host.emit("turn_end", { message: dirty }); await settle();
+	assert.equal(segments.length, dirtyCount);
+	assert.equal(worker.pauses.at(-1), true);
+	await host.shortcut("f8"); await settle();
+	assert.equal(worker.pauses.at(-1), false);
+	assert.equal(segments.at(-1)!.text, "Live dirty response.");
+	worker.emit({ type: "idle", utterance: segments.at(-1)!.utterance }); await settle();
+	assert.equal(segments.length, dirtyCount + 1, "the dirty message must not replay a second copy");
 });

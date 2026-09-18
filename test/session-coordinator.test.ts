@@ -117,7 +117,9 @@ test("shutdown and cancellation prevent delayed acquisition without releasing a 
 		for (const shutdown of [false, true]) {
 			first.speechOwner = () => ({ interactive: true, instanceId: "remote", pid: process.ppid, cwd: "/remote", updatedAt: Date.now() });
 			const pending = first.forceAcquireSpeech();
+			assert.equal(fs.existsSync(path.join(root, "preemption", "remote.json")), true);
 			if (shutdown) first.shutdown(); else first.cancelSpeechAcquisition();
+			assert.equal(fs.existsSync(path.join(root, "preemption", "remote.json")), false, "cancellation withdraws the unconsumed handoff request");
 			first.speechOwner = realOwner;
 			assert.equal(second.tryAcquireSpeech(), true);
 			assert.equal(await pending, false);

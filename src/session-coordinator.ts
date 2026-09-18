@@ -69,10 +69,15 @@ export class SessionCoordinator {
 	#stopped = false;
 	#speechLease = false;
 	#speechRequestEpoch = 0;
+	#pendingPreemptionFile: string | undefined;
 	#attentionEnabled = true;
 
 	cancelSpeechAcquisition(): void {
 		this.#speechRequestEpoch += 1;
+		if (this.#pendingPreemptionFile) {
+			if (readJson<{ requestedBy: string }>(this.#pendingPreemptionFile)?.requestedBy === this.instanceId) remove(this.#pendingPreemptionFile);
+			this.#pendingPreemptionFile = undefined;
+		}
 	}
 
 	setAttentionEnabled(enabled: boolean): void {
@@ -166,7 +171,8 @@ export class SessionCoordinator {
 
 	/** Manual user action requests an acknowledged handoff before taking the lease. */
 	async forceAcquireSpeech(): Promise<boolean> {
-		const epoch = ++this.#speechRequestEpoch;
+		this.cancelSpeechAcquisition();
+		const epoch = this.#speechRequestEpoch;
 		const current = () => !this.#stopped && epoch === this.#speechRequestEpoch;
 		if (!current()) return false;
 		if (this.ownsSpeech()) {
@@ -175,9 +181,12 @@ export class SessionCoordinator {
 		}
 		const owner = this.speechOwner();
 		if (owner && owner.pid !== process.pid) {
-			writeJson(this.#preemptionFile(owner.instanceId), {
+			const preemptionFile = this.#preemptionFile(owner.instanceId);
+			this.#pendingPreemptionFile = preemptionFile;
+			writeJson(preemptionFile, {
 				requestedBy: this.instanceId,
 				requestedAt: Date.now(),
+				requestId: epoch,
 			});
 			// The owner may need the full acknowledged player-stop window before it
 			// can release. Poll asynchronously so playback controls can supersede this
@@ -186,6 +195,9 @@ export class SessionCoordinator {
 			while (current() && Date.now() < deadline && this.speechOwner()?.instanceId === owner.instanceId) {
 				await new Promise(resolve => setTimeout(resolve, SPEECH_HANDOFF_POLL_MS));
 			}
+			const request = readJson<{ requestedBy: string; requestId: number }>(preemptionFile);
+			if (request?.requestedBy === this.instanceId && request.requestId === epoch) remove(preemptionFile);
+			if (current()) this.#pendingPreemptionFile = undefined;
 		}
 		if (!current()) return false;
 		const remaining = this.speechOwner();

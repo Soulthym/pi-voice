@@ -1551,12 +1551,8 @@ const chargeBackfillUnit = (): boolean => {
 	const completeOwnerSpeech = (): void => {
 		const expectedUtterance = ownerContentExpected ? lastOwnerUtterance : projectPrefixUtterance;
 		if (!ownsSpeech || !ownerTurnEnded || completingOwnerSpeech || playbackPaused) return;
-		if (expectedUtterance === undefined) {
-			projectAnnouncementPending = false;
-			releaseSpeechOwnership(true);
-			return;
-		}
-		if (completedOwnerUtterance !== expectedUtterance) return;
+		if (expectedUtterance === undefined) projectAnnouncementPending = false;
+		else if (completedOwnerUtterance !== expectedUtterance) return;
 		completingOwnerSpeech = true;
 		if (speechPurpose === "notification") {
 			if (pendingNotification) coordinator?.markAnnounced(pendingNotification.instanceId);
@@ -1569,7 +1565,7 @@ const chargeBackfillUnit = (): boolean => {
 			void playTarget(queued, !playbackHistory.hasCompleteTimingFor(queued.id), false, true);
 			return;
 		}
-		releaseSpeechOwnership(true);
+		if (!queueIncomingWhilePaused) releaseSpeechOwnership(true);
 	};
 
 	handleCoordinatedIdle = utterance => {
@@ -2052,7 +2048,10 @@ const chargeBackfillUnit = (): boolean => {
 	// their obsolete sink. Explicit resume rebuilds with the current dependencies.
 	const pauseDirtyPlayback = (): void => {
 		if (!ownsSpeech && !pendingReplay) return;
-		if (speechPurpose === "turn" && !ownerTurnEnded) queueIncomingWhilePaused = true;
+		if (speechPurpose === "turn" && !ownerTurnEnded) {
+			queueIncomingWhilePaused = true;
+			if (livePlaybackId) playbackHistory.updateText(livePlaybackId, ownedSpeechText);
+		}
 		clearPlaybackTransport();
 		vocalizer.setPlaybackPaused(true);
 		playbackPaused = true;
@@ -2107,7 +2106,9 @@ const chargeBackfillUnit = (): boolean => {
 		refreshPlaybackTimeline();
 		if (activeContext) {
 			if (!await preparePlaybackMessages(activeContext)) return;
-			syncPlaybackMessages(activeContext);
+			// A live capture is not in the completed transcript yet. Do not let a
+			// settings sweep replace its selected/paused target with older history.
+			if (!livePlaybackId) syncPlaybackMessages(activeContext);
 			scheduleMissingCodeDescriptions(activeContext);
 			if (!timingPreprocessing) {
 				timingRescheduleRequested = false;
@@ -2531,7 +2532,7 @@ const chargeBackfillUnit = (): boolean => {
 	});
 
 	pi.on("message_update", event => {
-		if (!interactiveVoiceSession || !config.enabled || attentionSuppressed || queueIncomingWhilePaused || config.mode === "yield") return;
+		if (!interactiveVoiceSession || !config.enabled || attentionSuppressed || config.mode === "yield") return;
 		speechAssistantMessage = event.message;
 		vocalizer.setCodeDescriptionMessages(contextualAssistantMessages(speechConversationMessages, event.message));
 		const delta = event.assistantMessageEvent;
@@ -2539,6 +2540,13 @@ const chargeBackfillUnit = (): boolean => {
 			delta.type === "text_delta" || (delta.type === "thinking_delta" && config.mode === "all")
 				? delta.delta
 				: undefined;
+		if (queueIncomingWhilePaused) {
+			if (livePlaybackId && speakableDelta !== undefined) {
+				ownedSpeechText += speakableDelta;
+				playbackHistory.updateText(livePlaybackId, ownedSpeechText);
+			}
+			return;
+		}
 		if (!ownsSpeech || speechPurpose !== "turn") {
 			if (speechBlocked && speakableDelta !== undefined) {
 				blockedSpeechText += speakableDelta;
@@ -2571,8 +2579,16 @@ const chargeBackfillUnit = (): boolean => {
 			// Use the existing eligible snapshots here; canonical thinking/context
 			// targets and paused timing/viewport refinement remain separate work.
 			if (config.enabled && !attentionSuppressed && requiresVoiceAttention(completedText, config.mode, stopReason)) {
-				const message = activeContext && playbackMessages(activeContext).findLast(item => item.text === completedText);
-				queuedPausedMessages.push({ id: message?.id ?? `live:${++nextLivePlaybackId}`, text: completedText, time: 0, sourceOffset: 0 });
+				if (livePlaybackId && activeContext) {
+					// A dirty asset paused this message mid-stream; complete its existing
+					// target rather than queueing a second copy behind itself.
+					finalizePlaybackMessage(activeContext, livePlaybackId, completedText);
+					livePlaybackId = undefined;
+					ownerTurnEnded = true;
+				} else {
+					const message = activeContext && playbackMessages(activeContext).findLast(item => item.text === completedText);
+					queuedPausedMessages.push({ id: message?.id ?? `live:${++nextLivePlaybackId}`, text: completedText, time: 0, sourceOffset: 0 });
+				}
 			}
 			return;
 		}
@@ -2600,7 +2616,12 @@ const chargeBackfillUnit = (): boolean => {
 	});
 
 	pi.on("turn_end", (event, ctx) => {
-		if (!interactiveVoiceSession || queueIncomingWhilePaused) return;
+		if (!interactiveVoiceSession) return;
+		if (queueIncomingWhilePaused) {
+			queueIncomingWhilePaused = false;
+			completeOwnerSpeech();
+			return;
+		}
 		const stopReason = assistantStopReason(event.message);
 		const completedTurn = stopReason !== "aborted" && stopReason !== "error" && stopReason !== undefined;
 		if (!config.enabled && !attentionSuppressed && requiresVoiceAttention(assistantText(event.message), config.mode, stopReason)) {
@@ -2685,6 +2706,8 @@ const chargeBackfillUnit = (): boolean => {
 		return true;
 	};
 
+	// Future device repinning must distinguish resume/navigation from pause-only
+	// F8 here, and must not repin automatic queued speech in playTarget().
 	const preparePlaybackAction = async (ctx: ExtensionContext): Promise<boolean> => {
 		if (!requireEnabledVoice(ctx)) return false;
 		const epoch = playbackRequestEpoch;
@@ -2820,7 +2843,7 @@ const chargeBackfillUnit = (): boolean => {
 				refreshStatus();
 				refreshPlaybackTimeline();
 				if (!request.waiting && !request.paused) {
-					void playTarget(request.target, request.recordTimings, request.previewTarget);
+					void playTarget(request.target, request.recordTimings, request.previewTarget, true);
 				}
 				return;
 			}
