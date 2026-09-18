@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import { mock, test } from "node:test";
 import { FakeVoiceHost, streamCompletedResponse } from "./helpers/fake-voice-host.js";
+import { voiceQueryCases } from "./helpers/voice-query-cases.js";
 
 test("real tts-workers command persists and reaches the worker protocol without playback or asset side effects", async t => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-voice-runtime-workers-"));
@@ -44,6 +45,7 @@ test("real tts-workers command persists and reaches the worker protocol without 
 		await fs.rm(root, { recursive: true, force: true });
 	});
 	await host.start();
+	mock.method(host.ctx.ui, "select", async () => assert.fail("queries must not open a picker"));
 	const query = async (expected: number) => {
 		const configBefore = await fs.readFile(env.PI_VOICE_CONFIG, "utf8");
 		const statBefore = await fs.stat(env.PI_VOICE_CONFIG);
@@ -51,10 +53,18 @@ test("real tts-workers command persists and reaches the worker protocol without 
 		const spawnedBefore = spawned;
 		const entriesBefore = JSON.stringify(host.entries);
 		const widgetsBefore = host.widgetOperations.length;
-		for (const command of ["tts-workers", "tts-worker", " TTS-WORKER  "]) {
-			await host.command(command);
-			assert.deepEqual(host.notices.at(-1), { message: `tts-workers concurrency: ${expected}`, level: "info" });
+		const requestsBefore = host.modelRequests.length;
+		for (const [command, output] of voiceQueryCases) {
+			for (const spelling of [command, ` ${command.toUpperCase()}  `]) {
+				await host.command(spelling);
+				assert.equal(host.notices.at(-1)?.level, "info", spelling);
+				assert.match(host.notices.at(-1)!.message, output, spelling);
+				if (command.startsWith("tts-worker")) {
+					assert.equal(host.notices.at(-1)!.message, `tts-workers concurrency: ${expected}`);
+				}
+			}
 		}
+		assert.equal(host.modelRequests.length, requestsBefore);
 		assert.equal(await fs.readFile(env.PI_VOICE_CONFIG, "utf8"), configBefore);
 		assert.equal((await fs.stat(env.PI_VOICE_CONFIG)).mtimeMs, statBefore.mtimeMs, "queries must not save config");
 		assert.equal(packets.length, packetsBefore, "no worker or playback commands");
@@ -68,6 +78,12 @@ test("real tts-workers command persists and reaches the worker protocol without 
 	assert.equal(spawned, 0, "idle setting must not spawn models");
 	assert.equal(JSON.parse(await fs.readFile(env.PI_VOICE_CONFIG, "utf8")).ttsWorkers, 2);
 	const command = host.commands.get("voice") as any;
+	const actionsAndReports = ["on", "off", "toggle", "status", "stop", "setup", "test", "talk", "attention", "scroll-to", "bottom", "timing", "code-retry"];
+	assert.deepEqual(
+		command.getArgumentCompletions("").map((item: any) => item.value).sort(),
+		[...voiceQueryCases.map(([name]) => name), ...actionsAndReports].sort(),
+		"every advertised command must be audited as a setting query or an intentional action/report",
+	);
 	assert.deepEqual(command.getArgumentCompletions("tts-workers ").map((item: any) => item.label), ["1", "2", "3", "4", "5", "6", "7", "8"]);
 	assert.ok(command.getArgumentCompletions("tts-w").some((item: any) => item.value === "tts-workers"));
 	assert.deepEqual(command.getArgumentCompletions("tts-worker ").map((item: any) => item.label), ["1", "2", "3", "4", "5", "6", "7", "8"]);
@@ -85,12 +101,15 @@ test("real tts-workers command persists and reaches the worker protocol without 
 	const leasePath = path.join(env.PI_VOICE_COORDINATOR_DIR, "speech.lock", "lease.json");
 	const owner = JSON.parse(await fs.readFile(leasePath, "utf8")).instanceId;
 	assert.ok(owner);
-	const before = packets.length;
 	const entries = JSON.stringify(host.entries);
 	await query(2);
+	await host.shortcut("f8");
+	await query(2);
+	await host.shortcut("f8");
+	const resizeStart = packets.length;
 	await host.command("tts-worker 1");
 	await query(1);
-	assert.deepEqual(packets.slice(before), [{ type: "tts-workers", workers: 1 }], "no cancel, pause, resume, or regenerated segments");
+	assert.deepEqual(packets.slice(resizeStart), [{ type: "tts-workers", workers: 1 }], "no cancel, pause, resume, or regenerated segments");
 	assert.equal(JSON.stringify(host.entries), entries, "no asset metadata invalidation");
 	assert.equal(JSON.parse(await fs.readFile(leasePath, "utf8")).instanceId, owner, "speech ownership retained");
 	await host.command("status");

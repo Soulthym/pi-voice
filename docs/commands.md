@@ -4,6 +4,12 @@
 
 Bare `/voice` is an alias for `/voice status`.
 
+Every value-setting command below accepts an omitted value to report its **current effective value**, without saving configuration, starting/reconfiguring workers, changing playback/ownership/transcript following, resetting budgets, or calling a provider. Brackets mark optional values. Explicit values retain their normal validation and setting behavior.
+
+Automatic input/output and device queries show the resolved route (including an active device pin); `edit-model current` shows Pi's current model or `unavailable`. `timing-preprocess` shows the currently resolved limit and, when running, the active batch limit. `shortcut` shows the loaded binding (and F5 alias), plus any configured change awaiting `/reload`. `code-budget` retains its scope/allowance/usage report.
+
+Action commands (`on`, `off`, `toggle`, `stop`, `setup`, `test`, `talk`, `attention`, `scroll-to`, `bottom`, and `code-retry`) retain their intentional behavior; they are not setting queries. `status` and `timing` remain reports.
+
 ## Runtime and input
 
 | Command | Effect |
@@ -22,15 +28,17 @@ Bare `/voice` is an alias for `/voice status`.
 ## Speech and narration
 
 ```text
-/voice mode assistant|all|yield
+/voice mode [assistant|all|yield]
 /voice voice [voice-id]
-/voice speed <0.5..2>
+/voice speed [0.5..2]
 /voice tts-workers [1..8]
 /voice tts-worker [1..8]
-/voice highlight on|off
-/voice autoscroll on|off
-/voice code-narration guided|summary
+/voice highlight [on|off]
+/voice autoscroll [on|off]
+/voice code-narration [guided|summary]
 ```
+
+`voice` without an ID reports the current voice instead of opening a picker; use argument completion or the [voice catalog](configuration.md#voice-catalog) to choose an explicit ID.
 
 `assistant` streams normal assistant text. `all` includes thinking. `yield` waits for the completed final response. `guided` code narration synchronizes line/bold focus; `summary` shows and speaks a plain description. `autoscroll` persists the exact-word TUI follow setting; it defaults to `on`.
 
@@ -41,14 +49,14 @@ Bare `/voice` is an alias for `/voice status`.
 ## Models
 
 ```text
-/voice tts-model <huggingface-repo>
-/voice tts-dtype fp32|q8|q4
-/voice stt-model <huggingface-repo>
-/voice stt-dtype fp32|q8|q4
-/voice stt-candidates <1..8>
-/voice alignment-model <huggingface-repo>
-/voice alignment-dtype fp32|q8|q4
-/voice edit-model current|provider/model-id
+/voice tts-model [huggingface-repo]
+/voice tts-dtype [fp32|q8|q4]
+/voice stt-model [huggingface-repo]
+/voice stt-dtype [fp32|q8|q4]
+/voice stt-candidates [1..8]
+/voice alignment-model [huggingface-repo]
+/voice alignment-dtype [fp32|q8|q4]
+/voice edit-model [current|provider/model-id]
 ```
 
 Weights download lazily. A selected dtype must exist in that repository.
@@ -56,10 +64,10 @@ Weights download lazily. A selected dtype must exist in that repository.
 ## Dictation behavior
 
 ```text
-/voice shortcut <key|disabled>
-/voice submit review|auto
-/voice edit smart|append
-/voice input auto|local|disabled|tcp://host:port|unix:///path
+/voice shortcut [key|disabled]
+/voice submit [review|auto]
+/voice edit [smart|append]
+/voice input [auto|local|disabled|tcp://host:port|unix:///path]
 ```
 
 Shortcut names follow Pi's format, for example `alt+m`, `ctrl+shift+m`, or `f8`. Run `/reload` after changing the shortcut because extension shortcuts are registered during loading. Setting it to `disabled` also disables F5.
@@ -69,24 +77,24 @@ Shortcut names follow Pi's format, for example `alt+m`, `ctrl+shift+m`, or `f8`.
 ## Output and devices
 
 ```text
-/voice device auto|local|<connected-device-id>
-/voice output auto|local|tcp://host:port|unix:///path
+/voice device [auto|local|<connected-device-id>]
+/voice output [auto|local|tcp://host:port|unix:///path]
 ```
 
-`device` stores a per-session routing preference. `output` controls the global endpoint policy. Output-producing controls automatically claim the current session's selected device.
+`device` without a value reports the session preference and resolved device ID/name (or local fallback), without claiming it. Device argument completion still lists connected devices. With a value, `device` stores a per-session routing preference. `output` controls the global endpoint policy. Output-producing controls automatically claim the current session's selected device.
 
 ## Timeline, preprocessing, and cache
 
 ```text
-/voice code-preprocess <1..8>
+/voice code-preprocess [1..8]
 /voice scroll-to
 /voice bottom
 /voice code-budget [unlimited|<n>]
 /voice code-retry current
 /voice code-retry historical [all|<message-id>]
-/voice timing-preprocess auto|<1..8>
-/voice audio-cache on|off
-/voice audio-bitrate <12..128>
+/voice timing-preprocess [auto|<1..8>]
+/voice audio-cache [on|off]
+/voice audio-bitrate [12..128]
 ```
 
 `scroll-to` re-anchors the current narrated position at 20% without changing play/pause state; its default shortcut is `Alt+V`. `bottom` pins the transcript to its end and restores normal transcript-end following, including while narration remains active; its default shortcut is `Alt+T`.

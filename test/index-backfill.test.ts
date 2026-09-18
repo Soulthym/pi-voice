@@ -5,6 +5,7 @@ import * as path from "node:path";
 import test from "node:test";
 import { VoiceWorkerClient } from "../src/worker-client.js";
 import { FakeVoiceHost, streamCompletedResponse, type ModelRequest } from "./helpers/fake-voice-host.js";
+import { voiceQueryCases } from "./helpers/voice-query-cases.js";
 
 async function settle(): Promise<void> {
 	for (let index = 0; index < 10; index += 1) await new Promise(resolve => setImmediate(resolve));
@@ -145,6 +146,14 @@ test("backfill budget caps historical work while live descriptions stay free", a
 		host.notices.some(notice => notice.message.includes("backfill stopped at its budget")),
 		`exhaustion should be reported; got ${JSON.stringify(host.notices)}`,
 	);
+
+	// Every setting query must retain the exhausted allowance and usage.
+	const requestsBeforeQueries = host.modelRequests.length;
+	for (const [command] of voiceQueryCases) await host.command(command);
+	await host.command("code-budget");
+	assert.match(host.notices.at(-1)!.message, /scope=all; budget=1; used=1;/);
+	await settle();
+	assert.equal(host.modelRequests.length, requestsBeforeQueries);
 
 	// Topping up resumes the skipped historical block.
 	await host.command("code-budget unlimited");

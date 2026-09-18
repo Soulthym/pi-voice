@@ -2,7 +2,7 @@
 
 [← README](../README.md) · [Commands](commands.md) · [Devices](devices-and-ssh.md)
 
-Pi Voice reads `~/.pi/agent/pi-voice.json` by default. Unknown or invalid values fall back to defaults. Commands persist changes atomically; use [`pi-voice.example.json`](../pi-voice.example.json) as a copyable example.
+Pi Voice reads `~/.pi/agent/pi-voice.json` by default. Unknown or invalid values fall back to defaults. Explicit setting values persist changes atomically; omitting the value queries the effective setting without changing state (see [Commands](commands.md)). Use [`pi-voice.example.json`](../pi-voice.example.json) as a copyable example.
 
 ## Settings
 
@@ -62,13 +62,13 @@ The three shortcut settings are registered when the extension loads, so edit the
 | `bm_george` | George, British male |
 | `bm_fable` | Fable, British male |
 
-Use `/voice voice` for an interactive picker or `/voice voice <id>` directly.
+Use `/voice voice` to report the current voice, or `/voice voice <id>` to set it. Argument completion lists available voices.
 
 ## Automatic and explicit devices
 
 `auto` prefers the device inherited from `pi-voice-ssh`, then the most recently active registered client, then local devices. Explicit `local`, `disabled`, TCP, and Unix values bypass automatic endpoint selection.
 
-`/voice device` is a per-session preference persisted as a non-context-injecting Pi custom entry. It does not change the global JSON endpoint settings. See [Devices and SSH](devices-and-ssh.md).
+`/voice device <selection>` sets a per-session preference persisted as a non-context-injecting Pi custom entry; `/voice device` reports the effective selection and route without claiming it. It does not change the global JSON endpoint settings. See [Devices and SSH](devices-and-ssh.md).
 
 ## Model-assisted features
 

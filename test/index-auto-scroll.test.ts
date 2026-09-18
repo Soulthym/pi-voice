@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test, { mock } from "node:test";
 import { NARRATION_ACTIVE_MARKER } from "../src/narration-progress.js";
+import { voiceQueryCases } from "./helpers/voice-query-cases.js";
 import {
 	FakeVoiceHost,
 	MockedVoiceWorkerClient,
@@ -87,6 +88,7 @@ test("TUI follows exact words, permits in-band framing, and seek/resume controls
 	});
 	worker!.emit({ type: "playback", utterance: live.utterance, position: 0 } as never);
 	await waitForScroll(host, 152);
+	for (const [command] of voiceQueryCases) await host.command(command);
 	worker!.emit({ type: "idle", utterance: live.utterance } as never);
 	assert.equal(host.scrollView.scrollTop, 260, "automatic live narration should restore prior bottom-follow");
 	assert.equal(host.scrollView.isFollowingEnd, true);
@@ -149,7 +151,7 @@ test("TUI follows exact words, permits in-band framing, and seek/resume controls
 	// word updates cannot pull it back to the narrated position.
 	await host.command("bottom");
 	assert.equal(host.scrollView.scrollTop, 260);
-	for (const command of ["tts-workers", "tts-worker"]) {
+	for (const [command] of voiceQueryCases) {
 		await host.command(command);
 		worker!.emit({ type: "playback", utterance: replay.utterance, position: 2.25 } as never);
 		await new Promise(resolve => setTimeout(resolve, 120));

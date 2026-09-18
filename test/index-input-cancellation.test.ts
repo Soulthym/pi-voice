@@ -4,7 +4,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { mock, test } from "node:test";
 import { PhoneInputClient, type PhoneCapture, type PhoneCaptureOptions } from "../src/phone-input.js";
+import { DeviceRouter } from "../src/device-router.js";
 import { FakeVoiceHost, MockedVoiceWorkerClient } from "./helpers/fake-voice-host.js";
+import { voiceQueryCases } from "./helpers/voice-query-cases.js";
 
 mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: MockedVoiceWorkerClient } });
 
@@ -22,6 +24,12 @@ test("cancelled dictation ignores late decoder progress, PCM and ASR results dur
 	await fs.writeFile(process.env.PI_VOICE_CONFIG, JSON.stringify({
 		enabled: true, input: "local", output: "local", submitMode: "review",
 	}));
+	const phone = { version: 1 as const, id: "phone", name: "Phone", platform: "termux" as const,
+		audioEndpoint: "local", inputEndpoint: "local", connectedAt: 1, lastActive: 1 };
+	const newer = { ...phone, id: "newer", name: "Newer" };
+	let devices = [phone];
+	mock.method(DeviceRouter.prototype, "connected", () => devices);
+	const claim = mock.method(DeviceRouter.prototype, "claim");
 	const started = Promise.withResolvers<PhoneCaptureOptions>();
 	const drained = Promise.withResolvers<PhoneCapture>();
 	const decoded = Promise.withResolvers<string>();
@@ -30,7 +38,7 @@ test("cancelled dictation ignores late decoder progress, PCM and ASR results dur
 		started.resolve(options);
 		return drained.promise;
 	});
-	mock.method(PhoneInputClient.prototype, "cancel", async () => {});
+	const cancel = mock.method(PhoneInputClient.prototype, "cancel", async () => {});
 	mock.method(MockedVoiceWorkerClient.prototype, "transcribePcm", async () => {
 		transcriptions++;
 		return decoded.promise;
@@ -53,6 +61,20 @@ test("cancelled dictation ignores late decoder progress, PCM and ASR results dur
 	await host.start();
 	await host.command("talk");
 	const callbacks = await started.promise;
+	devices = [newer, phone];
+	const claims = claim.mock.callCount();
+	const cancellations = cancel.mock.callCount();
+	const widgetOperations = host.widgetOperations.length;
+	for (const [command] of voiceQueryCases) {
+		await host.command(command);
+		assert.equal(host.notices.at(-1)?.level, "info", command);
+	}
+	await host.command("device");
+	assert.equal(host.notices.at(-1)?.message, "device: auto → phone (Phone)", "capture retains its pinned device");
+	assert.equal(claim.mock.callCount(), claims, "queries must not claim a device");
+	assert.equal(cancel.mock.callCount(), cancellations, "queries must not cancel active capture");
+	assert.equal(host.widgetOperations.length, widgetOperations, "queries must leave input progress intact");
+	assert.equal(editor, "Original draft");
 	const speech = new Float32Array(16000).fill(0.1);
 	callbacks.onAudio!(speech);
 	await settle();

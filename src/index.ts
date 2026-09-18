@@ -60,7 +60,7 @@ import { prioritizeFromCurrent, processConcurrently, resolveTimingConcurrency } 
 import { SpeakableStream, type FencedCodeBlock, type SpeakableSourceRange } from "./speakable.js";
 import { pendingPlaybackTiming, voiceProgressLines } from "./status-text.js";
 import { anchorLineForMessage, computeAutoScrollTop, isManualScrollAway } from "./auto-scroll.js";
-import { applySpokenEdit, formatAsrCandidates, resolveDictationCandidates } from "./prompt-editor.js";
+import { applySpokenEdit, formatAsrCandidates, parseEditModelSelector, resolveDictationCandidates } from "./prompt-editor.js";
 import { narrationRenderKey } from "./render-identity.js";
 import { invalidateNarrationMarkdown } from "./narration-render.js";
 import { SessionCoordinator, type WaitingSession } from "./session-coordinator.js";
@@ -2700,6 +2700,7 @@ const chargeBackfillUnit = (): boolean => {
 		handler: attendNextProject,
 	});
 
+	const registeredTalkShortcut = config.talkShortcut;
 	if (config.talkShortcut !== "disabled") {
 		const registerTalkShortcut = (key: Exclude<VoiceConfig["talkShortcut"], "disabled">): void => {
 			pi.registerShortcut(key, {
@@ -2931,6 +2932,57 @@ const chargeBackfillUnit = (): boolean => {
 			const args = rawArgs.trim();
 			const [action = "status", value = "", ...restArgs] = args.split(/\s+/);
 			const normalizedAction = action.toLowerCase();
+			// Queries must return before even the transcript-follow reset below.
+			if (!value && restArgs.length === 0) {
+				const queries: Record<string, () => string | number | boolean> = {
+					mode: () => config.mode,
+					voice: () => config.voice,
+					speed: () => config.speed,
+					"tts-model": () => config.ttsModel,
+					"tts-dtype": () => config.ttsDtype,
+					"tts-workers": () => `concurrency: ${config.ttsWorkers}`,
+					"tts-worker": () => `concurrency: ${config.ttsWorkers}`,
+					"stt-model": () => config.sttModel,
+					"stt-dtype": () => config.sttDtype,
+					"stt-candidates": () => config.sttCandidates,
+					"alignment-model": () => config.alignmentModel,
+					"alignment-dtype": () => config.alignmentDtype,
+					"edit-model": () => {
+						const selected = parseEditModelSelector(config.editModel);
+						const model = selected ? ctx.modelRegistry.find(selected.provider, selected.modelId) : ctx.model;
+						return `${config.editModel} → ${model ? `${model.provider}/${model.id}` : "unavailable"}`;
+					},
+					highlight: () => config.playbackHighlight,
+					autoscroll: () => config.autoScroll,
+					"code-narration": () => config.codeNarration,
+					"code-preprocess": () => config.codeDescriptionPreprocessConcurrency,
+					"code-budget": () => `scope=${config.codeDescriptionPreprocessScope}; budget=${backfillAllowance}; used=${backfillUsed}; set /voice code-budget <0..n|unlimited> for this session`,
+					"timing-preprocess": () => `${config.timingPreprocessConcurrency} → ${resolveTimingConcurrency(config.timingPreprocessConcurrency, config.ttsDtype)}${timingPreprocessing ? `; active batch=${timingWorkers.length}` : ""}`,
+					"audio-cache": () => config.audioCache,
+					"audio-bitrate": () => `${config.audioCacheBitrate} kbps`,
+					shortcut: () => `${registeredTalkShortcut}${registeredTalkShortcut !== "disabled" && registeredTalkShortcut !== "f5" ? " (also f5)" : ""}${registeredTalkShortcut !== config.talkShortcut ? `; configured=${config.talkShortcut} (run /reload to apply)` : ""}`,
+					submit: () => config.submitMode,
+					edit: () => config.editMode,
+				};
+				if (normalizedAction === "device" || normalizedAction === "output" || normalizedAction === "input") {
+					// routedVoiceConfig updates activeDeviceId; resolve without claiming or pinning here.
+					const selection = activeDeviceId && (ownsSpeech || inputInProgress) ? activeDeviceId : deviceSelection;
+					const device = deviceRouter.resolve(selection);
+					const current = normalizedAction === "device"
+						? `${deviceSelection} → ${device ? `${device.id} (${device.name})` : "local"}`
+						: `${config[normalizedAction]} → ${normalizedAction === "output"
+							? (config.output === "auto" ? device?.audioEndpoint ?? "local" : config.output)
+							: (activeInputEndpoint ?? (config.input === "auto" ? device?.inputEndpoint ?? "local" : config.input))}`;
+					ctx.ui.notify(`${normalizedAction}: ${current}`, "info");
+					return;
+				}
+				if (Object.hasOwn(queries, normalizedAction)) {
+					const current = queries[normalizedAction]();
+					const label = normalizedAction === "tts-worker" ? "tts-workers" : normalizedAction;
+					ctx.ui.notify(`${label}${label === "tts-workers" ? " " : ": "}${typeof current === "boolean" ? (current ? "on" : "off") : current}`, "info");
+					return;
+				}
+			}
 			if (!["", "status", "timing", "bottom", "tts-workers", "tts-worker"].includes(normalizedAction)) {
 				restoreBottomAfterSpeech = false;
 				bottomPinned = false;
@@ -3065,10 +3117,6 @@ const chargeBackfillUnit = (): boolean => {
 				}
 				case "tts-worker":
 				case "tts-workers": {
-					if (!value && restArgs.length === 0) {
-						ctx.ui.notify(`tts-workers concurrency: ${config.ttsWorkers}`, "info");
-						return;
-					}
 					const workers = /^[1-8]$/.test(value) && restArgs.length === 0 ? normalizeWorkerCount(Number(value)) : undefined;
 					if (workers === undefined) {
 						ctx.ui.notify("Usage: /voice tts-workers <1..8>", "error");
@@ -3093,14 +3141,6 @@ const chargeBackfillUnit = (): boolean => {
 					return;
 				}
 				case "code-budget": {
-					if (!value) {
-						const used = backfillUsed;
-						ctx.ui.notify(
-							`code-description backfill: scope=${config.codeDescriptionPreprocessScope}; budget=${backfillAllowance}; used=${used}; set /voice code-budget <0..n|unlimited> for this session`,
-							"info",
-						);
-						return;
-					}
 					const parsed = normalizeBackfillBudget(value.toLowerCase() === "unlimited" ? "unlimited" : Number(value));
 					if (parsed === undefined) {
 						ctx.ui.notify("Usage: /voice code-budget [unlimited|<0..n>] | code-retry current|historical [all|<id>]", "error");
@@ -3313,16 +3353,9 @@ const chargeBackfillUnit = (): boolean => {
 					return;
 				}
 				case "voice": {
-					let selected = value;
-					if (!selected && ctx.hasUI) {
-						const label = await ctx.ui.select(
-							"Kokoro voice",
-							VOICES.map(voice => `${voice.id} — ${voice.label}`),
-						);
-						selected = label?.split(" — ", 1)[0] ?? "";
-					}
+					const selected = value;
 					if (!isVoice(selected)) {
-						ctx.ui.notify("Unknown voice. Run /voice voice and choose from the picker.", "error");
+						ctx.ui.notify("Unknown voice. Use /voice voice <voice-id>; completion lists available voices.", "error");
 						return;
 					}
 					if (inputInProgress) await cancelActiveInput();
