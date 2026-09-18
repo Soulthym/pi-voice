@@ -45,6 +45,7 @@ export class VoiceWorkerClient {
 	#pendingMeasurements = new Map<string, PendingMeasurement>();
 	#nextRequestId = 0;
 	#nextCancelId = 0;
+	#paused = false;
 	#activeUtterance: number | undefined;
 	#onEvent: (event: WorkerEvent) => void;
 
@@ -76,11 +77,13 @@ export class VoiceWorkerClient {
 	}
 
 	setPlaybackPaused(paused: boolean): void {
+		this.#paused = paused;
 		if (!this.#child) return;
 		this.#send({ type: "pause", paused });
 	}
 
 	cancel(): number | undefined {
+		this.#paused = false;
 		for (const pending of this.#pendingMeasurements.values()) {
 			clearTimeout(pending.timer);
 			pending.reject(new Error("Speech timing measurement interrupted"));
@@ -253,6 +256,7 @@ export class VoiceWorkerClient {
 				this.#handleFailure(new Error(detail || `Voice worker exited with code ${code ?? "unknown"}`));
 			}
 		});
+		child.stdin.write(`${JSON.stringify({ type: "pause", paused: this.#paused })}\n`);
 		return child;
 	}
 
