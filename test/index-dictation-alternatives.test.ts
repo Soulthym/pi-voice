@@ -27,6 +27,8 @@ test("live/final evidence matches LLM syntax, and manual edits or Stop prevent s
 	const host = new FakeVoiceHost(root, "alternatives", async () => resolution.promise);
 	let editor = "Existing draft.";
 	let submissions = 0;
+	let terminations = 0;
+	mock.method(MockedVoiceWorkerClient.prototype, "terminate", async () => { terminations++; });
 	host.ctx.ui.getEditorText = () => editor;
 	host.ctx.ui.setEditorText = (text: string) => { editor = text; };
 	host.api.sendUserMessage = () => { submissions++; };
@@ -45,6 +47,7 @@ test("live/final evidence matches LLM syntax, and manual edits or Stop prevent s
 		await fs.rm(root, { recursive: true, force: true });
 	});
 	await host.start();
+	t.mock.timers.enable({ apis: ["setTimeout"] });
 	const begin = async () => {
 		started = Promise.withResolvers<PhoneCaptureOptions>();
 		capture = Promise.withResolvers<PhoneCapture>();
@@ -66,6 +69,10 @@ test("live/final evidence matches LLM syntax, and manual edits or Stop prevent s
 	resolution.resolve(answer); await settle();
 	assert.equal(editor, "Existing draft. Clear the cache.");
 	assert.equal(submissions, 0);
+	const previousTerminations = terminations;
+	t.mock.timers.tick(60_001);
+	await settle();
+	assert.ok(terminations > previousTerminations, "review completion must arm the idle worker shutdown");
 
 	await host.command("submit auto");
 	await begin(); await finishCapture();

@@ -1416,6 +1416,18 @@ const chargeBackfillUnit = (): boolean => {
 		for (const worker of timingWorkers) worker.cancel();
 	};
 
+	const scheduleVoiceWorkerIdleStop = (): void => {
+		if (voiceWorkerIdleTimer) clearTimeout(voiceWorkerIdleTimer);
+		voiceWorkerIdleTimer = null;
+		if (!ownsSpeech && !inputInProgress) {
+			voiceWorkerIdleTimer = setTimeout(() => {
+				voiceWorkerIdleTimer = null;
+				if (!ownsSpeech && !inputInProgress) void vocalizer.shutdown().catch(() => {});
+			}, 60_000);
+			voiceWorkerIdleTimer.unref?.();
+		}
+	};
+
 	const relinquishSpeech = (): void => {
 		coordinator?.releaseSpeech();
 		ownsSpeech = false;
@@ -1433,15 +1445,7 @@ const chargeBackfillUnit = (): boolean => {
 		completingOwnerSpeech = false;
 		if (!inputInProgress) state = "idle";
 		refreshStatus();
-		if (voiceWorkerIdleTimer) clearTimeout(voiceWorkerIdleTimer);
-		voiceWorkerIdleTimer = null;
-		if (!inputInProgress) {
-			voiceWorkerIdleTimer = setTimeout(() => {
-				voiceWorkerIdleTimer = null;
-				if (!ownsSpeech && !inputInProgress) void vocalizer.shutdown().catch(() => {});
-			}, 60_000);
-			voiceWorkerIdleTimer.unref?.();
-		}
+		scheduleVoiceWorkerIdleStop();
 	};
 
 	const speakAttentionNotification = (waiting: WaitingSession): void => {
@@ -2163,6 +2167,7 @@ const chargeBackfillUnit = (): boolean => {
 			if (cancelPendingDictation === cancel) cancelPendingDictation = undefined;
 			if (current()) {
 				clearInputProgress();
+				scheduleVoiceWorkerIdleStop();
 				if (state !== "error") state = "idle";
 				refreshStatus();
 			}
