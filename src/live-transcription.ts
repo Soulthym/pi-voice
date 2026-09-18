@@ -29,6 +29,8 @@ export class LiveTranscriptionSession {
 	constructor(transcribe: (audio: Float32Array) => Promise<string | string[]>, callbacks: LiveTranscriptionCallbacks) {
 		this.#transcribe = transcribe;
 		this.#callbacks = callbacks;
+		// Recording may continue after a preview fails; finish() still observes the original rejection.
+		void this.#done.promise.catch(() => {});
 	}
 
 	push(audio: Float32Array): void {

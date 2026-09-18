@@ -8,6 +8,13 @@ function samples(seconds: number, amplitude: number): Float32Array {
 	return audio;
 }
 
+test("a preview failure stays awaitable until recording finishes", async () => {
+	const session = new LiveTranscriptionSession(async () => { throw new Error("synthetic preview failure"); }, {});
+	session.push(samples(0.7, 0.1));
+	await new Promise(resolve => setImmediate(resolve));
+	await assert.rejects(session.finish(), /synthetic preview failure/);
+});
+
 test("emits revisable partial text and commits speech at a pause", async () => {
 	const partials: string[] = [];
 	const segments: string[] = [];
