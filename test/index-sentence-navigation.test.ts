@@ -40,6 +40,7 @@ test("suffix playback ticks and completed tail-follow preserve sentence navigati
 	const full = spoken.filter(segment => segment.utterance === first.utterance);
 	full.forEach((segment, i) => worker.emit({ type: "segment-audio", utterance: segment.utterance, segmentId: segment.segmentId, start: i * 2, duration: 2 }));
 	worker.emit({ type: "idle", utterance: first.utterance }); await settle();
+	worker.emit({ type: "playback", utterance: first.utterance, position: 0.5 }); // Late buffered clock packet.
 	const finished = worker.sent.length;
 	await host.shortcut("f9"); await settle();
 	assert.equal(worker.sent.length, finished, "confirmed completion must go to tail, not replay an earlier sentence");

@@ -249,6 +249,7 @@ export class PlaybackHistory {
 
 	finishUtterance(utterance: number | undefined): void {
 		if (utterance === undefined || utterance !== this.#activeUtterance) return;
+		this.#activeUtterance = undefined;
 		this.#endedUtterances.add(utterance);
 		this.#completeTimingsIfReady(utterance);
 		const capture = this.#utterances.get(utterance);

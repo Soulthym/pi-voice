@@ -23,8 +23,11 @@ test("code sentence ordinals survive playback, pause-style repeated steps and re
 	history.sync([{ id: "m", text, renderKey: "key" }]);
 	history.beginCapture("m", text);
 	for (let index = 0; index < 3; index++) {
-		history.registerSegment({ id: index + 1, utterance: 1, text: `Sentence ${index}`, source: { start: units[index]!.sourceOffset, end: units[index]!.sourceOffset } });
+		history.registerSegment({ id: index + 1, utterance: 1, text: `Sentence ${index}`, source: { start: units[index]!.sourceOffset, end: units[index]!.sourceOffset },
+			...(index < 2 ? { codeDescription: { blockSource: { start: 0, end: text.indexOf("Done.") }, text: "Two code sentences.", offset: index * 10 } } : {}),
+		});
 		history.setSegmentAudio(index + 1, index * 5, 5);
+		if (index < 2) history.setWordTimings(index + 1, [{ time: 1, sourceOffset: 5 }]);
 	}
 	history.finishTimingGeneration(1);
 	history.setPlayback(1, 5); // Exact boundary belongs to the second sentence.
@@ -36,6 +39,7 @@ test("code sentence ordinals survive playback, pause-style repeated steps and re
 	assert.equal(second.skipUnits, 1); assert.equal(second.time, 5); assert.equal(second.sourceOffset, 0);
 	assert.equal(history.sentenceTarget(1, units)?.sourceOffset, text.indexOf("Done."));
 	const snapshot = history.snapshotForUtterance(1)!;
+	assert.equal(snapshot.checkpoints.length, 3, "description-relative words must not become raw Markdown offsets");
 	history.restore([snapshot]);
 	assert.equal(history.status()?.position, 10, "restoration must not rewind an existing navigation position");
 	history.beginCapture("m", text, 5, false, 0, 1);
