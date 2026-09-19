@@ -69,6 +69,9 @@ for (const stopReason of ["aborted", "error"]) {
 			if (replacement === "replay") {
 				await host.shortcut("f11");
 				await tick();
+				assert.ok(!worker.sent.some(segment => (segment as { text: string }).text.includes("historical response")), "replacement waits for stop proof");
+				worker.emit({ type: "idle", cancelId });
+				for (let i = 0; i < 10; i++) await tick();
 				assert.ok(worker.sent.some(segment => (segment as { text: string }).text.includes("historical response")));
 			} else if (replacement === "session") {
 				await host.shutdown();

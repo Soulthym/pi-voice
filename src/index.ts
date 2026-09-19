@@ -447,6 +447,7 @@ export default async function (pi: ExtensionAPI) {
 	const narration = new NarrationProgress(requestNarrationRender);
 
 	let outputEndpoint = "disabled";
+	let outputGeneration: number | undefined;
 	const routedVoiceConfig = (): VoiceConfig => ({
 		...config,
 		output: config.output === "auto" ? outputEndpoint : config.output,
@@ -457,6 +458,7 @@ export default async function (pi: ExtensionAPI) {
 		const selection = activeDeviceId ?? deviceSelection;
 		const route = deviceRouter.routeMetadata(selection, "output", config.output);
 		outputEndpoint = route.endpoint;
+		outputGeneration = route.kind === "device" ? route.device.connectedAt : undefined;
 		if (route.kind === "device") deviceRouter.claim(selection);
 		const routed = routedVoiceConfig();
 		refreshStatus();
@@ -1457,6 +1459,7 @@ const chargeBackfillUnit = (): boolean => {
 		if (!ownsSpeech) coordinator?.releaseSpeech();
 		pendingReplay = undefined;
 		const cancelId = vocalizer.clear();
+		if (cancelId !== undefined) void waitForTransportCancellation(cancelId);
 		playbackPaused = false;
 		pausedOwnerUtterance = undefined;
 		lastOwnerUtterance = undefined;
@@ -1466,12 +1469,19 @@ const chargeBackfillUnit = (): boolean => {
 		return cancelId;
 	};
 
+	let transportStopPending = false;
+	let transportStopBarrier = Promise.resolve();
+	const transportStops = new Map<number, Promise<void>>();
 	const waitForTransportCancellation = (cancelId: number | undefined): Promise<void> => {
-		if (cancelId === undefined) return Promise.resolve();
-		return new Promise(resolve => {
+		if (cancelId === undefined) return transportStopBarrier;
+		const existing = transportStops.get(cancelId);
+		if (existing) return existing;
+		transportStopPending = true;
+		const previous = transportStopBarrier;
+		const stopped = new Promise<void>((resolve, reject) => {
 			const timer = setTimeout(() => {
 				transportCancelWaiters.delete(cancelId);
-				resolve();
+				void vocalizer.shutdown().then(resolve, reject);
 			}, 1_000);
 			timer.unref?.();
 			transportCancelWaiters.set(cancelId, () => {
@@ -1479,11 +1489,22 @@ const chargeBackfillUnit = (): boolean => {
 				resolve();
 			});
 		});
+		transportStopBarrier = Promise.all([previous, stopped]).then(() => {});
+		const barrier = transportStopBarrier;
+		transportStops.set(cancelId, barrier);
+		void barrier.then(() => {
+			transportStops.delete(cancelId);
+			if (transportStopBarrier === barrier) transportStopPending = false;
+		}, error => activeContext?.ui.notify(`Voice stop failed; ownership retained: ${String(error)}`, "error"));
+		return barrier;
 	};
 
 	const releaseAfterTransportCancellation = (cancelId: number | undefined, announceNext = false, inputCancelled = Promise.resolve()): void => {
 		const leaseEpoch = speechLeaseEpoch;
 		void Promise.all([waitForTransportCancellation(cancelId), inputCancelled]).then(() => {
+			if (deviceRebind) return deviceRebind.then(() => {
+				if (ownsSpeech && speechLeaseEpoch === leaseEpoch) releaseSpeechOwnership(announceNext);
+			});
 			if (ownsSpeech && speechLeaseEpoch === leaseEpoch) releaseSpeechOwnership(announceNext);
 		}).catch(error => activeContext?.ui.notify(`Voice stop failed; ownership retained: ${error instanceof Error ? error.message : String(error)}`, "error"));
 	};
@@ -1581,7 +1602,7 @@ const chargeBackfillUnit = (): boolean => {
 	};
 
 	releaseSpeechOwnership = (announceNext = true): void => {
-		if (!ownsSpeech || !coordinator) return;
+		if (!ownsSpeech || !coordinator || deviceRebind || transportStopPending) return;
 		restoreFollowAfterSpeech();
 		if (announceNext && config.enabled && !attentionSuppressed && !playbackPaused) {
 			const waiting = coordinator.nextUnannouncedWaiting();
@@ -1595,7 +1616,7 @@ const chargeBackfillUnit = (): boolean => {
 
 	const completeOwnerSpeech = (): void => {
 		const expectedUtterance = ownerContentExpected ? lastOwnerUtterance : projectPrefixUtterance;
-		if (!ownsSpeech || !ownerTurnEnded || completingOwnerSpeech || playbackPaused) return;
+		if (!ownsSpeech || !ownerTurnEnded || completingOwnerSpeech || playbackPaused || deviceRebind || transportStopPending) return;
 		if (expectedUtterance === undefined) projectAnnouncementPending = false;
 		else if (completedOwnerUtterance !== expectedUtterance) return;
 		completingOwnerSpeech = true;
@@ -1663,7 +1684,7 @@ const chargeBackfillUnit = (): boolean => {
 	};
 
 	const acquireSpeech = (purpose: "turn" | "replay", announceProject = true): boolean => {
-		if (attentionSuppressed || deviceRetryRequired || !interactiveVoiceSession || deviceRebind || inputStopPending) return false;
+		if (attentionSuppressed || deviceRetryRequired || !interactiveVoiceSession || deviceRebind || inputStopPending || transportStopPending) return false;
 		if (!coordinator) return true;
 		const alreadyOwned = ownsSpeech && coordinator.ownsSpeech();
 		if (!alreadyOwned && !coordinator.tryAcquireSpeech()) return false;
@@ -1674,6 +1695,10 @@ const chargeBackfillUnit = (): boolean => {
 		const owner = coordinator;
 		const epoch = playbackRequestEpoch;
 		const captureEpoch = inputEpoch;
+		try {
+			if (deviceRebind) await deviceRebind;
+			if (transportStopPending) await transportStopBarrier;
+		} catch { return false; }
 		if (inputStopPending) {
 			try { await inputStopBarrier; } catch { return false; }
 		}
@@ -1745,13 +1770,14 @@ const chargeBackfillUnit = (): boolean => {
 		pendingSpeechPreemption = pending;
 		narration.finish();
 		// Release only after both the player and microphone have acknowledged stop.
-		void Promise.all([inputCancellation, waitForTransportCancellation(cancelId)]).then(() => {
+		void Promise.all([inputCancellation, waitForTransportCancellation(cancelId)]).then(async () => {
+			if (deviceRebind) await deviceRebind;
 			if (pendingSpeechPreemption === pending) finishSpeechPreemption();
 		}).catch(error => activeContext?.ui.notify(`Voice handoff stop failed; ownership retained: ${error instanceof Error ? error.message : String(error)}`, "error"));
 	};
 
 	const pollWaitingAttention = (): void => {
-		if (!coordinator || deviceRebind || deviceRetryRequired) return;
+		if (!coordinator || deviceRebind || deviceRetryRequired || transportStopPending) return;
 		if (ownsSpeech && coordinator.consumeSpeechPreemptionRequest()) {
 			handleSpeechPreemption();
 		}
@@ -1807,11 +1833,19 @@ const chargeBackfillUnit = (): boolean => {
 			const selection = connection.kind === "device" ? connection.id : "local";
 			// Pin identity even if its registration is temporarily absent; operations validate their own direction.
 			// A reconnect is metadata adoption, never a readiness claim.
-			if (selection !== (activeDeviceId ?? deviceSelection) && (ownsSpeech || inputInProgress)) {
+			const identityChanged = selection !== (activeDeviceId ?? deviceSelection);
+			let changed = identityChanged;
+			try {
+				const route = deviceRouter.routeMetadata(selection, "output", config.output);
+				changed ||= route.endpoint !== outputEndpoint ||
+					(route.kind === "device" ? route.device.connectedAt : undefined) !== outputGeneration;
+			} catch (error) { if (!identityChanged) throw error; }
+			if (changed && (ownsSpeech || inputInProgress)) {
 				// Termination, not a TCP accept or a cancellation timeout, proves the old sink is gone.
 				const stopping = Promise.all([vocalizer.shutdown(), cancelActiveInput()]).then(() => {});
 				deviceRebind = stopping;
-				try { await stopping; } finally { if (deviceRebind === stopping) deviceRebind = undefined; }
+				await stopping;
+				if (deviceRebind === stopping) deviceRebind = undefined;
 				if (epoch !== playbackRequestEpoch || ctx !== activeContext) return false;
 				pausedOwnerUtterance = undefined;
 				lastOwnerUtterance = undefined;
@@ -1827,7 +1861,7 @@ const chargeBackfillUnit = (): boolean => {
 		} catch (error) {
 			if (epoch !== playbackRequestEpoch || ctx !== activeContext) return false;
 			deviceRetryRequired = true;
-			ctx?.ui.notify(`Voice device: ${error instanceof Error ? error.message : String(error)} Explicitly reconnect/retry.`, "error");
+			ctx?.ui.notify(`Voice device: ${error instanceof Error ? error.message : String(error)}${deviceRebind ? " Stop unconfirmed; ownership retained." : " Explicitly reconnect/retry."}`, "error");
 			return false;
 		}
 	};
@@ -1893,7 +1927,10 @@ const chargeBackfillUnit = (): boolean => {
 				return;
 			}
 		}
-		if (deviceRebind) await deviceRebind;
+		try {
+			if (deviceRebind) await deviceRebind;
+			if (transportStopPending) await transportStopBarrier;
+		} catch { return; }
 		if (!queued && !request.paused && !await adoptCurrentConnection(request.epoch)) {
 			if (pendingReplay === request) {
 				pendingReplay = undefined;
@@ -2288,6 +2325,16 @@ const chargeBackfillUnit = (): boolean => {
 		restoreBottomAfterSpeech = false;
 		bottomPinned = false;
 		const talkEpoch = contextEpoch;
+		if (inputPhase === "recording" && activeInputEndpoint) {
+			setInputProgress("🎙 Stopping voice recording…");
+			try { await phoneInput.stop(activeInputEndpoint); }
+			catch (error) { ctx.ui.notify(`Voice microphone: ${String(error)}`, "error"); }
+			return;
+		}
+		if (deviceRebind) {
+			try { await deviceRebind; } catch { return; }
+			if (talkEpoch !== contextEpoch) return;
+		}
 		if (inputPhase === "acquiring") {
 			coordinator?.cancelSpeechAcquisition();
 			void cancelActiveInput();
@@ -2328,7 +2375,8 @@ const chargeBackfillUnit = (): boolean => {
 		const playbackCancelId = clearPlaybackTransport();
 		narration.finish();
 		const leaseEpoch = speechLeaseEpoch;
-		await waitForTransportCancellation(playbackCancelId);
+		try { await waitForTransportCancellation(playbackCancelId); }
+		catch { clearInputProgress(); return; }
 		if (captureEpoch !== inputEpoch || talkEpoch !== contextEpoch) {
 			if (talkEpoch === contextEpoch && leaseEpoch === speechLeaseEpoch) releaseSpeechOwnership(false);
 			return;
@@ -2501,8 +2549,17 @@ const chargeBackfillUnit = (): boolean => {
 	};
 
 	pi.on("session_start", async (_event, ctx) => {
-		void cancelActiveInput();
+		const inputCancelled = cancelActiveInput();
 		clearPlaybackTransport();
+		try {
+			await Promise.all([inputCancelled, deviceRebind, vocalizer.shutdown()]);
+			for (const resolve of transportCancelWaiters.values()) resolve();
+			transportCancelWaiters.clear();
+			await transportStopBarrier;
+		} catch (error) {
+			ctx.ui.notify(`Voice reload stop failed; ownership retained: ${String(error)}`, "error");
+			throw error;
+		}
 		ownsSpeech = false;
 		attentionSuppressed = false;
 		deviceRetryRequired = false;
@@ -2619,7 +2676,15 @@ const chargeBackfillUnit = (): boolean => {
 		activeContext = null;
 		const inputCancelled = cancelActiveInput();
 		const workers = timingWorkers.splice(0);
-		await Promise.all([inputCancelled, ...workers.map(worker => worker.terminate()), vocalizer.shutdown()]);
+		try {
+			await Promise.all([inputCancelled, deviceRebind, ...workers.map(worker => worker.terminate()), vocalizer.shutdown()]);
+		} catch (error) {
+			ctx.ui.notify(`Voice shutdown stop failed; ownership retained: ${String(error)}`, "error");
+			throw error;
+		}
+		for (const resolve of transportCancelWaiters.values()) resolve();
+		transportCancelWaiters.clear();
+		await transportStopBarrier;
 		retiringCoordinator?.shutdown();
 		if (!interactiveVoiceSession) ownsSpeech = false;
 	});
@@ -2644,10 +2709,11 @@ const chargeBackfillUnit = (): boolean => {
 		const cancelId = clearPlaybackTransport();
 		narration.finish();
 		const request = playbackRequestEpoch;
-		await waitForTransportCancellation(cancelId);
-		if (request !== playbackRequestEpoch || !interactiveVoiceSession) return;
-		releaseSpeechOwnership(false);
-		if (!attentionSuppressed) await reserveSpeechForInput();
+		void waitForTransportCancellation(cancelId).then(async () => {
+			if (request !== playbackRequestEpoch || !interactiveVoiceSession || deviceRebind) return;
+			releaseSpeechOwnership(false);
+			if (!attentionSuppressed) await reserveSpeechForInput();
+		}).catch(error => activeContext?.ui.notify(`Voice input stop failed; ownership retained: ${String(error)}`, "error"));
 	});
 
 	pi.on("before_agent_start", async () => {
@@ -2660,9 +2726,10 @@ const chargeBackfillUnit = (): boolean => {
 		const cancelId = clearPlaybackTransport();
 		narration.finish();
 		const request = playbackRequestEpoch;
-		await waitForTransportCancellation(cancelId);
-		if (request !== playbackRequestEpoch || !interactiveVoiceSession) return;
-		if (!speechReservedForInput) releaseSpeechOwnership(false);
+		void waitForTransportCancellation(cancelId).then(() => {
+			if (request !== playbackRequestEpoch || !interactiveVoiceSession || deviceRebind) return;
+			if (!speechReservedForInput) releaseSpeechOwnership(false);
+		}).catch(error => activeContext?.ui.notify(`Voice turn stop failed; ownership retained: ${String(error)}`, "error"));
 	});
 
 	pi.on("message_start", event => {
@@ -2690,7 +2757,7 @@ const chargeBackfillUnit = (): boolean => {
 			speechConversationMessages = liveSource?.before ?? [];
 			speechAssistantMessage = event.message;
 			const continuingTurn =
-				liveTurnNarrationActive && ownsSpeech && speechPurpose === "turn" && (coordinator?.ownsSpeech() ?? true);
+				!deviceRebind && !transportStopPending && liveTurnNarrationActive && ownsSpeech && speechPurpose === "turn" && (coordinator?.ownsSpeech() ?? true);
 			const wasFollowingTranscriptEnd = transcriptIsFollowingEnd();
 			if (!continuingTurn && !acquireSpeech("turn")) {
 				speechBlocked = true;
@@ -2753,6 +2820,11 @@ const chargeBackfillUnit = (): boolean => {
 			delta.type === "text_delta" || (delta.type === "thinking_delta" && config.mode === "all")
 				? delta.delta
 				: undefined;
+		if (deviceRebind || transportStopPending) {
+			speechBlocked = true;
+			if (speakableDelta !== undefined) blockedSpeechText += speakableDelta;
+			return;
+		}
 		if (playbackPaused && liveBlockIndex !== undefined && speakableDelta !== undefined &&
 			"contentIndex" in delta && delta.contentIndex !== liveBlockIndex && !queueIncomingWhilePaused) {
 			vocalizer.flush();
@@ -2817,6 +2889,10 @@ const chargeBackfillUnit = (): boolean => {
 			for (const block of eligible) {
 				scheduleCodeDescriptionsInText(activeContext, block.text);
 			}
+			finalizePlaybackMessages(activeContext, eligible.flatMap(block => {
+				const id = liveBlockIds.get(block.contentIndex);
+				return id ? [{ ...block, id }] : [];
+			}), event.message, liveSource?.existingEntries ?? new Set());
 			livePlaybackId = undefined;
 		}
 		if (config.enabled && !attentionSuppressed && speechBlocked && requiresVoiceAttention(eligible.map(block => block.text).join("\n"), config.mode, stopReason)) {
@@ -2824,7 +2900,7 @@ const chargeBackfillUnit = (): boolean => {
 			pausedForAttention = true;
 			refreshStatus();
 		}
-		if (!config.enabled || attentionSuppressed || stopReason === undefined || !ownsSpeech || speechPurpose !== "turn") return;
+		if (!config.enabled || attentionSuppressed || deviceRebind || transportStopPending || stopReason === undefined || !ownsSpeech || speechPurpose !== "turn") return;
 		if (stopReason === "aborted" || stopReason === "error") {
 			liveTurnNarrationActive = false;
 			const cancelId = clearPlaybackTransport();
@@ -2889,10 +2965,6 @@ const chargeBackfillUnit = (): boolean => {
 				coordinator?.markWaiting();
 				pausedForAttention = true;
 				speechBlocked = false;
-			finalizePlaybackMessages(activeContext, eligible.flatMap(block => {
-				const id = liveBlockIds.get(block.contentIndex);
-				return id ? [{ ...block, id }] : [];
-			}), event.message, liveSource?.existingEntries ?? new Set());
 				blockedMessageHasSpeech = false;
 				blockedSpeechText = "";
 				if (!blockedWarningIssued) {
@@ -3958,6 +4030,7 @@ const chargeBackfillUnit = (): boolean => {
 					const epoch = await preparePlaybackAction(ctx);
 					if (epoch === undefined || !await adoptCurrentConnection(epoch)) return;
 					if (!(await forceAcquireSpeech("replay", true))) return;
+					if (epoch !== playbackRequestEpoch || !isCurrentContext(ctx) || !interactiveVoiceSession) return;
 					ownerContentExpected = true;
 					announceProjectForSpeech();
 					lastOwnerUtterance = vocalizer.speakUntracked(text);

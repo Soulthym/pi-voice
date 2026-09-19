@@ -40,9 +40,9 @@ for (const scenario of ["f6", "f9", "timing", "aborted", "error", "prefix"] as c
 			const cancel = mock.method(worker, "cancel", () => 71);
 			await host.emit("message_end", { message: assistant("Interrupted.", scenario) });
 			cancel.mock.restore();
-			await host.emit("message_start", { message: partial });
 			worker.emit({ type: "idle", cancelId: 71 });
 			await tick();
+			await host.emit("message_start", { message: partial });
 			const lease = path.join(env.PI_VOICE_COORDINATOR_DIR, "speech.lock", "lease.json");
 			await fs.stat(lease);
 			await host.emit("message_update", { message: partial,
