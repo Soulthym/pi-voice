@@ -251,6 +251,45 @@ for (const pauseBeforeCapture of [true, false]) test(`live dirty resume retains 
 	assert.deepEqual(spoken(), ["First answer.", "Queued thought.", "Future thought."]);
 });
 
+for (const persistedBeforeEnd of [true, false]) test(`canonical batch preserves paused middle target; persisted before end=${persistedBeforeEnd}`, async t => {
+	const { host, worker } = await setup(t);
+	let history: PlaybackHistory | undefined;
+	const begin = PlaybackHistory.prototype.beginCapture;
+	t.mock.method(PlaybackHistory.prototype, "beginCapture", function(this: PlaybackHistory, ...args: Parameters<typeof begin>) { history = this; return begin.apply(this, args); });
+	const content = [
+		{ type: "text", text: "Identical first.\n" },
+		{ type: "thinking", thinking: "Identical middle.\n" },
+		{ type: "text", text: "Identical last.\n" },
+	];
+	const complete = { ...assistant(""), content };
+	host.addMessage("earlier", null, structuredClone(complete));
+	const partial = { ...complete, stopReason: "pending", content: [] as any[] };
+	await host.emit("message_start", { message: partial });
+	for (const [contentIndex, block] of content.entries()) {
+		partial.content.push(block);
+		await host.emit("message_update", { message: structuredClone(partial), assistantMessageEvent: {
+			type: block.type === "thinking" ? "thinking_delta" : "text_delta", contentIndex, delta: block.text ?? block.thinking,
+		} });
+	}
+	const middle = (worker.sent as Array<{ text: string; utterance: number }>).find(segment => segment.text === "Identical middle.")!;
+	worker.emit({ type: "playback", utterance: middle.utterance, position: 0 });
+	await host.shortcut("f8");
+	const selected = history!.selected()!.id;
+	assert.match(selected, /^live:/);
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	if (persistedBeforeEnd) host.addMessage("current", "earlier", structuredClone(complete));
+	await host.emit("message_end", { message: complete });
+	if (!persistedBeforeEnd) {
+		assert.equal(history!.selected()!.id, selected, "must not rename to earlier identical text/index");
+		host.addMessage("current", "earlier", structuredClone(complete));
+		t.mock.timers.tick(0);
+	}
+	await settle();
+	assert.equal(history!.selected()!.id, "current:1");
+	assert.equal(worker.pauses.at(-1), true);
+	t.mock.timers.reset();
+});
+
 test("Stop cancels boundary waits without starting a late narrator request", async t => {
 	const { host, spoken } = await setup(t);
 	const text = "Earlier prose.\n```ts\nrun();\n```\n";

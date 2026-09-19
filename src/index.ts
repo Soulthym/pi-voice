@@ -315,7 +315,7 @@ export default async function (pi: ExtensionAPI) {
 	let speechAssistantMessage: unknown;
 	let speechContentIndex = 0;
 	let liveDisplayOffset = 0;
-	let liveSource: { assistant: unknown; final: boolean; before: Message[]; waiters: Set<() => void> } | undefined;
+	let liveSource: { assistant: unknown; final: boolean; before: Message[]; existingEntries: Set<string>; waiters: Set<() => void> } | undefined;
 	let liveBlockIndex: number | undefined;
 	const liveBlockIds = new Map<number, string>();
 	const setDescriptionSource = (contentIndex: number, suffixOffset = 0): void => {
@@ -2037,20 +2037,26 @@ const chargeBackfillUnit = (): boolean => {
 		return messages;
 	};
 
-	const finalizePlaybackMessage = (
+	const finalizePlaybackMessages = (
 		ctx: ExtensionContext,
-		playbackId: string,
-		text: string,
+		targets: Array<{ id: string; text: string; contentIndex: number }>,
+		assistant: unknown,
+		existingEntries: Set<string>,
 		attempt = 0,
-		contentIndex?: number,
 	): void => {
-		playbackHistory.updateText(playbackId, text);
-		const messages = playbackMessages(ctx);
-		const completed = messages.findLast(message => message.text === text && (contentIndex === undefined || message.contentIndex === contentIndex));
-		if (completed) {
-			playbackHistory.rename(playbackId, completed);
-			const queued = queuedPausedMessages.find(message => message.id === playbackId);
-			if (queued) Object.assign(queued, completed);
+		for (const target of targets) playbackHistory.updateText(target.id, target.text);
+		const entry = ctx.sessionManager.getBranch().find(entry => entry.type === "message" &&
+			!existingEntries.has(entry.id) && (entry.message === assistant || JSON.stringify(entry.message) === JSON.stringify(assistant)));
+		if (entry) {
+			const messages = playbackMessages(ctx);
+			for (const target of targets) {
+				const completed = messages.find(message => message.id === (target.contentIndex === 0 ? entry.id : `${entry.id}:${target.contentIndex}`));
+				if (!completed) continue;
+				playbackHistory.rename(target.id, completed);
+				const queued = queuedPausedMessages.find(message => message.id === target.id);
+				if (queued) Object.assign(queued, completed);
+			}
+			// Sync only once all live identities (including the selected middle block) are canonical.
 			playbackHistory.sync(messages);
 			return;
 		}
@@ -2060,7 +2066,7 @@ const chargeBackfillUnit = (): boolean => {
 			() => {
 				if (epoch !== contextEpoch || !isCurrentContext(ctx)) return;
 				try {
-					finalizePlaybackMessage(ctx, playbackId, text, attempt + 1, contentIndex);
+					finalizePlaybackMessages(ctx, targets, assistant, existingEntries, attempt + 1);
 				} catch {
 					// Ignore a timer that races session replacement.
 				}
@@ -2666,7 +2672,8 @@ const chargeBackfillUnit = (): boolean => {
 			queueIncomingWhilePaused = config.enabled && playbackPaused;
 			liveBlockIndex = undefined;
 			liveBlockIds.clear();
-			liveSource = { assistant: event.message, final: false, before: activeContext && config.codeDescriptionContext === "conversation"
+			liveSource = { assistant: event.message, final: false,
+				existingEntries: new Set(activeContext?.sessionManager.getBranch().filter(entry => entry.type !== "message" || entry.message !== event.message).map(entry => entry.id)), before: activeContext && config.codeDescriptionContext === "conversation"
 				? liveConversationBefore(activeContext).messages : [], waiters: new Set() };
 			if (queueIncomingWhilePaused) return;
 		}
@@ -2793,16 +2800,14 @@ const chargeBackfillUnit = (): boolean => {
 		const eligible = eligibleAssistantBlocks(event.message, config.mode).filter(block => hasSpeakableAudio(block.text));
 		if (queueIncomingWhilePaused) {
 			if (config.enabled && !attentionSuppressed && stopReason !== "aborted" && stopReason !== "error" && !(config.mode === "yield" && stopReason === "toolUse")) {
-				for (const block of eligible) {
+				const targets = eligible.map(block => {
 					const id = liveBlockIds.get(block.contentIndex);
-					if (id && activeContext) finalizePlaybackMessage(activeContext, id, block.text, 0, block.contentIndex);
-					else {
-						const message = activeContext && playbackMessages(activeContext).findLast(item => item.text === block.text && item.contentIndex === block.contentIndex);
-						const queued = { ...block, id: message?.id ?? `live:${++nextLivePlaybackId}`, time: 0, sourceOffset: 0 };
-						queuedPausedMessages.push(queued);
-						if (!message && activeContext) finalizePlaybackMessage(activeContext, queued.id, block.text, 0, block.contentIndex);
-					}
-				}
+					if (id) return { ...block, id };
+					const queued = { ...block, id: `live:${++nextLivePlaybackId}`, time: 0, sourceOffset: 0 };
+					queuedPausedMessages.push(queued);
+					return queued;
+				});
+				if (activeContext) finalizePlaybackMessages(activeContext, targets, event.message, liveSource?.existingEntries ?? new Set());
 				livePlaybackId = undefined;
 				ownerTurnEnded = true;
 			}
@@ -2811,8 +2816,6 @@ const chargeBackfillUnit = (): boolean => {
 		if (stopReason !== "aborted" && stopReason !== "error" && activeContext) {
 			for (const block of eligible) {
 				scheduleCodeDescriptionsInText(activeContext, block.text);
-				const id = liveBlockIds.get(block.contentIndex);
-				if (id) finalizePlaybackMessage(activeContext, id, block.text, 0, block.contentIndex);
 			}
 			livePlaybackId = undefined;
 		}
@@ -2886,6 +2889,10 @@ const chargeBackfillUnit = (): boolean => {
 				coordinator?.markWaiting();
 				pausedForAttention = true;
 				speechBlocked = false;
+			finalizePlaybackMessages(activeContext, eligible.flatMap(block => {
+				const id = liveBlockIds.get(block.contentIndex);
+				return id ? [{ ...block, id }] : [];
+			}), event.message, liveSource?.existingEntries ?? new Set());
 				blockedMessageHasSpeech = false;
 				blockedSpeechText = "";
 				if (!blockedWarningIssued) {
