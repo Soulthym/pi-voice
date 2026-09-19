@@ -471,6 +471,8 @@ export default async function (pi: ExtensionAPI) {
 
 	let outputEndpoint = "disabled";
 	let outputGeneration: number | undefined;
+	let inputEndpoint = "disabled";
+	let inputGeneration: number | undefined;
 	const routedVoiceConfig = (): VoiceConfig => ({
 		...config,
 		output: config.output === "auto" ? outputEndpoint : config.output,
@@ -1893,59 +1895,97 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	let deviceRebind: Promise<void> | undefined;
+	const unconfirmedDeviceStops = new WeakSet<Promise<void>>();
 	// Persist only session metadata. Reattachment alone never changes an existing pin.
-	const adoptCurrentConnection = async (epoch: number, force = false): Promise<boolean> => {
+	const adoptCurrentConnection = (epoch: number, force = false): Promise<boolean> => {
 		if (!force && (deviceSelection === "local" || config.output !== "auto")) {
 			deviceRetryRequired = false;
-			return true;
+			return Promise.resolve(true);
 		}
 		const ctx = activeContext;
-		try {
-			// Explicit reconnect retries stop proof; ordinary playback still waits on the failure.
-			if (deviceRebind) await deviceRebind.catch(() => {});
-			if (epoch !== playbackRequestEpoch || ctx !== activeContext) return false;
-			const connection = await deviceRouter.resolveCurrentConnection();
-			if (epoch !== playbackRequestEpoch || ctx !== activeContext || !interactiveVoiceSession) return false;
-			const selection = connection.kind === "device" ? connection.id : "local";
-			// Pin identity even if its registration is temporarily absent; operations validate their own direction.
-			// A reconnect is metadata adoption, never a readiness claim.
-			const identityChanged = selection !== (activeDeviceId ?? deviceSelection);
-			let changed = identityChanged;
+		const previous = deviceRebind;
+		let stopUnconfirmed = false;
+		const adoption = (async () => {
 			try {
-				const route = deviceRouter.routeMetadata(selection, "output", config.output);
-				changed ||= route.endpoint !== outputEndpoint ||
-					(route.kind === "device" ? route.device.connectedAt : undefined) !== outputGeneration;
-			} catch (error) { if (!identityChanged) throw error; }
-			if (deviceRebind || (changed && (ownsSpeech || inputInProgress))) {
-				// Termination, not a TCP accept or a cancellation timeout, proves the old sink is gone.
-				const stopping = Promise.all([vocalizer.shutdown(), cancelActiveInput()]).then(() => {});
-				deviceRebind = stopping;
-				await stopping;
-				for (const resolve of transportCancelWaiters.values()) resolve();
-				transportCancelWaiters.clear();
-				await transportStopBarrier.catch(() => {});
-				transportStopBarrier = Promise.resolve();
-				transportStopPending = false;
-				transportStops.clear();
-				if (deviceRebind === stopping) deviceRebind = undefined;
+				// Fence the whole adoption, including resolution, stop proof and both route metadata updates.
+				// Explicit reconnect retries stop proof; ordinary playback still waits on the failure.
+				if (previous) await previous.catch(() => { stopUnconfirmed = unconfirmedDeviceStops.has(previous); });
+				if (epoch !== playbackRequestEpoch || ctx !== activeContext || !interactiveVoiceSession) return false;
+				if (force && retiredStops.size) {
+					const previousStopUnconfirmed = stopUnconfirmed;
+					stopUnconfirmed = true;
+					await Promise.all([...retiredStops].map(cleanup => cleanup()));
+					stopUnconfirmed = previousStopUnconfirmed;
+				}
 				if (epoch !== playbackRequestEpoch || ctx !== activeContext) return false;
-				pausedOwnerUtterance = undefined;
-				lastOwnerUtterance = undefined;
+				const connection = await deviceRouter.resolveCurrentConnection();
+				if (epoch !== playbackRequestEpoch || ctx !== activeContext || !interactiveVoiceSession) return false;
+				const selection = connection.kind === "device" ? connection.id : "local";
+				// Pin identity even if its registration is temporarily absent; operations validate their own direction.
+				// A reconnect is metadata adoption, never a readiness claim.
+				const identityChanged = selection !== (activeDeviceId ?? deviceSelection);
+				let changed = identityChanged;
+				let outputRoute: ReturnType<DeviceRouter["routeMetadata"]> | undefined;
+				let inputRoute: ReturnType<DeviceRouter["routeMetadata"]> | undefined;
+				try {
+					outputRoute = deviceRouter.routeMetadata(selection, "output", config.output);
+					changed ||= outputRoute.endpoint !== outputEndpoint ||
+						(outputRoute.kind === "device" ? outputRoute.device.connectedAt : undefined) !== outputGeneration;
+				} catch (error) { if (!identityChanged) throw error; }
+				try {
+					inputRoute = deviceRouter.routeMetadata(selection, "input", config.input);
+					changed ||= inputInProgress && (inputRoute.endpoint !== inputEndpoint ||
+						(inputRoute.kind === "device" ? inputRoute.device.connectedAt : undefined) !== inputGeneration);
+				} catch (error) { if (!identityChanged && inputInProgress) throw error; }
+				if (previous || (changed && (ownsSpeech || inputInProgress))) {
+					// Termination, not a TCP accept or a cancellation timeout, proves the old sink is gone.
+					stopUnconfirmed = true;
+					await Promise.all([vocalizer.shutdown(), cancelActiveInput()]);
+					stopUnconfirmed = false;
+					for (const resolve of transportCancelWaiters.values()) resolve();
+					transportCancelWaiters.clear();
+					await transportStopBarrier.catch(() => {});
+					transportStopBarrier = Promise.resolve();
+					transportStopPending = false;
+					transportStops.clear();
+					if (epoch !== playbackRequestEpoch || ctx !== activeContext) return false;
+					pausedOwnerUtterance = undefined;
+					lastOwnerUtterance = undefined;
+				}
+				if (!force && selection !== "local") await deviceRouter.route(selection, "output", config.output);
+				if (epoch !== playbackRequestEpoch || ctx !== activeContext) return false;
+				if (force) deviceSelection = "auto";
+				activeDeviceId = selection;
+				deviceRouter.setEnvironmentDevice(connection.kind === "device" ? connection.id : undefined);
+				pi.appendEntry(DEVICE_SELECTION_ENTRY, { version: 1, selection: deviceSelection, pin: selection });
+				if (outputRoute) {
+					outputEndpoint = outputRoute.endpoint;
+					outputGeneration = outputRoute.kind === "device" ? outputRoute.device.connectedAt : undefined;
+				}
+				if (inputRoute) {
+					inputEndpoint = inputRoute.endpoint;
+					inputGeneration = inputRoute.kind === "device" ? inputRoute.device.connectedAt : undefined;
+				}
+				deviceRetryRequired = false;
+				return true;
+			} catch (error) {
+				deviceRetryRequired = true;
+				if (epoch === playbackRequestEpoch && ctx === activeContext) {
+					ctx?.ui.notify(`Voice device: ${error instanceof Error ? error.message : String(error)}${stopUnconfirmed ? " Stop unconfirmed; ownership retained. Restore the old device connection and retry /voice reconnect." : " Explicitly reconnect/retry."}`, "error");
+				}
+				throw error;
 			}
-			if (force) deviceSelection = "auto";
-			activeDeviceId = selection;
-			deviceRouter.setEnvironmentDevice(connection.kind === "device" ? connection.id : undefined);
-			pi.appendEntry(DEVICE_SELECTION_ENTRY, { version: 1, selection: deviceSelection, pin: selection });
-			if (!force && selection !== "local") await deviceRouter.route(selection, "output", config.output);
-			if (epoch !== playbackRequestEpoch || ctx !== activeContext) return false;
-			deviceRetryRequired = false;
-			return true;
-		} catch (error) {
-			if (epoch !== playbackRequestEpoch || ctx !== activeContext) return false;
-			deviceRetryRequired = true;
-			ctx?.ui.notify(`Voice device: ${error instanceof Error ? error.message : String(error)}${deviceRebind ? " Stop unconfirmed; ownership retained." : " Explicitly reconnect/retry."}`, "error");
-			return false;
-		}
+		})();
+		const barrier = adoption.then(() => {
+			if (stopUnconfirmed) throw new Error("Voice stop unconfirmed; retry /voice reconnect");
+		});
+		deviceRebind = barrier;
+		const clearBarrier = () => { if (deviceRebind === barrier) deviceRebind = undefined; };
+		void barrier.then(clearBarrier, () => {
+			if (stopUnconfirmed) unconfirmedDeviceStops.add(barrier);
+			else clearBarrier();
+		});
+		return adoption.catch(() => false);
 	};
 
 	const previewPlaybackTarget = (target: PlaybackTarget, explicit = true): void => {
@@ -2490,16 +2530,16 @@ export default async function (pi: ExtensionAPI) {
 		restoreBottomAfterSpeech = false;
 		bottomPinned = false;
 		const talkEpoch = contextEpoch;
-		const requestedInputEpoch = inputEpoch;
+		const requestedPlaybackEpoch = playbackRequestEpoch;
+		if (deviceRebind) {
+			try { await deviceRebind; } catch { return; }
+			if (talkEpoch !== contextEpoch || requestedPlaybackEpoch !== playbackRequestEpoch) return;
+		}
 		if (inputPhase === "recording" && activeInputEndpoint) {
 			setInputProgress("🎙 Stopping voice recording…");
 			try { await phoneInput.stop(activeInputEndpoint); }
 			catch (error) { ctx.ui.notify(`Voice microphone: ${String(error)}`, "error"); }
 			return;
-		}
-		if (deviceRebind) {
-			try { await deviceRebind; } catch { return; }
-			if (talkEpoch !== contextEpoch || requestedInputEpoch !== inputEpoch) return;
 		}
 		if (inputPhase === "acquiring") {
 			coordinator?.cancelSpeechAcquisition();
@@ -2512,6 +2552,8 @@ export default async function (pi: ExtensionAPI) {
 		try {
 			const route = await deviceRouter.route(activeDeviceId ?? deviceSelection, "input", config.input);
 			if (talkEpoch !== contextEpoch || captureEpoch !== inputEpoch) return;
+			inputEndpoint = route.endpoint;
+			inputGeneration = route.kind === "device" ? route.device.connectedAt : undefined;
 			routed = { ...config, input: route.endpoint };
 		} catch (error) {
 			if (captureEpoch !== inputEpoch) return;
@@ -2859,9 +2901,10 @@ export default async function (pi: ExtensionAPI) {
 		activeContext = null;
 		const inputCancelled = cancelActiveInput();
 		const workers = timingWorkers.splice(0);
+		const retiringRebind = deviceRebind;
 		let stopping: Promise<void> | undefined;
 		const cleanup = (): Promise<void> => stopping ??= Promise.all([
-			phoneInput.cancel(), deviceRebind?.catch(() => {}),
+			phoneInput.cancel(), retiringRebind?.catch(() => {}),
 			...workers.map(worker => worker.terminate()), vocalizer.shutdown(),
 		]).then(() => {
 			retiringCoordinator?.shutdown();
@@ -3869,12 +3912,6 @@ export default async function (pi: ExtensionAPI) {
 				}
 				case "reconnect": {
 					const epoch = ++playbackRequestEpoch;
-					try { await Promise.all([...retiredStops].map(cleanup => cleanup())); }
-					catch (error) {
-						ctx.ui.notify(`Voice retired transport stop unconfirmed; ownership retained. Restore the old device connection and retry /voice reconnect: ${String(error)}`, "error");
-						return;
-					}
-					if (epoch !== playbackRequestEpoch || activeContext !== ctx) return;
 					pendingReplay = undefined;
 					if (ownsSpeech) {
 						playbackPaused = true;

@@ -87,6 +87,51 @@ test("same-ID changed endpoint/generation rebuild waits for proof and gates delt
  assert.equal(capture.mock.callCount(), 1);
 });
 
+for (const phase of ["resolution", "termination"]) test(`Talk waits through ${phase} and complete A-to-B adoption`, async t => {
+ const { host, worker, registration } = await setup(t);
+ await host.command("test Old audio.");
+ await fs.writeFile(path.join(process.env.PI_VOICE_DEVICE_DIR!, "B.json"), JSON.stringify({ ...registration, id: "B", inputEndpoint: "unix:///B-input", audioEndpoint: "unix:///B-output" }));
+ const resolved = Promise.withResolvers<{ kind: "device"; id: string }>();
+ t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", () => resolved.promise);
+ const stopped = Promise.withResolvers<void>();
+ t.mock.method(worker, "terminate", () => stopped.promise);
+ const capture = t.mock.method(PhoneInputClient.prototype, "capture", async (endpoint: string) => {
+  assert.equal(endpoint, "unix:///B-input");
+  assert.ok(host.entries.some(entry => entry.type === "custom" && entry.customType === "pi-voice.device-selection" && entry.data.pin === "B"));
+  return { type: "text" as const, data: "" };
+ });
+ const reconnect = host.command("reconnect"); await settle();
+ if (phase === "termination") { resolved.resolve({ kind: "device", id: "B" }); await settle(); }
+ await host.command("talk"); await settle();
+ assert.equal(capture.mock.callCount(), 0);
+ resolved.resolve({ kind: "device", id: "B" }); await settle();
+ stopped.resolve(); await reconnect; await settle();
+ assert.equal(capture.mock.callCount(), 1);
+ await host.command("input");
+ assert.ok(host.notices.some(notice => notice.message.includes("B-input")));
+});
+
+for (const change of ["endpoint", "generation"]) test(`same-ID input ${change} change cancels capture with intentional local output`, async t => {
+ const { host, registration, register } = await setup(t);
+ await host.command("output local");
+ const recording = Promise.withResolvers<any>();
+ const capture = t.mock.method(PhoneInputClient.prototype, "capture", () => recording.promise);
+ await host.command("talk"); await settle();
+ assert.equal(capture.mock.callCount(), 1);
+ const stopped = Promise.withResolvers<void>();
+ const cancel = t.mock.method(PhoneInputClient.prototype, "cancel", () => stopped.promise);
+ if (change === "endpoint") registration.inputEndpoint = "unix:///replacement-input";
+ else registration.connectedAt++;
+ await register();
+ let adopted = false;
+ const reconnect = host.command("reconnect").then(() => { adopted = true; }); await settle();
+ assert.ok(cancel.mock.callCount(), "input metadata must be compared independently of output");
+ assert.equal(adopted, false, "pin adoption awaits capture stop proof");
+ stopped.resolve(); recording.resolve({ type: "text", data: "obsolete draft" });
+ await reconnect; await settle();
+ assert.equal(host.ctx.ui.getEditorText(), "", "retired capture cannot finalize after rebind");
+});
+
 test("failed rebind keeps its barrier and lease through later playback and shutdown", async t => {
  const { host, worker, lease, registration, register } = await setup(t);
  await host.command("test Owned audio.");
@@ -110,6 +155,7 @@ test("failed session_shutdown followed by replacement cannot steal same-PID owne
  await assert.rejects(host.shutdown(), /unconfirmed remote stop/);
  // Pi catches the hook error and constructs a new extension anyway.
  const replacement = new FakeVoiceHost(host.ctx.cwd, "replacement");
+ replacement.entries.push(...host.entries); // Reload restores the existing device pin.
  const index = MockedVoiceWorkerClient.instances.length;
  await replacement.start();
  const freshWorker = MockedVoiceWorkerClient.instances[index]!;
@@ -131,6 +177,64 @@ test("failed session_shutdown followed by replacement cannot steal same-PID owne
  assert.ok(freshWorker.sent.length > 0);
  assert.equal(worker.sent.length, oldSent, "cleanup never revives retired playback");
  assert.notEqual(JSON.parse(await fs.readFile(lease, "utf8")).instanceId, owner);
+});
+
+test("replacement Talk waits for retired cleanup and fresh adoption with a distinct command context", async t => {
+ const { host, worker, registration } = await setup(t);
+ await host.command("test Old audio.");
+ const terminate = t.mock.method(worker, "terminate", async () => { throw new Error("unconfirmed"); });
+ await assert.rejects(host.shutdown(), /unconfirmed/);
+ const replacement = new FakeVoiceHost(host.ctx.cwd, "replacement");
+ replacement.entries.push(...host.entries);
+ await replacement.start();
+ t.after(() => replacement.shutdown());
+ await fs.writeFile(path.join(process.env.PI_VOICE_DEVICE_DIR!, "B.json"), JSON.stringify({ ...registration, id: "B", inputEndpoint: "unix:///B-input" }));
+ t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", async () => ({ kind: "device" as const, id: "B" }));
+ const stopped = Promise.withResolvers<void>();
+ terminate.mock.mockImplementation(() => stopped.promise);
+ const capture = t.mock.method(PhoneInputClient.prototype, "capture", async (endpoint: string) => {
+  assert.equal(endpoint, "unix:///B-input");
+  return { type: "text" as const, data: "" };
+ });
+ // Pi creates a new command context rather than reusing session_start's object.
+ const reconnect = replacement.commands.get("voice")!.handler("reconnect", { ...replacement.ctx });
+ await settle();
+ await replacement.command("talk"); await settle();
+ assert.equal(capture.mock.callCount(), 0);
+ stopped.resolve(); await reconnect; await settle();
+ assert.equal(capture.mock.callCount(), 1);
+});
+
+test("overlapping identity-only reconnect failures do not fence explicitly local transports", async t => {
+ const { host, worker } = await setup(t);
+ await host.command("output local");
+ await host.command("input local");
+ const lookup = Promise.withResolvers<never>();
+ t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", () => lookup.promise);
+ const first = host.command("reconnect"); await settle();
+ const second = host.command("reconnect"); await settle();
+ lookup.reject(new Error("SSH identity unavailable"));
+ await Promise.all([first, second]);
+ await host.command("test Explicit local audio.");
+ assert.ok(worker.sent.length > 0);
+ await host.command("stop"); await settle();
+ const capture = t.mock.method(PhoneInputClient.prototype, "capture", async (endpoint: string) => {
+  assert.equal(endpoint, "local");
+  return { type: "text" as const, data: "" };
+ });
+ await host.command("talk"); await settle();
+ assert.equal(capture.mock.callCount(), 1);
+});
+
+test("shutdown invalidates queued reconnects before they can await their own retired cleanup", { timeout: 2000 }, async t => {
+ const { host } = await setup(t);
+ const lookup = Promise.withResolvers<{ kind: "device"; id: string }>();
+ t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", () => lookup.promise);
+ const first = host.command("reconnect"); await settle();
+ const second = host.command("reconnect"); await settle();
+ const shutdown = host.shutdown(); await settle();
+ lookup.resolve({ kind: "device", id: "A" });
+ await Promise.all([first, second, shutdown]);
 });
 
 test("recording stop uses captured endpoint even after registry disappears", async t => {
@@ -226,6 +330,26 @@ for (const retry of ["reconnect", "shutdown", "reload"]) test(`failed rebind per
  termination.resolve(); await retried; await settle();
  if (retry === "reconnect") { await host.command("stop"); await settle(); }
  await assert.rejects(fs.stat(lease), { code: "ENOENT" });
+});
+
+test("Stop during a failed-rebind retry cannot discard the unconfirmed-stop fence", async t => {
+ const { host, worker, registration, register, lease } = await setup(t);
+ await host.command("test Old audio.");
+ registration.connectedAt++; await register();
+ t.mock.method(worker, "terminate", async () => { throw new Error("unconfirmed"); });
+ await host.command("reconnect");
+ const resolved = Promise.withResolvers<{ kind: "device"; id: string }>();
+ t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", () => resolved.promise);
+ const reconnect = host.command("reconnect"); await settle();
+ await host.command("stop"); await settle();
+ resolved.resolve({ kind: "device", id: "A" }); await reconnect; await settle();
+ const sent = worker.sent.length;
+ const capture = t.mock.method(PhoneInputClient.prototype, "capture", async () => { throw new Error("unexpected capture"); });
+ await host.command("test Must remain silent.");
+ await host.command("talk"); await settle();
+ assert.equal(worker.sent.length, sent);
+ assert.equal(capture.mock.callCount(), 0);
+ assert.ok(await fs.stat(lease));
 });
 
 test("voice test rechecks cancellation after ownership activation before any prefix or segment", async t => {

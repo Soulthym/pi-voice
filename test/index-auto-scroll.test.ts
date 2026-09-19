@@ -416,6 +416,8 @@ test("TUI follows exact words, respects manual browsing, and explicit controls r
 	assert.ok(worker!.sent.length > beforeLivePause, "live deltas must remain queued behind F8 pause");
 	await host.shortcut("f8");
 	await host.shortcut("f6");
+	// F6 starts replay asynchronously; wait for the complete device-adoption barrier.
+	await new Promise(resolve => setImmediate(resolve));
 	const afterReplayStarted = worker!.sent.length;
 	await host.emit("message_update", {
 		type: "message_update",
