@@ -36,10 +36,10 @@ function startFakeSttServer(socketPath: string): Promise<net.Server> {
 			socket.on("close", () => clients.delete(socket));
 			socket.on("data", chunk => {
 				if (chunk.toString("utf8").trim() === "stop") {
-					for (const client of clients) client.destroy();
-				}
+					for (const client of clients) if (client !== socket) client.destroy();
+					socket.end(`ok ${Buffer.from("stopped").toString("base64")}\n`);
+				} else socket.write("stream\n");
 			});
-			socket.write("stream\n");
 		});
 		server.listen(socketPath, () => resolve(server));
 	});

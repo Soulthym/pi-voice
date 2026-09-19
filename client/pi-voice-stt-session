@@ -19,11 +19,18 @@ encode_message() {
 
 IFS= read -r command || exit 1
 if [[ $command == stop ]]; then
-  if [[ -e $active_file ]]; then
+  owner=$(cat "$active_file" 2>/dev/null || true)
+  if [[ -n $owner ]]; then
     : >"$stop_file"
-    printf 'ok %s\n' "$(encode_message stopping)"
+    for _ in {1..90}; do
+      [[ $(cat "$active_file" 2>/dev/null || true) != "$owner" ]] && break
+      sleep 0.1
+    done
+  fi
+  if [[ -z $owner || $(cat "$active_file" 2>/dev/null || true) != "$owner" ]]; then
+    printf 'ok %s\n' "$(encode_message stopped)"
   else
-    printf 'error %s\n' "$(encode_message 'The local microphone is not recording')"
+    printf 'error %s\n' "$(encode_message 'Microphone stop not confirmed')"
   fi
   exit 0
 fi
@@ -73,8 +80,10 @@ fi
 rm -f "$stop_file"
 printf '%s\n' "$recording_owner" >"$active_file"
 producer_pid=
+disconnect_pid=
 cleanup() {
   trap - EXIT INT TERM
+  [[ -n ${disconnect_pid:-} ]] && kill "$disconnect_pid" 2>/dev/null || true
   [[ -n ${producer_pid:-} ]] && kill -- "-$producer_pid" 2>/dev/null || true
   [[ -n ${producer_pid:-} ]] && wait "$producer_pid" 2>/dev/null || true
   if [[ $(cat "$active_file" 2>/dev/null || true) == "$recording_owner" ]]; then
@@ -82,17 +91,26 @@ cleanup() {
     rmdir "$recording_lock" 2>/dev/null || true
   fi
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 1' INT TERM
+# EOF means the capture client disconnected. Only stop this recording generation.
+exec 3<&0
+( while IFS= read -r _ <&3; do :; done
+  [[ $(cat "$active_file" 2>/dev/null || true) == "$recording_owner" ]] && : >"$stop_file"
+) &
+disconnect_pid=$!
 
 printf 'stream\n'
 if [[ $recorder == pw-record ]]; then
   setsid bash -c '
+    trap "wait; exit" TERM
     pw-record --raw --format s16 --rate 16000 --channels 1 - 2>/dev/null |
       ffmpeg -hide_banner -loglevel error -f s16le -ar 16000 -ac 1 -i pipe:0 \
         -c:a libopus -application voip -b:a 32k -vbr on -f ogg pipe:1 2>/dev/null
   ' &
 else
   setsid bash -c '
+    trap "wait; exit" TERM
     parec --raw --format=s16le --rate=16000 --channels=1 2>/dev/null |
       ffmpeg -hide_banner -loglevel error -f s16le -ar 16000 -ac 1 -i pipe:0 \
         -c:a libopus -application voip -b:a 32k -vbr on -f ogg pipe:1 2>/dev/null
@@ -105,6 +123,6 @@ for ((tick = 0; tick < max_record_seconds * 10; tick += 1)); do
   kill -0 "$producer_pid" 2>/dev/null || break
   sleep 0.1
 done
-kill -INT -- "-$producer_pid" 2>/dev/null || kill -INT "$producer_pid" 2>/dev/null || true
+kill -TERM -- "-$producer_pid" 2>/dev/null || true
 wait "$producer_pid" 2>/dev/null || true
 producer_pid=

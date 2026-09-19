@@ -5,18 +5,19 @@ import * as path from "node:path";
 import test, { mock } from "node:test";
 import { PhoneInputClient, type PhoneCapture } from "../src/phone-input.js";
 import { SessionCoordinator } from "../src/session-coordinator.js";
+import { PlaybackHistory } from "../src/playback-history.js";
 import { FakeVoiceHost, MockedVoiceWorkerClient, assistant, streamBlockedResponse } from "./helpers/fake-voice-host.js";
 
 mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: MockedVoiceWorkerClient } });
 const tick = () => new Promise(resolve => setTimeout(resolve, 250));
 const settle = async () => { for (let i = 0; i < 12; i++) await new Promise(resolve => setImmediate(resolve)); };
 
-async function lifecycleHost(t: import("node:test").TestContext) {
+async function lifecycleHost(t: import("node:test").TestContext, config = {}) {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-lifecycle-regression-"));
 	const names = ["PI_VOICE_CONFIG", "PI_VOICE_COORDINATOR_DIR", "PI_VOICE_DEVICE_DIR"] as const;
 	const old = Object.fromEntries(names.map(name => [name, process.env[name]]));
 	for (const name of names) process.env[name] = path.join(root, name);
-	await fs.writeFile(process.env.PI_VOICE_CONFIG!, JSON.stringify({ enabled: true, input: "local", output: "local", audioCache: false, timingPreprocessConcurrency: 0 }));
+	await fs.writeFile(process.env.PI_VOICE_CONFIG!, JSON.stringify({ enabled: true, input: "local", output: "local", audioCache: false, timingPreprocessConcurrency: 0, ...config }));
 	const host = new FakeVoiceHost(root, "lifecycle");
 	const observer = new SessionCoordinator(path.join(root, "observer"), "observer");
 	observer.start();
@@ -226,4 +227,124 @@ for (const idleBeforeResume of [true, false]) test(`resuming paused attention dr
 	if (!idleBeforeResume) worker.emit({ type: "idle", utterance: notification });
 	await settle();
 	assert.match(JSON.stringify(worker.sent.slice(before)), /Queued unheard response/);
+});
+
+test("cancellation between activation and reservation continuation releases that lease", async t => {
+	const { host, observer } = await lifecycleHost(t);
+	const original = SessionCoordinator.prototype.clearWaiting;
+	let armed = true;
+	mock.method(SessionCoordinator.prototype, "clearWaiting", function (this: SessionCoordinator) {
+		original.call(this);
+		if (armed) { armed = false; queueMicrotask(() => { void host.command("stop"); }); }
+	});
+	await host.emit("input", { text: "Prompt" }); await settle();
+	assert.equal(observer.speechOwner(), undefined);
+});
+
+test("retired worker callbacks after shutdown cannot append timings or mutate UI", async t => {
+	const { host, worker } = await lifecycleHost(t);
+	await host.shortcut("f11"); await settle();
+	const utterance = (worker.sent.at(-1) as { utterance: number }).utterance;
+	await host.shutdown();
+	const before = [host.entries.length, host.notices.length, host.widgetOperations.length, host.styleCalls.length];
+	worker.emit({ type: "idle", utterance });
+	worker.emit({ type: "progress", percent: 50 });
+	worker.emit({ type: "error", message: "Retired failure" });
+	await settle();
+	assert.deepEqual([host.entries.length, host.notices.length, host.widgetOperations.length, host.styleCalls.length], before);
+});
+
+test("resuming completed paused announcement before incoming message_end keeps its continuation lease", async t => {
+	const { host, observer, worker } = await lifecycleHost(t);
+	await host.shortcut("f11"); await settle(); observer.markWaiting();
+	worker.emit({ type: "idle", utterance: (worker.sent.at(-1) as { utterance: number }).utterance }); await settle();
+	const notification = (worker.sent.at(-1) as { utterance: number }).utterance;
+	await host.shortcut("f8");
+	await host.emit("message_start", { message: assistant("", "pending") });
+	worker.emit({ type: "idle", utterance: notification });
+	await host.shortcut("f8"); await settle();
+	assert.ok(observer.speechOwner(), "incoming response is not finished yet");
+	const complete = assistant("Response arriving after resume.");
+	host.addMessage("b", "a", complete);
+	await host.emit("message_end", { message: complete });
+	await host.emit("turn_end", { message: complete }); await settle();
+	assert.match(JSON.stringify(worker.sent), /Response arriving after resume/);
+});
+
+test("dirty resume before the first delta reenables live narration", async t => {
+	const { host, worker } = await lifecycleHost(t);
+	await host.emit("message_start", { message: assistant("", "pending") });
+	await host.command("speed 1.2");
+	await host.shortcut("f8"); await settle();
+	await delta(host, "First later sentence.");
+	const complete = assistant("First later sentence."); host.addMessage("b", "a", complete);
+	await host.emit("message_end", { message: complete });
+	await host.emit("turn_end", { message: complete }); await settle();
+	assert.match(JSON.stringify(worker.sent), /First later sentence/);
+});
+
+test("dirty live resume retains unfinished assistant and conversation through the code fence", async t => {
+	const { host } = await lifecycleHost(t, { codeDescriptionContext: "conversation", codeNarration: "summary", codeDescriptionPreprocessConcurrency: 0 });
+	mock.method(host, "completeModel", async () => assistant("Described test code."));
+	host.addMessage("u", "a", { role: "user", content: [{ type: "text", text: "Unique live user context" }], timestamp: 1 });
+	await host.emit("message_start", { message: assistant("", "pending") });
+	await host.command("speed 1.2");
+	const text = "Unique live prefix.\n```ts\nconst liveOnly = 123;\n```\n";
+	await delta(host, text);
+	await host.shortcut("f8"); await settle();
+	assert.equal(host.modelRequests.length, 1);
+	const context = JSON.stringify(host.modelRequests[0]!.context.messages);
+	assert.match(context, /Unique live user context/);
+	assert.match(context, /Unique live prefix/);
+	assert.match(context, /const liveOnly = 123/);
+});
+
+test("dirty live continuation forwards its code-description sentence ordinal", async t => {
+	const { host, worker } = await lifecycleHost(t, { codeNarration: "summary", codeDescriptionPreprocessConcurrency: 0 });
+	mock.method(host, "completeModel", async () => assistant("First description sentence. Second description sentence."));
+	await host.emit("message_start", { message: assistant("", "pending") });
+	await delta(host, "```ts\nconst value = 1;\n```\n"); await settle();
+	await host.command("speed 1.2");
+	const resumeTarget = PlaybackHistory.prototype.resumeTarget;
+	mock.method(PlaybackHistory.prototype, "resumeTarget", function (this: PlaybackHistory) {
+		const target = resumeTarget.call(this);
+		return target && { ...target, sourceOffset: 0, skipUnits: 1 };
+	});
+	const before = worker.sent.length;
+	await host.shortcut("f8"); await settle();
+	await delta(host, "Future live sentence.");
+	const complete = assistant("```ts\nconst value = 1;\n```\nFuture live sentence.");
+	host.addMessage("b", "a", complete);
+	await host.emit("message_end", { message: complete });
+	await host.emit("turn_end", { message: complete }); await settle();
+	const spoken = JSON.stringify(worker.sent.slice(before));
+	assert.doesNotMatch(spoken, /First description sentence/);
+	assert.match(spoken, /Second description sentence/);
+	assert.match(spoken, /Future live sentence/);
+});
+
+test("Stop remains prompt but failed recorder stop keeps the lease and blocks replacement playback", async t => {
+	const { host, observer, worker } = await lifecycleHost(t);
+	const capture = Promise.withResolvers<PhoneCapture>();
+	mock.method(PhoneInputClient.prototype, "capture", () => capture.promise);
+	await host.command("talk"); await settle();
+	const stopped = Promise.withResolvers<void>();
+	const cancel = mock.method(PhoneInputClient.prototype, "cancel", () => stopped.promise);
+	try {
+		await host.command("stop");
+		assert.ok(observer.speechOwner(), "Stop UI returns while recorder is still stopping");
+		stopped.reject(new Error("Recorder stop unconfirmed")); await settle();
+		assert.ok(observer.speechOwner());
+		assert.match(JSON.stringify(host.notices), /ownership retained/);
+		const before = worker.sent.length;
+		await host.shortcut("f11"); await settle();
+		assert.equal(worker.sent.length, before);
+		assert.ok(observer.speechOwner());
+		capture.resolve({ type: "text", data: "Cancelled draft" }); await settle();
+		assert.doesNotMatch(host.ctx.ui.getEditorText(), /Cancelled draft/);
+	} finally {
+		cancel.mock.restore();
+		capture.resolve({ type: "text", data: "" });
+		await host.command("stop"); await settle();
+	}
 });

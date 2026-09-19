@@ -166,22 +166,21 @@ export class PhoneInputClient {
 	#activeEndpoint: string | null = null;
 	#cancellation: Promise<void> = Promise.resolve();
 	#cancelCapture: (() => void) | null = null;
+	#stopPending: Promise<void> | null = null;
 
 	cancel(): Promise<void> {
 		const endpoint = this.#activeEndpoint;
-		this.#cancelCapture?.();
+		if (this.#cancelCapture) this.#cancelCapture();
+		else if (endpoint) void this.stop(endpoint).catch(() => {});
 		this.#socket?.destroy();
 		this.#socket = null;
-		this.#activeEndpoint = null;
-		if (endpoint) {
-			void this.stop(endpoint).catch(() => {});
-		}
 		return this.#cancellation;
 	}
 
 	stop(endpoint: string): Promise<void> {
+		if (this.#stopPending) return this.#stopPending;
 		// All stop sources (VAD, timeout, UI, cancellation) must finish before a new recording.
-		const pending = this.#cancellation.then(() => new Promise<void>((resolve, reject) => {
+		const pending = this.#cancellation.catch(() => {}).then(() => new Promise<void>((resolve, reject) => {
 			const socket = connectEndpoint(endpoint);
 			let response = "";
 			let settled = false;
@@ -191,7 +190,10 @@ export class PhoneInputClient {
 				clearTimeout(timer);
 				socket.destroy();
 				if (error) reject(error);
-				else resolve();
+				else {
+					if (this.#activeEndpoint === endpoint) this.#activeEndpoint = null;
+					resolve();
+				}
 			};
 			const timer = setTimeout(() => finish(new Error("Voice microphone stop timed out")), 10_000);
 			timer.unref?.();
@@ -203,15 +205,19 @@ export class PhoneInputClient {
 				if (newline === -1) return;
 				const line = response.slice(0, newline).trim();
 				const [status, payload = ""] = line.split(" ", 2);
-				if (status === "ok") finish();
-				else finish(new Error(Buffer.from(payload, "base64").toString("utf8") || "Unable to stop phone microphone"));
+				const message = Buffer.from(payload, "base64").toString("utf8");
+				if (status === "ok" && message === "stopped") finish();
+				else finish(new Error(status === "ok" ? "Microphone stop not confirmed; update the recorder client" : message || "Unable to stop phone microphone"));
 			});
 			socket.on("error", finish);
 			socket.on("close", () => {
 				if (!settled) finish(new Error("Voice microphone stop connection closed"));
 			});
 		}));
-		this.#cancellation = pending.catch(() => {});
+		this.#cancellation = pending;
+		this.#stopPending = pending;
+		void pending.finally(() => { if (this.#stopPending === pending) this.#stopPending = null; }).catch(() => {});
+		void pending.catch(() => {}); // Observed by cancel/capture; never turn failure into an ACK.
 		return pending;
 	}
 
@@ -238,17 +244,18 @@ export class PhoneInputClient {
 					this.#socket = null;
 					this.#cancelCapture = null;
 				}
-				if (this.#activeEndpoint === endpoint) this.#activeEndpoint = null;
+				const stopped = error || streamMode ? this.stop(endpoint) : Promise.resolve();
+				void stopped.catch(() => {});
+				if (!error && !streamMode && this.#activeEndpoint === endpoint) this.#activeEndpoint = null;
 				socket.destroy();
 				// Child 'close' follows stdout drainage; socket EOF alone can precede final PCM.
-				void (detector?.close(!!error) ?? Promise.resolve()).then(() => {
+				void Promise.all([detector?.close(!!error), ...(error ? [] : [stopped])]).then(() => {
 					if (error) reject(error);
 					else if (capture) resolve(capture);
 					else reject(new Error("Voice device returned no capture"));
 				}, decoderError => reject(error ?? decoderError));
 			};
 			const timer = setTimeout(() => {
-				void this.stop(endpoint).catch(() => {});
 				finish(new Error("Voice microphone timed out"));
 			}, RECORDING_TIMEOUT_MS);
 			timer.unref?.();
@@ -258,7 +265,6 @@ export class PhoneInputClient {
 				if (settled || chunk.length === 0) return;
 				streamBytes += chunk.length;
 				if (streamBytes > MAX_RESPONSE_BYTES) {
-					void this.stop(endpoint).catch(() => {});
 					finish(new Error("Voice microphone stream exceeded 32 MB"));
 					return;
 				}

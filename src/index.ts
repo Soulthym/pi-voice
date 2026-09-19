@@ -323,7 +323,6 @@ export default async function (pi: ExtensionAPI) {
 	let pendingSpeechPreemption:
 		| { purpose: SpeechPurpose | undefined; wasComplete: boolean; spokenText: string; cancelId?: number }
 		| undefined;
-	let speechPreemptionTimer: NodeJS.Timeout | null = null;
 	let finishSpeechPreemption: () => void = () => {};
 	const transportCancelWaiters = new Map<number, () => void>();
 	let state: VoiceState = "idle";
@@ -1259,6 +1258,13 @@ const chargeBackfillUnit = (): boolean => {
 	};
 
 	const handleWorkerEvent = (event: WorkerEvent): void => {
+		// Cancellation acknowledgements still unblock retiring transports, not UI/history.
+		if (event.type === "idle" && event.cancelId !== undefined) {
+			transportCancelWaiters.get(event.cancelId)?.();
+			transportCancelWaiters.delete(event.cancelId);
+			return;
+		}
+		if (!interactiveVoiceSession || !activeContext) return;
 		switch (event.type) {
 			case "loading":
 				state = "loading";
@@ -1282,10 +1288,6 @@ const chargeBackfillUnit = (): boolean => {
 				downloadPercent = undefined;
 				break;
 			case "idle":
-				if (event.cancelId !== undefined) {
-					transportCancelWaiters.get(event.cancelId)?.();
-					transportCancelWaiters.delete(event.cancelId);
-				}
 				if (!inputInProgress) state = "idle";
 				downloadPercent = undefined;
 				playbackHistory.finishUtterance(event.utterance);
@@ -1456,10 +1458,12 @@ const chargeBackfillUnit = (): boolean => {
 		const leaseEpoch = speechLeaseEpoch;
 		void Promise.all([waitForTransportCancellation(cancelId), inputCancelled]).then(() => {
 			if (ownsSpeech && speechLeaseEpoch === leaseEpoch) releaseSpeechOwnership(announceNext);
-		});
+		}).catch(error => activeContext?.ui.notify(`Voice stop failed; ownership retained: ${error instanceof Error ? error.message : String(error)}`, "error"));
 	};
 
 	const phoneInput = new PhoneInputClient();
+	let inputStopBarrier = Promise.resolve();
+	let inputStopPending = false;
 	let cancelPendingDictation: (() => void) | undefined;
 	let finishPendingDictation: (() => Promise<void>) | undefined;
 	const finishInputForPlayback = async (): Promise<void> => {
@@ -1476,7 +1480,10 @@ const chargeBackfillUnit = (): boolean => {
 		cancelPendingDictation?.();
 		cancelPendingDictation = undefined;
 		finishPendingDictation = undefined;
+		inputStopPending = true;
 		const cancelled = phoneInput.cancel();
+		inputStopBarrier = cancelled;
+		void cancelled.then(() => { if (inputStopBarrier === cancelled) inputStopPending = false; }, () => {});
 		if (speechReservedForInput) {
 			speechReservedForInput = false;
 			if (lastOwnerUtterance === undefined) releaseAfterTransportCancellation(undefined, false, cancelled);
@@ -1567,7 +1574,7 @@ const chargeBackfillUnit = (): boolean => {
 		completingOwnerSpeech = true;
 		if (speechPurpose === "notification") {
 			if (pendingNotification) coordinator?.markAnnounced(pendingNotification.instanceId);
-			if (queuedPausedMessages.length === 0) {
+			if (queuedPausedMessages.length === 0 && !queueIncomingWhilePaused) {
 				relinquishSpeech();
 				return;
 			}
@@ -1629,7 +1636,7 @@ const chargeBackfillUnit = (): boolean => {
 	};
 
 	const acquireSpeech = (purpose: "turn" | "replay", announceProject = true): boolean => {
-		if (attentionSuppressed || deviceRetryRequired || !interactiveVoiceSession || deviceRebind) return false;
+		if (attentionSuppressed || deviceRetryRequired || !interactiveVoiceSession || deviceRebind || inputStopPending) return false;
 		if (!coordinator) return true;
 		const alreadyOwned = ownsSpeech && coordinator.ownsSpeech();
 		if (!alreadyOwned && !coordinator.tryAcquireSpeech()) return false;
@@ -1640,6 +1647,10 @@ const chargeBackfillUnit = (): boolean => {
 		const owner = coordinator;
 		const epoch = playbackRequestEpoch;
 		const captureEpoch = inputEpoch;
+		if (inputStopPending) {
+			try { await inputStopBarrier; } catch { return false; }
+		}
+		if (captureEpoch !== inputEpoch || epoch !== playbackRequestEpoch) return false;
 		if (!owner) return interactiveVoiceSession;
 		const alreadyOwned = ownsSpeech && owner.ownsSpeech();
 		if (!alreadyOwned && !(await owner.forceAcquireSpeech())) return false;
@@ -1661,7 +1672,15 @@ const chargeBackfillUnit = (): boolean => {
 	const reserveSpeechForInput = async (dictation = false): Promise<boolean> => {
 		if (!dictation && !config.enabled) return true;
 		if (!coordinator) return true;
+		const epoch = inputEpoch;
+		const request = playbackRequestEpoch;
+		const owner = coordinator;
+		const lease = speechLeaseEpoch + 1;
 		if (!(await forceAcquireSpeech("turn", false, false))) return false;
+		if (epoch !== inputEpoch || request !== playbackRequestEpoch || owner !== coordinator || !interactiveVoiceSession) {
+			if (owner === coordinator && ownsSpeech && speechLeaseEpoch === lease) releaseSpeechOwnership(false);
+			return false;
+		}
 		speechReservedForInput = true;
 		projectAnnouncementPending = !coordinator.attentionIsCurrent();
 		return true;
@@ -1671,8 +1690,6 @@ const chargeBackfillUnit = (): boolean => {
 		const interrupted = pendingSpeechPreemption;
 		if (!interrupted) return;
 		pendingSpeechPreemption = undefined;
-		if (speechPreemptionTimer) clearTimeout(speechPreemptionTimer);
-		speechPreemptionTimer = null;
 		relinquishSpeech();
 		if (interrupted.purpose === "turn" || interrupted.purpose === "replay") {
 			pausedForAttention = true;
@@ -1695,7 +1712,7 @@ const chargeBackfillUnit = (): boolean => {
 			spokenText: ownedSpeechText,
 		};
 		const hadActiveInput = inputInProgress;
-		const inputCancellation = hadActiveInput ? cancelActiveInput() : Promise.resolve();
+		const inputCancellation = hadActiveInput ? cancelActiveInput() : inputStopBarrier;
 		const cancelId = clearPlaybackTransport();
 		const pending = { ...interrupted, ...(cancelId !== undefined ? { cancelId } : {}) };
 		pendingSpeechPreemption = pending;
@@ -1703,10 +1720,7 @@ const chargeBackfillUnit = (): boolean => {
 		// Release only after both the player and microphone have acknowledged stop.
 		void Promise.all([inputCancellation, waitForTransportCancellation(cancelId)]).then(() => {
 			if (pendingSpeechPreemption === pending) finishSpeechPreemption();
-		});
-		// Crash-safe fallback; microphone stop itself has a ten-second timeout.
-		speechPreemptionTimer = setTimeout(finishSpeechPreemption, hadActiveInput ? 10_500 : 1_250);
-		speechPreemptionTimer.unref?.();
+		}).catch(error => activeContext?.ui.notify(`Voice handoff stop failed; ownership retained: ${error instanceof Error ? error.message : String(error)}`, "error"));
 	};
 
 	const pollWaitingAttention = (): void => {
@@ -1801,7 +1815,8 @@ const chargeBackfillUnit = (): boolean => {
 		restoreBottomAfterSpeech = false;
 		const sourceOffset = Math.max(0, Math.min(target.text.length, target.sourceOffset));
 		const suffix = target.text.slice(sourceOffset);
-		if (!suffix.trim()) return;
+		const continueLiveTurn = queued && queueIncomingWhilePaused && livePlaybackId === target.id;
+		if (!suffix.trim() && !continueLiveTurn) return;
 		if (pendingSpeechPreemption) {
 			activeContext?.ui.notify("Voice device handoff is still stopping the previous transport", "warning");
 			return;
@@ -1837,7 +1852,6 @@ const chargeBackfillUnit = (): boolean => {
 		} else requestNarrationRender();
 		refreshPlaybackTimeline();
 
-		const continueLiveTurn = queued && queueIncomingWhilePaused && livePlaybackId === target.id;
 		const displacedLiveTurn = ownsSpeech && speechPurpose === "turn" && !ownerTurnEnded;
 		const displacedLiveText = displacedLiveTurn ? ownedSpeechText : "";
 		if (inputInProgress) {
@@ -1845,6 +1859,12 @@ const chargeBackfillUnit = (): boolean => {
 			if (pendingReplay !== request || request.epoch !== playbackRequestEpoch) return;
 		}
 
+		if (inputStopPending) {
+			try { await inputStopBarrier; } catch {
+				activeContext?.ui.notify("Microphone stop is unconfirmed; playback ownership retained", "error");
+				return;
+			}
+		}
 		if (deviceRebind) await deviceRebind;
 		if (!queued && !request.paused && !await adoptCurrentConnection(request.epoch)) {
 			if (pendingReplay === request) {
@@ -1910,8 +1930,12 @@ const chargeBackfillUnit = (): boolean => {
 		const contextual = activeContext
 			? completedAssistantMessages(activeContext, config.mode, config.codeDescriptionContext === "conversation").find(message => message.id === target.id)
 			: undefined;
-		speechConversationMessages = contextual?.conversationMessages ?? [];
-		speechAssistantMessage = contextual?.assistantMessage;
+		if (!continueLiveTurn) {
+			speechConversationMessages = contextual?.conversationMessages ?? [];
+			speechAssistantMessage = contextual?.assistantMessage;
+		}
+		vocalizer.setCodeDescriptionMessages(speechAssistantMessage
+			? contextualAssistantMessages(speechConversationMessages, speechAssistantMessage) : undefined);
 		playbackPaused = request.paused;
 		pausedOwnerUtterance = undefined;
 		playbackPositionEstimated = false;
@@ -1919,7 +1943,7 @@ const chargeBackfillUnit = (): boolean => {
 		ownerContentExpected = hasSpeakableAudio(suffix);
 		if (ownerContentExpected) announceProjectForSpeech();
 		if (continueLiveTurn) {
-			vocalizer.setNarrationSourceOffset(sourceOffset);
+			vocalizer.setNarrationSourceOffset(sourceOffset, target.skipUnits ?? 0);
 			vocalizer.pushDelta(suffix);
 		} else vocalizer.speakFrom(suffix, sourceOffset, target.skipUnits ?? 0);
 		ownerTurnEnded = !continueLiveTurn;
@@ -2410,7 +2434,7 @@ const chargeBackfillUnit = (): boolean => {
 			cancel();
 			if (talkEpoch !== contextEpoch || captureEpoch !== inputEpoch || !activeContext) return;
 			activeInputEndpoint = undefined;
-			releaseSpeechOwnership(false);
+			releaseAfterTransportCancellation(undefined, false, cancelActiveInput());
 			clearInputProgress();
 			state = "error";
 			refreshStatus();
@@ -2536,8 +2560,6 @@ const chargeBackfillUnit = (): boolean => {
 		attentionPollTimer = null;
 		if (voiceWorkerIdleTimer) clearTimeout(voiceWorkerIdleTimer);
 		voiceWorkerIdleTimer = null;
-		if (speechPreemptionTimer) clearTimeout(speechPreemptionTimer);
-		speechPreemptionTimer = null;
 		pendingSpeechPreemption = undefined;
 		pausedForAttention = false;
 		if (narrationRenderTimer) clearTimeout(narrationRenderTimer);
@@ -3372,7 +3394,6 @@ const chargeBackfillUnit = (): boolean => {
 					blockedMessageHasSpeech = false;
 					coordinator?.setAttentionEnabled(false);
 					pendingSpeechPreemption = undefined;
-					if (speechPreemptionTimer) clearTimeout(speechPreemptionTimer);
 					const cancelId = clearPlaybackTransport();
 					narration.finish();
 					const inputCancelled = cancelActiveInput();

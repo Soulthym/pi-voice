@@ -173,4 +173,14 @@ test("starts code description early while preserving spoken order", async () => 
 	assert.equal(segments[0].codeDescription.offset, "First sentence. ".length);
 	assert.equal(segments[0].code.cues[0].operations[0].id, "one");
 	assert.equal(segments[0].code.cues.at(-1).operations[0].kind, "reset");
+	// Dirty live resume must retain the same sentence ordinal without ending the stream.
+	events.length = 0; segments.length = 0;
+	skipped.clear();
+	skipped.setNarrationSourceOffset(50, 1);
+	skipped.pushDelta("```ts\nconst value = 1;\n```\n");
+	await immediate(); await immediate();
+	skipped.pushDelta("Future sentence."); skipped.flush();
+	await immediate(); await immediate();
+	assert.deepEqual(events, ["speech:Second sentence.", "speech:Future sentence.", "end"]);
+	assert.equal(segments[0].codeDescription.offset, "First sentence. ".length);
 });

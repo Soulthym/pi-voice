@@ -11,12 +11,19 @@ encode_message() {
 }
 
 IFS= read -r command || exit 1
-if [[ "$command" == "stop" ]]; then
-  if [[ -e "$active_file" ]]; then
-    : > "$stop_file"
-    printf 'ok %s\n' "$(encode_message "stopping")"
+if [[ $command == stop ]]; then
+  owner=$(cat "$active_file" 2>/dev/null || true)
+  if [[ -n $owner ]]; then
+    : >"$stop_file"
+    for _ in {1..90}; do
+      [[ $(cat "$active_file" 2>/dev/null || true) != "$owner" ]] && break
+      sleep 0.1
+    done
+  fi
+  if [[ -z $owner || $(cat "$active_file" 2>/dev/null || true) != "$owner" ]]; then
+    printf 'ok %s\n' "$(encode_message stopped)"
   else
-    printf 'error %s\n' "$(encode_message "The phone microphone is not recording")"
+    printf 'error %s\n' "$(encode_message 'Microphone stop not confirmed')"
   fi
   exit 0
 fi
@@ -47,8 +54,8 @@ else
       mkdir "$recording_lock" 2>/dev/null && lock_acquired=true
     fi
   elif [[ ! $old_owner =~ ^[0-9]+$ ]] || [[ $old_command != *pi-voice-stt-session* ]]; then
-    rm -rf "$recording_lock" "$active_file" "$stop_file"
-    mkdir "$recording_lock" 2>/dev/null && lock_acquired=true
+    # A dead client does not prove Android's recorder stopped. Keep the lease.
+    lock_acquired=false
   fi
 fi
 if [[ $lock_acquired != true ]]; then
@@ -57,14 +64,40 @@ if [[ $lock_acquired != true ]]; then
 fi
 rm -f "$recording" "$stop_file"
 printf '%s\n' "$recording_owner" > "$active_file"
+recorder_stopped=false
+tail_pid=
+disconnect_pid=
+stop_recorder() {
+  [[ $recorder_stopped == true ]] && return 0
+  [[ $(cat "$active_file" 2>/dev/null || true) == "$recording_owner" ]] || return 1
+  # The API callback, not file-size stability, confirms MediaRecorder stopped.
+  timeout 2s termux-microphone-record -q >/dev/null 2>&1 || true
+  if timeout 2s termux-microphone-record -i 2>/dev/null | grep -Eq '"isRecording"[[:space:]]*:[[:space:]]*false'; then
+    recorder_stopped=true
+    return 0
+  fi
+  return 1
+}
 cleanup() {
-  if [[ $(cat "$active_file" 2>/dev/null || true) == "$recording_owner" ]]; then
+  trap - EXIT INT TERM
+  wait "$starter_pid" 2>/dev/null || true
+  stop_recorder || true
+  [[ -n $tail_pid ]] && kill "$tail_pid" 2>/dev/null || true
+  [[ -n $disconnect_pid ]] && kill "$disconnect_pid" 2>/dev/null || true
+  if [[ $recorder_stopped == true && $(cat "$active_file" 2>/dev/null || true) == "$recording_owner" ]]; then
     rm -f "$active_file" "$stop_file"
     rmdir "$recording_lock" 2>/dev/null || true
   fi
   rm -f "$recording"
 }
+starter_pid=
 trap cleanup EXIT
+trap 'exit 1' INT TERM
+exec 3<&0
+( while IFS= read -r _ <&3; do :; done
+  [[ $(cat "$active_file" 2>/dev/null || true) == "$recording_owner" ]] && : >"$stop_file"
+) &
+disconnect_pid=$!
 
 # Everything after this header is a live Ogg/Opus byte stream.
 printf 'stream\n'
@@ -97,12 +130,12 @@ tail_pid=$!
 # A second Alt+M or desktop-side silence detection creates stop_file.
 for (( tick = 0; tick < max_record_seconds * 10; tick++ )); do
   [[ -e "$stop_file" ]] && break
+  kill -0 "$tail_pid" 2>/dev/null || break
   sleep 0.1
 done
 
-# The callback may hang on Android 15 while the stop itself succeeds.
-timeout 2s termux-microphone-record -q >/dev/null 2>&1 || true
 wait "$starter_pid" 2>/dev/null || true
+stop_recorder || exit 1
 
 # Let MediaRecorder append the final Ogg page and let tail forward it.
 previous_size=-1

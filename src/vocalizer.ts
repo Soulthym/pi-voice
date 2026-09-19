@@ -82,8 +82,9 @@ export class Vocalizer {
 		this.#onUtteranceEnded = onUtteranceEnded;
 	}
 
-	setNarrationSourceOffset(offset: number): void {
+	setNarrationSourceOffset(offset: number, skipUnits = 0): void {
 		this.#nextSourceOffset = Math.max(0, offset);
+		this.#skipUnits = Math.max(0, Math.floor(skipUnits));
 	}
 
 	setCodeDescriptionMessages(messages: readonly Message[] | undefined): void {

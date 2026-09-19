@@ -60,7 +60,7 @@ test("cancellation finishes the old stop before a replacement capture starts", a
 			if (String(command) === "stop\n") {
 				activeRecord?.destroy();
 				activeRecord = undefined;
-				socket.end(`ok ${Buffer.from("stopping").toString("base64")}\n`);
+				socket.end(`ok ${Buffer.from("stopped").toString("base64")}\n`);
 				return;
 			}
 			records += 1;
@@ -115,7 +115,8 @@ test("accepts a live binary phone audio stream and drains the decoder before res
 	// Float WAV includes legal decoder overshoot, like Opus reconstructed from PCM16.
 	const expectedAudio = wav(16000, true);
 	const server = net.createServer(socket => {
-		socket.once("data", () => socket.end(Buffer.concat([Buffer.from("stream\n"), expectedAudio])));
+		socket.once("data", command => socket.end(String(command) === "stop\n"
+			? `ok ${Buffer.from("stopped").toString("base64")}\n` : Buffer.concat([Buffer.from("stream\n"), expectedAudio])));
 	});
 	const port = await listen(server);
 	try {
@@ -129,6 +130,60 @@ test("accepts a live binary phone audio stream and drains the decoder before res
 		if (capture.type === "audio") assert.deepEqual(capture.data, expectedAudio);
 		assert.equal(samples, 16000, "capture must wait for all decoded PCM before resolving");
 	} finally {
+		await new Promise<void>(resolve => server.close(() => resolve()));
+	}
+});
+
+test("failed microphone stop rejects cancellation and prevents replacement capture until confirmed", async () => {
+	let records = 0;
+	let safe = false;
+	const recording = Promise.withResolvers<void>();
+	const server = net.createServer(socket => {
+		socket.on("error", () => {});
+		socket.once("data", command => {
+			if (String(command) === "record\n") {
+				records++; recording.resolve();
+				if (safe) socket.end(`audio ${Buffer.from("replacement").toString("base64")}\n`);
+			} else socket.end(safe ? `ok ${Buffer.from("stopped").toString("base64")}\n` : `error ${Buffer.from("Stop unconfirmed").toString("base64")}\n`);
+		});
+	});
+	const port = await listen(server);
+	const client = new PhoneInputClient();
+	try {
+		const first = assert.rejects(client.capture(`tcp://127.0.0.1:${port}`), /cancelled/);
+		await recording.promise;
+		await assert.rejects(client.cancel(), /Stop unconfirmed/);
+		await first;
+		await assert.rejects(client.capture(`tcp://127.0.0.1:${port}`), /Stop unconfirmed/);
+		assert.equal(records, 1);
+		safe = true;
+		await client.capture(`tcp://127.0.0.1:${port}`);
+		assert.equal(records, 2);
+	} finally { await new Promise<void>(resolve => server.close(() => resolve())); }
+});
+
+for (const response of ["legacy", "timeout", "disconnect"]) test(`microphone ${response} is not a stop acknowledgement`, async t => {
+	const commanded = Promise.withResolvers<void>();
+	let connection: net.Socket | undefined;
+	const server = net.createServer(socket => {
+		connection = socket;
+		socket.once("data", () => {
+			commanded.resolve();
+			if (response === "legacy") socket.end(`ok ${Buffer.from("stopping").toString("base64")}\n`);
+			if (response === "disconnect") socket.end();
+		});
+	});
+	const port = await listen(server);
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	try {
+		const client = new PhoneInputClient();
+		const stopped = assert.rejects(client.stop(`tcp://127.0.0.1:${port}`), /not confirmed|timed out|closed/);
+		await commanded.promise;
+		if (response === "timeout") t.mock.timers.tick(10_000);
+		await stopped;
+		await assert.rejects(client.cancel(), /not confirmed|timed out|closed/);
+	} finally {
+		connection?.destroy();
 		await new Promise<void>(resolve => server.close(() => resolve()));
 	}
 });

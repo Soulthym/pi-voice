@@ -53,7 +53,8 @@ function runScript(
 			detached: true,
 			stdio: ["pipe", "pipe", "pipe"],
 		});
-		child.stdin.end(input);
+		if (input === "record\n") child.stdin.write(input);
+		else child.stdin.end(input);
 		let stdout = "";
 		let stderr = "";
 		child.stdout.on("data", chunk => {
@@ -132,7 +133,7 @@ function baseEnv(overrides: Record<string, string> = {}): Record<string, string>
 	};
 }
 
-test("local STT session reports stop errors, missing ffmpeg, and honors XDG_RUNTIME_DIR", async () => {
+test("local STT session reports idle stop, missing ffmpeg, and honors XDG_RUNTIME_DIR", async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-voice-stt-errors-"));
 	{
 		try {
@@ -142,8 +143,8 @@ test("local STT session reports stop errors, missing ffmpeg, and honors XDG_RUNT
 
 			const stopped = await runScript(path.join(CLIENT_DIR, "pi-voice-stt-session"), [], "stop\n", env);
 			assert.equal(stopped.code, 0);
-			assert.match(stopped.stdout, /^error /);
-			assert.match(decodeMessage(stopped.stdout.trim()).message, /not recording/);
+			assert.match(stopped.stdout, /^ok /);
+			assert.equal(decodeMessage(stopped.stdout.trim()).message, "stopped");
 
 			const badCommand = await runScript(path.join(CLIENT_DIR, "pi-voice-stt-session"), [], "dance\n", env);
 			assert.equal(badCommand.code, 0);
@@ -254,7 +255,7 @@ test("local STT session records through PipeWire, forwards audio, and stops clea
 	}
 });
 
-test("stop terminates an active local recording", async () => {
+test("stop cannot acknowledge until the active recording generation is removed", async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-voice-stt-stop-"));
 	try {
 		const runtime = path.join(root, "runtime");
@@ -264,10 +265,15 @@ test("stop terminates an active local recording", async () => {
 		fs.mkdirSync(stateDir, { recursive: true });
 		fs.writeFileSync(path.join(stateDir, "recording-active"), `${process.pid}\n`);
 
-		const stopped = await runScript(path.join(CLIENT_DIR, "pi-voice-stt-session"), [], "stop\n", baseEnv({ XDG_RUNTIME_DIR: runtime }));
+		let acknowledged = false;
+		const pending = runScript(path.join(CLIENT_DIR, "pi-voice-stt-session"), [], "stop\n", baseEnv({ XDG_RUNTIME_DIR: runtime })).then(result => { acknowledged = true; return result; });
+		await new Promise(resolve => setTimeout(resolve, 200));
+		assert.equal(acknowledged, false);
+		fs.unlinkSync(path.join(stateDir, "recording-active"));
+		const stopped = await pending;
 		assert.equal(stopped.code, 0);
 		assert.match(stopped.stdout, /^ok /);
-		assert.equal(decodeMessage(stopped.stdout.trim()).message, "stopping");
+		assert.equal(decodeMessage(stopped.stdout.trim()).message, "stopped");
 		assert.ok(fs.existsSync(path.join(stateDir, "stop-recording")), "the stop flag must be created");
 	} finally {
 		fs.rmSync(root, { recursive: true, force: true });
@@ -286,6 +292,7 @@ test("dispatcher prefers the Termux backend when Termux is detected", async () =
 		const recording = path.join(root, "recording.ogg");
 		const bin = restrictedPath(root, {
 			"termux-microphone-record": `
+if [[ "$1" == "-i" ]]; then printf '{"isRecording":false}'; exit 0; fi
 if [[ "$1" == "-q" ]]; then
   [[ -f "${root}/producer.pid" ]] && kill "$(cat "${root}/producer.pid")" 2>/dev/null || true
   rm -f "${root}/producer.pid"
@@ -336,7 +343,7 @@ test("Termux STT session validates commands, streams the recording, and stops", 
 
 		const idleStop = await runScript(script, [], "stop\n", env);
 		assert.equal(idleStop.code, 0);
-		assert.match(decodeMessage(idleStop.stdout.trim()).message, /not recording/);
+		assert.equal(decodeMessage(idleStop.stdout.trim()).message, "stopped");
 
 		const unsupported = await runScript(script, [], "rewind\n", env);
 		assert.match(decodeMessage(unsupported.stdout.trim()).message, /Unsupported phone voice command/);
@@ -352,6 +359,7 @@ test("Termux STT session validates commands, streams the recording, and stops", 
 		const recording = path.join(root, "call.ogg");
 		const bin = restrictedPath(root, {
 			"termux-microphone-record": `
+if [[ "$1" == "-i" ]]; then printf '{"isRecording":false}'; exit 0; fi
 if [[ "$1" == "-q" ]]; then
   [[ -f "${root}/producer.pid" ]] && kill "$(cat "${root}/producer.pid")" 2>/dev/null || true
   rm -f "${root}/producer.pid"
