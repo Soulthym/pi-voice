@@ -50,6 +50,7 @@ type SourceBlock = {
 	type: NarrationMessageType;
 	contentIndex: number;
 	displayOffset: number;
+	displayGroup: number;
 	text: string;
 	start: number;
 };
@@ -470,7 +471,11 @@ export class NarrationProgress {
 		if (!this.#active || !delta) return;
 		let block = this.#blocks[this.#blocks.length - 1];
 		if (this.#forceNextBlock || !block || block.type !== type || block.contentIndex !== contentIndex) {
-			block = { type, contentIndex, displayOffset, text: "", start: this.#raw.length };
+			// Consecutive thinking blocks share a display; offsets restart for each new group.
+			const displayGroup = type === "assistant-thinking" && block?.type === type &&
+				contentIndex > block.contentIndex && displayOffset > block.displayOffset
+				? block.displayGroup : this.#raw.length;
+			block = { type, contentIndex, displayOffset, displayGroup, text: "", start: this.#raw.length };
 			this.#forceNextBlock = false;
 			this.#blocks.push(block);
 		}
@@ -685,7 +690,8 @@ export class NarrationProgress {
 		);
 		const focused = [...this.#codeBlocks.values()].flatMap(codeBlock => {
 			if (codeBlock.complete) return [];
-			const owner = (type === "assistant-thinking" ? candidates : [block]).find(candidate => codeBlock.source.start >= candidate.start &&
+			const owner = (type === "assistant-thinking" ? candidates : [block]).find(candidate =>
+				candidate.displayGroup === block.displayGroup && codeBlock.source.start >= candidate.start &&
 				codeBlock.source.end <= candidate.start + candidate.text.length);
 			if (!owner) return [];
 			const fence = this.#raw.slice(codeBlock.source.start, codeBlock.source.end);

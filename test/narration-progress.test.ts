@@ -296,6 +296,43 @@ test("highlights the selected identical thinking fence at its display offset", (
 	}
 });
 
+test("styles identical thinking groups once while retaining consecutive thinking fences", () => {
+	const code = "run();";
+	const fence = `\`\`\`ts\n${code}\n\`\`\``;
+	for (const count of [1, 2]) {
+		for (const separateMessages of [false, true]) {
+			const progress = new NarrationProgress();
+			progress.begin();
+			const bases: number[] = [];
+			for (let group = 0; group < 2; group += 1) {
+				for (let index = 0; index < count; index += 1) {
+					// Live callers start a narration message for each content block.
+					const start = progress.startMessage();
+					if (index === 0) bases.push(start);
+					progress.pushDelta("assistant-thinking", separateMessages ? index : group * (count + 1) + index,
+						fence, index * (fence.length + 2));
+					progress.registerSegment({
+						id: group * count + index, utterance: group, text: "Run it.", source: { start, end: start },
+						code: {
+							blockSource: { start, end: start + fence.length }, code, language: "ts",
+							cues: [{ offset: 0, operations: [{ kind: "line-add", id: "active", range: { startLine: 1, endLine: 1 } }] }],
+						},
+					});
+				}
+			}
+			const markdown = Array(count).fill(fence).join("\n\n");
+			progress.setSegmentAudio(0, 0, 1);
+			progress.setPlayback(0, 0);
+			for (const [group, base] of bases.entries()) {
+				progress.previewSourceOffset(base);
+				const expected = Array.from({ length: count }, (_, index) =>
+					`\`\`\`ts\u200c\n${group === 0 && index === 0 ? code : `\x1b[2m${code}\x1b[22m`}\n\`\`\``).join("\n\n");
+				assert.equal(progress.transform(markdown, "assistant-thinking", dim), expected);
+			}
+		}
+	}
+});
+
 test("uses the canonical range for a later duplicate fence within one source block", () => {
 	const code = "run();";
 	const fence = `\`\`\`ts\n${code}\n\`\`\``;

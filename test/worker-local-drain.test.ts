@@ -55,7 +55,8 @@ test("host-local playhead continues through EOF drain and stops on actual exit o
 	send({ type: "pause", paused: true }); await wait(150);
 	const paused = events.filter(e => e.type === "playback").at(-1).position;
 	await wait(150);
-	assert.equal(events.filter(e => e.type === "playback").at(-1).position, paused);
+	// Subtracting performance.now() timestamps can differ by floating-point roundoff.
+	assert.ok(Math.abs(events.filter(e => e.type === "playback").at(-1).position - paused) < 1e-9);
 	send({ type: "pause", paused: false });
 	players[0].exitCode = 0; players[0].emit("exit", 0); await wait(0);
 	assert.equal(events.filter(e => e.type === "playback").at(-1).position, 2);

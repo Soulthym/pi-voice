@@ -105,7 +105,8 @@ test("sticky pause queues new responses; settings preserve ownership and dirty a
 	// Dirty a live asset before message_end; its eventual completed text must
 	// remain resumable without either auto-starting or queueing a duplicate.
 	const dirty = assistant("Live dirty response.");
-	await host.emit("before_agent_start", {});
+	// Missing cancellation IDs now require asynchronous termination proof.
+	await host.emit("before_agent_start", {}); await settle();
 	await host.emit("message_start", { message: dirty });
 	await host.emit("message_update", { message: dirty, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Live dirty response." } });
 	await host.command("speed 1.3");

@@ -280,14 +280,30 @@ for (const persistedBeforeEnd of [true, false]) test(`canonical batch preserves 
 	if (persistedBeforeEnd) host.addMessage("current", "earlier", structuredClone(complete));
 	await host.emit("message_end", { message: complete });
 	if (!persistedBeforeEnd) {
-		assert.equal(history!.selected()!.id, selected, "must not rename to earlier identical text/index");
+		await host.emit("agent_settled", {});
+		await settle();
+		assert.equal(history!.selected()!.id, selected, "history sync must wait rather than select earlier identical text/index");
 		host.addMessage("current", "earlier", structuredClone(complete));
-		t.mock.timers.tick(0);
 	}
+	await host.emit("turn_end", { message: complete });
+	await host.emit("agent_settled", {});
 	await settle();
-	assert.equal(history!.selected()!.id, "current:1");
+	assert.equal(history!.selected()!.id, "current:1", "settled history sync must canonicalize before the retry timer");
+	t.mock.timers.tick(0);
+	await settle();
+	assert.equal(history!.selected()!.id, "current:1", "late retry must preserve the canonical middle target");
 	assert.equal(worker.pauses.at(-1), true);
 	t.mock.timers.reset();
+});
+
+test("a message with no live targets cannot block later history sync", async t => {
+	const { host } = await setup(t, "yield", "block-only");
+	await host.emit("message_end", { message: assistant("Uncaptured tool response.", "toolUse") });
+	const sync = t.mock.method(PlaybackHistory.prototype, "sync");
+	host.addMessage("later", null, assistant("Later response."));
+	await host.emit("agent_settled", {}); await settle();
+	assert.ok(sync.mock.callCount() > 0);
+	assert.ok(sync.mock.calls.at(-1)!.arguments[0].some(message => message.id === "later"));
 });
 
 test("Stop cancels boundary waits without starting a late narrator request", async t => {

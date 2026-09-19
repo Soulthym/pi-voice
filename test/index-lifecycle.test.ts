@@ -205,8 +205,8 @@ test("TTS changes during microphone-only ownership do not sticky-pause the submi
 	await host.command("speed 1.2");
 	assert.notEqual(worker.pauses.at(-1), true);
 	capture.resolve({ type: "text", data: "" }); await settle();
-	await host.emit("input", { text: "Prompt" });
-	await host.emit("before_agent_start", {});
+	await host.emit("input", { text: "Prompt" }); await settle();
+	await host.emit("before_agent_start", {}); await settle();
 	await streamBlockedResponse(host, "Audible submitted response."); await settle();
 	assert.match(JSON.stringify(worker.sent), /Audible submitted response/);
 	assert.notEqual(worker.pauses.at(-1), true);

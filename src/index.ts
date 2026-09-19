@@ -1473,12 +1473,12 @@ const chargeBackfillUnit = (): boolean => {
 	let transportStopBarrier = Promise.resolve();
 	const transportStops = new Map<number, Promise<void>>();
 	const waitForTransportCancellation = (cancelId: number | undefined): Promise<void> => {
-		if (cancelId === undefined) return transportStopBarrier;
-		const existing = transportStops.get(cancelId);
+		if (cancelId === undefined && !ownsSpeech) return transportStopBarrier;
+		const existing = cancelId === undefined ? undefined : transportStops.get(cancelId);
 		if (existing) return existing;
 		transportStopPending = true;
 		const previous = transportStopBarrier;
-		const stopped = new Promise<void>((resolve, reject) => {
+		const stopped = cancelId === undefined ? vocalizer.shutdown() : new Promise<void>((resolve, reject) => {
 			const timer = setTimeout(() => {
 				transportCancelWaiters.delete(cancelId);
 				void vocalizer.shutdown().then(resolve, reject);
@@ -1489,11 +1489,12 @@ const chargeBackfillUnit = (): boolean => {
 				resolve();
 			});
 		});
-		transportStopBarrier = Promise.all([previous, stopped]).then(() => {});
+		// A fresh acknowledgement/termination can supersede a failed stop, not a pending one.
+		transportStopBarrier = Promise.all([previous.catch(() => {}), stopped]).then(() => {});
 		const barrier = transportStopBarrier;
-		transportStops.set(cancelId, barrier);
+		if (cancelId !== undefined) transportStops.set(cancelId, barrier);
 		void barrier.then(() => {
-			transportStops.delete(cancelId);
+			if (cancelId !== undefined) transportStops.delete(cancelId);
 			if (transportStopBarrier === barrier) transportStopPending = false;
 		}, error => activeContext?.ui.notify(`Voice stop failed; ownership retained: ${String(error)}`, "error"));
 		return barrier;
@@ -1602,7 +1603,7 @@ const chargeBackfillUnit = (): boolean => {
 	};
 
 	releaseSpeechOwnership = (announceNext = true): void => {
-		if (!ownsSpeech || !coordinator || deviceRebind || transportStopPending) return;
+		if (!ownsSpeech || !coordinator || deviceRebind || transportStopPending || inputStopPending) return;
 		restoreFollowAfterSpeech();
 		if (announceNext && config.enabled && !attentionSuppressed && !playbackPaused) {
 			const waiting = coordinator.nextUnannouncedWaiting();
@@ -1616,7 +1617,7 @@ const chargeBackfillUnit = (): boolean => {
 
 	const completeOwnerSpeech = (): void => {
 		const expectedUtterance = ownerContentExpected ? lastOwnerUtterance : projectPrefixUtterance;
-		if (!ownsSpeech || !ownerTurnEnded || completingOwnerSpeech || playbackPaused || deviceRebind || transportStopPending) return;
+		if (!ownsSpeech || !ownerTurnEnded || completingOwnerSpeech || playbackPaused || deviceRebind || transportStopPending || inputStopPending) return;
 		if (expectedUtterance === undefined) projectAnnouncementPending = false;
 		else if (completedOwnerUtterance !== expectedUtterance) return;
 		completingOwnerSpeech = true;
@@ -1826,7 +1827,8 @@ const chargeBackfillUnit = (): boolean => {
 		}
 		const ctx = activeContext;
 		try {
-			if (deviceRebind) await deviceRebind;
+			// Explicit reconnect retries stop proof; ordinary playback still waits on the failure.
+			if (deviceRebind) await deviceRebind.catch(() => {});
 			if (epoch !== playbackRequestEpoch || ctx !== activeContext) return false;
 			const connection = await deviceRouter.resolveCurrentConnection();
 			if (epoch !== playbackRequestEpoch || ctx !== activeContext || !interactiveVoiceSession) return false;
@@ -1840,11 +1842,17 @@ const chargeBackfillUnit = (): boolean => {
 				changed ||= route.endpoint !== outputEndpoint ||
 					(route.kind === "device" ? route.device.connectedAt : undefined) !== outputGeneration;
 			} catch (error) { if (!identityChanged) throw error; }
-			if (changed && (ownsSpeech || inputInProgress)) {
+			if (deviceRebind || (changed && (ownsSpeech || inputInProgress))) {
 				// Termination, not a TCP accept or a cancellation timeout, proves the old sink is gone.
 				const stopping = Promise.all([vocalizer.shutdown(), cancelActiveInput()]).then(() => {});
 				deviceRebind = stopping;
 				await stopping;
+				for (const resolve of transportCancelWaiters.values()) resolve();
+				transportCancelWaiters.clear();
+				await transportStopBarrier.catch(() => {});
+				transportStopBarrier = Promise.resolve();
+				transportStopPending = false;
+				transportStops.clear();
 				if (deviceRebind === stopping) deviceRebind = undefined;
 				if (epoch !== playbackRequestEpoch || ctx !== activeContext) return false;
 				pausedOwnerUtterance = undefined;
@@ -2065,8 +2073,14 @@ const chargeBackfillUnit = (): boolean => {
 		return epoch === contextEpoch && request === playbackRequestEpoch && isCurrentContext(ctx);
 	};
 
+	const pendingCanonicalizations = new Set<(messages: PlaybackMessage[]) => boolean>();
 	const syncPlaybackMessages = (ctx: ExtensionContext, selectLatest = false): PlaybackMessage[] => {
 		const messages = playbackMessages(ctx);
+		for (const canonicalize of pendingCanonicalizations) {
+			if (canonicalize(messages)) pendingCanonicalizations.delete(canonicalize);
+		}
+		// Never let sync replace a selected live id before its session entry exists.
+		if (pendingCanonicalizations.size > 0) return messages;
 		const selected = playbackHistory.selected();
 		const updated = messages.find(message => message.id === selected?.id);
 		if (selected && updated && selected.text !== updated.text) pauseDirtyPlayback();
@@ -2079,13 +2093,15 @@ const chargeBackfillUnit = (): boolean => {
 		targets: Array<{ id: string; text: string; contentIndex: number }>,
 		assistant: unknown,
 		existingEntries: Set<string>,
-		attempt = 0,
 	): void => {
+		if (targets.length === 0) return;
 		for (const target of targets) playbackHistory.updateText(target.id, target.text);
-		const entry = ctx.sessionManager.getBranch().find(entry => entry.type === "message" &&
-			!existingEntries.has(entry.id) && (entry.message === assistant || JSON.stringify(entry.message) === JSON.stringify(assistant)));
-		if (entry) {
-			const messages = playbackMessages(ctx);
+		const epoch = contextEpoch;
+		const canonicalize = (messages: PlaybackMessage[]): boolean => {
+			if (epoch !== contextEpoch || !isCurrentContext(ctx)) return true;
+			const entry = ctx.sessionManager.getBranch().find(entry => entry.type === "message" &&
+				!existingEntries.has(entry.id) && (entry.message === assistant || JSON.stringify(entry.message) === JSON.stringify(assistant)));
+			if (!entry) return false;
 			for (const target of targets) {
 				const completed = messages.find(message => message.id === (target.contentIndex === 0 ? entry.id : `${entry.id}:${target.contentIndex}`));
 				if (!completed) continue;
@@ -2093,24 +2109,23 @@ const chargeBackfillUnit = (): boolean => {
 				const queued = queuedPausedMessages.find(message => message.id === target.id);
 				if (queued) Object.assign(queued, completed);
 			}
-			// Sync only once all live identities (including the selected middle block) are canonical.
-			playbackHistory.sync(messages);
-			return;
-		}
-		if (attempt >= 5) return;
-		const epoch = contextEpoch;
-		const timer = setTimeout(
-			() => {
-				if (epoch !== contextEpoch || !isCurrentContext(ctx)) return;
-				try {
-					finalizePlaybackMessages(ctx, targets, assistant, existingEntries, attempt + 1);
-				} catch {
-					// Ignore a timer that races session replacement.
-				}
-			},
-			[0, 20, 100, 250, 500][attempt] ?? 500,
-		);
-		timer.unref?.();
+			return true;
+		};
+		pendingCanonicalizations.add(canonicalize);
+		const retry = (attempt = 0): void => {
+			if (epoch !== contextEpoch || !isCurrentContext(ctx)) {
+				pendingCanonicalizations.delete(canonicalize);
+				return;
+			}
+			if (!pendingCanonicalizations.has(canonicalize)) return;
+			syncPlaybackMessages(ctx);
+			if (!pendingCanonicalizations.has(canonicalize) || attempt >= 5) return;
+			const timer = setTimeout(() => {
+				try { retry(attempt + 1); } catch { /* Session replacement invalidates retries. */ }
+			}, [0, 20, 100, 250, 500][attempt]);
+			timer.unref?.();
+		};
+		retry();
 	};
 
 	let timingPreprocessing: Promise<void> | undefined;
@@ -2196,7 +2211,7 @@ const chargeBackfillUnit = (): boolean => {
 						const resolvedRenderKey = renderKeyFor(ctx, contextual);
 						if (resolvedRenderKey !== message.renderKey) {
 							message.renderKey = resolvedRenderKey;
-							playbackHistory.sync(playbackMessages(ctx));
+							syncPlaybackMessages(ctx);
 						}
 						const snapshot: PlaybackTimingSnapshot = {
 							version: 3,
@@ -2325,6 +2340,7 @@ const chargeBackfillUnit = (): boolean => {
 		restoreBottomAfterSpeech = false;
 		bottomPinned = false;
 		const talkEpoch = contextEpoch;
+		const requestedInputEpoch = inputEpoch;
 		if (inputPhase === "recording" && activeInputEndpoint) {
 			setInputProgress("🎙 Stopping voice recording…");
 			try { await phoneInput.stop(activeInputEndpoint); }
@@ -2333,7 +2349,7 @@ const chargeBackfillUnit = (): boolean => {
 		}
 		if (deviceRebind) {
 			try { await deviceRebind; } catch { return; }
-			if (talkEpoch !== contextEpoch) return;
+			if (talkEpoch !== contextEpoch || requestedInputEpoch !== inputEpoch) return;
 		}
 		if (inputPhase === "acquiring") {
 			coordinator?.cancelSpeechAcquisition();
@@ -2552,10 +2568,14 @@ const chargeBackfillUnit = (): boolean => {
 		const inputCancelled = cancelActiveInput();
 		clearPlaybackTransport();
 		try {
-			await Promise.all([inputCancelled, deviceRebind, vocalizer.shutdown()]);
+			await Promise.all([inputCancelled, deviceRebind?.catch(() => {}), vocalizer.shutdown()]);
+			deviceRebind = undefined;
 			for (const resolve of transportCancelWaiters.values()) resolve();
 			transportCancelWaiters.clear();
-			await transportStopBarrier;
+			await transportStopBarrier.catch(() => {});
+			transportStopBarrier = Promise.resolve();
+			transportStopPending = false;
+			transportStops.clear();
 		} catch (error) {
 			ctx.ui.notify(`Voice reload stop failed; ownership retained: ${String(error)}`, "error");
 			throw error;
@@ -2677,14 +2697,18 @@ const chargeBackfillUnit = (): boolean => {
 		const inputCancelled = cancelActiveInput();
 		const workers = timingWorkers.splice(0);
 		try {
-			await Promise.all([inputCancelled, deviceRebind, ...workers.map(worker => worker.terminate()), vocalizer.shutdown()]);
+			await Promise.all([inputCancelled, deviceRebind?.catch(() => {}), ...workers.map(worker => worker.terminate()), vocalizer.shutdown()]);
+			deviceRebind = undefined;
 		} catch (error) {
 			ctx.ui.notify(`Voice shutdown stop failed; ownership retained: ${String(error)}`, "error");
 			throw error;
 		}
 		for (const resolve of transportCancelWaiters.values()) resolve();
 		transportCancelWaiters.clear();
-		await transportStopBarrier;
+		await transportStopBarrier.catch(() => {});
+		transportStopBarrier = Promise.resolve();
+		transportStopPending = false;
+		transportStops.clear();
 		retiringCoordinator?.shutdown();
 		if (!interactiveVoiceSession) ownsSpeech = false;
 	});
@@ -2929,8 +2953,7 @@ const chargeBackfillUnit = (): boolean => {
 		if (config.enabled && !attentionSuppressed && config.mode === "yield" && completedTurn) {
 			const text = assistantText(event.message);
 			if (text && stopReason !== "toolUse" && acquireSpeech("turn")) {
-				const messages = playbackMessages(ctx);
-				playbackHistory.sync(messages);
+				const messages = syncPlaybackMessages(ctx);
 				narration.begin();
 				let firstBlock = true;
 				for (const block of eligibleAssistantBlocks(event.message, config.mode)) {

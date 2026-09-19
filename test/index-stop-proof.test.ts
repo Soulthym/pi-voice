@@ -113,6 +113,90 @@ test("recording stop uses captured endpoint even after registry disappears", asy
  assert.equal(stop.mock.callCount(), 1);
 });
 
+test("missing cancel ID after worker exit requires fresh termination proof before releasing", async t => {
+ const { host, worker, lease } = await setup(t);
+ await host.command("test Retained audio.");
+ const termination = Promise.withResolvers<void>();
+ const terminate = t.mock.method(worker, "terminate", () => termination.promise);
+ // The worker clears its child on unexpected exit, so cancel cannot return an ID.
+ t.mock.method(worker, "cancel", () => undefined);
+ await host.command("stop"); await settle();
+ assert.ok(terminate.mock.callCount());
+ assert.ok(await fs.stat(lease));
+ termination.resolve(); await settle();
+ await assert.rejects(fs.stat(lease), { code: "ENOENT" });
+});
+
+for (const event of ["before_agent_start", "input"]) test(`${event} cannot release while microphone Stop is unresolved`, async t => {
+ const { host, lease } = await setup(t);
+ const recording = Promise.withResolvers<any>();
+ t.mock.method(PhoneInputClient.prototype, "capture", () => recording.promise);
+ await host.command("talk"); await settle();
+ assert.ok(await fs.stat(lease));
+ const stopped = Promise.withResolvers<void>();
+ t.mock.method(PhoneInputClient.prototype, "cancel", () => stopped.promise);
+ await host.command("stop"); await settle();
+ await host.emit(event, {}); await settle();
+ assert.ok(await fs.stat(lease));
+ stopped.resolve(); recording.resolve({ type: "text", data: "" }); await settle();
+ await assert.rejects(fs.stat(lease), { code: "ENOENT" });
+});
+
+test("Stop fences Talk waiting for a successful reconnect", async t => {
+ const { host, worker, lease, registration, register } = await setup(t);
+ await host.command("test Old audio.");
+ registration.connectedAt++; await register();
+ const termination = Promise.withResolvers<void>();
+ t.mock.method(worker, "terminate", () => termination.promise);
+ const capture = t.mock.method(PhoneInputClient.prototype, "capture", async () => { throw new Error("unexpected capture"); });
+ const reconnect = host.command("reconnect"); await settle();
+ await host.command("talk"); await settle();
+ await host.command("stop"); await settle();
+ assert.ok(await fs.stat(lease));
+ termination.resolve(); await reconnect; await settle();
+ assert.equal(capture.mock.callCount(), 0);
+ await assert.rejects(fs.stat(lease), { code: "ENOENT" });
+});
+
+for (const retry of ["stop", "shutdown", "reload"]) test(`failed transport barrier permits fresh ${retry} proof`, async t => {
+ const { host, worker, lease } = await setup(t);
+ await host.command("test Old audio.");
+ let cancelId = 90;
+ t.mock.method(worker, "cancel", () => ++cancelId as never);
+ const terminate = t.mock.method(worker, "terminate", async () => { throw new Error("unconfirmed"); });
+ t.mock.timers.enable({ apis: ["setTimeout"] });
+ await host.command("stop");
+ t.mock.timers.tick(1000); await settle();
+ assert.ok(terminate.mock.callCount()); assert.ok(await fs.stat(lease));
+ if (retry === "stop") {
+  await host.command("stop");
+  worker.emit({ type: "idle", cancelId }); await settle();
+ } else {
+  terminate.mock.mockImplementation(async () => {});
+  if (retry === "shutdown") await host.shutdown();
+  else await host.emit("session_start", {});
+ }
+ await assert.rejects(fs.stat(lease), { code: "ENOENT" });
+ t.mock.timers.reset();
+});
+
+for (const retry of ["reconnect", "shutdown", "reload"]) test(`failed rebind permits successful ${retry} termination proof`, async t => {
+ const { host, worker, lease, registration, register } = await setup(t);
+ await host.command("test Old audio.");
+ registration.connectedAt++; await register();
+ const terminate = t.mock.method(worker, "terminate", async () => { throw new Error("unconfirmed"); });
+ await host.command("reconnect"); await settle();
+ assert.ok(await fs.stat(lease));
+ const termination = Promise.withResolvers<void>();
+ terminate.mock.mockImplementation(() => termination.promise);
+ const retried = retry === "shutdown" ? host.shutdown() : retry === "reload" ? host.emit("session_start", {}) : host.command("reconnect");
+ await settle(); assert.ok(await fs.stat(lease));
+ assert.equal(terminate.mock.callCount(), 2);
+ termination.resolve(); await retried; await settle();
+ if (retry === "reconnect") { await host.command("stop"); await settle(); }
+ await assert.rejects(fs.stat(lease), { code: "ENOENT" });
+});
+
 test("voice test rechecks cancellation after ownership activation before any prefix or segment", async t => {
  const { host, worker } = await setup(t);
  const acquire = SessionCoordinator.prototype.forceAcquireSpeech;
