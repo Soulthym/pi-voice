@@ -669,6 +669,10 @@ export default async function (pi: ExtensionAPI) {
 							// Session replacement invalidates captured contexts before background work settles.
 						}
 					},
+					// Live/replay callers must not inherit a historical caller's budget rejection.
+					options?.chargeBackfill ? undefined : error =>
+						requestEpoch === contextEpoch && isCurrentContext(ctx) &&
+						(error === BACKFILL_EXHAUSTED || error instanceof CodeDescriptionBudgetExhaustedError),
 				)
 				.then(plan => {
 					if (requestEpoch === contextEpoch && isCurrentContext(ctx) && !plan.omitted) {
