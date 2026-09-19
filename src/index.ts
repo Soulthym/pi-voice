@@ -1253,6 +1253,7 @@ export default async function (pi: ExtensionAPI) {
 		if (!restoreBottom) return;
 		try {
 			activeScrollView()?.scrollToEnd?.();
+			atTranscriptTail = transcriptIsFollowingEnd();
 		} catch {
 			// Follow restoration is cosmetic; ignore missing runtime support.
 		}
@@ -1966,6 +1967,7 @@ export default async function (pi: ExtensionAPI) {
 		queued = false,
 		framed = false,
 		restoreTail = false,
+		prepareContext?: ExtensionContext,
 	): Promise<void> => {
 		if (!interactiveVoiceSession) return;
 		if (!queued) restoreBottomAfterSpeech = restoreTail;
@@ -2001,6 +2003,22 @@ export default async function (pi: ExtensionAPI) {
 		pausedOwnerUtterance = undefined;
 		if (!framed) previewPlaybackTarget({ ...target, sourceOffset }, !queued);
 		refreshPlaybackTimeline();
+
+		if (prepareContext) {
+			await new Promise<void>(resolve => setImmediate(resolve));
+			if (!await preparePlaybackMessages(prepareContext, request.epoch) || pendingReplay !== request) return;
+			const messages = syncPlaybackMessages(prepareContext, false, true);
+			if (!messages.some(message => message.id === target.id && message.text === target.text)) {
+				pendingReplay = undefined;
+				return;
+			}
+			// Resolve absolute timing only after canonical identities and snapshots are available.
+			playbackHistory.beginCapture(target.id, target.text, target.time, false, sourceOffset, target.skipUnits ?? 0);
+			target = playbackHistory.resumeTarget()!;
+			request.target = { ...target, sourceOffset };
+			request.recordTimings = recordTimings = recordTimings && !playbackHistory.hasCompleteTimingFor(target.id);
+			refreshPlaybackTimeline();
+		}
 
 		const displacedLiveTurn = ownsSpeech && speechPurpose === "turn" && !ownerTurnEnded;
 		const displacedLiveText = displacedLiveTurn ? ownedSpeechText : "";
@@ -2155,7 +2173,7 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	const pendingCanonicalizations = new Set<(messages: PlaybackMessage[]) => boolean>();
-	const syncPlaybackMessages = (ctx: ExtensionContext, selectLatest = false): PlaybackMessage[] => {
+	const syncPlaybackMessages = (ctx: ExtensionContext, selectLatest = false, replacing = false): PlaybackMessage[] => {
 		const messages = playbackMessages(ctx);
 		for (const canonicalize of pendingCanonicalizations) {
 			if (canonicalize(messages)) pendingCanonicalizations.delete(canonicalize);
@@ -2164,7 +2182,7 @@ export default async function (pi: ExtensionAPI) {
 		const selected = playbackHistory.selected(true);
 		if (pendingCanonicalizations.size > 0 || (!ownerTurnEnded && livePlaybackId !== undefined && selected?.id.startsWith("live:") && !messages.some(message => message.id === selected.id))) return messages;
 		const updated = messages.find(message => message.id === selected?.id);
-		if (selected && updated && (selected.text !== updated.text || selected.renderKey !== updated.renderKey)) pauseDirtyPlayback();
+		if (!replacing && selected && updated && (selected.text !== updated.text || selected.renderKey !== updated.renderKey)) pauseDirtyPlayback();
 		playbackHistory.sync(messages, selectLatest);
 		return messages;
 	};
@@ -3152,9 +3170,8 @@ export default async function (pi: ExtensionAPI) {
 	// Resolve identity after preview, never in this shared scroll/control path.
 	const preparePlaybackAction = async (ctx: ExtensionContext, pauseResume = false, deferInput = false): Promise<number | undefined> => {
 		if (!requireEnabledVoice(ctx)) return;
-		const epoch = ++playbackRequestEpoch;
-		// Pause/resume edits the pending replay rather than superseding it.
-		if (pauseResume && pendingReplay) pendingReplay.epoch = epoch;
+		// Pause/resume edits the pending replay without invalidating its preparation.
+		const epoch = pauseResume && pendingReplay ? playbackRequestEpoch : ++playbackRequestEpoch;
 		if (!deferInput && inputInProgress) {
 			try { await finishInputForPlayback(); }
 			catch (error) {
@@ -3221,14 +3238,14 @@ export default async function (pi: ExtensionAPI) {
 
 	const stepSentence = async (ctx: ExtensionContext, direction: -1 | 1, fromPrevious = false, navigation?: PlaybackHistory): Promise<void> => {
 		if (!requireEnabledVoice(ctx)) return;
-		const request = ++playbackRequestEpoch;
 		const messages = completedAssistantMessages(ctx, config.mode, false);
-		let history = navigation ?? playbackHistory;
-		if (!navigation && messages.length !== playbackHistory.status()?.messageCount) {
-			history = new PlaybackHistory();
+		const history = navigation ?? new PlaybackHistory();
+		if (!navigation) {
 			history.sync(messages);
 			const cursor = playbackHistory.resumeTarget();
-			if (cursor) history.beginCapture(cursor.id, cursor.text, cursor.time, false, cursor.sourceOffset, cursor.skipUnits ?? 0);
+			if (cursor && messages.some(message => message.id === cursor.id && message.text === cursor.text)) {
+				history.beginCapture(cursor.id, cursor.text, cursor.time, false, cursor.sourceOffset, cursor.skipUnits ?? 0);
+			}
 		}
 		const selected = history.selected();
 		if (!selected) { ctx.ui.notify("There is no completed assistant message", "warning"); return; }
@@ -3259,12 +3276,8 @@ export default async function (pi: ExtensionAPI) {
 		}
 		const target = history.sentenceTarget(direction, units, atTranscriptTail || fromPrevious);
 		if (target) {
-			previewPlaybackTarget(target);
-			await new Promise<void>(resolve => setImmediate(resolve));
-			if (!await preparePlaybackMessages(ctx, request) || request !== playbackRequestEpoch) return;
-			syncPlaybackMessages(ctx);
 			const fullCapture = target.sourceOffset === units[0]?.sourceOffset && !target.skipUnits;
-			void playTarget(target, fullCapture && !playbackHistory.hasCompleteTimingFor(target.id), true, false, true);
+			await playTarget(target, fullCapture, true, false, false, false, ctx);
 		} else if (direction > 0 && complete) {
 			const before = history.status();
 			if (before && before.messageIndex === before.messageCount - 1) followTranscriptTail(ctx);
@@ -3272,11 +3285,7 @@ export default async function (pi: ExtensionAPI) {
 				const next = history.move(1);
 				if (next) {
 					const target = { ...next, time: 0, sourceOffset: 0 };
-					previewPlaybackTarget(target);
-					await new Promise<void>(resolve => setImmediate(resolve));
-					if (!await preparePlaybackMessages(ctx, request) || request !== playbackRequestEpoch) return;
-					syncPlaybackMessages(ctx);
-					void playTarget(target, !playbackHistory.hasCompleteTimingFor(next.id), true, false, true);
+					await playTarget(target, true, true, false, false, false, ctx);
 				}
 			}
 		} else {
@@ -3331,7 +3340,7 @@ export default async function (pi: ExtensionAPI) {
 			if (requestEpoch === undefined || requestEpoch !== playbackRequestEpoch) return;
 			if (pendingReplay) {
 				const request = pendingReplay;
-				if (request.paused) {
+				if (request.paused && !request.waiting) {
 					playbackPaused = false;
 					narration.setPaused(playbackPaused);
 					void playTarget(request.target, request.recordTimings, request.previewTarget);

@@ -65,6 +65,67 @@ test("sentence preview precedes whole-history identity preparation", async t => 
 	await pending; await settle();
 });
 
+for (const key of ["f7", "f9"]) for (const changedCount of [false, true]) {
+	test(`${key} ignores discarded branch cursors with ${changedCount ? "different" : "equal"} message counts`, async t => {
+		const host = await setup(t);
+		host.addMessage("discarded", null, assistant("Discarded first. Discarded second."));
+		await host.start(); await host.shortcut("f11"); await settle();
+		const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
+		const before = worker.sent.length;
+		host.entries.splice(host.entries.findIndex(entry => entry.id === "discarded"), 1);
+		if (changedCount) host.addMessage("earlier", null, assistant("Earlier branch sentence."));
+		host.addMessage("replacement", null, assistant("Replacement first. Replacement second."));
+		await host.shortcut(key); await settle();
+		const spoken = worker.sent.slice(before) as Array<{ text: string }>;
+		assert.equal(spoken[0]?.text, key === "f7"
+				? (changedCount ? "Earlier branch sentence." : "Replacement first.") : "Replacement second.");
+		assert.ok(spoken.every(segment => !segment.text.includes("Discarded")));
+		assert.equal(host.render("Discarded first. Discarded second.").includes(NARRATION_ACTIVE_MARKER), false);
+	});
+}
+
+for (const resumeDuringPreparation of [false, true]) test(`F8 retains pending sentence navigation (early resume: ${resumeDuringPreparation})`, async t => {
+	const host = await setup(t);
+	const text = "First sentence. Second sentence. Third sentence.";
+	host.addMessage("answer", null, assistant(text));
+	await host.start(); await host.shortcut("f11"); await settle();
+	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
+	const before = worker.sent.length;
+	const pending = host.shortcut("f9");
+	await host.shortcut("f8");
+	assert.equal(worker.pauses.at(-1), true);
+	if (resumeDuringPreparation) await host.shortcut("f8");
+	await pending; await settle();
+	assert.equal(worker.pauses.at(-1), !resumeDuringPreparation);
+	const segments = worker.sent.slice(before) as Array<{ text: string; utterance: number; segmentId: number }>;
+	assert.deepEqual(segments.map(segment => segment.text), ["Second sentence.", "Third sentence."]);
+	if (!resumeDuringPreparation) await host.shortcut("f8");
+	await settle();
+	const third = segments[1];
+	worker.emit({ type: "segment-audio", utterance: third.utterance, segmentId: third.segmentId, start: 2, duration: 2 });
+	worker.emit({ type: "playback", utterance: third.utterance, position: 2.5 });
+	assert.ok(host.render(text).includes(`${NARRATION_ACTIVE_MARKER}Third`), "resumed replacement ticks still update highlights");
+});
+
+test("sentence navigation resolves known absolute timing after the branch grows", async t => {
+	t.mock.method(MockedVoiceWorkerClient.prototype, "measureSegment", async () => 2);
+	const host = await setup(t);
+	host.addMessage("answer", null, assistant("First sentence. Second sentence. Third sentence."));
+	await host.start(); await host.shortcut("f11"); await settle();
+	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
+	const full = worker.sent as Array<{ text: string; utterance: number; segmentId: number }>;
+	full.forEach((segment, i) => worker.emit({ type: "segment-audio", utterance: segment.utterance, segmentId: segment.segmentId, start: i * 2, duration: 2 }));
+	host.addMessage("later", "answer", assistant("Later message."));
+	const before = full.length;
+	await host.shortcut("f9"); await settle();
+	const second = full[before];
+	assert.equal(second.text, "Second sentence.");
+	worker.emit({ type: "segment-audio", utterance: second.utterance, segmentId: second.segmentId, start: 0, duration: 2 });
+	worker.emit({ type: "playback", utterance: second.utterance, position: 1 });
+	await new Promise(resolve => setTimeout(resolve, 100));
+	assert.match(host.widgetLines()?.join(" ") ?? "", /\] 0:03 \/ /);
+});
+
 test("cached description sentence previews carry description offsets before acquisition", async t => {
 	const host = await setup(t);
 	const cached = mock.method(CodeDescriptionCache.prototype, "get", () => ({ guided: false,

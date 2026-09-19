@@ -32,9 +32,16 @@ for (const key of ["f11", "f8"]) test(`${key} replay from tail restores bottom u
 		assert.equal(host.scrollView.scrollTop, 92, "replay immediately leaves tail for the spoken position");
 		const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
 		const last = worker.sent.at(-1) as { utterance: number };
+		const segments = worker.sent as Array<{ utterance: number; segmentId: number; text: string }>;
+		segments.filter(segment => segment.utterance === last.utterance).forEach((segment, i) =>
+			worker.emit({ type: "segment-audio", utterance: segment.utterance, segmentId: segment.segmentId, start: i * 2, duration: 2 }));
 		if (manual) host.scrollView.manualScrollTo(50);
 		worker.emit({ type: "idle", utterance: last.utterance }); await settle();
 		assert.equal(host.scrollView.scrollTop, manual ? 50 : 260);
 		assert.equal(host.scrollView.isFollowingEnd, !manual);
+		const before = worker.sent.length;
+		await host.shortcut("f7"); await settle();
+		assert.equal(segments[before].text, manual ? "First sentence." : "Second sentence.",
+			"completion restores logical tail only when it restores the viewport");
 	}
 });

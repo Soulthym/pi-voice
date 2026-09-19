@@ -42,11 +42,12 @@ test("worker quality reaches the widget independently of clock estimates and pre
 	worker.emit({ type: "playback", utterance, position: 1, estimated: true });
 	await settle();
 	assert.match(widget(), /playback clock: estimated/);
+	// Pause the active transport; F8 after completion at the restored tail starts a new replay.
+	await host.shortcut("f8");
 	worker.emit({ type: "idle", utterance });
 	const snapshots = () => host.entries.filter(entry => entry.customType === "pi-voice.playback-timing").map(entry => entry.data as PlaybackTimingSnapshot);
 	assert.equal(snapshots().length, 1);
 	const estimated = structuredClone(snapshots()[0]);
-	await host.shortcut("f8");
 	const frozen = host.render(text);
 	const top = host.scrollView.scrollTop;
 	worker.emit({ type: "alignment", segmentId, quality: "mixed", words: [
