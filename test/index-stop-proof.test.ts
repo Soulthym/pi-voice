@@ -102,6 +102,37 @@ test("failed rebind keeps its barrier and lease through later playback and shutd
  assert.ok(host.notices.some(notice => /shutdown stop failed; ownership retained/.test(notice.message)));
 });
 
+test("failed session_shutdown followed by replacement cannot steal same-PID ownership; reconnect retries cleanup only", async t => {
+ const { host, worker, lease } = await setup(t);
+ await host.command("test Owned audio.");
+ const owner = JSON.parse(await fs.readFile(lease, "utf8")).instanceId;
+ const terminate = t.mock.method(worker, "terminate", async () => { throw new Error("unconfirmed remote stop"); });
+ await assert.rejects(host.shutdown(), /unconfirmed remote stop/);
+ // Pi catches the hook error and constructs a new extension anyway.
+ const replacement = new FakeVoiceHost(host.ctx.cwd, "replacement");
+ const index = MockedVoiceWorkerClient.instances.length;
+ await replacement.start();
+ const freshWorker = MockedVoiceWorkerClient.instances[index]!;
+ t.after(() => replacement.shutdown());
+ const capture = t.mock.method(PhoneInputClient.prototype, "capture", async () => { throw new Error("unexpected capture"); });
+ await replacement.command("test Must remain silent.");
+ await replacement.command("talk");
+ await new Promise(resolve => setTimeout(resolve, 1600)); await settle();
+ assert.equal(freshWorker.sent.length, 0);
+ assert.equal(capture.mock.callCount(), 0);
+ assert.equal(JSON.parse(await fs.readFile(lease, "utf8")).instanceId, owner);
+ await replacement.command("reconnect");
+ assert.equal(JSON.parse(await fs.readFile(lease, "utf8")).instanceId, owner);
+ const oldSent = worker.sent.length;
+ terminate.mock.mockImplementation(async () => {});
+ await replacement.command("reconnect");
+ await assert.rejects(fs.stat(lease), { code: "ENOENT" });
+ await replacement.command("test Fresh audio.");
+ assert.ok(freshWorker.sent.length > 0);
+ assert.equal(worker.sent.length, oldSent, "cleanup never revives retired playback");
+ assert.notEqual(JSON.parse(await fs.readFile(lease, "utf8")).instanceId, owner);
+});
+
 test("recording stop uses captured endpoint even after registry disappears", async t => {
  const { host, registration } = await setup(t);
  const captured = Promise.withResolvers<any>();

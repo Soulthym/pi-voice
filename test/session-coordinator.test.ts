@@ -21,7 +21,11 @@ test("grants speech to only the first session and records waiting attention", as
 		assert.equal(first.tryAcquireSpeech(), true);
 		assert.equal(second.speechOwner()?.instanceId, first.instanceId);
 		assert.equal(second.tryAcquireSpeech(), false);
-		assert.equal(await second.forceAcquireSpeech(), true);
+		const handoff = second.forceAcquireSpeech();
+		assert.equal(first.consumeSpeechPreemptionRequest(), true);
+		assert.equal(first.ownsSpeech(), true, "request alone does not release ownership");
+		first.releaseSpeech(); // Transport stop acknowledged.
+		assert.equal(await handoff, true);
 		assert.equal(first.ownsSpeech(), false);
 		assert.equal(second.ownsSpeech(), true);
 		second.releaseSpeech();
@@ -40,6 +44,58 @@ test("grants speech to only the first session and records waiting attention", as
 	} finally {
 		first.shutdown();
 		second.shutdown();
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("same-PID replacement cannot bypass failed shutdown and recovers after confirmed cleanup", async () => {
+	const { root, first, second } = coordinators();
+	try {
+		assert.equal(first.tryAcquireSpeech(), true);
+		first.shutdown(true); // Transport shutdown failed: keep the lease and heartbeat.
+		const leaseFile = path.join(root, "speech.lock", "lease.json");
+		const before = JSON.parse(fs.readFileSync(leaseFile, "utf8")).updatedAt;
+		assert.equal(second.tryAcquireSpeech(), false);
+		assert.equal(await second.forceAcquireSpeech(), false);
+		assert.equal(first.ownsSpeech(), true);
+		assert.ok(JSON.parse(fs.readFileSync(leaseFile, "utf8")).updatedAt > before, "deferred shutdown keeps heartbeating");
+		assert.equal(fs.existsSync(path.join(root, "preemption", `${first.instanceId}.json`)), false);
+		assert.equal(first.tryAcquireSpeech(), false);
+		assert.equal(await first.forceAcquireSpeech(), false);
+
+		first.shutdown(true); // A failed retry still must not release ownership.
+		assert.equal(second.tryAcquireSpeech(), false);
+		const retry = second.forceAcquireSpeech();
+		assert.equal(first.consumeSpeechPreemptionRequest(), true);
+		first.shutdown(); // Caller retried transport cleanup and confirmed stop.
+		assert.equal(await retry, true);
+		assert.equal(second.ownsSpeech(), true);
+		assert.equal(fs.existsSync(path.join(root, "sessions", `${first.instanceId}.json`)), false);
+		first.shutdown(); // Repeated cleanup cannot release the replacement's lease.
+		assert.equal(second.ownsSpeech(), true);
+	} finally {
+		first.shutdown();
+		second.shutdown();
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("forced handoff does not steal from a same-PID contender that acquires first", async () => {
+	const { root, first, second } = coordinators();
+	const third = new SessionCoordinator("/third", "three", root);
+	third.start();
+	try {
+		assert.equal(first.tryAcquireSpeech(), true);
+		const pending = second.forceAcquireSpeech();
+		assert.equal(first.consumeSpeechPreemptionRequest(), true);
+		first.releaseSpeech();
+		assert.equal(third.tryAcquireSpeech(), true);
+		assert.equal(await pending, false);
+		assert.equal(third.ownsSpeech(), true);
+	} finally {
+		first.shutdown();
+		second.shutdown();
+		third.shutdown();
 		fs.rmSync(root, { recursive: true, force: true });
 	}
 });

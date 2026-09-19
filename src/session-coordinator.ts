@@ -180,7 +180,7 @@ export class SessionCoordinator {
 			return true;
 		}
 		const owner = this.speechOwner();
-		if (owner && owner.pid !== process.pid) {
+		if (owner) {
 			const preemptionFile = this.#preemptionFile(owner.instanceId);
 			this.#pendingPreemptionFile = preemptionFile;
 			writeJson(preemptionFile, {
@@ -205,17 +205,9 @@ export class SessionCoordinator {
 			this.#speechLease = true;
 			return true;
 		}
-		if (remaining) {
-			// Never steal from a still-live owner, including a contender that won the
-			// handoff first. Stale leases are already removed by speechOwner(). Tests
-			// can host synthetic coordinators in one process, where no transport race
-			// exists and direct replacement preserves the historical unit contract.
-			if (remaining.pid === process.pid && owner?.instanceId === remaining.instanceId) {
-				remove(this.#speechPath());
-			} else {
-				return false;
-			}
-		}
+		// A same-PID owner may still be stopping transports after session replacement.
+		// Only its acknowledged release (or a stale lease) permits acquisition.
+		if (remaining) return false;
 		const lease = this.#acquireLease(this.#speechPath(), "speech");
 		this.#speechLease = lease;
 		return lease;
@@ -341,6 +333,7 @@ export class SessionCoordinator {
 		}
 	}
 
+	/** Defer while transports stop; retry without deferral only after stop is confirmed. */
 	shutdown(deferRelease = false): void {
 		this.#stopped = true;
 		this.cancelSpeechAcquisition();

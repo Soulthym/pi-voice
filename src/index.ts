@@ -79,6 +79,11 @@ type SpeechPurpose = "turn" | "replay" | "notification";
 const PLAYBACK_TIMING_ENTRY = "pi-voice.playback-timing";
 const CODE_DESCRIPTION_CACHE_ENTRY = "pi-voice.code-description";
 const DEVICE_SELECTION_ENTRY = "pi-voice.device-selection";
+// Pi reloads even when session_shutdown throws. Retain cleanup, never retired UI/session callbacks.
+const retiredStopsKey = Symbol.for("pi-voice.retired-stops");
+const retiredStops = ((globalThis as typeof globalThis & {
+	[retiredStopsKey]?: Set<() => Promise<void>>;
+})[retiredStopsKey] ??= new Set<() => Promise<void>>());
 
 function assistantText(message: unknown): string {
 	if (!message || typeof message !== "object" || !("role" in message) || message.role !== "assistant") return "";
@@ -2854,8 +2859,17 @@ export default async function (pi: ExtensionAPI) {
 		activeContext = null;
 		const inputCancelled = cancelActiveInput();
 		const workers = timingWorkers.splice(0);
+		let stopping: Promise<void> | undefined;
+		const cleanup = (): Promise<void> => stopping ??= Promise.all([
+			phoneInput.cancel(), deviceRebind?.catch(() => {}),
+			...workers.map(worker => worker.terminate()), vocalizer.shutdown(),
+		]).then(() => {
+			retiringCoordinator?.shutdown();
+			retiredStops.delete(cleanup);
+		}).finally(() => { stopping = undefined; });
+		retiredStops.add(cleanup);
 		try {
-			await Promise.all([inputCancelled, deviceRebind?.catch(() => {}), ...workers.map(worker => worker.terminate()), vocalizer.shutdown()]);
+			await Promise.all([inputCancelled, cleanup()]);
 			deviceRebind = undefined;
 		} catch (error) {
 			ctx.ui.notify(`Voice shutdown stop failed; ownership retained: ${String(error)}`, "error");
@@ -3855,6 +3869,12 @@ export default async function (pi: ExtensionAPI) {
 				}
 				case "reconnect": {
 					const epoch = ++playbackRequestEpoch;
+					try { await Promise.all([...retiredStops].map(cleanup => cleanup())); }
+					catch (error) {
+						ctx.ui.notify(`Voice retired transport stop unconfirmed; ownership retained. Restore the old device connection and retry /voice reconnect: ${String(error)}`, "error");
+						return;
+					}
+					if (epoch !== playbackRequestEpoch || activeContext !== ctx) return;
 					pendingReplay = undefined;
 					if (ownsSpeech) {
 						playbackPaused = true;
