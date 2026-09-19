@@ -346,22 +346,30 @@ export class PlaybackHistory {
 		if (!tracked?.capture.valid || tracked.code || tracked.audioStart === undefined || words.length === 0) return;
 		const record = tracked.capture.record;
 		const relative: TimingCheckpoint[] = [];
+		// Replays refine the saved unit's absolute timeline, not the regenerated audio clock.
+		const anchor = record.timingsComplete
+			? record.checkpoints.filter(point => point.duration > 0 && point.sourceOffset === tracked.sourceOffset)[tracked.skipUnits]
+			: undefined;
+		const absoluteStart = anchor?.time ?? (tracked.capture.recordTimings
+			? tracked.capture.baseTime + tracked.audioStart : undefined);
 		const unit = record.units?.get(`${tracked.sourceOffset}:${tracked.skipUnits}`);
 		for (const point of unit?.slice(1) ?? []) tracked.wordOffsets.add(point.sourceOffset);
-		if (tracked.capture.recordTimings && tracked.wordOffsets.size > 0) {
+		if (absoluteStart !== undefined) {
 			record.checkpoints = record.checkpoints.filter(
-				checkpoint => checkpoint.duration > 0 || !tracked.wordOffsets.has(checkpoint.sourceOffset),
+				checkpoint => checkpoint.duration > 0 || (anchor
+					? checkpoint.time < anchor.time || checkpoint.time >= anchor.time + anchor.duration
+					: !tracked.wordOffsets.has(checkpoint.sourceOffset)),
 			);
 			tracked.wordOffsets.clear();
 		}
 		let lastTime = Number.NEGATIVE_INFINITY;
 		for (const word of words) {
 			if (!Number.isFinite(word.time) || word.time < 0 || !Number.isInteger(word.sourceOffset)) continue;
-			const absoluteTime = tracked.capture.baseTime + tracked.audioStart + word.time;
+			const absoluteTime = (absoluteStart ?? tracked.capture.baseTime + tracked.audioStart) + word.time;
 			const sourceOffset = word.sourceOffset - tracked.sourceBase + tracked.capture.origin.sourceOffset;
 			if (sourceOffset < 0 || sourceOffset === tracked.sourceOffset || absoluteTime - lastTime < 0.4) continue;
 			relative.push({ time: word.time, duration: 0, sourceOffset, ...(word.quality ? { quality: word.quality } : {}) });
-			if (tracked.capture.recordTimings) record.checkpoints.push({ time: absoluteTime, duration: 0, sourceOffset, ...(word.quality ? { quality: word.quality } : {}) });
+			if (absoluteStart !== undefined) record.checkpoints.push({ time: absoluteTime, duration: 0, sourceOffset, ...(word.quality ? { quality: word.quality } : {}) });
 			tracked.wordOffsets.add(sourceOffset);
 			lastTime = absoluteTime;
 		}
@@ -391,7 +399,7 @@ export class PlaybackHistory {
 	snapshotForUtterance(utterance: number): PlaybackTimingSnapshot | undefined {
 		const capture = this.#utterances.get(utterance);
 		if (
-			!capture?.valid || !capture.recordTimings ||
+			!capture?.valid ||
 			capture.record.id.startsWith("live:") ||
 			capture.record.checkpoints.length === 0 ||
 			!capture.record.timingsComplete

@@ -177,7 +177,10 @@ test("quality reports suffix-only timings before absolute checkpoints exist", ()
 	history.setTimingQuality(1, "mixed");
 	assert.equal(history.status()?.timingQuality, "mixed");
 	history.setTimingQuality(1, "ctc-refined");
+	history.setWordTimings(1, [{ time: 1, sourceOffset: 7, quality: "ctc-refined" }]);
 	assert.equal(history.status()?.timingQuality, "ctc-refined");
+	assert.equal(history.status()?.hasTimings, false, "unanchored suffix words remain relative only");
+	assert.equal(history.snapshotForSegment(1), undefined);
 });
 
 test("directional scrubs advance across ties until the final checkpoint", () => {
@@ -221,6 +224,58 @@ test("uses aligned word checkpoints to land close to a ten-second scrub", () => 
 		time: 14.8,
 		sourceOffset: 60,
 	});
+});
+
+test("complete estimated timings are refined and persisted during replay without recording timings", () => {
+	for (const reload of [false, true]) for (const suffix of [false, true]) {
+		const message = { id: "message", text: "x".repeat(100), renderKey: "render" };
+		let history = new PlaybackHistory();
+		history.sync([message]);
+		history.beginCapture(message.id, message.text);
+		for (const [id, start, offset] of [[1, 0, 0], [2, 4, 50]]) {
+			history.registerSegment(segment(id, 1, offset));
+			history.setSegmentAudio(id, start, 4);
+			history.setWordTimings(id, [
+				{ time: 1, sourceOffset: offset + 10, quality: "estimated" },
+				{ time: 2, sourceOffset: offset + 20, quality: "estimated" },
+			]);
+		}
+		history.finishTimingGeneration(1);
+		const estimated = history.snapshotForUtterance(1)!;
+		if (reload) {
+			history = new PlaybackHistory();
+			history.sync([message]);
+			history.restore([estimated]);
+		}
+		const start = suffix ? 4 : 0;
+		const offset = suffix ? 50 : 0;
+		history.beginCapture(message.id, message.text, start, false, offset);
+		history.registerSegment(segment(3, 2, 0));
+		history.setSegmentAudio(3, 0, 4);
+		const before = history.snapshotForSegment(3);
+		assert.deepEqual(before, estimated);
+		const status = history.status();
+		history.setTimingQuality(3, "ctc-refined");
+		history.setWordTimings(3, [{ time: 2.5, sourceOffset: 20, quality: "ctc-refined" }]);
+		const refined = history.snapshotForSegment(3);
+		assert.ok(refined, "replay alignment must emit a persisted revision");
+		assert.deepEqual(refined.checkpoints, [
+			...estimated.checkpoints.filter(point => point.time < start || point.time >= start + 4),
+			{ time: start, duration: 4, sourceOffset: offset, quality: "ctc-refined" },
+			{ time: start + 2.5, duration: 0, sourceOffset: offset + 20, quality: "ctc-refined" },
+		].sort((a, b) => a.time - b.time), "replace stale words, preserving other units and sentence boundaries");
+		assert.deepEqual(history.status(), { ...status, timingQuality: "mixed" });
+		assert.equal(history.seekTarget(start + 2.5)?.time, start + 2.5);
+		history.setWordTimings(3, [{ time: 2.5, sourceOffset: 20, quality: "ctc-refined" }]);
+		assert.equal(history.snapshotForSegment(3), undefined, "duplicate alignment does not persist again");
+		const restored = new PlaybackHistory();
+		restored.sync([message]);
+		restored.restore([refined]);
+		assert.equal(restored.seekTarget(start + 2.5)?.time, start + 2.5);
+		history.invalidateCaptures();
+		history.setWordTimings(3, [{ time: 3, sourceOffset: 30 }]);
+		assert.equal(history.snapshotForSegment(3), undefined);
+	}
 });
 
 test("invalidates and replaces timing checkpoints for a full rerender", () => {
