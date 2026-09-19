@@ -51,6 +51,8 @@ type MessageRecord = PlaybackMessage & {
 	position: number;
 	timingsComplete: boolean;
 	cursor?: PlaybackUnit;
+	/** Relative checkpoints for compatible units, including suffixes without a known absolute start. */
+	units?: Map<string, TimingCheckpoint[]>;
 };
 
 type Capture = {
@@ -117,7 +119,7 @@ export class PlaybackHistory {
 					existing = { ...message, checkpoints: [], duration: 0, position: existing.position,
 						cursor: existing.text === message.text ? existing.cursor : undefined, timingsComplete: false,
 						...(compatible ? { checkpoints: compatible.checkpoints.map(point => ({ ...point })),
-							duration: compatible.duration, timingsComplete: compatible.timingsComplete } : {}) };
+							duration: compatible.duration, timingsComplete: compatible.timingsComplete, units: compatible.units } : {}) };
 					this.#records.set(message.id, existing);
 				}
 				existing.messageType = message.messageType;
@@ -180,13 +182,14 @@ export class PlaybackHistory {
 			record = { id, text, checkpoints: [], duration: 0, position: baseTime, timingsComplete: false };
 			this.#records.set(id, record);
 		} else {
+			if (record.text !== text) {
+				record.checkpoints = [];
+				record.units = undefined;
+				record.duration = 0;
+				record.timingsComplete = false;
+			}
 			record.text = text;
 			record.position = baseTime;
-		}
-		if (recordTimings) {
-			record.checkpoints = [];
-			record.duration = 0;
-			record.timingsComplete = false;
 		}
 		// Replay selects immediately and fences ticks from the displaced transport.
 		// Queued live captures must leave the audible selection and its ticks alone.
@@ -258,12 +261,17 @@ export class PlaybackHistory {
 
 	setSegmentAudio(segmentId: number, start: number, duration: number): void {
 		const tracked = this.#segments.get(segmentId);
-		if (!tracked?.capture.valid || !Number.isFinite(start) || !Number.isFinite(duration)) return;
+		if (!tracked?.capture.valid || !Number.isFinite(start) || !Number.isFinite(duration) || duration <= 0) return;
 		const normalizedStart = Math.max(0, start);
 		tracked.audioStart = normalizedStart;
 		const absoluteTime = tracked.capture.baseTime + normalizedStart;
 		const record = tracked.capture.record;
-		if (tracked.capture.recordTimings) {
+		if (tracked.capture.recordTimings && !record.timingsComplete) {
+			const previous = record.units?.get(`${tracked.sourceOffset}:${tracked.skipUnits}`);
+			if (previous) {
+				record.checkpoints = record.checkpoints.filter(point =>
+					point.time < absoluteTime || point.time >= absoluteTime + duration);
+			}
 			record.checkpoints.push({
 				time: absoluteTime,
 				duration: Math.max(0, duration),
@@ -273,13 +281,20 @@ export class PlaybackHistory {
 			record.duration = Math.max(record.duration, absoluteTime + Math.max(0, duration));
 			this.#completeTimingsIfReady(tracked.utterance);
 		}
+		record.units ??= new Map();
+		const key = `${tracked.sourceOffset}:${tracked.skipUnits}`;
+		const words = record.units.get(key)?.slice(1) ?? [];
+		record.units.set(key, [{ time: 0, duration, sourceOffset: tracked.sourceOffset }, ...words]);
 	}
 
 	setWordTimings(segmentId: number, words: Array<{ time: number; sourceOffset: number }>): void {
 		const tracked = this.#segments.get(segmentId);
-		if (!tracked?.capture.valid || !tracked.capture.recordTimings || tracked.code || tracked.audioStart === undefined || words.length === 0) return;
+		if (!tracked?.capture.valid || tracked.code || tracked.audioStart === undefined || words.length === 0) return;
 		const record = tracked.capture.record;
-		if (tracked.wordOffsets.size > 0) {
+		const relative: TimingCheckpoint[] = [];
+		const unit = record.units?.get(`${tracked.sourceOffset}:${tracked.skipUnits}`);
+		for (const point of unit?.slice(1) ?? []) tracked.wordOffsets.add(point.sourceOffset);
+		if (tracked.capture.recordTimings && tracked.wordOffsets.size > 0) {
 			record.checkpoints = record.checkpoints.filter(
 				checkpoint => checkpoint.duration > 0 || !tracked.wordOffsets.has(checkpoint.sourceOffset),
 			);
@@ -291,11 +306,27 @@ export class PlaybackHistory {
 			const absoluteTime = tracked.capture.baseTime + tracked.audioStart + word.time;
 			const sourceOffset = word.sourceOffset - tracked.sourceBase + tracked.capture.origin.sourceOffset;
 			if (sourceOffset < 0 || sourceOffset === tracked.sourceOffset || absoluteTime - lastTime < 0.4) continue;
-			record.checkpoints.push({ time: absoluteTime, duration: 0, sourceOffset });
+			relative.push({ time: word.time, duration: 0, sourceOffset });
+			if (tracked.capture.recordTimings) record.checkpoints.push({ time: absoluteTime, duration: 0, sourceOffset });
 			tracked.wordOffsets.add(sourceOffset);
 			lastTime = absoluteTime;
 		}
 		record.checkpoints.sort((left, right) => left.time - right.time);
+		if (unit) unit.splice(1, unit.length, ...relative);
+	}
+
+	/** Recovery is metadata-only: it never selects a message or changes its cursor/position. */
+	timingForUnit(messageId: string, renderKey: string, unit: PlaybackUnit): TimingCheckpoint[] | undefined {
+		const record = this.#records.get(messageId);
+		if (record?.renderKey !== renderKey) return undefined;
+		return record.units?.get(`${unit.sourceOffset}:${unit.skipUnits}`)?.map(point => ({ ...point }));
+	}
+
+	retainTimingUnit(messageId: string, renderKey: string, unit: PlaybackUnit, checkpoints: TimingCheckpoint[]): void {
+		const record = this.#records.get(messageId);
+		if (!record || record.renderKey !== renderKey || !checkpoints.length) return;
+		record.units ??= new Map();
+		record.units.set(`${unit.sourceOffset}:${unit.skipUnits}`, checkpoints.map(point => ({ ...point })));
 	}
 
 	snapshotForUtterance(utterance: number): PlaybackTimingSnapshot | undefined {
