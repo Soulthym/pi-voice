@@ -12,7 +12,7 @@ export interface ScrollViewportLike {
 	contentHeight: number;
 }
 
-export function computeAutoScrollTop(viewport: ScrollViewportLike, anchorLine: number): number | null {
+export function computeAutoScrollTop(viewport: ScrollViewportLike, anchorLine: number, start = false): number | null {
 	const { scrollTop, viewportHeight, contentHeight } = viewport;
 	if (viewportHeight <= 0 || contentHeight <= 0) return null;
 	const maxScrollTop = Math.max(0, contentHeight - viewportHeight);
@@ -21,7 +21,7 @@ export function computeAutoScrollTop(viewport: ScrollViewportLike, anchorLine: n
 	const topBand = Math.floor(viewportHeight * 0.2);
 	const bottomBand = Math.ceil(viewportHeight * 0.8);
 	const relative = anchorLine - scrollTop;
-	if (relative >= topBand && relative <= bottomBand) return null;
+	if (!start && relative >= topBand && relative <= bottomBand) return null;
 
 	const target = anchorLine - topBand;
 	return Math.max(0, Math.min(maxScrollTop, target));
@@ -29,7 +29,7 @@ export function computeAutoScrollTop(viewport: ScrollViewportLike, anchorLine: n
 
 /** True when the viewport moved independently from the last automatic anchor. */
 export function isManualScrollAway(viewport: ScrollViewportLike, lastAnchoredScrollTop: number): boolean {
-	return Math.abs(viewport.scrollTop - lastAnchoredScrollTop) > 1;
+	return viewport.scrollTop !== lastAnchoredScrollTop;
 }
 
 /**

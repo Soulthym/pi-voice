@@ -2,6 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { anchorLineForMessage, computeAutoScrollTop, isManualScrollAway } from "../src/auto-scroll.js";
 
+test("starts always anchor at twenty percent, clamped to the real transcript end", () => {
+	const view = { scrollTop: 100, viewportHeight: 40, contentHeight: 300 };
+	assert.equal(computeAutoScrollTop(view, 120), null);
+	assert.equal(computeAutoScrollTop(view, 120, true), 112);
+	assert.equal(computeAutoScrollTop(view, 299, true), 260);
+	assert.equal(computeAutoScrollTop(view, 2, true), 0);
+});
+
 const viewport = (scrollTop: number, viewportHeight = 40, contentHeight = 400) => ({
 	scrollTop,
 	viewportHeight,
@@ -32,7 +40,7 @@ test("degenerate viewports never scroll", () => {
 
 test("detects manual reframing relative to the last automatic anchor", () => {
 	assert.equal(isManualScrollAway(viewport(105), 100), true);
-	assert.equal(isManualScrollAway(viewport(101), 100), false);
+	assert.equal(isManualScrollAway(viewport(101), 100), true);
 });
 
 test("anchor tracks playback fraction inside the message", () => {

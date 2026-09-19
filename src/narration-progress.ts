@@ -436,6 +436,7 @@ export class NarrationProgress {
 	#raw = "";
 	#cursor = 0;
 	#active = false;
+	#paused = false;
 	#activeSource: NarrationSourceRange | undefined;
 	#activeWord: NarrationSourceRange | undefined;
 	#playback = new Map<number, number>();
@@ -458,6 +459,13 @@ export class NarrationProgress {
 		this.#activeWord = undefined;
 		this.#playback.clear();
 		this.#forceNextBlock = false;
+	}
+
+	/** Retain timing refinements without changing the frozen presentation. */
+	setPaused(paused: boolean): void {
+		if (this.#paused === paused) return;
+		this.#paused = paused;
+		if (!paused) for (const utterance of this.#playback.keys()) this.#recompute(utterance);
 	}
 
 	/** Starts another assistant message without discarding queued playback progress. */
@@ -573,10 +581,10 @@ export class NarrationProgress {
 		return segment.words.map(word => ({ time: word.time, sourceOffset: word.start }));
 	}
 
-	setPlayback(utterance: number, position: number): void {
+	setPlayback(utterance: number, position: number, preview = false): void {
 		if (!Number.isFinite(position) || position < 0) return;
 		this.#playback.set(utterance, position);
-		this.#recompute(utterance);
+		this.#recompute(utterance, preview);
 	}
 
 	finish(): void {
@@ -650,7 +658,7 @@ export class NarrationProgress {
 			styleActive,
 			activeMarker,
 		);
-		if (!highlightProgress || !this.#active || !block || blockStart === undefined) return injected.markdown;
+		if ((!highlightProgress && !activeMarker) || !this.#active || !block || blockStart === undefined) return injected.markdown;
 
 		const mapOffset = (offset: number): number =>
 			offset + injected.shifts.reduce((total, shift) => total + (shift.at <= offset ? shift.length : 0), 0);
@@ -688,6 +696,7 @@ export class NarrationProgress {
 			activeMarker,
 			proseShifts,
 		);
+		if (!highlightProgress) return transformed;
 		const focused = [...this.#codeBlocks.values()].flatMap(codeBlock => {
 			if (codeBlock.complete) return [];
 			const owner = (type === "assistant-thinking" ? candidates : [block]).find(candidate =>
@@ -915,7 +924,8 @@ export class NarrationProgress {
 		return changed;
 	}
 
-	#recompute(utterance: number): void {
+	#recompute(utterance: number, preview = false): void {
+		if (this.#paused && !preview) return;
 		const playback = this.#playback.get(utterance);
 		if (playback === undefined) return;
 		let cursor = this.#cursor;

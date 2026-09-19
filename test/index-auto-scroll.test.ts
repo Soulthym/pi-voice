@@ -27,7 +27,7 @@ const renderedDocument = (activeLine: number, count = 300): string[] =>
 		line === activeLine ? `${NARRATION_ACTIVE_MARKER}spoken word` : `line ${line}`,
 	);
 
-test("TUI follows exact words, permits in-band framing, and seek/resume controls re-follow", async t => {
+test("TUI follows exact words, respects manual browsing, and explicit controls re-anchor", async t => {
 	mock.module("../src/worker-client.js", {
 		namedExports: { VoiceWorkerClient: MockedVoiceWorkerClient },
 	});
@@ -132,15 +132,13 @@ test("TUI follows exact words, permits in-band framing, and seek/resume controls
 	worker!.emit({ type: "playback", utterance: replay.utterance, position: 1 } as never);
 	await waitForScroll(host, 177);
 
-	// Manual framing is accepted while the spoken word remains within 20–80%.
-	// Tracking stays armed, and a TUI hint offers immediate re-anchoring.
+	// Manual framing disables automatic motion until an explicit action.
+	// Pi owns the native jump-to-latest indicator; Voice adds no widget.
 	host.scrollView.manualScrollTo(160);
 	worker!.emit({ type: "playback", utterance: replay.utterance, position: 2 } as never);
 	await new Promise(resolve => setTimeout(resolve, 120));
 	assert.equal(host.scrollView.scrollTop, 160);
-	const hint = host.widgets.get("pi-voice-follow-hint");
-	assert.equal(hint?.placement, "belowEditor");
-	assert.match(hint?.lines?.[0] ?? "", /Alt\+V.*re-anchor spoken text/);
+	assert.equal(host.widgets.get("pi-voice-follow-hint"), undefined);
 
 	// /voice scroll-to and its advertised shortcut re-anchor the narrated word.
 	await host.command("scroll-to");
@@ -164,18 +162,17 @@ test("TUI follows exact words, permits in-band framing, and seek/resume controls
 	await host.command("scroll-to");
 	await waitForScroll(host, 177);
 
-	// Moving just beyond the 80% edge is the point at which auto-scroll snaps.
+	// Manual browsing remains authoritative even beyond the 80% edge.
 	host.scrollView.manualScrollTo(152); // active line 185 is now 33/40 lines down
 	worker!.emit({ type: "playback", utterance: replay.utterance, position: 2.5 } as never);
-	await waitForScroll(host, 177);
-	assert.equal(host.widgets.get("pi-voice-follow-hint"), undefined);
+	await new Promise(resolve => setTimeout(resolve, 120));
+	assert.equal(host.scrollView.scrollTop, 152, "manual browsing remains authoritative outside the band");
 
-	// Timeline seek buttons route through playTarget, but re-arming is not a
-	// forced snap: a sought word already inside 20–80% keeps current framing.
+	// Explicit sentence navigation re-anchors even an already in-band target.
 	host.scrollView.manualScrollTo(160);
 	worker!.emit({ type: "playback", utterance: replay.utterance, position: 3 } as never);
 	await new Promise(resolve => setTimeout(resolve, 120));
-	assert.ok(host.widgets.get("pi-voice-follow-hint"));
+	assert.equal(host.widgets.get("pi-voice-follow-hint"), undefined);
 	const forwardStart = worker!.sent.length;
 	await host.shortcut("f9");
 	const forwardSegments = worker!.sent.slice(forwardStart) as Array<{
@@ -192,7 +189,7 @@ test("TUI follows exact words, permits in-band framing, and seek/resume controls
 	worker!.emit({ type: "playback", utterance: forward.utterance, position: 0 } as never);
 	assert.ok(host.render(text).includes(NARRATION_ACTIVE_MARKER));
 	await new Promise(resolve => setTimeout(resolve, 120));
-	assert.equal(host.scrollView.scrollTop, 160);
+	assert.equal(host.scrollView.scrollTop, 172);
 
 	// F7 immediately previews and anchors its target before audio starts. Once
 	// manually reframed in-band, the first playback tick preserves that framing.
@@ -216,11 +213,14 @@ test("TUI follows exact words, permits in-band framing, and seek/resume controls
 	assert.ok(host.render(text).includes(NARRATION_ACTIVE_MARKER));
 	await new Promise(resolve => setTimeout(resolve, 120));
 	assert.equal(host.scrollView.scrollTop, 160);
-	assert.ok(host.widgets.get("pi-voice-follow-hint"));
+	assert.equal(host.widgets.get("pi-voice-follow-hint"), undefined);
 
-	// The next word crossing 80% still snaps normally.
+	// Later words cannot override manual browsing; Alt+V explicitly re-arms.
 	host.scrollView.setDocument(renderedDocument(193), 40); // 33/40 lines down
 	worker!.emit({ type: "playback", utterance: sought.utterance, position: 1 } as never);
+	await new Promise(resolve => setTimeout(resolve, 120));
+	assert.equal(host.scrollView.scrollTop, 160);
+	await host.shortcut("alt+v");
 	await waitForScroll(host, 185);
 
 	// Pausing must preserve the exact viewport even when pause-related widget
@@ -247,8 +247,7 @@ test("TUI follows exact words, permits in-band framing, and seek/resume controls
 	assert.match(host.render(text), new RegExp(`${NARRATION_ACTIVE_MARKER}Sentence`));
 	assert.equal(host.scrollView.scrollTop, 185);
 
-	// Resume keeps the current framing. Pausing it again preserves a manually
-	// framed viewport, and the next resume re-arms normal 20–80 tracking.
+	// Pausing preserves manual framing; explicit resume re-anchors at 20%.
 	await host.shortcut("f8");
 	assert.equal(worker!.pauses.at(-1), false);
 	worker!.emit({ type: "segment-audio", segmentId: pausedSeek.segmentId, start: 0, duration: 20 } as never);
@@ -260,10 +259,10 @@ test("TUI follows exact words, permits in-band framing, and seek/resume controls
 	await host.shortcut("f8");
 	worker!.emit({ type: "playback", utterance: pausedSeek.utterance, position: 1.5 } as never);
 	await new Promise(resolve => setTimeout(resolve, 120));
-	assert.equal(host.scrollView.scrollTop, 180);
-	host.scrollView.setDocument(renderedDocument(213), 40); // now 33/40 lines down
+	assert.equal(host.scrollView.scrollTop, 185);
+	host.scrollView.setDocument(renderedDocument(218), 40); // now 33/40 lines down
 	worker!.emit({ type: "playback", utterance: pausedSeek.utterance, position: 2 } as never);
-	await waitForScroll(host, 205);
+	await waitForScroll(host, 210);
 
 	// The default-on behavior is also a persisted runtime setting.
 	await host.command("autoscroll off");
@@ -271,9 +270,16 @@ test("TUI follows exact words, permits in-band framing, and seek/resume controls
 	worker!.emit({ type: "playback", utterance: pausedSeek.utterance, position: 2.5 } as never);
 	await new Promise(resolve => setTimeout(resolve, 120));
 	assert.equal(host.scrollView.scrollTop, 0);
+	assert.ok(host.render(text).includes(NARRATION_ACTIVE_MARKER), "manual lookup retains markers with autoscroll off");
+	await host.shortcut("alt+v");
+	assert.equal(host.scrollView.scrollTop, 210);
+	host.scrollView.manualScrollTo(1);
+	worker!.emit({ type: "playback", utterance: pausedSeek.utterance, position: 2.6 } as never);
+	await new Promise(resolve => setTimeout(resolve, 120));
+	assert.equal(host.scrollView.scrollTop, 1);
 	await host.command("autoscroll on");
 	worker!.emit({ type: "playback", utterance: pausedSeek.utterance, position: 3 } as never);
-	await waitForScroll(host, 205);
+	await waitForScroll(host, 210);
 
 	// Stop invalidates a paused transport; a later F8 cannot "resume" a ghost
 	// sink or reacquire the device indefinitely.
@@ -284,8 +290,8 @@ test("TUI follows exact words, permits in-band framing, and seek/resume controls
 	assert.equal(worker!.pauses.length, pauseCommandsAfterStop);
 	assert.ok(host.notices.some(notice => notice.message.includes("no assistant message playing")));
 
-	// Message movement also previews and anchors while paused without starting
-	// the replacement sink. Moving back in-band preserves the chosen framing.
+	// Message movement previews and anchors at 20% while paused, including
+	// in-band targets, without starting the replacement sink.
 	host.addMessage("user-2", "assistant-1", {
 		role: "user",
 		content: [{ type: "text", text: "Another response." }],
@@ -308,7 +314,7 @@ test("TUI follows exact words, permits in-band framing, and seek/resume controls
 	host.scrollView.queueDocument(renderedDocument(100), 40);
 	const latestStart = worker!.sent.length;
 	await host.shortcut("f10");
-	assert.equal(host.scrollView.scrollTop, 90);
+	assert.equal(host.scrollView.scrollTop, 92);
 	assert.equal(worker!.pauses.at(-1), true);
 	const latestSegments = worker!.sent.slice(latestStart) as Array<{
 		utterance: number;
