@@ -162,8 +162,8 @@ async function align(operation) {
 	const blank = Number(aligner.model.config.pad_token_id ?? 0);
 	for (const window of alignmentWindows(duration)) {
 		if (operation.epoch !== epoch || shuttingDown) return;
-		// Give newly arrived/current speech priority over further historical windows.
-		if (queue.length > 0) break;
+		// Refine current speech first, then yield further windows to the next unit.
+		if (window.start > 0 && queue.length > 0) break;
 		try {
 			const audio = resample(pcm.subarray(Math.round(window.start * inputRate), Math.round(window.end * inputRate)), inputRate, targetRate);
 			const inputs = await aligner.processor(audio);
@@ -256,6 +256,7 @@ lines.on("line", line => {
 	}
 	if (message.type === "preload") {
 		if (Number.isInteger(message.epoch) && message.epoch < epoch) return;
+		if (Number.isInteger(message.epoch) && message.epoch > epoch) queue = [];
 		epoch = Number.isInteger(message.epoch) ? message.epoch : epoch;
 		void getAligner(message.model ?? DEFAULT_ALIGNMENT_MODEL, message.dtype ?? DEFAULT_ALIGNMENT_DTYPE).then(
 			() => send({ type: "alignment-ready", requestId: message.requestId }),
@@ -269,6 +270,7 @@ lines.on("line", line => {
 	} else if (message.type === "align") {
 		const incomingEpoch = Number.isInteger(message.epoch) ? message.epoch : epoch;
 		if (incomingEpoch < epoch || shuttingDown) return;
+		if (incomingEpoch > epoch) queue = [];
 		epoch = incomingEpoch;
 		if (typeof message.audio !== "string" || message.audio.length > Math.ceil(MAX_ALIGNMENT_BYTES / 3) * 4 ||
 			typeof message.text !== "string" || message.text.length > MAX_ALIGNMENT_TEXT ||
@@ -276,8 +278,12 @@ lines.on("line", line => {
 			send({ type: "alignment-error", epoch, segmentId: message.segmentId, quality: "estimated", message: "Alignment resource limit" });
 			return;
 		}
-		for (const skipped of queue) send({ type: "alignment-error", epoch: skipped.epoch, segmentId: skipped.segmentId,
-			quality: "estimated", message: "Alignment superseded by upcoming speech" });
+		// Arrivals are in playback order: retain the nearest upcoming unit, not the tail.
+		if (queue.length > 0) {
+			send({ type: "alignment-error", epoch, segmentId: message.segmentId,
+				quality: "estimated", message: "Alignment overloaded" });
+			return;
+		}
 		queue = [{
 			type: "align",
 			epoch,
@@ -291,6 +297,7 @@ lines.on("line", line => {
 		}];
 		void pump();
 	} else if (message.type === "cancel") {
+		if (Number.isInteger(message.epoch) && message.epoch < epoch) return;
 		epoch = Number.isInteger(message.epoch) ? Math.max(epoch, message.epoch) : epoch + 1;
 		queue = [];
 	} else if (message.type === "shutdown") {

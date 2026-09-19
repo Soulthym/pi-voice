@@ -44,19 +44,35 @@ test("real alignment worker bounds windows and pending work and fences cancellat
 	assert.deepEqual(lengths, [30 * 8000, 30 * 8000, 17 * 8000]);
 	assert.equal(events.find(e => e.type === "alignment").quality, "estimated", "missing logits must never claim refinement");
 	const held = Promise.withResolvers<void>(); barrier = held.promise;
-	send({ ...job, segmentId: 2 }); await turn();
-	for (let segmentId = 3; segmentId <= 20; segmentId++) send({ ...job, segmentId });
+	const beforeBurst = lengths.length;
+	send({ ...job, segmentId: 0 });
+	send({ ...job, segmentId: 1 }); // pending before the active job finishes loading
+	for (let segmentId = 2; segmentId <= 20; segmentId++) send({ ...job, segmentId });
+	assert.deepEqual(events.filter(e => e.type === "alignment-error").map(e => e.segmentId),
+		Array.from({ length: 19 }, (_, i) => i + 2));
+	assert.ok(events.filter(e => e.type === "alignment-error").every(e => e.quality === "estimated"));
+	await turn();
+	assert.equal(lengths.length, beforeBurst + 1, "pending work must not skip the active unit's first window");
 	held.resolve(); barrier = undefined;
 	for (let i = 0; i < 30; i++) await turn();
-	assert.deepEqual(events.filter(e => e.type === "alignment").map(e => e.segmentId), [1, 2, 20]);
-	assert.equal(events.filter(e => e.type === "alignment-error").length, 17, "only newest pending unit retained");
+	assert.deepEqual(events.filter(e => e.type === "alignment").map(e => e.segmentId), [1, 0, 1], "active 0 and nearest pending 1 survive arrivals 2..N");
 	const cancelled = Promise.withResolvers<void>(); barrier = cancelled.promise;
 	send({ ...job, segmentId: 21 }); await turn();
+	send({ ...job, segmentId: 22 });
 	send({ type: "cancel", epoch: 1 });
 	cancelled.resolve(); barrier = undefined;
 	send({ ...job, segmentId: 22 }); // old-epoch input cannot resurrect cancelled work
 	for (let i = 0; i < 10; i++) await turn();
 	assert.ok(!events.some(e => e.type === "alignment" && e.segmentId >= 21));
+	const obsolete = Promise.withResolvers<void>(); barrier = obsolete.promise;
+	send({ ...job, epoch: 1, segmentId: 24 }); await turn();
+	send({ ...job, epoch: 1, segmentId: 25 });
+	send({ ...job, epoch: 2, segmentId: 26 }); // new epoch replaces obsolete pending work
+	send({ type: "cancel", epoch: 1 }); // late stale cancel must not clear the new queue
+	send({ ...job, epoch: 1, segmentId: 27 });
+	obsolete.resolve(); barrier = undefined;
+	for (let i = 0; i < 20; i++) await turn();
+	assert.deepEqual(events.filter(e => e.segmentId >= 24).map(e => [e.type, e.segmentId]), [["alignment", 26]]);
 	assert.ok(lengths.every(length => length <= 30 * 8000));
 	// Synthetic confident CTC emissions exercise recognition -> forced alignment ->
 	// source merge, not just the helper. No real model or provider is invoked.
@@ -68,7 +84,7 @@ test("real alignment worker bounds windows and pending work and fences cancellat
 		data[frame * vocab.length] = -20; data[frame * vocab.length + token] = 20;
 	}
 	nextLogits = { dims: [300, vocab.length], data };
-	send({ ...job, epoch: 1, segmentId: 23, text: "AAA BBB CCC DDD EEE FFF" });
+	send({ ...job, epoch: 2, segmentId: 23, text: "AAA BBB CCC DDD EEE FFF" });
 	for (let i = 0; i < 20 && !events.some(e => e.segmentId === 23); i++) await turn();
 	const aligned = events.find(e => e.segmentId === 23);
 	assert.equal(aligned.quality, "mixed");
