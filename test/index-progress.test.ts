@@ -38,11 +38,11 @@ function startFakeSttServer(socketPath: string): Promise<net.Server> {
 			socket.on("data", chunk => {
 				const command = chunk.toString("utf8").trim();
 				if (command === "ticket") {
-					ticket = String(++nextTicket);
+					ticket = `${"a".repeat(32)}.${++nextTicket}`;
 					clients.set(ticket, socket);
 					socket.write(`ticket ${ticket}\n`);
 				} else if (command.startsWith("stop ")) {
-					assert.match(command, /^stop [1-9][0-9]*$/);
+					assert.match(command, /^stop [0-9a-f]{32}\.[1-9][0-9]*$/);
 					clients.get(command.slice(5))?.destroy();
 					socket.end(`ok ${Buffer.from("stopped").toString("base64")}\n`);
 				} else {
