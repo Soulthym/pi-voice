@@ -57,6 +57,41 @@ test("adopts a legacy key without invalidating timing dependencies and restores 
 	}), PLAN);
 });
 
+test("uncharged joiners retry a charged rejection with their own creator and store once", async () => {
+	const cache = new CodeDescriptionCache();
+	const exhausted = Symbol("budget exhausted");
+	const charged = Promise.withResolvers<typeof PLAN>();
+	const stored: CodeDescriptionCacheSnapshot[] = [];
+	let requests = 0;
+	const historical = cache.getOrCreate(KEY, () => charged.promise);
+	const create = async () => { requests++; return PLAN; };
+	const retry = (error: unknown) => error === exhausted;
+	const live = cache.getOrCreate(KEY, create, snapshot => stored.push(snapshot), retry);
+	const replay = cache.getOrCreate(KEY, create, snapshot => stored.push(snapshot), retry);
+	charged.reject(exhausted);
+	await assert.rejects(historical, error => error === exhausted);
+	assert.deepEqual(await Promise.all([live, replay]), [PLAN, PLAN]);
+	assert.equal(requests, 1);
+	assert.deepEqual(stored, [{ version: 1, key: KEY, plan: PLAN }]);
+	assert.equal(cache.get(KEY), PLAN);
+});
+
+test("joiners do not retry unrelated failures or requests from a restored session", async () => {
+	for (const restore of [false, true]) {
+		const cache = new CodeDescriptionCache();
+		const deferred = Promise.withResolvers<typeof PLAN>();
+		const failure = new Error("rejected");
+		let requests = 0;
+		const first = cache.getOrCreate(KEY, () => deferred.promise);
+		const joined = cache.getOrCreate(KEY, async () => { requests++; return PLAN; }, undefined, () => restore);
+		if (restore) cache.restore([]);
+		deferred.reject(failure);
+		await assert.rejects(first, error => error === failure);
+		await assert.rejects(joined, error => error === failure);
+		assert.equal(requests, 0);
+	}
+});
+
 test("rejects malformed persisted descriptions", () => {
 	assert.equal(parseCodeDescriptionCacheSnapshot({ version: 1, key: "short", plan: PLAN }), undefined);
 	assert.equal(

@@ -109,13 +109,18 @@ export class CodeDescriptionCache {
 		key: string,
 		create: () => Promise<CodeNarrationPlan>,
 		onStore?: (snapshot: CodeDescriptionCacheSnapshot) => void,
+		/** Let a joining caller retry a rejection specific to the original caller's policy. */
+		retryRejected?: (error: unknown) => boolean,
 	): Promise<CodeNarrationPlan> {
 		const cached = this.#plans.get(key);
 		if (cached) return Promise.resolve(cached);
-		const active = this.#pending.get(key);
-		if (active) return active;
-
 		const generation = this.#generation;
+		const active = this.#pending.get(key);
+		if (active) return retryRejected ? active.catch(error => {
+			if (!retryRejected(error) || generation !== this.#generation) throw error;
+			return this.getOrCreate(key, create, onStore, retryRejected);
+		}) : active;
+
 		const pending = Promise.resolve()
 			.then(create)
 			.then(plan => {
