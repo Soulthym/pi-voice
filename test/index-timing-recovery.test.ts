@@ -76,3 +76,43 @@ for (const paused of [false, true]) test(`missing-unit recovery preserves the ta
 		await fs.stat(path.join(root, "coordinator", "speech.lock", "lease.json"));
 	}
 });
+
+test("same-transport resume cancels paused background timing before unpausing", async t => {
+	mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: MeasuringWorker } });
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-resume-timing-"));
+	const keys = ["PI_VOICE_CONFIG", "PI_VOICE_COORDINATOR_DIR", "PI_VOICE_DEVICE_DIR"];
+	const previous = keys.map(key => process.env[key]);
+	process.env.PI_VOICE_CONFIG = path.join(root, "voice.json");
+	process.env.PI_VOICE_COORDINATOR_DIR = path.join(root, "coordinator");
+	process.env.PI_VOICE_DEVICE_DIR = path.join(root, "devices");
+	await fs.writeFile(process.env.PI_VOICE_CONFIG, JSON.stringify({ enabled: true, input: "disabled", output: "local",
+		codeDescriptionPreprocessConcurrency: 0, timingPreprocessConcurrency: 1 }));
+	const host = new FakeVoiceHost(root, "resume-timing");
+	let finish: ((duration: number) => void) | undefined;
+	let measuring: MockedVoiceWorkerClient | undefined;
+	const measure = mock.method(MeasuringWorker.prototype, "measureSegment", function (this: MeasuringWorker) {
+		measuring = this;
+		return new Promise<number>(resolve => { finish = resolve; });
+	});
+	t.after(async () => {
+		finish?.(1); measure.mock.restore(); await host.shutdown(); mock.reset();
+		keys.forEach((key, i) => { if (previous[i] === undefined) delete process.env[key]; else process.env[key] = previous[i]; });
+		await fs.rm(root, { recursive: true, force: true });
+	});
+	const firstWorker = MockedVoiceWorkerClient.instances.length;
+	await host.start();
+	await streamCompletedResponse(host, "answer", "user", "First sentence. Second sentence.");
+	const worker = MockedVoiceWorkerClient.instances[firstWorker]!;
+	await host.shortcut("f8");
+	for (let i = 0; i < 100 && !measuring; i++) await new Promise(resolve => setTimeout(resolve, 10));
+	assert.ok(measuring, "paused-owner poll starts incomplete timing work");
+	const cancel = mock.method(measuring, "cancel", () => undefined);
+	const sent = worker.sent.length;
+	await host.shortcut("f8");
+	assert.ok(cancel.mock.callCount() > 0, "foreground resume cancels paused recovery");
+	assert.equal(worker.sent.length, sent, "resume reuses the same transport");
+	assert.equal(worker.pauses.at(-1), false);
+	finish?.(9);
+	await new Promise(resolve => setImmediate(resolve));
+	assert.equal(host.entries.some(entry => entry.data?.version === 3), false, "cancelled recovery cannot persist a late result");
+});

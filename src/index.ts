@@ -3355,6 +3355,7 @@ export default async function (pi: ExtensionAPI) {
 					if (target) playTarget(target, false, false, true);
 					return;
 				}
+				cancelTimingWorkers();
 				lastOwnerUtterance = pausedOwnerUtterance;
 				ownerContentExpected = true;
 				completedOwnerUtterance = undefined;
