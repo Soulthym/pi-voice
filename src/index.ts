@@ -397,6 +397,7 @@ export default async function (pi: ExtensionAPI) {
 				target: PlaybackTarget;
 				recordTimings: boolean;
 				previewTarget: boolean;
+				restoreTail: boolean;
 				paused: boolean;
 				waiting: boolean;
 			}
@@ -2078,6 +2079,7 @@ export default async function (pi: ExtensionAPI) {
 			target: { ...target, sourceOffset },
 			recordTimings,
 			previewTarget,
+			restoreTail,
 			paused: playbackPaused,
 			waiting: true,
 		};
@@ -2108,16 +2110,19 @@ export default async function (pi: ExtensionAPI) {
 
 		const displacedLiveTurn = ownsSpeech && speechPurpose === "turn" && !ownerTurnEnded;
 		const displacedLiveText = displacedLiveTurn ? ownedSpeechText : "";
-		if (inputInProgress) {
-			await finishInputForPlayback();
+		try {
+			if (inputInProgress) await finishInputForPlayback();
 			if (pendingReplay !== request || request.epoch !== playbackRequestEpoch) return;
-		}
-
-		if (inputStopPending) {
-			try { await inputStopBarrier; } catch {
-				activeContext?.ui.notify("Microphone stop is unconfirmed; playback ownership retained", "error");
-				return;
-			}
+			if (inputStopPending) await inputStopBarrier;
+		} catch (error) {
+			if (pendingReplay !== request || request.epoch !== playbackRequestEpoch) return;
+			pendingReplay = undefined;
+			vocalizer.setPlaybackPaused(true);
+			playbackPaused = true;
+			narration.setPaused(true);
+			refreshStatus();
+			activeContext?.ui.notify(`Voice replay failed; microphone ownership retained: ${error instanceof Error ? error.message : String(error)}`, "error");
+			return;
 		}
 		try {
 			if (deviceRebind) await deviceRebind;
@@ -3326,10 +3331,20 @@ export default async function (pi: ExtensionAPI) {
 
 	const replaySelected = async (ctx: ExtensionContext, automatic = false): Promise<void> => {
 		if (!requireEnabledVoice(ctx)) return;
+		// ponytail: reject live replay until preparation can preserve live capture/context;
+		// previewing it as completed history would detach ongoing ticks and deltas.
+		if (!ownerTurnEnded && livePlaybackId !== undefined && playbackHistory.selected()?.id.startsWith("live:")) {
+			ctx.ui.notify("Replay is unavailable until this assistant response finishes streaming", "warning");
+			return;
+		}
+		if (!automatic) {
+			restoreBottomAfterSpeech = false;
+			bottomPinned = false;
+		}
 		const restoreTail = atTranscriptTail && transcriptIsFollowingEnd();
 		const target = previewHistoricalTarget(ctx, 0, automatic);
 		const request = await preparePlaybackAction(ctx, false, true);
-		if (request === undefined) return;
+		if (request === undefined || request !== playbackRequestEpoch) return;
 		if (!target) {
 			ctx.ui.notify("There is no completed assistant message to replay yet", "warning");
 			return;
@@ -3348,8 +3363,6 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	const attendNextProject = async (ctx: ExtensionContext): Promise<void> => {
-		restoreBottomAfterSpeech = false;
-		bottomPinned = false;
 		await replaySelected(ctx);
 	};
 
@@ -3451,7 +3464,9 @@ export default async function (pi: ExtensionAPI) {
 		// following. An already paused or completed transport remains untouched.
 		if (pendingReplay) {
 			playbackRequestEpoch += 1;
+			coordinator?.cancelSpeechAcquisition();
 			pendingReplay = undefined;
+			vocalizer.setPlaybackPaused(true);
 			playbackPaused = true;
 			narration.setPaused(playbackPaused);
 		}
@@ -3469,7 +3484,7 @@ export default async function (pi: ExtensionAPI) {
 				if (request.paused && !request.waiting) {
 					playbackPaused = false;
 					narration.setPaused(playbackPaused);
-					void playTarget(request.target, request.recordTimings, request.previewTarget);
+					void playTarget(request.target, request.recordTimings, request.previewTarget, false, false, request.restoreTail);
 					return;
 				}
 				request.paused = !request.paused;
@@ -3479,7 +3494,7 @@ export default async function (pi: ExtensionAPI) {
 				refreshStatus();
 				refreshPlaybackTimeline();
 				if (!request.waiting && !request.paused) {
-					void playTarget(request.target, request.recordTimings, request.previewTarget, true);
+					void playTarget(request.target, request.recordTimings, request.previewTarget, true, false, request.restoreTail);
 				}
 				return;
 			}
