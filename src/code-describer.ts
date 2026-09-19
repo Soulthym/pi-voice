@@ -328,7 +328,7 @@ export async function describeCodeBlock(
 	const catalog = mode === "guided" ? await buildCodeTargetCatalog(block.language, block.code).catch(() => undefined) : undefined;
 	const targetSection = catalog ? `\n<tree_sitter_targets>\n${catalog.prompt}\n</tree_sitter_targets>` : "";
 	const baseRequest = conversation
-		? `<concerned_fence language="${block.language || "code"}">Describe the fenced block immediately before this request.</concerned_fence>${targetSection}`
+		? `<concerned_fence language="${block.language || "code"}">Explain the latest included fenced code block, the target of this request. Context includes its following prose but excludes the next block. Complement rather than repeat the surrounding explanation; focus on useful code-specific details and retain the requested highlighting protocol.</concerned_fence>${targetSection}`
 		: `<fenced_block language="${block.language || "code"}">\n${numbered}\n</fenced_block>${targetSection}`;
 	const narrationPrompt =
 		mode === "guided"
@@ -337,7 +337,7 @@ export async function describeCodeBlock(
 				: GUIDED_COORDINATE_PROMPT
 			: SUMMARY_PROMPT;
 	const reusesNormalPrompt =
-		conversation?.normalPrompt !== undefined && codeDescriptionUsesActivePrompt(ctx, modelSelector);
+		conversation?.normalPrompt !== undefined;
 	const systemPrompt = reusesNormalPrompt ? conversation.normalPrompt!.systemPrompt : narrationPrompt;
 	const tools = reusesNormalPrompt ? [...conversation.normalPrompt!.tools] : undefined;
 	let priorRejection: string | undefined;

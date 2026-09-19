@@ -85,7 +85,7 @@ test("extends the normal prompt prefix and sends the concerned block exactly onc
 	assert.equal(options?.cacheRetention, undefined);
 });
 
-test("does not forward the active system prompt or tools to a different pinned model", async () => {
+test("preserves the available system prompt and tools with a different pinned narrator", async () => {
 	const current = { provider: "current", id: "main", contextWindow: 8_192, maxTokens: 1_024 };
 	const pinned = { provider: "remote", id: "narrator", contextWindow: 8_192, maxTokens: 1_024 };
 	let submitted: { systemPrompt?: string; messages: unknown[]; tools?: unknown[] } | undefined;
@@ -118,11 +118,11 @@ test("does not forward the active system prompt or tools to a different pinned m
 		},
 	});
 
-	assert.notEqual(submitted?.systemPrompt, "PRIVATE ACTIVE SYSTEM PROMPT");
-	assert.equal(submitted?.tools, undefined);
+	assert.equal(submitted?.systemPrompt, "PRIVATE ACTIVE SYSTEM PROMPT");
+	assert.equal((submitted?.tools?.[0] as { name: string }).name, "private_tool");
 	assert.equal((submitted?.messages[0] as { role: string }).role, "user");
-	assert.equal(options?.cacheRetention, "none");
-	assert.notEqual(options?.sessionId, "normal-session");
+	assert.equal(options?.cacheRetention, undefined);
+	assert.equal(options?.sessionId, "normal-session");
 });
 
 test("rejects requests that cannot fit the selected model context", async () => {

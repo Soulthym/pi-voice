@@ -28,7 +28,7 @@ Examples for smart mode include “replace port 8000 with 8080,” “scratch th
 ## Spoken output modes
 
 - `assistant` speaks streaming assistant text. This is the default.
-- `all` additionally speaks thinking content.
+- `all` additionally speaks thinking content, regardless of whether thinking is expanded in the UI.
 - `yield` waits for the completed final response and excludes intermediate tool-use responses.
 
 `Ctrl+Shift+V` toggles spoken output. `/voice stop` cancels speech and also asks an active recording to stop.
@@ -37,22 +37,22 @@ Examples for smart mode include “replace port 8000 with 8080,” “scratch th
 
 | Key | Action |
 | --- | --- |
-| `F6` | Select and play the previous completed assistant message |
-| `F7` | Play the previous sentence or literal-newline unit; clamp at the first |
+| `F6` (⏮) | Select and play the previous eligible completed transcript target |
+| `F7` (↶) | Play the previous sentence/newline unit, crossing eligible targets; clamp at the transcript start |
 | `F8` | Pause or resume the existing audio player |
-| `F9` | Play the next sentence/newline unit; advance to the next message or pause and follow the latest transcript tail |
-| `F10` | Select and play the next completed assistant message; from the latest message, pause and follow the transcript tail |
+| `F9` (↷) | Play the next sentence/newline unit; advance to the next eligible target or pause and follow the latest transcript tail |
+| `F10` (⏭) | Select and play the next eligible completed transcript target; from the latest target, pause and follow the transcript tail |
 | `F11` | Play this session's waiting response, route attention to the oldest waiting project, or replay the selected message |
 | `Alt+V` | Re-anchor the current narrated position (`/voice scroll-to`) |
 | `Alt+T` | Pin to transcript end and follow new output (`/voice bottom`) |
 
 F7/F9 use source sentences and actual newlines, never terminal soft wraps. They work before durations are known and retain pause intent. Code-description sentences are separate steps, with existing focus cues preserved; terminal omissions are skipped. F7 from transcript-tail follow selects the final unit of the selected message.
 
-F6/F10 navigate Pi Voice's selected-message history; merely scrolling the terminal viewport does not change that selection. Navigation is available while Pi is idle. The destination message is highlighted and exposed immediately, before regenerated audio starts, and Pi Voice invalidates any marker cached in the previously selected message before locating the destination.
+Live speech, replay, ⏮/⏭ and ↶/↷ use the same mode-filtered transcript order. Each assistant text content block is a target; `all` also includes each thinking block in its actual position. Tool calls separate targets but are not spoken. No artificial thinking/answer alternation is imposed, and text separated by tools is not joined. Timings and source highlights belong to those exact targets. F6/F10 navigate this history; merely scrolling the terminal viewport does not change that selection. Navigation is available while Pi is idle. The destination message is highlighted and exposed immediately, before regenerated audio starts, and Pi Voice invalidates any marker cached in the previously selected message before locating the destination.
 
 F8 preserves the current audio connection, highlighting position, and transcript viewport around the paused word. Because the paused sink still owns the physical output resource, it retains the cross-session device lease until resume, seek, or stop. It does not restore bottom-follow merely because playback paused. If no live paused transport survives, resume falls back to regenerating from the nearest persisted timing checkpoint.
 
-F7/F9 use duration estimates first and replace them with aligned source-word checkpoints when alignment arrives, usually landing within a fraction of the requested ten seconds. Unchanged messages reuse valid timing maps and cached Opus segments. Message and time movement preserves the transport's paused versus unpaused state: while paused it updates the highlighted position and queues the replacement sink in paused state; from idle, message replay starts unpaused.
+F7/F9 select sentence/newline source units independently of timing availability; alignment refines playback highlighting without redefining the navigation units. Unchanged messages reuse valid timing maps and cached Opus segments. Message and time movement preserves the transport's paused versus unpaused state: while paused it updates the highlighted position and queues the replacement sink in paused state; from idle, message replay starts unpaused.
 
 Transcript-tail following acts as the timeline position after the latest completed message. F10 while that message is selected, or F9 from its final known sentence/newline unit, pauses active playback before behaving like `Alt+T`/`/voice bottom`: it snaps to the transcript end and follows new output without restarting or regenerating audio. If playback is already paused or complete, the transport is left untouched.
 

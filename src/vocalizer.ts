@@ -17,8 +17,8 @@ export interface CodeDescriptionSourceContext {
 	throughBlock: string;
 	/** Absolute end offset in the replay/display source. */
 	sourceEnd: number;
-	/** Exact provider context captured from a live assistant partial. */
-	providerMessages?: readonly Message[];
+	/** Provider-compatible context, resolved lazily at the canonical boundary. */
+	providerMessages?: readonly Message[] | ((signal: AbortSignal) => Promise<readonly Message[]>);
 }
 
 type CodeDescriber = (
@@ -63,7 +63,7 @@ export class Vocalizer {
 	#nextSourceOffset = 0;
 	#trackNarration = true;
 	#sourceText = "";
-	#codeDescriptionMessages: readonly Message[] | undefined;
+	#codeDescriptionMessages: readonly Message[] | ((sourceEnd: number, signal: AbortSignal) => Promise<readonly Message[]>) | undefined;
 
 	constructor(
 		getConfig: () => VoiceConfig,
@@ -87,7 +87,7 @@ export class Vocalizer {
 		this.#skipUnits = Math.max(0, Math.floor(skipUnits));
 	}
 
-	setCodeDescriptionMessages(messages: readonly Message[] | undefined): void {
+	setCodeDescriptionMessages(messages: readonly Message[] | ((sourceEnd: number, signal: AbortSignal) => Promise<readonly Message[]>) | undefined): void {
 		this.#codeDescriptionMessages = messages;
 	}
 
@@ -114,8 +114,9 @@ export class Vocalizer {
 		if (speakable) this.#pushItems(speakable.flush());
 		const utterance = this.#utterance;
 		this.#utterance = null;
+		// Keep delivery ordered across source targets, including a description
+		// waiting on prose in the next content block of this same message.
 		const barrier = this.#deliveryBarrier;
-		this.#deliveryBarrier = null;
 		if (utterance === null) return;
 		const endUtterance = (): void => {
 			this.#worker.endUtterance(utterance);
@@ -123,7 +124,7 @@ export class Vocalizer {
 		};
 		if (barrier) {
 			const generation = this.#generation;
-			void barrier.then(() => {
+			this.#deliveryBarrier = barrier.then(() => {
 				if (generation === this.#generation) endUtterance();
 			});
 		} else {
@@ -225,11 +226,14 @@ export class Vocalizer {
 			};
 			if (item.kind === "speech") this.#scheduleSpeech(item.text, source);
 			else {
+				const messages = this.#codeDescriptionMessages;
+				const text = this.#sourceText;
 				this.#scheduleCodeDescription(item.block, source, {
-					beforeBlock: this.#sourceText.slice(0, item.source.start),
-					throughBlock: this.#sourceText.slice(0, item.source.end),
+					get beforeBlock() { return text.slice(0, item.source.start); },
+					get throughBlock() { return text.slice(0, item.source.end); },
 					sourceEnd: source.end,
-					...(this.#codeDescriptionMessages ? { providerMessages: [...this.#codeDescriptionMessages] } : {}),
+					...(messages ? { providerMessages: typeof messages === "function"
+						? (signal: AbortSignal) => messages(item.source.end, signal) : messages } : {}),
 				});
 			}
 		}
@@ -242,9 +246,10 @@ export class Vocalizer {
 			return;
 		}
 		const generation = this.#generation;
+		const trackNarration = this.#trackNarration;
 		const utterance = this.#ensureUtterance();
 		this.#deliveryBarrier = this.#deliveryBarrier.then(() => {
-			if (generation === this.#generation) this.#sendSegments([text], utterance, source, false, undefined, undefined, sourceBase);
+			if (generation === this.#generation) this.#sendSegments([text], utterance, source, false, undefined, undefined, sourceBase, trackNarration);
 		});
 	}
 
@@ -256,6 +261,8 @@ export class Vocalizer {
 		const utterance = this.#ensureUtterance();
 		const generation = this.#generation;
 		const sourceBase = this.#sourceOffset;
+		const skipUnits = this.#skipUnits;
+		this.#skipUnits = 0;
 		const controller = new AbortController();
 		this.#descriptionControllers.add(controller);
 		let description: Promise<CodeNarrationPlan>;
@@ -273,7 +280,7 @@ export class Vocalizer {
 		this.#deliveryBarrier = before.then(async () => {
 			const spoken = await ready;
 			if (generation !== this.#generation) return;
-			this.#sendDescription(spoken, block, source, utterance, sourceBase);
+			this.#sendDescription(spoken, block, source, utterance, sourceBase, skipUnits);
 		});
 	}
 
@@ -283,9 +290,8 @@ export class Vocalizer {
 		source: SpeakableSourceRange,
 		utterance: number,
 		sourceBase: number,
+		requestedSkip: number,
 	): void {
-		const requestedSkip = this.#skipUnits;
-		this.#skipUnits = 0;
 		let chunks = chunkCodeNarration(plan);
 		if (plan.omitted) return; // No semantic description: stay silent rather than speak filler.
 		if (chunks.length === 0) chunks = chunkCodeNarration(plainCodeNarration(fallbackCodeDescription(block)));
@@ -325,6 +331,7 @@ export class Vocalizer {
 		code?: NarrationSegment["code"],
 		codeDescription?: NarrationSegment["codeDescription"],
 		sourceBase = this.#sourceOffset,
+		trackNarration = this.#trackNarration,
 	): void {
 		if (segments.length === 0) return;
 		const config = this.#getConfig();
@@ -335,7 +342,7 @@ export class Vocalizer {
 					? { start: source.start, end: source.start }
 					: source
 				: { start: 0, end: 0 };
-			if (this.#trackNarration) {
+			if (trackNarration) {
 				this.#onNarrationSegment?.({
 					id,
 					utterance,

@@ -283,7 +283,7 @@ test("dirty resume before the first delta reenables live narration", async t => 
 	assert.match(JSON.stringify(worker.sent), /First later sentence/);
 });
 
-test("dirty live resume retains unfinished assistant and conversation through the code fence", async t => {
+test("dirty live resume waits for the message boundary and retains full available context", async t => {
 	const { host } = await lifecycleHost(t, { codeDescriptionContext: "conversation", codeNarration: "summary", codeDescriptionPreprocessConcurrency: 0 });
 	mock.method(host, "completeModel", async () => assistant("Described test code."));
 	host.addMessage("u", "a", { role: "user", content: [{ type: "text", text: "Unique live user context" }], timestamp: 1 });
@@ -292,11 +292,16 @@ test("dirty live resume retains unfinished assistant and conversation through th
 	const text = "Unique live prefix.\n```ts\nconst liveOnly = 123;\n```\n";
 	await delta(host, text);
 	await host.shortcut("f8"); await settle();
+	assert.equal(host.modelRequests.length, 0, "closing fence is not the conversation boundary");
+	const complete = assistant(text + "Following explanation.");
+	host.addMessage("b", "u", complete);
+	await host.emit("message_end", { message: complete }); await settle();
 	assert.equal(host.modelRequests.length, 1);
 	const context = JSON.stringify(host.modelRequests[0]!.context.messages);
 	assert.match(context, /Unique live user context/);
 	assert.match(context, /Unique live prefix/);
 	assert.match(context, /const liveOnly = 123/);
+	assert.match(context, /Following explanation/);
 });
 
 test("dirty live continuation forwards its code-description sentence ordinal", async t => {

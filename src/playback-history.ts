@@ -5,6 +5,9 @@ export interface PlaybackMessage {
 	id: string;
 	text: string;
 	renderKey?: string;
+	messageType?: "assistant" | "assistant-thinking";
+	contentIndex?: number;
+	displayOffset?: number;
 }
 
 export interface PlaybackUnit {
@@ -87,6 +90,9 @@ export class PlaybackHistory {
 					if (existing.text !== message.text) existing.cursor = undefined;
 					existing.timingsComplete = false;
 				}
+				existing.messageType = message.messageType;
+				existing.contentIndex = message.contentIndex;
+				existing.displayOffset = message.displayOffset;
 				existing.text = message.text;
 				existing.renderKey = message.renderKey;
 			} else this.#records.set(message.id, { ...message, checkpoints: [], duration: 0, position: 0, timingsComplete: false });
@@ -142,15 +148,24 @@ export class PlaybackHistory {
 		this.#activeUtterance = undefined;
 	}
 
-	updateText(id: string, text: string): void {
+	updateText(id: string, text: string, source?: Pick<PlaybackMessage, "messageType" | "contentIndex" | "displayOffset">): void {
 		const record = this.#records.get(id);
-		if (record) record.text = text;
+		if (!record) return;
+		record.text = text;
+		if (source) {
+			record.messageType = source.messageType;
+			record.contentIndex = source.contentIndex;
+			record.displayOffset = source.displayOffset;
+		}
 	}
 
 	rename(fromId: string, message: PlaybackMessage): void {
 		const record = this.#records.get(fromId);
 		if (!record) return;
 		this.#records.delete(fromId);
+		record.messageType = message.messageType;
+		record.contentIndex = message.contentIndex;
+		record.displayOffset = message.displayOffset;
 		record.id = message.id;
 		record.text = message.text;
 		record.renderKey = message.renderKey;
@@ -158,8 +173,13 @@ export class PlaybackHistory {
 		if (this.#selectedId === fromId) this.#selectedId = message.id;
 	}
 
+	/** Bind before async descriptions resolve and another target becomes current. */
+	bindUtterance(utterance: number): void {
+		if (this.#capture) this.#utterances.set(utterance, this.#capture);
+	}
+
 	registerSegment(segment: NarrationSegment): void {
-		const capture = this.#capture;
+		const capture = this.#utterances.get(segment.utterance) ?? this.#capture;
 		if (!capture) return;
 		// The extension registers suffix-relative ranges; navigation uses whole-message ranges.
 		const sourceOffset = segment.source.start + capture.origin.sourceOffset;
@@ -281,7 +301,7 @@ export class PlaybackHistory {
 
 	selected(): PlaybackMessage | undefined {
 		const record = this.#selectedId ? this.#records.get(this.#selectedId) : undefined;
-		return record ? { id: record.id, text: record.text } : undefined;
+		return record ? { id: record.id, text: record.text, ...(record.messageType ? { messageType: record.messageType, contentIndex: record.contentIndex, displayOffset: record.displayOffset } : {}) } : undefined;
 	}
 
 	status(): PlaybackStatus | undefined {
@@ -358,7 +378,7 @@ export class PlaybackHistory {
 		const time = checkpoint?.time ?? 0;
 		record.cursor = unit;
 		record.position = time;
-		return { id: record.id, text: record.text, time, sourceOffset: unit.sourceOffset, skipUnits: unit.skipUnits };
+		return { ...this.selected()!, time, sourceOffset: unit.sourceOffset, skipUnits: unit.skipUnits };
 	}
 
 	resumeTarget(): PlaybackTarget | undefined {

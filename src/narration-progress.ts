@@ -49,6 +49,7 @@ export interface AlignmentWord {
 type SourceBlock = {
 	type: NarrationMessageType;
 	contentIndex: number;
+	displayOffset: number;
 	text: string;
 	start: number;
 };
@@ -461,11 +462,11 @@ export class NarrationProgress {
 		return this.#raw.length;
 	}
 
-	pushDelta(type: NarrationMessageType, contentIndex: number, delta: string): void {
+	pushDelta(type: NarrationMessageType, contentIndex: number, delta: string, displayOffset = 0): void {
 		if (!this.#active || !delta) return;
 		let block = this.#blocks[this.#blocks.length - 1];
 		if (this.#forceNextBlock || !block || block.type !== type || block.contentIndex !== contentIndex) {
-			block = { type, contentIndex, text: "", start: this.#raw.length };
+			block = { type, contentIndex, displayOffset, text: "", start: this.#raw.length };
 			this.#forceNextBlock = false;
 			this.#blocks.push(block);
 		}
@@ -473,9 +474,9 @@ export class NarrationProgress {
 		this.#raw += delta;
 	}
 
-	setCompletedText(text: string): void {
+	setCompletedText(text: string, type: NarrationMessageType = "assistant", contentIndex = 0, displayOffset = 0): void {
 		this.begin();
-		this.pushDelta("assistant", 0, text);
+		this.pushDelta(type, contentIndex, text, displayOffset);
 	}
 
 	/** Places a provisional marker before regenerated audio begins. */
@@ -624,11 +625,14 @@ export class NarrationProgress {
 		activeMarker = "",
 	): string {
 		if (!markdown) return markdown;
-		const candidates = this.#blocks.filter(block => block.type === type && block.text.trim() === markdown);
+		const candidates = this.#blocks.filter(block => block.type === type &&
+			(type === "assistant-thinking"
+				? markdown.slice(block.displayOffset, block.displayOffset + block.text.trim().length) === block.text.trim()
+				: block.text.trim() === markdown));
 		const block =
 			candidates.find(candidate => this.#cursor <= candidate.start + candidate.text.length) ?? candidates[candidates.length - 1];
 		const leading = block ? block.text.length - block.text.trimStart().length : 0;
-		const blockStart = block ? block.start + leading : undefined;
+		const blockStart = block ? block.start + leading - block.displayOffset : undefined;
 		const injected = this.#injectCodeDescriptions(
 			markdown,
 			blockStart,

@@ -1,3 +1,6 @@
+import { createHash } from "node:crypto";
+import { SpeakableStream } from "./speakable.js";
+import type { VoiceMode } from "./config.js";
 import type { Message } from "@earendil-works/pi-ai";
 import { buildSessionContext, convertToLlm, type SessionEntry } from "@earendil-works/pi-coding-agent";
 
@@ -97,9 +100,59 @@ export function contextualAssistantMessagesThroughText(
 	return providerMessagesForAssistant(conversationBefore, { ...structuredClone(assistant), content });
 }
 
+/** Each actual content block is a navigation/source target; tool calls are never joined across. */
+export function eligibleAssistantBlocks(assistant: unknown, mode: VoiceMode) {
+	if (!assistant || typeof assistant !== "object" || !("role" in assistant) || assistant.role !== "assistant" ||
+		!("content" in assistant) || !Array.isArray(assistant.content)) return [];
+	let thinkingOffset = 0;
+	return assistant.content.flatMap<{ contentIndex: number; text: string; messageType: "assistant" | "assistant-thinking"; displayOffset: number }>((block, contentIndex) => {
+		if (block?.type !== "thinking") thinkingOffset = 0;
+		if (block?.type === "text" && typeof block.text === "string") return [{ contentIndex, text: block.text, messageType: "assistant", displayOffset: 0 }];
+		if (block?.type === "thinking" && typeof block.thinking === "string") {
+			const displayOffset = thinkingOffset;
+			if (block.thinking.trim()) thinkingOffset += block.thinking.trim().length + 2; // Pi joins consecutive thinking Markdown with two newlines.
+			if (mode === "all") return [{ contentIndex, text: block.thinking, messageType: "assistant-thinking", displayOffset }];
+		}
+		return [];
+	});
+}
+
+/** Full containing-message context, ending BEFORE the next fence, or at message end.
+ * Undefined means the streaming boundary has not arrived. Offsets are block-local UTF-16.
+ */
+export function assistantCodeContext(
+	before: readonly Message[], assistant: unknown, contentIndex: number, sourceEnd: number, final = true,
+): Message[] | undefined {
+	if (!assistant || typeof assistant !== "object" || !("content" in assistant) || !Array.isArray(assistant.content)) return [...before];
+	for (let index = contentIndex; index < assistant.content.length; index++) {
+		const block = assistant.content[index];
+		const text = block?.type === "text" ? block.text : block?.type === "thinking" ? block.thinking : undefined;
+		if (typeof text !== "string") continue;
+		const stream = new SpeakableStream();
+		stream.push(text);
+		const end = stream.fenceStarts.find(start => index !== contentIndex || start >= sourceEnd);
+		if (end === undefined) continue;
+		const content = assistant.content.slice(0, index);
+		if (end > 0) {
+			const truncated = { ...block, [block.type === "text" ? "text" : "thinking"]: text.slice(0, end) };
+			// A whole-block provider signature is not valid for a truncated block.
+			delete truncated.textSignature;
+			delete truncated.thinkingSignature;
+			content.push(truncated);
+		}
+		return providerMessagesForAssistant(before, { ...assistant, content });
+	}
+	return final ? providerMessagesForAssistant(before, assistant) : undefined;
+}
+
 function providerVisibleMessage(message: Message): unknown {
 	if (message.role === "user") return { role: message.role, content: message.content };
-	if (message.role === "assistant") return { role: message.role, content: message.content };
+	if (message.role === "assistant") return { role: message.role, content: message.content.map(block => {
+		if (block.type === "text") return { type: block.type, text: block.text };
+		if (block.type === "thinking") return { type: block.type, thinking: block.thinking,
+			...(block.redacted ? { redacted: true, thinkingSignature: block.thinkingSignature } : {}) };
+		return { type: block.type, id: block.id, name: block.name, arguments: block.arguments, namespace: block.namespace };
+	}) };
 	return {
 		role: message.role,
 		toolCallId: message.toolCallId,
@@ -109,7 +162,7 @@ function providerVisibleMessage(message: Message): unknown {
 	};
 }
 
-/** Deterministic identity for the content providers actually receive. */
+/** Compact source identity; provider transforms and runtime metadata are not archived. */
 export function structuredContextIdentity(messages: readonly Message[]): string {
-	return JSON.stringify(messages.map(providerVisibleMessage));
+	return createHash("sha256").update(JSON.stringify(messages.map(providerVisibleMessage))).digest("hex");
 }

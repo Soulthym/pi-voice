@@ -4,8 +4,8 @@ import { getMarkdownTheme, highlightCode, type ExtensionAPI, type ExtensionConte
 import { Markdown } from "@earendil-works/pi-tui";
 import { hasSpeakableAudio, requiresVoiceAttention } from "./attention.js";
 import {
-	contextualAssistantMessages,
-	contextualAssistantMessagesThroughText,
+	assistantCodeContext,
+	eligibleAssistantBlocks,
 	resolvedSessionContext,
 	structuredContextIdentity,
 	type ResolvedCodeContext,
@@ -106,11 +106,13 @@ function assistantStopReason(message: unknown): string | undefined {
 type ContextualPlaybackMessage = PlaybackMessage & {
 	conversationMessages: Message[];
 	assistantMessage: unknown;
+	contentIndex: number;
+	messageType: NarrationMessageType;
 };
 
 const conversationBeforeCache = new WeakMap<object, Map<string, ResolvedCodeContext>>();
 const completedMessagesCache = new WeakMap<object, { session: string; leaf: string | null; messages: Map<string, ContextualPlaybackMessage[]> }>();
-const completedEntryCache = new WeakMap<object, Map<boolean, ContextualPlaybackMessage>>();
+const completedEntryCache = new WeakMap<object, Map<string, ContextualPlaybackMessage[]>>();
 type IdentityContext = string | (() => string);
 const completedBlocksCache = new WeakMap<ContextualPlaybackMessage, Array<DescribableCodeItem & { identityContext: () => string; providerMessagesThroughBlock: Message[] }>>();
 
@@ -119,8 +121,8 @@ function completedCodeItems(message: ContextualPlaybackMessage) {
 	if (!items) {
 		items = describableCodeItems(message.text).map(item => {
 			// Retain compact lookup keys downstream, not serialized copies of every prefix.
-			const providerMessages = () => contextualAssistantMessagesThroughText(
-				message.conversationMessages, message.assistantMessage, item.throughBlock.length);
+			const providerMessages = () => assistantCodeContext(
+				message.conversationMessages, message.assistantMessage, message.contentIndex, item.sourceEnd)!;
 			return { ...item, get providerMessagesThroughBlock() { return providerMessages(); },
 				identityContext: () => structuredContextIdentity(providerMessages()) };
 		});
@@ -182,22 +184,19 @@ function completedAssistantMessages(ctx: ExtensionContext, mode: VoiceMode, incl
 		// Yield mode only speaks the final response, not intermediate text attached to tool/edit calls.
 		if (mode === "yield" && stopReason === "toolUse") continue;
 		let variants = completedEntryCache.get(entry);
-		const existing = variants?.get(includeContext);
-		if (existing) { messages.push(existing); continue; }
-		const text = assistantText(entry.message);
-		if (text) {
-			const message: ContextualPlaybackMessage = {
-				id: entry.id,
-				text,
-				get conversationMessages() {
-					return includeContext ? contextBeforeEntry(ctx, entry.parentId).messages : [];
-				},
-				assistantMessage: entry.message,
-			};
-			if (!variants) { variants = new Map(); completedEntryCache.set(entry, variants); }
-			variants.set(includeContext, message);
-			messages.push(message);
-		}
+		const existing = variants?.get(key);
+		if (existing) { messages.push(...existing); continue; }
+		const targets = eligibleAssistantBlocks(entry.message, mode).filter(block => hasSpeakableAudio(block.text)).map(block => ({
+			...block,
+			id: block.contentIndex === 0 ? entry.id : `${entry.id}:${block.contentIndex}`,
+			get conversationMessages() {
+				return includeContext ? contextBeforeEntry(ctx, entry.parentId).messages : [];
+			},
+			assistantMessage: entry.message,
+		}));
+		if (!variants) { variants = new Map(); completedEntryCache.set(entry, variants); }
+		variants.set(key, targets);
+		messages.push(...targets);
 	}
 	cache.messages.set(key, messages);
 	return messages;
@@ -239,8 +238,7 @@ function codeDescriptionSnapshots(ctx: ExtensionContext): unknown[] {
 
 interface DescribableCodeItem {
 	block: FencedCodeBlock;
-	beforeBlock: string;
-	throughBlock: string;
+	sourceEnd: number;
 }
 
 function describableCodeItems(text: string): DescribableCodeItem[] {
@@ -249,8 +247,7 @@ function describableCodeItems(text: string): DescribableCodeItem[] {
 		.filter(item => item.kind === "code")
 		.map(item => ({
 			block: item.block,
-			beforeBlock: text.slice(0, item.source.start),
-			throughBlock: text.slice(0, item.source.end),
+			sourceEnd: item.source.end,
 		}));
 }
 
@@ -314,6 +311,35 @@ export default async function (pi: ExtensionAPI) {
 	let ownedSpeechText = "";
 	let speechConversationMessages: Message[] = [];
 	let speechAssistantMessage: unknown;
+	let speechContentIndex = 0;
+	let liveDisplayOffset = 0;
+	let liveSource: { assistant: unknown; final: boolean; before: Message[]; waiters: Set<() => void> } | undefined;
+	let liveBlockIndex: number | undefined;
+	const liveBlockIds = new Map<number, string>();
+	const setDescriptionSource = (contentIndex: number, suffixOffset = 0): void => {
+		const source = liveSource?.assistant === speechAssistantMessage ? liveSource : undefined;
+		const assistant = speechAssistantMessage;
+		const before = speechConversationMessages;
+		vocalizer.setCodeDescriptionMessages((end, signal) => {
+			if (config.codeDescriptionContext !== "conversation") return Promise.resolve([]);
+			if (!source) return Promise.resolve(assistantCodeContext(before, assistant, contentIndex, end + suffixOffset)!);
+			return new Promise(resolve => {
+				const finish = (messages: Message[]) => {
+					source.waiters.delete(check);
+					signal.removeEventListener("abort", abort);
+					resolve(messages);
+				};
+				const abort = () => finish([]);
+				const check = () => {
+					const messages = assistantCodeContext(source.before, source.assistant, contentIndex, end + suffixOffset, source.final);
+					if (messages) finish(messages);
+				};
+				source.waiters.add(check);
+				signal.addEventListener("abort", abort, { once: true });
+				if (signal.aborted) abort(); else check();
+			});
+		});
+	};
 	let completingOwnerSpeech = false;
 	let attentionPollTimer: NodeJS.Timeout | null = null;
 	let voiceWorkerIdleTimer: NodeJS.Timeout | null = null;
@@ -550,7 +576,7 @@ export default async function (pi: ExtensionAPI) {
 			const narrationMode = config.codeNarration;
 			const contextMode = config.codeDescriptionContext;
 			const reusesActivePrompt =
-				contextMode === "conversation" && codeDescriptionUsesActivePrompt(ctx, editModel);
+				contextMode === "conversation";
 			const systemPrompt = reusesActivePrompt ? ctx.getSystemPrompt() : undefined;
 			const tools = reusesActivePrompt ? activePromptTools() : undefined;
 			const conversation =
@@ -658,7 +684,7 @@ export default async function (pi: ExtensionAPI) {
 				result.push({ text: item.text, source: item.source, wordTimings: true });
 				continue;
 			}
-			const completed = completedCodeItems(message).find(block => block.throughBlock.length === item.source.end)!;
+			const completed = completedCodeItems(message).find(block => block.sourceEnd === item.source.end)!;
 			const plan = await requestCodeDescription(
 				ctx,
 				completed.block,
@@ -727,7 +753,7 @@ const chargeBackfillUnit = (): boolean => {
 			await new Promise<void>(resolve => setImmediate(resolve));
 			let sliceStart = performance.now();
 			const currentId = playbackHistory.status()?.messageId;
-			for (const message of prioritizeFromCurrent(scopedCompletedMessages(ctx, "assistant"), currentId)) {
+			for (const message of prioritizeFromCurrent(scopedCompletedMessages(ctx, config.mode), currentId)) {
 				if (performance.now() - sliceStart >= 8) {
 					await new Promise<void>(resolve => setImmediate(resolve));
 					sliceStart = performance.now();
@@ -814,7 +840,7 @@ const chargeBackfillUnit = (): boolean => {
 	};
 
 	const scheduleCodeDescriptionsInText = (ctx: ExtensionContext, text: string): void => {
-		const message = completedAssistantMessages(ctx, "assistant", config.codeDescriptionContext === "conversation").findLast(candidate => candidate.text === text);
+		const message = completedAssistantMessages(ctx, config.mode, config.codeDescriptionContext === "conversation").findLast(candidate => candidate.text === text);
 		if (!message) return; // agent_settled retries after the session entry is committed
 		for (const item of completedCodeItems(message)) {
 			void requestCodeDescription(ctx, item.block, item.identityContext, item.providerMessagesThroughBlock);
@@ -833,21 +859,30 @@ const chargeBackfillUnit = (): boolean => {
 				if (!ctx) return undefined;
 				try {
 					const contextual = config.codeDescriptionContext === "conversation";
+					const matchesSource = (message: { text: string; messageType: NarrationMessageType; displayOffset?: number }) =>
+						message.messageType === messageType && (messageType === "assistant-thinking"
+							? markdown.slice(message.displayOffset ?? 0, (message.displayOffset ?? 0) + message.text.trim().length) === message.text.trim()
+							: message.text.trim() === markdown.trim());
+					const matchesEnd = (message: { text: string; displayOffset?: number }, end: number) =>
+						(message.displayOffset ?? 0) + message.text.slice(0, end).trim().length === messageThroughBlock.trimEnd().length;
 					const completed = contextual
-						? completedAssistantMessages(ctx, "assistant", true).findLast(message => message.text === markdown)
+						? completedAssistantMessages(ctx, config.mode, true).findLast(message => matchesSource(message) &&
+							completedCodeItems(message).some(item => matchesEnd(message, item.sourceEnd)))
 						: undefined;
 					const source = completed?.assistantMessage;
 					const memo = source && typeof source === "object" ? renderedDescriptionKeys.get(source) : undefined;
-					const memoKey = JSON.stringify([contextEpoch, config.codeNarration, config.codeDescriptionContext, messageThroughBlock.length]);
+					const memoKey = JSON.stringify([contextEpoch, config.codeNarration, config.codeDescriptionContext, completed?.contentIndex, messageThroughBlock.length]);
 					const remembered = memo?.get(memoKey);
 					let key = remembered ? codeDescriptionCache.resolveKey(remembered) : undefined;
 					if (!key) {
-						const item = completed && completedCodeItems(completed).find(item => item.throughBlock.length === messageThroughBlock.length);
-						const providerMessages = item || !contextual ? [] : completed
-							? contextualAssistantMessagesThroughText(completed.conversationMessages, completed.assistantMessage, messageThroughBlock.length)
-							: speechAssistantMessage
-								? contextualAssistantMessagesThroughText(speechConversationMessages, speechAssistantMessage, messageThroughBlock.length)
-								: [];
+						const item = completed && completedCodeItems(completed).find(item => matchesEnd(completed, item.sourceEnd));
+						const liveBlock = contextual && !item ? eligibleAssistantBlocks(speechAssistantMessage, config.mode).findLast(message =>
+							matchesSource(message) && describableCodeItems(message.text).some(item => matchesEnd(message, item.sourceEnd))) : undefined;
+						const liveItem = liveBlock && describableCodeItems(liveBlock.text).find(item => matchesEnd(liveBlock, item.sourceEnd));
+						const providerMessages = item || !contextual ? [] : liveBlock && liveItem
+							? assistantCodeContext(speechConversationMessages, speechAssistantMessage, liveBlock.contentIndex, liveItem.sourceEnd, liveSource?.final ?? true)
+							: undefined;
+						if (!providerMessages) return undefined;
 						key = item ? descriptionCacheKey(ctx, item.block, item.identityContext)
 							: descriptionCacheKey(ctx, block, structuredContextIdentity(providerMessages));
 						if (source && typeof source === "object") {
@@ -1367,22 +1402,12 @@ const chargeBackfillUnit = (): boolean => {
 	const vocalizer = new Vocalizer(
 		() => routedVoiceConfig(),
 		handleWorkerEvent,
-		(block, sourceContext, _signal) => {
+		async (block, sourceContext, signal) => {
 			const ctx = activeContext;
 			if (!ctx) return Promise.reject(new Error("No active Pi context for code description"));
-			const completed = completedAssistantMessages(ctx, config.mode, config.codeDescriptionContext === "conversation")
-				.find(message => message.assistantMessage === speechAssistantMessage);
-			const item = completed && completedCodeItems(completed).find(item => item.throughBlock.length === sourceContext.sourceEnd);
-			if (item) return requestCodeDescription(ctx, item.block, item.identityContext, item.providerMessagesThroughBlock);
-			const providerMessages = sourceContext.providerMessages
-				? [...sourceContext.providerMessages]
-				: speechAssistantMessage
-					? contextualAssistantMessagesThroughText(
-							speechConversationMessages,
-							speechAssistantMessage,
-							sourceContext.sourceEnd,
-						)
-					: [];
+			const providerMessages = [...await (typeof sourceContext.providerMessages === "function"
+				? sourceContext.providerMessages(signal) : sourceContext.providerMessages ?? [])];
+			if (signal.aborted) return { records: [], guided: false, omitted: true };
 			return requestCodeDescription(ctx, block, structuredContextIdentity(providerMessages), providerMessages);
 		},
 		segment => {
@@ -1417,6 +1442,7 @@ const chargeBackfillUnit = (): boolean => {
 		},
 		undefined,
 		utterance => {
+			playbackHistory.bindUtterance(utterance);
 			if (!ownsSpeech) return;
 			lastOwnerUtterance = utterance;
 			if (playbackPaused) pausedOwnerUtterance = utterance;
@@ -1843,7 +1869,7 @@ const chargeBackfillUnit = (): boolean => {
 		pausedOwnerUtterance = undefined;
 		narration.finish();
 		narration.begin();
-		narration.setCompletedText(target.text);
+		narration.setCompletedText(target.text, target.messageType, target.contentIndex, target.displayOffset);
 		narration.previewSourceOffset(sourceOffset);
 		armNarrationFollow();
 		if (previewTarget) {
@@ -1934,8 +1960,8 @@ const chargeBackfillUnit = (): boolean => {
 			speechConversationMessages = contextual?.conversationMessages ?? [];
 			speechAssistantMessage = contextual?.assistantMessage;
 		}
-		vocalizer.setCodeDescriptionMessages(speechAssistantMessage
-			? contextualAssistantMessages(speechConversationMessages, speechAssistantMessage) : undefined);
+		speechContentIndex = contextual?.contentIndex ?? target.contentIndex ?? speechContentIndex;
+		setDescriptionSource(speechContentIndex, sourceOffset);
 		playbackPaused = request.paused;
 		pausedOwnerUtterance = undefined;
 		playbackPositionEstimated = false;
@@ -1945,6 +1971,11 @@ const chargeBackfillUnit = (): boolean => {
 		if (continueLiveTurn) {
 			vocalizer.setNarrationSourceOffset(sourceOffset, target.skipUnits ?? 0);
 			vocalizer.pushDelta(suffix);
+			// Later content blocks can arrive while a dirty/paused live target is
+			// retained. Catch up from the source snapshot before accepting deltas.
+			for (const block of eligibleAssistantBlocks(liveSource?.assistant, config.mode)) {
+				if (block.contentIndex > (liveBlockIndex ?? -1)) pushLiveDelta(block.messageType, block.contentIndex, block.text);
+			}
 		} else vocalizer.speakFrom(suffix, sourceOffset, target.skipUnits ?? 0);
 		ownerTurnEnded = !continueLiveTurn;
 		completeOwnerSpeech();
@@ -1971,6 +2002,9 @@ const chargeBackfillUnit = (): boolean => {
 		completedAssistantMessages(ctx, config.mode, config.codeDescriptionContext === "conversation").map(message => ({
 			id: message.id,
 			text: message.text,
+			messageType: message.messageType,
+			contentIndex: message.contentIndex,
+			displayOffset: message.displayOffset,
 			renderKey: renderKeyFor(ctx, message),
 		}));
 
@@ -2003,10 +2037,11 @@ const chargeBackfillUnit = (): boolean => {
 		playbackId: string,
 		text: string,
 		attempt = 0,
+		contentIndex?: number,
 	): void => {
 		playbackHistory.updateText(playbackId, text);
 		const messages = playbackMessages(ctx);
-		const completed = messages.findLast(message => message.text === text);
+		const completed = messages.findLast(message => message.text === text && (contentIndex === undefined || message.contentIndex === contentIndex));
 		if (completed) {
 			playbackHistory.rename(playbackId, completed);
 			playbackHistory.sync(messages);
@@ -2018,7 +2053,7 @@ const chargeBackfillUnit = (): boolean => {
 			() => {
 				if (epoch !== contextEpoch || !isCurrentContext(ctx)) return;
 				try {
-					finalizePlaybackMessage(ctx, playbackId, text, attempt + 1);
+					finalizePlaybackMessage(ctx, playbackId, text, attempt + 1, contentIndex);
 				} catch {
 					// Ignore a timer that races session replacement.
 				}
@@ -2622,6 +2657,10 @@ const chargeBackfillUnit = (): boolean => {
 			attentionSuppressed = false;
 			coordinator?.setAttentionEnabled(config.enabled);
 			queueIncomingWhilePaused = config.enabled && playbackPaused;
+			liveBlockIndex = undefined;
+			liveBlockIds.clear();
+			liveSource = { assistant: event.message, final: false, before: activeContext && config.codeDescriptionContext === "conversation"
+				? liveConversationBefore(activeContext).messages : [], waiters: new Set() };
 			if (queueIncomingWhilePaused) return;
 		}
 		if (
@@ -2634,9 +2673,7 @@ const chargeBackfillUnit = (): boolean => {
 			event.message.role === "assistant"
 		) {
 			blockedWarningIssued = false;
-			speechConversationMessages = activeContext && config.codeDescriptionContext === "conversation"
-				? liveConversationBefore(activeContext).messages
-				: [];
+			speechConversationMessages = liveSource?.before ?? [];
 			speechAssistantMessage = event.message;
 			const continuingTurn =
 				liveTurnNarrationActive && ownsSpeech && speechPurpose === "turn" && (coordinator?.ownsSpeech() ?? true);
@@ -2669,19 +2706,54 @@ const chargeBackfillUnit = (): boolean => {
 		}
 	});
 
+	const pushLiveDelta = (messageType: NarrationMessageType, contentIndex: number, text: string): void => {
+		if (liveBlockIndex !== contentIndex) {
+			if (liveBlockIndex !== undefined) {
+				vocalizer.flush();
+				vocalizer.setNarrationSourceOffset(narration.startMessage());
+				livePlaybackId = `live:${++nextLivePlaybackId}`;
+				playbackHistory.beginCapture(livePlaybackId, "", 0, true);
+			}
+			liveBlockIndex = speechContentIndex = contentIndex;
+			liveDisplayOffset = eligibleAssistantBlocks(speechAssistantMessage, config.mode).find(block => block.contentIndex === contentIndex)?.displayOffset ?? 0;
+			if (livePlaybackId) liveBlockIds.set(contentIndex, livePlaybackId);
+			ownedSpeechText = "";
+			setDescriptionSource(contentIndex);
+		}
+		ownedSpeechText += text;
+		if (livePlaybackId) playbackHistory.updateText(livePlaybackId, ownedSpeechText, { contentIndex, messageType, displayOffset: liveDisplayOffset });
+		if (hasSpeakableAudio(ownedSpeechText)) announceProjectForSpeech();
+		narration.pushDelta(messageType, contentIndex, text, liveDisplayOffset);
+		vocalizer.pushDelta(text);
+	};
+
 	pi.on("message_update", event => {
 		if (!interactiveVoiceSession || !config.enabled || attentionSuppressed || config.mode === "yield") return;
 		speechAssistantMessage = event.message;
-		vocalizer.setCodeDescriptionMessages(contextualAssistantMessages(speechConversationMessages, event.message));
+		if (liveSource) {
+			liveSource.assistant = event.message;
+			for (const check of liveSource.waiters) check();
+		}
 		const delta = event.assistantMessageEvent;
 		const speakableDelta =
 			delta.type === "text_delta" || (delta.type === "thinking_delta" && config.mode === "all")
 				? delta.delta
 				: undefined;
+		if (playbackPaused && liveBlockIndex !== undefined && speakableDelta !== undefined &&
+			"contentIndex" in delta && delta.contentIndex !== liveBlockIndex && !queueIncomingWhilePaused) {
+			vocalizer.flush();
+			queueIncomingWhilePaused = true;
+		}
 		if (queueIncomingWhilePaused) {
-			if (livePlaybackId && speakableDelta !== undefined) {
+			if (livePlaybackId && liveBlockIndex === undefined && speakableDelta !== undefined && "contentIndex" in delta) {
+				liveBlockIndex = speechContentIndex = delta.contentIndex;
+				liveBlockIds.set(delta.contentIndex, livePlaybackId);
+			}
+			if (livePlaybackId && speakableDelta !== undefined && "contentIndex" in delta && delta.contentIndex === liveBlockIndex) {
 				ownedSpeechText += speakableDelta;
-				playbackHistory.updateText(livePlaybackId, ownedSpeechText);
+				const source = eligibleAssistantBlocks(event.message, config.mode).find(block => block.contentIndex === delta.contentIndex);
+				liveDisplayOffset = source?.displayOffset ?? 0;
+				playbackHistory.updateText(livePlaybackId, ownedSpeechText, source);
 			}
 			return;
 		}
@@ -2696,16 +2768,8 @@ const chargeBackfillUnit = (): boolean => {
 			}
 			return;
 		}
-		if (speakableDelta !== undefined) {
-			ownedSpeechText += speakableDelta;
-			if (hasSpeakableAudio(ownedSpeechText)) announceProjectForSpeech();
-		}
-		if (delta.type === "text_delta") {
-			narration.pushDelta("assistant", delta.contentIndex, delta.delta);
-			vocalizer.pushDelta(delta.delta);
-		} else if (delta.type === "thinking_delta" && config.mode === "all") {
-			narration.pushDelta("assistant-thinking", delta.contentIndex, delta.delta);
-			vocalizer.pushDelta(delta.delta);
+		if (speakableDelta !== undefined && "contentIndex" in delta) {
+			pushLiveDelta(delta.type === "thinking_delta" ? "assistant-thinking" : "assistant", delta.contentIndex, speakableDelta);
 		}
 	});
 
@@ -2713,29 +2777,37 @@ const chargeBackfillUnit = (): boolean => {
 		if (!interactiveVoiceSession) return;
 		const completedText = assistantText(event.message);
 		const stopReason = assistantStopReason(event.message);
+		if (stopReason === undefined) return;
+		if (liveSource) {
+			liveSource.assistant = event.message;
+			liveSource.final = true;
+			for (const check of liveSource.waiters) check();
+		}
+		const eligible = eligibleAssistantBlocks(event.message, config.mode).filter(block => hasSpeakableAudio(block.text));
 		if (queueIncomingWhilePaused) {
-			// Use the existing eligible snapshots here; canonical thinking/context
-			// targets and paused timing/viewport refinement remain separate work.
-			if (config.enabled && !attentionSuppressed && requiresVoiceAttention(completedText, config.mode, stopReason)) {
-				if (livePlaybackId && activeContext) {
-					// A dirty asset paused this message mid-stream; complete its existing
-					// target rather than queueing a second copy behind itself.
-					finalizePlaybackMessage(activeContext, livePlaybackId, completedText);
-					livePlaybackId = undefined;
-					ownerTurnEnded = true;
-				} else {
-					const message = activeContext && playbackMessages(activeContext).findLast(item => item.text === completedText);
-					queuedPausedMessages.push({ id: message?.id ?? `live:${++nextLivePlaybackId}`, text: completedText, time: 0, sourceOffset: 0 });
+			if (config.enabled && !attentionSuppressed && stopReason !== "aborted" && stopReason !== "error" && !(config.mode === "yield" && stopReason === "toolUse")) {
+				for (const block of eligible) {
+					const id = liveBlockIds.get(block.contentIndex);
+					if (id && activeContext) finalizePlaybackMessage(activeContext, id, block.text, 0, block.contentIndex);
+					else {
+						const message = activeContext && playbackMessages(activeContext).findLast(item => item.text === block.text && item.contentIndex === block.contentIndex);
+						queuedPausedMessages.push({ ...block, id: message?.id ?? `live:${++nextLivePlaybackId}`, time: 0, sourceOffset: 0 });
+					}
 				}
+				livePlaybackId = undefined;
+				ownerTurnEnded = true;
 			}
 			return;
 		}
-		if (completedText && stopReason !== undefined && stopReason !== "aborted" && stopReason !== "error" && activeContext) {
-			scheduleCodeDescriptionsInText(activeContext, completedText);
-			if (livePlaybackId) finalizePlaybackMessage(activeContext, livePlaybackId, completedText);
+		if (stopReason !== "aborted" && stopReason !== "error" && activeContext) {
+			for (const block of eligible) {
+				scheduleCodeDescriptionsInText(activeContext, block.text);
+				const id = liveBlockIds.get(block.contentIndex);
+				if (id) finalizePlaybackMessage(activeContext, id, block.text, 0, block.contentIndex);
+			}
 			livePlaybackId = undefined;
 		}
-		if (config.enabled && !attentionSuppressed && speechBlocked && requiresVoiceAttention(completedText, config.mode, stopReason)) {
+		if (config.enabled && !attentionSuppressed && speechBlocked && requiresVoiceAttention(eligible.map(block => block.text).join("\n"), config.mode, stopReason)) {
 			blockedMessageHasSpeech = true;
 			pausedForAttention = true;
 			refreshStatus();
@@ -2763,25 +2835,31 @@ const chargeBackfillUnit = (): boolean => {
 		}
 		const stopReason = assistantStopReason(event.message);
 		const completedTurn = stopReason !== "aborted" && stopReason !== "error" && stopReason !== undefined;
-		if (!config.enabled && !attentionSuppressed && requiresVoiceAttention(assistantText(event.message), config.mode, stopReason)) {
+		if (!config.enabled && !attentionSuppressed && requiresVoiceAttention(eligibleAssistantBlocks(event.message, config.mode).map(block => block.text).join("\n"), config.mode, stopReason)) {
 			disabledAttentionPending = true;
 		}
 		if (config.enabled && !attentionSuppressed && config.mode === "yield" && completedTurn) {
 			const text = assistantText(event.message);
-			if (text && acquireSpeech("turn")) {
-				const contextual = completedAssistantMessages(ctx, config.mode, config.codeDescriptionContext === "conversation").findLast(message => message.text === text);
+			if (text && stopReason !== "toolUse" && acquireSpeech("turn")) {
 				const messages = playbackMessages(ctx);
-				const completed = messages.findLast(message => message.text === text);
-				if (completed) {
-					playbackHistory.sync(messages, true);
-					playbackHistory.beginCapture(completed.id, completed.text, 0, true);
+				playbackHistory.sync(messages, true);
+				narration.begin();
+				for (const block of eligibleAssistantBlocks(event.message, config.mode)) {
+					if (!hasSpeakableAudio(block.text)) continue;
+					const contextual = completedAssistantMessages(ctx, config.mode, config.codeDescriptionContext === "conversation")
+						.findLast(message => message.text === block.text && message.contentIndex === block.contentIndex);
+					const completed = messages.find(message => message.id === contextual?.id);
+					if (completed) playbackHistory.beginCapture(completed.id, completed.text, 0, true);
+					speechConversationMessages = contextual?.conversationMessages ?? liveSource?.before ?? [];
+					speechAssistantMessage = event.message;
+					speechContentIndex = block.contentIndex;
+					setDescriptionSource(block.contentIndex);
+					const offset = narration.startMessage();
+					narration.pushDelta(block.messageType, block.contentIndex, block.text, block.displayOffset);
+					ownerContentExpected = true;
+					announceProjectForSpeech();
+					vocalizer.speakFrom(block.text, offset);
 				}
-				speechConversationMessages = contextual?.conversationMessages ?? [];
-				speechAssistantMessage = contextual?.assistantMessage;
-				narration.setCompletedText(text);
-				ownerContentExpected = hasSpeakableAudio(text);
-				if (ownerContentExpected) announceProjectForSpeech();
-				vocalizer.speak(text);
 			} else if (requiresVoiceAttention(text, config.mode, stopReason)) {
 				speechBlocked = true;
 				blockedMessageHasSpeech = true;
@@ -2895,22 +2973,22 @@ const chargeBackfillUnit = (): boolean => {
 		},
 	});
 
-	const stepSentence = async (ctx: ExtensionContext, direction: -1 | 1): Promise<void> => {
+	const stepSentence = async (ctx: ExtensionContext, direction: -1 | 1, fromPrevious = false): Promise<void> => {
 		const request = await preparePlaybackAction(ctx);
 		if (request === undefined || !await preparePlaybackMessages(ctx, request) || request !== playbackRequestEpoch) return;
 		syncPlaybackMessages(ctx);
 		const selected = playbackHistory.selected();
 		if (!selected) { ctx.ui.notify("There is no completed assistant message", "warning"); return; }
 		const contextual = config.codeDescriptionContext === "conversation"
-			? completedAssistantMessages(ctx, "assistant", true).find(message => message.id === selected.id) : undefined;
+			? completedAssistantMessages(ctx, config.mode, true).find(message => message.id === selected.id) : undefined;
 		const stream = new SpeakableStream();
 		const units: Array<{ sourceOffset: number; skipUnits: number }> = [];
 		let complete = true;
 		for (const item of [...stream.push(selected.text), ...stream.flush()]) {
 			let count = 1;
 			if (item.kind === "code") {
-				const messages = contextual ? contextualAssistantMessagesThroughText(
-					contextual.conversationMessages, contextual.assistantMessage, item.source.end) : [];
+				const messages = contextual ? assistantCodeContext(
+					contextual.conversationMessages, contextual.assistantMessage, contextual.contentIndex, item.source.end)! : [];
 				const key = descriptionCacheKey(ctx, item.block, structuredContextIdentity(messages));
 				const plan = codeDescriptionCache.get(key);
 				const omitted = plan?.omitted || (!plan && codeDescriptionOmissions.has(key));
@@ -2919,7 +2997,14 @@ const chargeBackfillUnit = (): boolean => {
 			}
 			for (let skipUnits = 0; skipUnits < count; skipUnits++) units.push({ sourceOffset: item.source.start, skipUnits });
 		}
-		const target = playbackHistory.sentenceTarget(direction, units, atTranscriptTail);
+		const cursor = playbackHistory.resumeTarget();
+		if (direction < 0 && !atTranscriptTail && complete &&
+			(!units.length || (!fromPrevious && (cursor?.sourceOffset ?? 0) <= units[0].sourceOffset && !cursor?.skipUnits)) &&
+			(playbackHistory.status()?.messageIndex ?? 0) > 0) {
+			playbackHistory.move(-1);
+			return stepSentence(ctx, direction, true);
+		}
+		const target = playbackHistory.sentenceTarget(direction, units, atTranscriptTail || fromPrevious);
 		if (target) {
 			const fullCapture = target.sourceOffset === units[0]?.sourceOffset && !target.skipUnits;
 			void playTarget(target, fullCapture && !playbackHistory.hasCompleteTimingFor(target.id), true);
@@ -3576,14 +3661,11 @@ const chargeBackfillUnit = (): boolean => {
 					const mode0 = retryArgs[0] ?? "";
 					const collectFailed = () => {
 						const found: Array<{ key: string; messageId: string; index: number; preview: string; block: FencedCodeBlock; providerMessages: Message[] }> = [];
-						scopedCompletedMessages(retryCtx, "assistant").forEach((message, index) => {
+						scopedCompletedMessages(retryCtx, config.mode).forEach((message, index) => {
 							for (const item of describableCodeItems(message.text)) {
 								try {
-									const providerMessages = contextualAssistantMessagesThroughText(
-										message.conversationMessages,
-										message.assistantMessage,
-										item.throughBlock.length,
-									);
+									const providerMessages = assistantCodeContext(
+										message.conversationMessages, message.assistantMessage, message.contentIndex, item.sourceEnd)!;
 									const key = descriptionCacheKey(retryCtx, item.block, structuredContextIdentity(providerMessages));
 									if (codeDescriptionOmissions.has(key) || codeDescriptionCache.get(key)?.omitted) {
 										found.push({ key, messageId: message.id, index, preview: item.block.code.replace(/\s+/g, " ").slice(0, 48), block: item.block, providerMessages });

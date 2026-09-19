@@ -18,21 +18,21 @@ Fences tagged `text`, `txt`, `plain`, `plaintext`, `md`, `markdown`, or `mdown` 
 
 ## Code and patch descriptions
 
-Other fenced blocks are semantic narration requests. Requests begin when the closing fence arrives, allowing model work to overlap already queued speech without changing spoken order.
+Other fenced blocks are semantic narration requests. In `block-only` mode, requests begin at the closing fence. In `conversation` mode, generation waits until the next fence opens (excluding that opening and everything after it), or the containing assistant message ends. Following prose is included, even across thinking/text/tool-call content blocks. Preceding prose can play while waiting; the description and subsequent prose remain in transcript order.
 
 The generated description:
 
 - explains purpose and meaningful behavior rather than reading punctuation;
 - is rendered in a bordered callout below the original fence;
-- is keyed by the concerned block alone in the default `block-only` context mode, or by the deterministic provider-compatible context through that block plus the effective system/tool prefix when the active model is reused in `conversation` mode, and stored in a non-context-injecting Pi custom entry;
+- is keyed by the concerned block in default `block-only` mode, or by a compact hash of the deterministic structured context through the same next-fence/message-end boundary in `conversation` mode, and stored in a non-context-injecting Pi custom entry; generator/model selection alone does not invalidate it;
 - is reused for the same block and selected context mode by timing/audio preprocessing;
 - falls back to a local structural description if the model is unavailable or returns an invalid plan.
 
 Shell installation/update blocks and patches have semantic local fallbacks. Generic unsupported code may fall back to language and structure information.
 
-Descriptions are generated for fenced blocks in completed assistant text, not raw tool result patches. Description preprocessing itself does not acquire speech ownership or request attention. Written descriptions continue to be filled while spoken output is disabled.
+Descriptions are generated for fenced blocks in eligible assistant text (and thinking in `all` mode), not raw tool result patches. Description preprocessing itself does not acquire speech ownership or request attention. Written descriptions continue to be filled while spoken output is disabled.
 
-Set `codeDescriptionContext` to `conversation` for the best discussion-specific descriptions. This opt-in can send Pi's provider-compatible history—including images, tool calls, and tool results—to a remote `editModel`; when that is the active model, the normal system prompt and tool-schema prefix is also reused for provider caching. The privacy-safe default is `block-only`.
+Set `codeDescriptionContext` to `conversation` for discussion-specific descriptions. The narrator is asked to explain the latest included code block and complement surrounding prose, retaining guided highlights; original prose is still spoken, so semantic deduplication is not guaranteed. This opt-in sends available provider-compatible history—including thinking, images, tool calls/results—and the available system prompt and active tool schemas even to a different pinned `editModel`. See [context reconstruction and limits](models-and-privacy.md#editing-model). The privacy-safe default remains `block-only`.
 
 ## Guided mode
 

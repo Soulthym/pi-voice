@@ -152,6 +152,7 @@ type BlockMode = "linestart" | "prose" | "fence-open" | "fence-body";
  */
 export class SpeakableStream {
 	#mode: BlockMode = "linestart";
+	readonly fenceStarts: number[] = [];
 	/** Pending line-start characters while the block marker is still ambiguous. */
 	#prefix = "";
 	/** Opening fence marker (``` or ~~~), info string, and streamed body state. */
@@ -260,6 +261,7 @@ export class SpeakableStream {
 				this.#mode = "prose";
 				return;
 			case "fence":
+				this.fenceStarts.push(this.#prefixStart);
 				this.#fence = decision.fence;
 				this.#fenceInfo = "";
 				this.#fenceStart = this.#prefixStart;
