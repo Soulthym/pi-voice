@@ -14,7 +14,7 @@ test("cold/restarted workers receive pause intent before audio, while cancellati
 		child.stdin.on("data", bytes => {
 			const message = JSON.parse(String(bytes)); child.messages.push(message);
 			if (message.type === "shutdown") queueMicrotask(() => {
-				child.exitCode = 0; child.stdout.end(); child.stderr.end(); child.emit("exit", 0);
+				child.exitCode = 0; child.stdout.end(); child.stderr.end(); child.emit("exit", 0); child.emit("close", 0);
 			});
 		});
 		children.push(child);

@@ -46,6 +46,7 @@ export class VoiceWorkerClient {
 	#nextRequestId = 0;
 	#nextCancelId = 0;
 	#paused = false;
+	#termination: Promise<void> | undefined;
 	#ttsWorkers: number | undefined;
 	#activeUtterance: number | undefined;
 	#onEvent: (event: WorkerEvent) => void;
@@ -202,7 +203,15 @@ export class VoiceWorkerClient {
 		return promise;
 	}
 
-	async terminate(): Promise<void> {
+	terminate(): Promise<void> {
+		if (this.#termination) return this.#termination;
+		const pending = this.#terminate();
+		this.#termination = pending;
+		void pending.finally(() => { if (this.#termination === pending) this.#termination = undefined; }).catch(() => {});
+		return pending;
+	}
+
+	async #terminate(): Promise<void> {
 		const child = this.#child;
 		this.#child = null;
 		if (!child) return;
@@ -227,25 +236,46 @@ export class VoiceWorkerClient {
 		} catch {
 			// The worker may already be gone.
 		}
-		if (child.exitCode !== null) return;
-		await new Promise<void>(resolve => {
+		if (child.exitCode !== null || child.signalCode != null) return;
+		let killedGroup: number | undefined;
+		await new Promise<void>((resolve, reject) => {
 			const timer = setTimeout(() => {
-				child.kill("SIGKILL");
-				resolve();
+				try {
+					// Only this detached worker's process group, never the caller's group.
+					if (process.platform !== "win32" && child.pid) {
+						killedGroup = -child.pid;
+						process.kill(killedGroup, "SIGKILL");
+					} else child.kill("SIGKILL");
+				} catch (error) {
+					if ((error as NodeJS.ErrnoException).code !== "ESRCH") reject(error);
+				}
+				// A signal request is not termination. Wait for transport pipes to close.
 			}, 2_000);
 			timer.unref?.();
-			child.once("exit", () => {
+			child.once("close", () => {
 				clearTimeout(timer);
 				resolve();
 			});
 		});
+		// Closing the leader's pipes need not mean its players exited. Never signal
+		// again here: only observe the group we killed, retaining ownership if uncertain.
+		while (killedGroup !== undefined) {
+			try { process.kill(killedGroup, 0); }
+			catch (error) {
+				if ((error as NodeJS.ErrnoException).code === "ESRCH") break;
+				throw error;
+			}
+			await new Promise(resolve => setTimeout(resolve, 10));
+		}
 	}
 
 	#ensureChild(): ChildProcessWithoutNullStreams {
+		if (this.#termination) throw new Error("Voice worker is stopping");
 		if (this.#child && this.#child.exitCode === null) return this.#child;
 		const workerPath = fileURLToPath(new URL("./worker.mjs", import.meta.url));
 		const child = spawn(process.execPath, [workerPath], {
 			stdio: ["pipe", "pipe", "pipe"],
+			detached: process.platform !== "win32",
 			env: { ...process.env },
 		});
 		this.#child = child;
@@ -253,12 +283,12 @@ export class VoiceWorkerClient {
 			if (this.#child === child) this.#handleFailure(error);
 		});
 		const lines = readline.createInterface({ input: child.stdout });
-		lines.on("line", line => this.#handleLine(line));
+		lines.on("line", line => this.#handleLine(line, this.#child !== child));
 		let stderr = "";
 		child.stderr.on("data", chunk => {
 			stderr = `${stderr}${String(chunk)}`.slice(-4_000);
 		});
-		child.on("error", error => this.#handleFailure(error));
+		child.on("error", error => { if (this.#child === child) this.#handleFailure(error); });
 		child.on("exit", code => {
 			if (this.#child !== child) return;
 			this.#child = null;
@@ -282,11 +312,15 @@ export class VoiceWorkerClient {
 		}
 	}
 
-	#handleLine(line: string): void {
+	#handleLine(line: string, retired: boolean): void {
 		let event: WorkerEvent;
 		try {
 			event = JSON.parse(line) as WorkerEvent;
 		} catch {
+			return;
+		}
+		if (retired) {
+			if (event.type === "idle" && event.cancelId !== undefined) this.#onEvent(event);
 			return;
 		}
 		if (
