@@ -6,6 +6,7 @@ import { mock, test } from "node:test";
 import { assistant, FakeVoiceHost, MockedVoiceWorkerClient } from "./helpers/fake-voice-host.js";
 import * as codeDescriber from "../src/code-describer.js";
 import { plainCodeNarration } from "../src/code-narration.js";
+import { NARRATION_ACTIVE_MARKER } from "../src/narration-progress.js";
 
 let sourceKeyCalls = 0;
 let chargeKeyWork = () => {};
@@ -133,16 +134,24 @@ test("completed conversation keys survive replay, settling and custom leaves; co
 	// Charge deterministic synthetic work per cold key, not elapsed CI wall time.
 	let clock = performance.now();
 	const now = mock.method(performance, "now", () => clock);
-	chargeKeyWork = () => { clock += 4; };
+	host.scrollView.setDocument(Array.from({ length: 300 }, (_, line) =>
+		line === 160 ? `${NARRATION_ACTIVE_MARKER}Replay target.` : `line ${line}`), 40);
+	host.scrollView.manualScrollTo(0);
+	chargeKeyWork = () => {
+		if (sourceKeyCalls === 1) assert.equal(host.scrollView.scrollTop, 152, "frame before the first identity computation");
+		clock += 4;
+	};
 	const slices = [0];
 	let heartbeat: NodeJS.Immediate;
 	const sample = () => {
 		slices.push(sourceKeyCalls);
+		if (sourceKeyCalls > 0) host.scrollView.manualScrollTo(50);
 		heartbeat = setImmediate(sample);
 	};
 	heartbeat = setImmediate(sample);
 	try { await replay(); } finally { clearImmediate(heartbeat); }
 	slices.push(sourceKeyCalls);
+	assert.equal(host.scrollView.scrollTop, 50, "audio startup must not rearm after manual browsing during identity work");
 	chargeKeyWork = () => {};
 	now.mock.restore();
 	assert.equal(sourceKeyCalls, texts.length, "cold preparation computes each source key once");

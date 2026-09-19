@@ -14,7 +14,10 @@ class MeasuringWorker extends MockedVoiceWorkerClient {
 	}
 }
 
-test("background recovery measures only missing units after a seek and persists full coverage", async t => {
+for (const paused of [false, true]) test(`missing-unit recovery preserves the target (paused lease-owner poll: ${paused})`, async t => {
+	measured.length = 0;
+	duration = 0;
+	const workerStart = MockedVoiceWorkerClient.instances.length;
 	mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: MeasuringWorker } });
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-voice-recovery-"));
 	const previous = { ...process.env };
@@ -36,7 +39,7 @@ test("background recovery measures only missing units after a seek and persists 
 	host.addMessage("user", null, { role: "user", content: [{ type: "text", text: "Read." }], timestamp: 1 });
 	await host.start();
 	await streamCompletedResponse(host, "assistant", "user", "First sentence has enough words. Second sentence has enough words. Third sentence has enough words.");
-	const worker = MockedVoiceWorkerClient.instances.find(instance => instance.sent.length > 0)!;
+	const worker = MockedVoiceWorkerClient.instances.slice(workerStart).find(instance => instance.sent.length > 0)!;
 	const beforeReplay = worker.sent.length;
 	await host.shortcut("f11");
 	const first = worker.sent[beforeReplay] as { utterance: number; segmentId: number };
@@ -48,7 +51,11 @@ test("background recovery measures only missing units after a seek and persists 
 	assert.equal(suffix.length, 2);
 	worker.emit({ type: "segment-audio", segmentId: suffix[1].segmentId, start: 4, duration: 3 } as never);
 	const sent = worker.sent.length;
-	worker.emit({ type: "idle", utterance: suffix[1].utterance } as never);
+	if (paused) await host.shortcut("f8");
+	else worker.emit({ type: "idle", utterance: suffix[1].utterance } as never);
+	const frozen = host.render("First sentence has enough words. Second sentence has enough words. Third sentence has enough words.");
+	if (paused) await fs.stat(path.join(root, "coordinator", "speech.lock", "lease.json"));
+	// Paused case has no idle/settled event: the ordinary poll must admit its owner.
 	for (let i = 0; i < 100 && measured.length === 0; i++) await new Promise(resolve => setTimeout(resolve, 10));
 	assert.deepEqual(measured, [suffix[0].text]);
 	assert.equal(host.entries.some(entry => entry.data?.version === 3), false, "invalid duration cannot make a partial target complete");
@@ -63,4 +70,9 @@ test("background recovery measures only missing units after a seek and persists 
 	assert.equal(snapshot.duration, 9);
 	assert.equal(snapshot.checkpoints.filter((point: { duration: number }) => point.duration > 0).length, 3);
 	assert.equal(worker.sent.length, sent, "timing recovery must not speak");
+	if (paused) {
+		assert.equal(worker.pauses.at(-1), true);
+		assert.equal(host.render("First sentence has enough words. Second sentence has enough words. Third sentence has enough words."), frozen);
+		await fs.stat(path.join(root, "coordinator", "speech.lock", "lease.json"));
+	}
 });

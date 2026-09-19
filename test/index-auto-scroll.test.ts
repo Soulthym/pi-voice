@@ -89,8 +89,12 @@ test("TUI follows exact words, respects manual browsing, and explicit controls r
 	worker!.emit({ type: "playback", utterance: live.utterance, position: 0 } as never);
 	await waitForScroll(host, 152);
 	for (const [command] of voiceQueryCases) await host.command(command);
+	await host.command("bottom");
+	host.scrollView.setDocument(renderedDocument(180, 320), 40);
+	worker!.emit({ type: "playback", utterance: live.utterance, position: 0.1 } as never);
+	await waitForScroll(host, 172);
 	worker!.emit({ type: "idle", utterance: live.utterance } as never);
-	assert.equal(host.scrollView.scrollTop, 260, "automatic live narration should restore prior bottom-follow");
+	assert.equal(host.scrollView.scrollTop, 280, "new tail text restores the spoken window but remembers final bottom-follow");
 	assert.equal(host.scrollView.isFollowingEnd, true);
 
 	// F11 starts replay and must place an out-of-frame marked word at 20%.
@@ -229,6 +233,16 @@ test("TUI follows exact words, respects manual browsing, and explicit controls r
 	await host.shortcut("f8");
 	host.snapScrollOnWidgetUpdate = false;
 	assert.equal(host.scrollView.scrollTop, 185);
+	const frozen = host.render(text);
+	for (const command of ["autoscroll off", "highlight off", "highlight on", "autoscroll on"]) await host.command(command);
+	assert.equal(host.render(text), frozen, "display settings retain the frozen narration position");
+	assert.equal(worker!.pauses.at(-1), true);
+	worker!.emit({ type: "alignment", segmentId: sought.segmentId, words: [
+		{ text: "Sentence", start: 0, end: 0.01 },
+		{ text: "words", start: 0.02, end: 0.03 },
+	] } as never);
+	worker!.emit({ type: "playback", utterance: sought.utterance, position: 19 } as never);
+	assert.equal(host.render(text), frozen, "late alignment and queued ticks must not change paused markup");
 
 	// Seeking directly from an F8-paused transport must explicitly clear worker
 	// pause state before regenerated audio is queued.
@@ -245,6 +259,9 @@ test("TUI follows exact words, respects manual browsing, and explicit controls r
 	const pausedSeek = pausedSeekSegments[0]!;
 	assert.ok(pausedSeek, "F9 after pause must queue fresh playback");
 	assert.match(host.render(text), new RegExp(`${NARRATION_ACTIVE_MARKER}Sentence`));
+	const soughtPreview = host.render(text);
+	worker!.emit({ type: "playback", utterance: sought.utterance, position: 20 } as never);
+	assert.equal(host.render(text), soughtPreview, "retired ticks cannot clear a replacement preview");
 	assert.equal(host.scrollView.scrollTop, 185);
 
 	// Pausing preserves manual framing; explicit resume re-anchors at 20%.
@@ -279,6 +296,9 @@ test("TUI follows exact words, respects manual browsing, and explicit controls r
 	assert.equal(host.scrollView.scrollTop, 1);
 	await host.command("autoscroll on");
 	worker!.emit({ type: "playback", utterance: pausedSeek.utterance, position: 3 } as never);
+	await new Promise(resolve => setTimeout(resolve, 120));
+	assert.equal(host.scrollView.scrollTop, 1, "enabling autoscroll must preserve manual framing");
+	await host.shortcut("alt+v");
 	await waitForScroll(host, 210);
 
 	// Stop invalidates a paused transport; a later F8 cannot "resume" a ghost
@@ -412,4 +432,16 @@ test("TUI follows exact words, respects manual browsing, and explicit controls r
 		worker!.sent.slice(afterReplayStarted).some(item => String((item as { text?: string }).text).includes("Live tail")),
 		false,
 	);
+
+	await host.command("stop");
+	host.scrollView.setDocument(renderedDocument(180), 40);
+	host.scrollView.manualScrollTo(60);
+	await streamCompletedResponse(host, "assistant-manual", "assistant-2", "A new automatic response.");
+	const automatic = worker!.sent.at(-1) as { utterance: number; segmentId: number };
+	worker!.emit({ type: "segment-audio", segmentId: automatic.segmentId, start: 0, duration: 2 } as never);
+	worker!.emit({ type: "playback", utterance: automatic.utterance, position: 0 } as never);
+	await new Promise(resolve => setTimeout(resolve, 120));
+	assert.equal(host.scrollView.scrollTop, 60, "new automatic messages retain manual framing");
+	worker!.emit({ type: "idle", utterance: automatic.utterance } as never);
+	assert.equal(host.scrollView.scrollTop, 60, "automatic completion must not override that frame");
 });

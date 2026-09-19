@@ -64,7 +64,7 @@ import { anchorLineForMessage, computeAutoScrollTop, isManualScrollAway } from "
 import { applySpokenEdit, parseEditModelSelector, resolveDictationCandidates } from "./prompt-editor.js";
 import { formatAsrDisplay } from "./asr-display.js";
 import { narrationRenderKey } from "./render-identity.js";
-import { invalidateNarrationMarkdown } from "./narration-render.js";
+import { frameNarrationViewport, invalidateNarrationMarkdown } from "./narration-render.js";
 import { SessionCoordinator, type WaitingSession } from "./session-coordinator.js";
 import { supportsInteractiveVoice } from "./session-mode.js";
 import { Vocalizer } from "./vocalizer.js";
@@ -941,7 +941,7 @@ export default async function (pi: ExtensionAPI) {
 			},
 			config.enabled && (config.playbackHighlight || config.autoScroll),
 			(code, language) => highlightCode(code, language),
-			config.autoScroll ? NARRATION_ACTIVE_MARKER : "",
+			config.enabled ? NARRATION_ACTIVE_MARKER : "",
 		);
 
 	pi.registerMarkdownTransformer((markdown, context) =>
@@ -950,14 +950,12 @@ export default async function (pi: ExtensionAPI) {
 
 	const refreshPlaybackTimeline = refreshProgressWidget;
 
-	/**
-	 * Keeps the spoken position visible: estimates the active message's rendered
-	 * height with Pi's own Markdown renderer, places the playback fraction inside
-	 * it, and applies 20/80 band hysteresis. The first tick of a new utterance
-	 * always brings the anchor into view, even if the user had scrolled away.
-	 */
+	/** Explicit actions anchor at 20%; continuation follows the 20–80% band until manual browsing. */
 	let lastAutoScrollTop: number | undefined;
 	let autoScrollForceOnce = false;
+	let narrationManuallyFramed = false;
+	let pinnedContentHeight = 0;
+	let lastNarrationLayout = "";
 	let restoreBottomAfterSpeech = false;
 	let bottomPinned = false;
 	let atTranscriptTail = false;
@@ -970,7 +968,8 @@ export default async function (pi: ExtensionAPI) {
 				messageId: string;
 				width: number;
 				messageTop: number;
-				scannedAt: number;
+				contentHeight: number;
+				viewportHeight: number;
 				wordStart?: number;
 				localMarkerLine?: number;
 			}
@@ -1033,14 +1032,6 @@ export default async function (pi: ExtensionAPI) {
 		}
 	};
 
-	const followShortcutLabel = (): string => {
-		if (config.scrollToShortcut === "disabled") return "/voice scroll-to";
-		return config.scrollToShortcut
-			.split("+")
-			.map(part => (part.length === 1 ? part.toUpperCase() : `${part[0]?.toUpperCase()}${part.slice(1)}`))
-			.join("+");
-	};
-
 	const hideFollowHint = (): void => {
 		if (!followHintVisible) return;
 		followHintVisible = false;
@@ -1051,23 +1042,21 @@ export default async function (pi: ExtensionAPI) {
 		}
 	};
 
-	const showFollowHint = (): void => {
-		if (followHintVisible || !activeContext) return;
-		followHintVisible = true;
-		const text = `↕ Free framing active — press ${followShortcutLabel()} to re-anchor spoken text`;
-		activeContext.ui.setWidget(
-			"pi-voice-follow-hint",
-			[activeContext.ui.theme.fg("accent", text)],
-			{ placement: "belowEditor" },
-		);
-	};
-
 	const transcriptIsFollowingEnd = (): boolean => {
 		const following = activeScrollView()?.isFollowingEnd;
 		return typeof following === "function" ? following() : following === true;
 	};
 
-	const armNarrationFollow = (forceCanonicalAnchor = false): void => {
+	const armNarrationFollow = (forceCanonicalAnchor = true, explicit = true): void => {
+		if (!explicit) {
+			if (lastAutoScrollTop !== undefined && activeScrollView()?.scrollTop !== lastAutoScrollTop && !transcriptIsFollowingEnd()) {
+				narrationManuallyFramed = true;
+				restoreBottomAfterSpeech = false;
+			}
+			if (narrationManuallyFramed) return;
+		}
+		narrationManuallyFramed = false;
+		narrationMessageAnchor = undefined;
 		atTranscriptTail = false;
 		bottomPinned = false;
 		lastAutoScrollTop = undefined;
@@ -1091,6 +1080,8 @@ export default async function (pi: ExtensionAPI) {
 			return;
 		}
 		scrollView.scrollToEnd();
+		pinnedContentHeight = scrollView.contentHeight ?? 0;
+		narrationManuallyFramed = false;
 		atTranscriptTail = true;
 		bottomPinned = ownsSpeech;
 		restoreBottomAfterSpeech = ownsSpeech;
@@ -1100,18 +1091,38 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	const requestNarrationAutoScroll = (allowPaused = false, force = false): void => {
+		const scrollView = activeScrollView();
+		if (!scrollView || typeof scrollView.scrollTo !== "function") return;
+		const layout = `${narrationViewportWidth()}:${scrollView.viewportHeight}:${scrollView.contentHeight}`;
+		const layoutChanged = layout !== lastNarrationLayout;
+		lastNarrationLayout = layout;
+		if (layoutChanged) narrationMessageAnchor = undefined;
+		if (bottomPinned && transcriptIsFollowingEnd()) {
+			if (playbackPaused || (scrollView.contentHeight ?? 0) <= pinnedContentHeight) return;
+			bottomPinned = false;
+			atTranscriptTail = false;
+			lastAutoScrollTop = scrollView.scrollTop;
+		} else if (lastAutoScrollTop !== undefined && !autoScrollForceOnce &&
+			(!layoutChanged || (!transcriptIsFollowingEnd() && scrollView.scrollTop !== Math.min(lastAutoScrollTop,
+				Math.max(0, (scrollView.contentHeight ?? Infinity) - scrollView.viewportHeight)))) &&
+			isManualScrollAway({ scrollTop: scrollView.scrollTop, viewportHeight: scrollView.viewportHeight,
+				contentHeight: scrollView.contentHeight ?? 0 }, lastAutoScrollTop)) {
+			narrationManuallyFramed = true;
+			narrationMessageAnchor = undefined;
+			restoreBottomAfterSpeech = false;
+			bottomPinned = false;
+		}
+		if (layoutChanged) lastAutoScrollTop = scrollView.scrollTop;
 		if (
-			bottomPinned ||
+			narrationManuallyFramed ||
 			!config.enabled ||
 			(!config.autoScroll && !force) ||
-			(!ownsSpeech && !pendingReplay) ||
+			(!ownsSpeech && !pendingReplay && !force) ||
 			(playbackPaused && !allowPaused)
 		) {
 			hideFollowHint();
 			return;
 		}
-		const scrollView = activeScrollView();
-		if (!scrollView || typeof scrollView.scrollTo !== "function") return;
 
 		const resolvedContentHeight = scrollView.contentHeight ?? (scrollView.scrollTop + scrollView.viewportHeight);
 		const scrollViewport = {
@@ -1137,14 +1148,16 @@ export default async function (pi: ExtensionAPI) {
 			canCacheMessageTop &&
 			messageId &&
 			narrationMessageAnchor?.messageId === messageId &&
-			narrationMessageAnchor.width === innerWidth
+			narrationMessageAnchor.width === innerWidth &&
+			narrationMessageAnchor.contentHeight === resolvedContentHeight &&
+			narrationMessageAnchor.viewportHeight === scrollView.viewportHeight
 				? narrationMessageAnchor
 				: undefined;
 		const localMarkerLine =
 			cached && cached.wordStart === wordStart && cached.localMarkerLine !== undefined
 				? cached.localMarkerLine
 				: renderedNarrationMarkerLine(text, innerWidth);
-		const cachedMessageTop = cached && Date.now() - cached.scannedAt < 5_000 ? cached.messageTop : undefined;
+		const cachedMessageTop = cached?.messageTop;
 		if (cached && localMarkerLine >= 0 && cached.wordStart !== wordStart) {
 			narrationMessageAnchor = { ...cached, wordStart, localMarkerLine };
 		}
@@ -1153,7 +1166,7 @@ export default async function (pi: ExtensionAPI) {
 			: undefined;
 
 		// Establish the selected message's absolute top from one full transcript
-		// render. Subsequent words render only that message until a periodic resync,
+		// render. Subsequent words render only that message until layout changes,
 		// avoiding a second full long-context render on every playback tick.
 		if (anchor === undefined && scrollView.render) {
 			const lines = scrollView.render(outerWidth);
@@ -1165,7 +1178,8 @@ export default async function (pi: ExtensionAPI) {
 						messageId,
 						width: innerWidth,
 						messageTop: markedLine - localMarkerLine,
-						scannedAt: Date.now(),
+						contentHeight: resolvedContentHeight,
+						viewportHeight: scrollView.viewportHeight,
 						wordStart,
 						localMarkerLine,
 					};
@@ -1207,23 +1221,9 @@ export default async function (pi: ExtensionAPI) {
 			anchor = anchorLineForMessage(messageTop, messageLines, fraction);
 		}
 
-		const target = computeAutoScrollTop(scrollViewport, anchor);
-		const manuallyReframed =
-			!autoScrollForceOnce &&
-			lastAutoScrollTop !== undefined &&
-			isManualScrollAway(scrollViewport, lastAutoScrollTop);
-		if (manuallyReframed) restoreBottomAfterSpeech = false;
+		const target = computeAutoScrollTop(scrollViewport, anchor, autoScrollForceOnce);
 		if (target === null && !autoScrollForceOnce) {
-			if (lastAutoScrollTop === undefined) {
-				// Replay/seek/resume controls re-arm from the current framing. They do
-				// not force 20% when the newly spoken word is already inside the band.
-				lastAutoScrollTop = scrollView.scrollTop;
-			} else if (manuallyReframed) {
-				// Accept user framing while the spoken word remains inside 20–80%.
-				// Tracking stays armed and will snap only after a later word overflows.
-				lastAutoScrollTop = scrollView.scrollTop;
-				showFollowHint();
-			}
+			lastAutoScrollTop = scrollView.scrollTop;
 			return;
 		}
 
@@ -1232,7 +1232,7 @@ export default async function (pi: ExtensionAPI) {
 		const topBand = Math.floor(scrollView.viewportHeight * 0.2);
 		const desired = Math.max(0, Math.min(maxScrollTop, target ?? anchor - topBand));
 		autoScrollForceOnce = false;
-		scrollView.scrollTo(desired, { disableFollow: true });
+		frameNarrationViewport(scrollView, desired);
 		lastAutoScrollTop = scrollView.scrollTop;
 	};
 
@@ -1241,8 +1241,8 @@ export default async function (pi: ExtensionAPI) {
 		autoScrollForceOnce = false;
 		const manuallyMoved =
 			lastAutoScrollTop !== undefined &&
-			Math.abs((activeScrollView()?.scrollTop ?? lastAutoScrollTop) - lastAutoScrollTop) > 1;
-		const restoreBottom = restoreBottomAfterSpeech && !manuallyMoved;
+			(activeScrollView()?.scrollTop ?? lastAutoScrollTop) !== lastAutoScrollTop;
+		const restoreBottom = restoreBottomAfterSpeech && !manuallyMoved && !narrationManuallyFramed;
 		restoreBottomAfterSpeech = false;
 		bottomPinned = false;
 		if (!restoreBottom) return;
@@ -1322,6 +1322,8 @@ export default async function (pi: ExtensionAPI) {
 		ctx.ui.setStatus("pi-voice", ctx.ui.theme.fg(color, label));
 	};
 
+	const playbackUtterances = new Set<number>();
+	let lastPlaybackTick: { utterance: number; position: number } | undefined;
 	const handleWorkerEvent = (event: WorkerEvent): void => {
 		// Cancellation acknowledgements still unblock retiring transports, not UI/history.
 		if (event.type === "idle" && event.cancelId !== undefined) {
@@ -1353,6 +1355,7 @@ export default async function (pi: ExtensionAPI) {
 				downloadPercent = undefined;
 				break;
 			case "idle":
+				const narratedIdle = event.utterance !== undefined && playbackUtterances.delete(event.utterance);
 				if (!inputInProgress) state = "idle";
 				downloadPercent = undefined;
 				playbackHistory.finishUtterance(event.utterance);
@@ -1361,10 +1364,9 @@ export default async function (pi: ExtensionAPI) {
 					const snapshot = playbackHistory.snapshotForUtterance(event.utterance);
 					if (snapshot) pi.appendEntry(PLAYBACK_TIMING_ENTRY, snapshot);
 				}
-				if (ownerTurnEnded && event.utterance !== undefined && event.utterance === lastOwnerUtterance) {
-					narration.finish();
-				} else {
-					narration.finishUtterance(event.utterance);
+				if (narratedIdle && !playbackPaused) {
+					if (ownerTurnEnded && event.utterance !== undefined && event.utterance === lastOwnerUtterance) narration.finish();
+					else narration.finishUtterance(event.utterance);
 				}
 				handleCoordinatedIdle(event.utterance);
 				if (event.utterance !== undefined && activeContext) scheduleMissingTimings(activeContext);
@@ -1385,6 +1387,8 @@ export default async function (pi: ExtensionAPI) {
 				playbackHistory.setWordTimings(event.segmentId, narration.sourceWordTimings(event.segmentId));
 				return;
 			case "playback":
+				if (!playbackUtterances.has(event.utterance) || event.utterance < (lastPlaybackTick?.utterance ?? 0) || pendingReplay?.waiting || playbackPaused) return;
+				lastPlaybackTick = event;
 				narration.setPlayback(event.utterance, event.position);
 				playbackHistory.setPlayback(event.utterance, event.position);
 				playbackPositionEstimated = event.estimated === true;
@@ -1471,6 +1475,7 @@ export default async function (pi: ExtensionAPI) {
 		},
 		undefined,
 		utterance => {
+			playbackUtterances.add(utterance);
 			playbackHistory.bindUtterance(utterance);
 			if (!ownsSpeech) return;
 			lastOwnerUtterance = utterance;
@@ -1480,6 +1485,8 @@ export default async function (pi: ExtensionAPI) {
 		utterance => playbackHistory.finishTimingGeneration(utterance),
 	);
 	const clearPlaybackTransport = (): number | undefined => {
+		playbackUtterances.clear();
+		lastPlaybackTick = undefined;
 		playbackRequestEpoch += 1;
 		coordinator?.cancelSpeechAcquisition();
 		if (!ownsSpeech) coordinator?.releaseSpeech();
@@ -1824,7 +1831,7 @@ export default async function (pi: ExtensionAPI) {
 			if (timingPreprocessing) cancelTimingWorkers();
 			return;
 		}
-		if (!owner && activeContext && !timingPreprocessing) scheduleMissingTimings(activeContext, false);
+		if ((!owner || (ownsSpeech && playbackPaused)) && activeContext && !timingPreprocessing) scheduleMissingTimings(activeContext, false);
 		if (!config.enabled || attentionSuppressed || ownsSpeech) return;
 		// Announcements never interrupt a transport or announce our own response.
 		const waiting = coordinator.tryAcquireWaitingAnnouncement();
@@ -1900,14 +1907,25 @@ export default async function (pi: ExtensionAPI) {
 		}
 	};
 
+	const previewPlaybackTarget = (target: PlaybackTarget, explicit = true): void => {
+		playbackUtterances.clear();
+		lastPlaybackTick = undefined;
+		narration.setCompletedText(target.text, target.messageType, target.contentIndex, target.displayOffset);
+		narration.previewSourceOffset(target.sourceOffset);
+		armNarrationFollow(true, explicit);
+		flushNarrationRender();
+		requestNarrationAutoScroll(true, explicit);
+	};
+
 	const playTarget = async (
 		target: PlaybackTarget,
 		recordTimings: boolean,
 		previewTarget = false,
 		queued = false,
+		framed = false,
 	): Promise<void> => {
 		if (!interactiveVoiceSession) return;
-		restoreBottomAfterSpeech = false;
+		if (!queued) restoreBottomAfterSpeech = false;
 		const sourceOffset = Math.max(0, Math.min(target.text.length, target.sourceOffset));
 		const suffix = target.text.slice(sourceOffset);
 		const liveTargetIndex = [...liveBlockIds].find(([, id]) => id === target.id)?.[0];
@@ -1936,16 +1954,9 @@ export default async function (pi: ExtensionAPI) {
 		// acknowledges shutdown. Do not destroy the current sink before ownership.
 		playbackHistory.beginCapture(target.id, target.text, target.time, false, sourceOffset, target.skipUnits ?? 0);
 		playbackPaused = request.paused;
+		narration.setPaused(playbackPaused);
 		pausedOwnerUtterance = undefined;
-		narration.finish();
-		narration.begin();
-		narration.setCompletedText(target.text, target.messageType, target.contentIndex, target.displayOffset);
-		narration.previewSourceOffset(sourceOffset);
-		armNarrationFollow();
-		if (previewTarget) {
-			flushNarrationRender();
-			requestNarrationAutoScroll(true);
-		} else requestNarrationRender();
+		if (!framed) previewPlaybackTarget({ ...target, sourceOffset }, !queued);
 		refreshPlaybackTimeline();
 
 		const displacedLiveTurn = ownsSpeech && speechPurpose === "turn" && !ownerTurnEnded;
@@ -1970,6 +1981,7 @@ export default async function (pi: ExtensionAPI) {
 				pendingReplay = undefined;
 				vocalizer.setPlaybackPaused(true);
 				playbackPaused = true;
+				narration.setPaused(playbackPaused);
 			}
 			return;
 		}
@@ -1994,6 +2006,7 @@ export default async function (pi: ExtensionAPI) {
 			request.waiting = false;
 			request.paused = true;
 			playbackPaused = true;
+			narration.setPaused(playbackPaused);
 			vocalizer.setPlaybackPaused(true);
 			pausedForAttention = true;
 			refreshStatus();
@@ -2039,6 +2052,7 @@ export default async function (pi: ExtensionAPI) {
 		speechContentIndex = contextual?.contentIndex ?? target.contentIndex ?? speechContentIndex;
 		setDescriptionSource(speechContentIndex, sourceOffset);
 		playbackPaused = request.paused;
+		narration.setPaused(playbackPaused);
 		pausedOwnerUtterance = undefined;
 		playbackPositionEstimated = false;
 		refreshPlaybackTimeline();
@@ -2104,8 +2118,8 @@ export default async function (pi: ExtensionAPI) {
 			if (canonicalize(messages)) pendingCanonicalizations.delete(canonicalize);
 		}
 		// Never let sync replace a selected live id before its session entry exists.
-		if (pendingCanonicalizations.size > 0) return messages;
 		const selected = playbackHistory.selected(true);
+		if (pendingCanonicalizations.size > 0 || (!ownerTurnEnded && livePlaybackId !== undefined && selected?.id.startsWith("live:") && !messages.some(message => message.id === selected.id))) return messages;
 		const updated = messages.find(message => message.id === selected?.id);
 		if (selected && updated && (selected.text !== updated.text || selected.renderKey !== updated.renderKey)) pauseDirtyPlayback();
 		playbackHistory.sync(messages, selectLatest);
@@ -2156,15 +2170,19 @@ export default async function (pi: ExtensionAPI) {
 	let lastTimingScan = "";
 	scheduleMissingTimings = (ctx: ExtensionContext, force = true): void => {
 		if (timingPreprocessing || config.timingPreprocessConcurrency === 0) return;
-		if (coordinator?.speechOwner()) return;
-		const scan = JSON.stringify([ctx.sessionManager.getSessionId(), ctx.sessionManager.getLeafId(), timingWorkEpoch]);
+		const canRecover = (): boolean => {
+			const owner = coordinator?.speechOwner();
+			return !owner || (owner.instanceId === coordinator?.instanceId && playbackPaused);
+		};
+		if (!canRecover()) return;
+		const scan = JSON.stringify([ctx.sessionManager.getSessionId(), ctx.sessionManager.getLeafId(), timingWorkEpoch, playbackPaused]);
 		if (!force && scan === lastTimingScan) return;
 		lastTimingScan = scan;
 		const epoch = contextEpoch;
 		const workEpoch = timingWorkEpoch;
 		timingPreprocessing = (async () => {
 			if (!await preparePlaybackMessages(ctx)) return;
-			if (epoch !== contextEpoch || workEpoch !== timingWorkEpoch || !isCurrentContext(ctx) || coordinator?.speechOwner()) return;
+			if (epoch !== contextEpoch || workEpoch !== timingWorkEpoch || !isCurrentContext(ctx) || !canRecover()) return;
 			const scoped = scopedCompletedMessages(ctx, config.mode);
 			const contextualById = new Map(scoped.map(message => [message.id, message]));
 			const scopedIds = new Set(scoped.map(message => message.id));
@@ -2206,10 +2224,24 @@ export default async function (pi: ExtensionAPI) {
 						if (epoch !== contextEpoch || workEpoch !== timingWorkEpoch || !isCurrentContext(ctx)) return;
 						measuredRenderKey = narrationRenderKey(message.text, measurementConfig, prepared.codeDependencies);
 						if (renderKeyFor(ctx, contextual) !== measuredRenderKey) return;
+						let previousSource = -1;
+						let skipUnits = 0;
 						for (const item of prepared.items) {
+							if (!canRecover()) return;
+							skipUnits = item.source.start === previousSource ? skipUnits + 1 : 0;
+							previousSource = item.source.start;
+							const unit = { sourceOffset: item.source.start, skipUnits };
+							const cached = playbackHistory.timingForUnit(message.id, measuredRenderKey, unit);
+							if (cached) {
+								checkpoints.push(...cached.map(point => ({ ...point, time: time + point.time })));
+								time += cached[0].duration;
+								continue;
+							}
 							const duration = await workers[lane].measureSegment(item.text, measurementConfig);
-							if (epoch !== contextEpoch || workEpoch !== timingWorkEpoch || !isCurrentContext(ctx)) return;
-							if (!Number.isFinite(duration) || duration <= 0) continue;
+							if (epoch !== contextEpoch || workEpoch !== timingWorkEpoch || !isCurrentContext(ctx) || !canRecover()) return;
+							// One failed unit leaves the whole target incomplete; never persist a prefix as complete.
+							if (!Number.isFinite(duration) || duration <= 0) return;
+							const unitStart = checkpoints.length;
 							checkpoints.push({ time, duration, sourceOffset: item.source.start });
 							if (item.wordTimings) {
 								const segmentId = ++timingSegmentId;
@@ -2227,6 +2259,9 @@ export default async function (pi: ExtensionAPI) {
 									lastWordTime = wordTime;
 								}
 							}
+							if (renderKeyFor(ctx, contextual) !== measuredRenderKey) return;
+							playbackHistory.retainTimingUnit(message.id, measuredRenderKey, unit,
+								checkpoints.slice(unitStart).map(point => ({ ...point, time: point.time - time })));
 							time += duration;
 						}
 					} catch {
@@ -2296,6 +2331,7 @@ export default async function (pi: ExtensionAPI) {
 		clearPlaybackTransport();
 		vocalizer.setPlaybackPaused(true);
 		playbackPaused = true;
+		narration.setPaused(playbackPaused);
 		state = "idle";
 		hideFollowHint();
 		autoScrollForceOnce = false;
@@ -2826,7 +2862,8 @@ export default async function (pi: ExtensionAPI) {
 			}
 			vocalizer.setNarrationSourceOffset(sourceOffset);
 			playbackPaused = false;
-			armNarrationFollow(true);
+			narration.setPaused(playbackPaused);
+			armNarrationFollow(true, false);
 			livePlaybackId = `live:${++nextLivePlaybackId}`;
 			playbackHistory.beginCapture(livePlaybackId, "", 0, true, 0, 0, !continuingTurn);
 			refreshPlaybackTimeline();
@@ -3059,21 +3096,37 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	// Resolve identity after preview, never in this shared scroll/control path.
-	const preparePlaybackAction = async (ctx: ExtensionContext, pauseResume = false): Promise<number | undefined> => {
+	const preparePlaybackAction = async (ctx: ExtensionContext, pauseResume = false, deferInput = false): Promise<number | undefined> => {
 		if (!requireEnabledVoice(ctx)) return;
 		const epoch = ++playbackRequestEpoch;
 		// Pause/resume edits the pending replay rather than superseding it.
 		if (pauseResume && pendingReplay) pendingReplay.epoch = epoch;
-		try {
-			if (inputInProgress) await finishInputForPlayback();
-		} catch (error) {
-			ctx.ui.notify(`Voice microphone: ${error instanceof Error ? error.message : String(error)}`, "error");
-			return;
+		if (!deferInput && inputInProgress) {
+			try { await finishInputForPlayback(); }
+			catch (error) {
+				ctx.ui.notify(`Voice microphone: ${error instanceof Error ? error.message : String(error)}`, "error");
+				return;
+			}
 		}
 		return epoch === playbackRequestEpoch && interactiveVoiceSession ? epoch : undefined;
 	};
 
+	// Preview raw source before contextual identities yield or device acquisition waits.
+	const previewHistoricalTarget = (ctx: ExtensionContext, movement: -1 | 0 | 1, automatic = false): boolean => {
+		const messages = completedAssistantMessages(ctx, config.mode, false);
+		const selected = playbackHistory.selected();
+		const index = pausedForAttention ? messages.length - 1 : messages.findIndex(message => message.id === selected?.id);
+		const live = index < 0 && !ownerTurnEnded && livePlaybackId !== undefined && selected?.id.startsWith("live:");
+		const target = live ? (movement === 0 ? selected : messages.at(-1))
+			: messages[Math.max(0, Math.min(messages.length - 1, (index < 0 ? messages.length - 1 : index) + movement))];
+		if (!target || (movement === 1 && index === messages.length - 1)) return false;
+		previewPlaybackTarget({ ...target, time: 0, sourceOffset: 0 }, !automatic);
+		return true;
+	};
+
 	const replaySelected = async (ctx: ExtensionContext, automatic = false): Promise<void> => {
+		if (!requireEnabledVoice(ctx)) return;
+		const framed = previewHistoricalTarget(ctx, 0, automatic);
 		const request = await preparePlaybackAction(ctx);
 		if (request === undefined || !await preparePlaybackMessages(ctx, request) || request !== playbackRequestEpoch) return;
 		syncPlaybackMessages(ctx, pausedForAttention);
@@ -3083,7 +3136,8 @@ export default async function (pi: ExtensionAPI) {
 			return;
 		}
 		playbackPaused = false;
-		playTarget(target, !playbackHistory.hasCompleteTimingFor(target.id), true, automatic);
+		narration.setPaused(playbackPaused);
+		playTarget(target, !playbackHistory.hasCompleteTimingFor(target.id), true, automatic, framed);
 	};
 
 	playRequestedAttention = ctx => {
@@ -3100,17 +3154,19 @@ export default async function (pi: ExtensionAPI) {
 	pi.registerShortcut("f6", {
 		description: "Play the previous assistant message",
 		handler: async ctx => {
+			if (!requireEnabledVoice(ctx)) return;
+			const framed = previewHistoricalTarget(ctx, -1);
 			const request = await preparePlaybackAction(ctx);
 			if (request === undefined || !await preparePlaybackMessages(ctx, request) || request !== playbackRequestEpoch) return;
 			syncPlaybackMessages(ctx);
 			const message = playbackHistory.move(-1);
-			if (message) playTarget({ ...message, time: 0, sourceOffset: 0 }, !playbackHistory.hasCompleteTimingFor(message.id), true);
+			if (message) playTarget({ ...message, time: 0, sourceOffset: 0 }, !playbackHistory.hasCompleteTimingFor(message.id), true, false, framed);
 		},
 	});
 
 	const stepSentence = async (ctx: ExtensionContext, direction: -1 | 1, fromPrevious = false): Promise<void> => {
-		const request = await preparePlaybackAction(ctx);
-		if (request === undefined || !await preparePlaybackMessages(ctx, request) || request !== playbackRequestEpoch) return;
+		const request = await preparePlaybackAction(ctx, false, true);
+		if (request === undefined || request !== playbackRequestEpoch) return;
 		syncPlaybackMessages(ctx);
 		const selected = playbackHistory.selected();
 		if (!selected) { ctx.ui.notify("There is no completed assistant message", "warning"); return; }
@@ -3168,6 +3224,7 @@ export default async function (pi: ExtensionAPI) {
 		pausedOwnerUtterance = lastOwnerUtterance;
 		vocalizer.setPlaybackPaused(true);
 		playbackPaused = true;
+		narration.setPaused(playbackPaused);
 		// A paused sink still owns the selected output device. Retaining the
 		// lease prevents another session from starting overlapping audio and lets
 		// live turns continue queueing/flush safely behind the paused transport.
@@ -3188,6 +3245,7 @@ export default async function (pi: ExtensionAPI) {
 			playbackRequestEpoch += 1;
 			pendingReplay = undefined;
 			playbackPaused = true;
+			narration.setPaused(playbackPaused);
 		}
 		pauseCurrentPlayback(false);
 		scrollToBottom(ctx);
@@ -3202,11 +3260,13 @@ export default async function (pi: ExtensionAPI) {
 				const request = pendingReplay;
 				if (request.paused) {
 					playbackPaused = false;
+					narration.setPaused(playbackPaused);
 					void playTarget(request.target, request.recordTimings, request.previewTarget);
 					return;
 				}
 				request.paused = !request.paused;
 				playbackPaused = request.paused;
+				narration.setPaused(playbackPaused);
 				vocalizer.setPlaybackPaused(request.paused);
 				refreshStatus();
 				refreshPlaybackTimeline();
@@ -3226,11 +3286,13 @@ export default async function (pi: ExtensionAPI) {
 			restoreBottomAfterSpeech = false;
 			bottomPinned = false;
 			if (playbackPaused) {
+				if (lastPlaybackTick) narration.setPlayback(lastPlaybackTick.utterance, lastPlaybackTick.position, true);
 				armNarrationFollow();
 				flushNarrationRender();
-				requestNarrationAutoScroll(true);
+				requestNarrationAutoScroll(true, true);
 				if (!await adoptCurrentConnection(requestEpoch) || requestEpoch !== playbackRequestEpoch) return;
 				playbackPaused = false;
+				narration.setPaused(playbackPaused);
 				if (speechPurpose === "notification" && completedOwnerUtterance === pausedOwnerUtterance) {
 					vocalizer.setPlaybackPaused(false);
 					completeOwnerSpeech();
@@ -3251,7 +3313,7 @@ export default async function (pi: ExtensionAPI) {
 				completedOwnerUtterance = undefined;
 				vocalizer.setPlaybackPaused(false);
 				playbackPaused = false;
-				armNarrationFollow();
+				narration.setPaused(playbackPaused);
 				pausedOwnerUtterance = undefined;
 				state = "speaking";
 				refreshStatus();
@@ -3272,6 +3334,8 @@ export default async function (pi: ExtensionAPI) {
 	pi.registerShortcut("f10", {
 		description: "Play the next assistant message; pause and follow transcript tail after the latest",
 		handler: async ctx => {
+			if (!requireEnabledVoice(ctx)) return;
+			const framed = previewHistoricalTarget(ctx, 1);
 			const request = await preparePlaybackAction(ctx);
 			if (request === undefined || !await preparePlaybackMessages(ctx, request) || request !== playbackRequestEpoch) return;
 			syncPlaybackMessages(ctx);
@@ -3281,7 +3345,7 @@ export default async function (pi: ExtensionAPI) {
 				return;
 			}
 			const message = playbackHistory.move(1);
-			if (message) playTarget({ ...message, time: 0, sourceOffset: 0 }, !playbackHistory.hasCompleteTimingFor(message.id), true);
+			if (message) playTarget({ ...message, time: 0, sourceOffset: 0 }, !playbackHistory.hasCompleteTimingFor(message.id), true, false, framed);
 		},
 	});
 
@@ -3683,10 +3747,12 @@ export default async function (pi: ExtensionAPI) {
 					pendingReplay = undefined;
 					if (ownsSpeech) {
 						playbackPaused = true;
+						narration.setPaused(playbackPaused);
 						vocalizer.setPlaybackPaused(true);
 					}
 					if (await adoptCurrentConnection(epoch, true)) {
 						playbackPaused = ownsSpeech;
+						narration.setPaused(playbackPaused);
 						vocalizer.setPlaybackPaused(playbackPaused);
 						ctx.ui.notify(`Voice pinned to ${activeDeviceId ?? deviceSelection}; no playback started (metadata only)`, "info");
 					}
@@ -3933,7 +3999,6 @@ export default async function (pi: ExtensionAPI) {
 						return;
 					}
 					await updateConfig({ ...config, playbackHighlight: normalized === "on" });
-					if (normalized === "off" && !config.autoScroll) narration.finish();
 					requestNarrationRender(true);
 					ctx.ui.notify(`Spoken-word highlighting ${normalized === "on" ? "enabled" : "disabled"}`, "info");
 					return;
@@ -3945,9 +4010,8 @@ export default async function (pi: ExtensionAPI) {
 						return;
 					}
 					await updateConfig({ ...config, autoScroll: normalized === "on" });
-					if (normalized === "on" && ownsSpeech && !playbackPaused) armNarrationFollow();
-					else hideFollowHint();
-					if (normalized === "off" && !config.playbackHighlight) narration.finish();
+					// Display settings retain paused/playing state and manual framing.
+					hideFollowHint();
 					requestNarrationRender(true);
 					ctx.ui.notify(`Spoken-text auto-scroll ${normalized === "on" ? "enabled" : "disabled"}`, "info");
 					return;
