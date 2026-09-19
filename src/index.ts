@@ -1952,9 +1952,10 @@ export default async function (pi: ExtensionAPI) {
 		previewTarget = false,
 		queued = false,
 		framed = false,
+		restoreTail = false,
 	): Promise<void> => {
 		if (!interactiveVoiceSession) return;
-		if (!queued) restoreBottomAfterSpeech = false;
+		if (!queued) restoreBottomAfterSpeech = restoreTail;
 		const sourceOffset = Math.max(0, Math.min(target.text.length, target.sourceOffset));
 		const suffix = target.text.slice(sourceOffset);
 		const liveTargetIndex = [...liveBlockIds].find(([, id]) => id === target.id)?.[0];
@@ -3155,6 +3156,7 @@ export default async function (pi: ExtensionAPI) {
 
 	const replaySelected = async (ctx: ExtensionContext, automatic = false): Promise<void> => {
 		if (!requireEnabledVoice(ctx)) return;
+		const restoreTail = atTranscriptTail && transcriptIsFollowingEnd();
 		const framed = previewHistoricalTarget(ctx, 0, automatic);
 		const request = await preparePlaybackAction(ctx);
 		if (request === undefined || !await preparePlaybackMessages(ctx, request) || request !== playbackRequestEpoch) return;
@@ -3166,7 +3168,7 @@ export default async function (pi: ExtensionAPI) {
 		}
 		playbackPaused = false;
 		narration.setPaused(playbackPaused);
-		playTarget(target, !playbackHistory.hasCompleteTimingFor(target.id), true, automatic, framed);
+		playTarget(target, !playbackHistory.hasCompleteTimingFor(target.id), true, automatic, framed, restoreTail);
 	};
 
 	playRequestedAttention = ctx => {
@@ -3330,7 +3332,7 @@ export default async function (pi: ExtensionAPI) {
 				await replaySelected(ctx);
 				return;
 			}
-			restoreBottomAfterSpeech = false;
+			restoreBottomAfterSpeech = atTranscriptTail && transcriptIsFollowingEnd();
 			bottomPinned = false;
 			if (playbackPaused) {
 				if (lastPlaybackTick) narration.setPlayback(lastPlaybackTick.utterance, lastPlaybackTick.position, true);
