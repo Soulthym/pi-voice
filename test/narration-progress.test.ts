@@ -263,6 +263,81 @@ test("looks up repeated code blocks with their transcript prefix", () => {
 	assert.match(transformed, /The first use\.[\s\S]*The second use\./);
 });
 
+test("highlights the selected identical thinking fence at its display offset", () => {
+	const code = "run();";
+	const fence = `\`\`\`ts\n${code}\n\`\`\``;
+	const thinking = `Before.\n${fence}\nAfter.`;
+	const joined = `${thinking}\n\n${thinking}`;
+	for (const live of [false, true]) {
+		const progress = new NarrationProgress();
+		progress.begin();
+		if (live) progress.pushDelta("assistant-thinking", 0, thinking);
+		const base = progress.startMessage();
+		// Leading whitespace is trimmed by the display, not by canonical source tracking.
+		const sourceText = `\n ${thinking}`;
+		progress.pushDelta("assistant-thinking", 1, sourceText, thinking.length + 2);
+		const start = base + sourceText.indexOf(fence);
+		progress.registerSegment({
+			id: 1, utterance: 1, text: "Run it.", source: { start, end: start },
+			code: { blockSource: { start, end: start + fence.length + 1 }, code, language: "ts", cues: [] },
+		});
+		progress.setSegmentAudio(1, 0, 1);
+		progress.setPlayback(1, 0);
+		const output = progress.transform(joined, "assistant-thinking", dim, background, () => "Cached description.");
+		assert.equal(output.match(/```ts\u200c/g)?.length, 1);
+		assert.ok(output.includes(fence), "the first identical fence is unchanged");
+		assert.ok(output.indexOf("```ts\u200c") > output.indexOf("After"), "only the second fence is styled");
+		assert.match(output, /```ts\u200c\n\x1b\[2mrun\(\);\x1b\[22m/);
+		assert.equal(output.match(/Code description/g)?.length, 2);
+		assert.doesNotMatch(progress.transform(joined, "assistant-thinking", dim, background, undefined, false), /\x1b|\u200c/);
+		assert.doesNotMatch(progress.transform(joined, "assistant", dim), /\x1b|\u200c/, "other message types stay untouched");
+		progress.finishUtterance(1);
+		assert.doesNotMatch(progress.transform(joined, "assistant-thinking", dim), /\x1b|\u200c/);
+	}
+});
+
+test("uses the canonical range for a later duplicate fence within one source block", () => {
+	const code = "run();";
+	const fence = `\`\`\`ts\n${code}\n\`\`\``;
+	const markdown = `${fence}\nAgain.\n${fence}`;
+	const progress = new NarrationProgress();
+	progress.begin();
+	progress.pushDelta("assistant", 0, "An earlier message.");
+	const base = progress.startMessage();
+	progress.pushDelta("assistant", 0, markdown);
+	const start = base + markdown.lastIndexOf(fence);
+	progress.registerSegment({
+		id: 1, utterance: 1, text: "Run it.", source: { start, end: start },
+		code: { blockSource: { start, end: base + markdown.length }, code, language: "ts", cues: [] },
+	});
+	const output = progress.transform(markdown, "assistant", dim);
+	assert.ok(output.startsWith(`${fence}\n<dim>Again</dim>.\n`));
+	assert.ok(output.endsWith("```ts\u200c\n\x1b[2mrun();\x1b[22m\n```"));
+});
+
+test("maps multiple code ranges past prose styles, markers and injected descriptions", () => {
+	const code = "run();";
+	const fence = `\`\`\`ts\n${code}\n\`\`\``;
+	const markdown = `Active words.\n${fence}\nBetween.\n${fence}\nLater.`;
+	const progress = new NarrationProgress();
+	progress.setCompletedText(markdown);
+	progress.registerSegment({ id: 1, utterance: 1, text: "Active words.", source: { start: 0, end: 13 } });
+	progress.setSegmentAudio(1, 0, 1);
+	progress.setPlayback(1, 0);
+	for (const [index, start] of [markdown.indexOf(fence), markdown.lastIndexOf(fence)].entries()) {
+		progress.registerSegment({
+			id: index + 2, utterance: 2, text: "Run it.", source: { start, end: start },
+			code: { blockSource: { start, end: start + fence.length + 1 }, code, language: "ts", cues: [] },
+		});
+	}
+	const output = progress.transform(markdown, "assistant", dim, background, () => "Cached.", true,
+		source => [`\x1b[31m${source}\x1b[39m`], NARRATION_ACTIVE_MARKER);
+	assert.ok(output.includes(`<bg>${NARRATION_ACTIVE_MARKER}Active <dim>words</dim></bg>`));
+	assert.equal(output.match(/```ts\u200c\n\x1b\[2m\x1b\[31mrun\(\);\x1b\[39m\x1b\[22m/g)?.length, 2);
+	assert.equal(output.match(/Code description/g)?.length, 2);
+	assert.ok(output.endsWith("<dim>Later</dim>."));
+});
+
 test("tracks table cells as independent active sentences", () => {
 	const markdown = "| Name | Status |";
 	const progress = new NarrationProgress();

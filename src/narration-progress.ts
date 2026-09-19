@@ -280,6 +280,7 @@ function styleNarrationMarkdown(
 	extraExcluded: readonly NarrationSourceRange[] = [],
 	activeWord: NarrationSourceRange | undefined = undefined,
 	activeMarker = "",
+	shifts?: Array<{ at: number; length: number }>,
 ): string {
 	const excluded = [...excludedMarkdownRanges(markdown), ...extraExcluded];
 	const ranges = tokenize(markdown).filter(word => {
@@ -297,9 +298,11 @@ function styleNarrationMarkdown(
 	for (let index = 0; index < ranges.length; index += 1) {
 		const range = ranges[index];
 		output += markdown.slice(offset, range.start);
+		const before = output.length;
 		if (!isActiveRange(range)) {
 			const text = markdown.slice(range.start, range.end);
 			output += range.end > cursor ? styleUnread(text) : text;
+			shifts?.push({ at: range.end, length: output.length - before - text.length });
 			offset = range.end;
 			continue;
 		}
@@ -327,6 +330,7 @@ function styleNarrationMarkdown(
 			phraseOffset = word.end;
 		}
 		output += styleActive(phrase);
+		shifts?.push({ at: ranges[last].end, length: output.length - before - (ranges[last].end - range.start) });
 		offset = ranges[last].end;
 		index = last;
 	}
@@ -667,6 +671,7 @@ export class NarrationProgress {
 			);
 			if (segment) segment.renderAt ??= performance.now();
 		}
+		const proseShifts: Array<{ at: number; length: number }> = [];
 		let transformed = styleNarrationMarkdown(
 			injected.markdown,
 			Math.max(0, mapOffset(localCursor)),
@@ -676,20 +681,31 @@ export class NarrationProgress {
 			injected.excluded,
 			activeWord,
 			activeMarker,
+			proseShifts,
 		);
-		const focused = [...this.#codeBlocks.values()]
-			.filter(codeBlock => !codeBlock.complete)
-			.sort((left, right) => left.source.start - right.source.start);
-		let searchFrom = 0;
-		for (const codeBlock of focused) {
-			let codeAt = transformed.indexOf(codeBlock.code, searchFrom);
-			if (codeAt < 0) continue;
+		const focused = [...this.#codeBlocks.values()].flatMap(codeBlock => {
+			if (codeBlock.complete) return [];
+			const owner = (type === "assistant-thinking" ? candidates : [block]).find(candidate => codeBlock.source.start >= candidate.start &&
+				codeBlock.source.end <= candidate.start + candidate.text.length);
+			if (!owner) return [];
+			const fence = this.#raw.slice(codeBlock.source.start, codeBlock.source.end);
+			const bodyAt = fence.indexOf("\n") + 1;
+			if (!bodyAt || fence.slice(bodyAt, bodyAt + codeBlock.code.length) !== codeBlock.code) return [];
+			const leading = owner.text.length - owner.text.trimStart().length;
+			const localAt = codeBlock.source.start + bodyAt - owner.start - leading + owner.displayOffset;
+			if (markdown.slice(localAt, localAt + codeBlock.code.length) !== codeBlock.code) return [];
+			const injectedAt = mapOffset(localAt);
+			const at = injectedAt + proseShifts.reduce((total, shift) => total + (shift.at <= injectedAt ? shift.length : 0), 0);
+			return [{ codeBlock, at }];
+		}).sort((left, right) => right.at - left.at);
+		// Work backwards so inserted styles cannot shift another fence's source position.
+		for (const { codeBlock, at } of focused) {
+			let codeAt = at;
 			const suppressed = suppressFenceSyntaxHighlight(transformed, codeAt);
 			transformed = suppressed.markdown;
 			codeAt = suppressed.codeAt;
 			const styled = styleCodeBlock(codeBlock.code, codeBlock, highlightSyntax);
 			transformed = transformed.slice(0, codeAt) + styled + transformed.slice(codeAt + codeBlock.code.length);
-			searchFrom = codeAt + styled.length;
 		}
 		return transformed;
 	}
