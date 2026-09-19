@@ -27,18 +27,29 @@ async function waitForWidgetLines(
 	}
 }
 
-/** Starts a fake STT endpoint that accepts recordings; any "stop" closes all clients. */
+/** Scoped admission/record/stop fixture; unscoped commands must never be sent. */
 function startFakeSttServer(socketPath: string): Promise<net.Server> {
 	return new Promise(resolve => {
-		const clients = new Set<net.Socket>();
+		const clients = new Map<string, net.Socket>();
+		let nextTicket = 0;
 		const server = net.createServer(socket => {
-			clients.add(socket);
-			socket.on("close", () => clients.delete(socket));
+			let ticket: string | undefined;
+			socket.on("close", () => { if (ticket) clients.delete(ticket); });
 			socket.on("data", chunk => {
-				if (chunk.toString("utf8").trim() === "stop") {
-					for (const client of clients) if (client !== socket) client.destroy();
+				const command = chunk.toString("utf8").trim();
+				if (command === "ticket") {
+					ticket = String(++nextTicket);
+					clients.set(ticket, socket);
+					socket.write(`ticket ${ticket}\n`);
+				} else if (command.startsWith("stop ")) {
+					assert.match(command, /^stop [1-9][0-9]*$/);
+					clients.get(command.slice(5))?.destroy();
 					socket.end(`ok ${Buffer.from("stopped").toString("base64")}\n`);
-				} else socket.write("stream\n");
+				} else {
+					assert.ok(ticket);
+					assert.equal(command, `record ${ticket}`);
+					socket.write("stream\n");
+				}
 			});
 		});
 		server.listen(socketPath, () => resolve(server));
