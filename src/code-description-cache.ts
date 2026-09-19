@@ -84,8 +84,22 @@ export class CodeDescriptionCache {
 		}
 	}
 
-	resolveKey(identity: string): string {
-		return this.#identities.get(identity) ?? identity;
+	resolveKey(
+		identity: string,
+		compatibleKeys?: () => Iterable<string>,
+		onAdopt?: (snapshot: CodeDescriptionCacheSnapshot) => void,
+	): string {
+		const known = this.#identities.get(identity) ?? identity;
+		if (known !== identity || this.#plans.has(known)) return known;
+		// Compute old serialized identities only on a miss; retain only their hashes.
+		for (const candidate of compatibleKeys?.() ?? []) {
+			const key = this.#identities.get(candidate) ?? candidate;
+			const adopted = this.adopt(identity, key);
+			if (!adopted) continue;
+			try { onAdopt?.(adopted); } catch { /* Persistence is best-effort. */ }
+			return key;
+		}
+		return identity;
 	}
 
 	adopt(identity: string, key: string): CodeDescriptionCacheSnapshot | undefined {

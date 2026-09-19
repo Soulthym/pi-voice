@@ -162,6 +162,13 @@ function providerVisibleMessage(message: Message): unknown {
 	};
 }
 
+/** Pre-hash identity for lazy lookup of old source keys and generator-key aliases. */
+export function legacyStructuredContextIdentity(messages: readonly Message[]): string {
+	return JSON.stringify(messages.map(message => message.role === "assistant"
+		? { role: message.role, content: message.content }
+		: providerVisibleMessage(message)));
+}
+
 /** Compact source identity; provider transforms and runtime metadata are not archived. */
 export function structuredContextIdentity(messages: readonly Message[]): string {
 	return createHash("sha256").update(JSON.stringify(messages.map(providerVisibleMessage))).digest("hex");
