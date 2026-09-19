@@ -27,6 +27,32 @@ test("dims unread prose and reveals words from playback progress", () => {
 	assert.equal(progress.transform("First second.", "assistant", dim), "First second.");
 });
 
+test("a fresh yield response highlights after pause and Stop without an explicit resume", () => {
+	const progress = new NarrationProgress();
+	progress.setCompletedText("Old response.");
+	progress.registerSegment({ id: 1, utterance: 1, text: "Old response.", source: { start: 0, end: 13 } });
+	progress.setSegmentAudio(1, 0, 2);
+	progress.setPlayback(1, 0);
+	progress.setPaused(true);
+	const frozen = progress.transform("Old response.", "assistant", dim, background);
+	progress.startMessage();
+	progress.setPlayback(1, 1.9);
+	assert.equal(progress.transform("Old response.", "assistant", dim, background), frozen,
+		"continuing messages must retain sticky pause");
+
+	progress.finish(); // Stop finishes narration; yield turn_end starts a fresh lifetime.
+	progress.begin();
+	const start = progress.startMessage();
+	progress.pushDelta("assistant", 0, "New response.");
+	progress.registerSegment({ id: 2, utterance: 2, text: "New response.", source: { start, end: start + 13 } });
+	progress.setSegmentAudio(2, 0, 2);
+	progress.setPlayback(2, 0);
+	assert.equal(progress.transform("New response.", "assistant", dim, background),
+		"<bg>New <dim>response</dim></bg>.");
+	progress.setPlayback(2, 1.9);
+	assert.equal(progress.transform("New response.", "assistant", dim), "New response.");
+});
+
 test("previews a regenerated source position before audio starts", () => {
 	const progress = new NarrationProgress();
 	progress.setCompletedText("Alpha beta gamma.");

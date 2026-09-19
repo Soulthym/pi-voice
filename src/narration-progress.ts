@@ -465,6 +465,7 @@ export class NarrationProgress {
 		this.#raw = "";
 		this.#cursor = 0;
 		this.#active = true;
+		this.#paused = false;
 		this.#activeSource = undefined;
 		this.#activeWord = undefined;
 		this.#playback.clear();
