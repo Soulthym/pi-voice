@@ -11,20 +11,20 @@ encode_message() {
   printf '%s' "$1" | base64 | tr -d '\n'
 }
 
-# Both counters are replaced together while holding the persistent fence.
+# Epoch and both counters are replaced together under the persistent fence.
 ticket_state="$recording_lock.tickets"
 valid_counter() {
   [[ $1 =~ ^(0|[1-9][0-9]{0,15})$ ]] && (( $1 <= 9007199254740991 ))
 }
 load_tickets() {
-  latest=0 watermark=0
+  epoch= latest=0 watermark=0
   if [[ -e $ticket_state ]]; then
-    IFS=' ' read -r latest watermark extra <"$ticket_state" || exit 1
-    valid_counter "$latest" && valid_counter "$watermark" && [[ -z $extra ]] && (( watermark <= latest )) || exit 1
+    IFS=' ' read -r epoch latest watermark extra <"$ticket_state" || exit 1
+    [[ $epoch =~ ^[0-9a-f]{32}$ ]] && valid_counter "$latest" && valid_counter "$watermark" && [[ -z $extra ]] && (( watermark <= latest )) || exit 1
   fi
 }
 save_tickets() {
-  printf '%s %s\n' "$latest" "$watermark" >"$ticket_state.tmp" &&
+  printf '%s %s %s\n' "$epoch" "$latest" "$watermark" >"$ticket_state.tmp" &&
     mv -f "$ticket_state.tmp" "$ticket_state" || exit 1
 }
 
@@ -35,13 +35,17 @@ flock -x 9 || exit 1
 load_tickets
 issued_ticket=
 if [[ $command == ticket ]]; then
+  if [[ -z $epoch ]]; then
+    epoch=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+    [[ $epoch =~ ^[0-9a-f]{32}$ ]] || exit 1
+  fi
   if (( latest == 9007199254740991 )); then
     printf 'error %s\n' "$(encode_message 'Microphone ticket space exhausted')"
     exit 0
   fi
   (( latest += 1 ))
   save_tickets
-  issued_ticket=$latest
+  issued_ticket="$epoch.$latest"
   flock -u 9
   printf 'ticket %s\n' "$issued_ticket"
   IFS= read -r command || exit 1
@@ -51,11 +55,12 @@ if [[ $command == ticket ]]; then
 fi
 if [[ $command == stop\ * && -z $issued_ticket ]]; then
   ticket=${command#stop }
-  if ! valid_counter "$ticket" || (( ticket == 0 || ticket > latest )); then
+  counter=${ticket#*.}
+  if [[ $ticket != "$epoch.$counter" || -z $epoch ]] || ! valid_counter "$counter" || (( counter == 0 || counter > latest )); then
     printf 'error %s\n' "$(encode_message 'Invalid microphone ticket')"
     exit 0
   fi
-  (( ticket > watermark )) && watermark=$ticket
+  (( counter > watermark )) && watermark=$counter
   save_tickets
   owner=$(cat "$active_file" 2>/dev/null || true)
   [[ ${owner%%:*} == "$ticket" ]] || owner=
@@ -94,7 +99,7 @@ if [[ -z $issued_ticket ]]; then
   printf 'error %s\n' "$(encode_message "Unsupported phone voice command: $command")"
   exit 0
 fi
-(( issued_ticket == latest && issued_ticket > watermark )) || exit 1
+[[ $issued_ticket == "$epoch.$latest" ]] && (( latest > watermark )) || exit 1
 # A crash between mkdir and marker publication leaves only an empty directory.
 [[ -e $active_file ]] || rmdir "$recording_lock" 2>/dev/null || true
 if [[ -e $active_file ]] || ! mkdir "$recording_lock" 2>/dev/null; then

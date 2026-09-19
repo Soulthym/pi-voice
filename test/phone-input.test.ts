@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -7,14 +8,15 @@ import { PhoneInputClient } from "../src/phone-input.js";
 
 function ticketServer(handler: (socket: net.Socket) => void): net.Server {
 	let ticket = 0;
+	const epoch = randomBytes(16).toString("hex");
 	return net.createServer(socket => {
 		socket.once("data", raw => {
 			const command = String(raw);
 			if (command === "ticket\n") {
-				socket.write(`ticket ${++ticket}\n`);
+				socket.write(`ticket ${epoch}.${++ticket}\n`);
 				socket.once("data", () => { handler(socket); socket.emit("data", "record\n"); });
 			} else {
-				assert.match(command, /^stop [1-9][0-9]*\n$/);
+				assert.match(command, /^stop [0-9a-f]{32}\.[1-9][0-9]*\n$/);
 				handler(socket); socket.emit("data", "stop\n");
 			}
 		});
@@ -254,4 +256,48 @@ test("stop uses the active capture endpoint, not a newly routed endpoint", async
 		await client.stop("tcp://127.0.0.1:1");
 		assert.deepEqual(await capture, { type: "text", data: "" });
 	} finally { active?.destroy(); await new Promise<void>(resolve => server.close(() => resolve())); }
+});
+
+for (const ticket of ["1", `${"a".repeat(32)}.0`, `${"a".repeat(32)}.9007199254740992`]) test(`rejects unsafe admission ${ticket}`, async () => {
+	const commands: string[] = [];
+	const server = net.createServer(socket => socket.on("data", raw => {
+		commands.push(String(raw)); socket.end(`ticket ${ticket}\n`);
+	}));
+	const port = await listen(server);
+	try {
+		await assert.rejects(new PhoneInputClient().capture(`tcp://127.0.0.1:${port}`), /update the recorder/);
+		assert.deepEqual(commands, ["ticket\n"]);
+	} finally { await new Promise<void>(resolve => server.close(() => resolve())); }
+});
+
+test("reassigned endpoint cannot confirm an unconfirmed origin; retry at origin can", async () => {
+	const a = "a".repeat(32), b = "b".repeat(32);
+	let origin = a, latest = 1, confirmed = false;
+	const recorded = Promise.withResolvers<void>();
+	const stops: string[] = [];
+	const server = net.createServer(socket => {
+		socket.on("error", () => {});
+		socket.on("data", raw => {
+			const command = String(raw).trim();
+			if (command === "ticket") socket.write(`ticket ${origin}.${latest}\n`);
+			else if (command.startsWith("record ")) recorded.resolve();
+			else {
+				stops.push(command);
+				socket.end(command === `stop ${origin}.1` && latest >= 1 && confirmed
+					? "ok c3RvcHBlZA==\n" : `error ${Buffer.from("Stop unconfirmed").toString("base64")}\n`);
+			}
+		});
+	});
+	const port = await listen(server);
+	try {
+		const client = new PhoneInputClient();
+		const capture = assert.rejects(client.capture(`tcp://127.0.0.1:${port}`), /cancelled/);
+		await recorded.promise;
+		await assert.rejects(client.cancel(), /unconfirmed/); await capture;
+		origin = b; latest = 10; confirmed = true;
+		await assert.rejects(client.stop(), /unconfirmed/);
+		origin = a;
+		await client.stop();
+		assert.deepEqual(stops, Array(3).fill(`stop ${a}.1`));
+	} finally { await new Promise<void>(resolve => server.close(() => resolve())); }
 });

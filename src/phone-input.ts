@@ -306,7 +306,7 @@ export class PhoneInputClient {
 				const header = headerBuffer.subarray(0, newline).toString("utf8").trim();
 				const remainder = headerBuffer.subarray(newline + 1);
 				if (!ticketReceived) {
-					if (!/^ticket [1-9][0-9]{0,15}$/.test(header) || !Number.isSafeInteger(Number(header.slice(7))) || remainder.length) {
+					if (!/^ticket [0-9a-f]{32}\.[1-9][0-9]{0,15}$/.test(header) || !Number.isSafeInteger(Number(header.slice(40))) || remainder.length) {
 						finish(new Error("Microphone admission ticket missing; update the recorder client"));
 						return;
 					}

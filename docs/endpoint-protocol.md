@@ -43,7 +43,9 @@ Forced local termination cannot confirm remote buffered audio stopped. This impl
 ## Input commands
 
 The host opens a recording connection and sends `ticket\n`. The server replies
-`ticket N\n` with a positive, monotonically increasing safe-integer admission ticket.
+`ticket N\n`, where N is `<epoch>.<counter>`: a 32-character lowercase random hex
+server-state epoch and a positive monotonically increasing safe integer (maximum
+9007199254740991). Treat the entire ticket as opaque; numeric-only tickets are rejected.
 Only then may the host send `record N\n` **on that same connection**. Keep its
 write side open throughout capture; EOF triggers generation-scoped cleanup.
 Cancellation before receiving a ticket must close the connection without sending record.
@@ -52,14 +54,21 @@ A separate control connection sends `stop N\n`. It cancels that pending request
 before admission/publication, or stops only the active recording bearing N. A late
 old stop cannot stop a newer recording. Bare `record` / `stop` are rejected.
 
-The persistent fence protects an atomically replaced pair of counters (latest issued
-ticket and cancellation watermark). Admission requires the connection's ticket to
-be the latest issued and above the watermark; newer ticket issuance supersedes older
-unadmitted requests. Stop advances the watermark, but touches active state only for
-its exact ticket. Storage is bounded, including one fixed replacement temp file;
-ticket exhaustion fails closed. Never reset counters or delete the fence while
-requests/stop retries may remain. Runtime-directory loss requires a fresh session,
-not replaying old tickets. This is process-crash fencing, not power-loss durability.
+The persistent fence protects an atomically replaced state file containing the epoch,
+latest issued counter and cancellation watermark. The epoch is generated from 16 bytes
+of OS randomness under that fence on first issuance and persists across connections.
+Admission rechecks the epoch as well as the latest counter and watermark; newer
+issuance supersedes older unadmitted requests. Stop rejects foreign or missing-state
+epochs before touching markers or acknowledging anything, even when the receiving
+server's counter is higher. This binds retries to the origin, not its forwarded address.
+Stop advances the watermark, but touches active state only for its exact ticket.
+Storage is bounded (one state file and fixed replacement temp file), without tombstones.
+Counter exhaustion fails closed without rollover. State loss creates a new epoch on
+next issuance; old stop and record tickets fail closed, including loss between issuance
+and record. Never reset counters, restore stale state, copy state between servers, or
+delete the fence while sessions may use it. Lost state cannot prove an old microphone
+stopped: recover the original recorder out of band before releasing its lease.
+This is process-crash persistence, not power-loss durability or backup-rollback protection.
 
 Under the fence, an empty recording-lock directory with **no active marker** is
 provably pre-publication debris and is removed with `rmdir` before admission.
@@ -117,7 +126,7 @@ a control request reaching a different server is not proof about the old server.
 
 ### Microphone protocol migration
 
-Older documentation defined stop `ok` as acceptance only. That contract is **not safe or compatible** with the current host: `ok` with `stopping`, an empty payload, or any payload other than `stopped` is rejected. Do not relabel an acceptance response as `stopped`; implement confirmation and pre-start cancellation fencing first. Ticket negotiation is mandatory; upgrade both host and recorder scripts. Upgrade all recorder-script copies on the client together, with no old recorder sessions still running. The bundled scripts require `flock` (util-linux on Linux/Termux); its persistent fence file must not be deleted while sessions may use it. No host compatibility switch permits acceptance-only ACKs.
+Older documentation defined stop `ok` as acceptance only. That contract is **not safe or compatible** with the current host: `ok` with `stopping`, an empty payload, or any payload other than `stopped` is rejected. Do not relabel an acceptance response as `stopped`; implement confirmation and pre-start cancellation fencing first. Epoch-qualified ticket negotiation is mandatory; upgrade both host and recorder scripts. Numeric-only hosts, tickets and old two-counter state files are incompatible. After confirming all old microphones stopped and exiting old sessions, remove the old `.tickets` state file before using the upgraded scripts; never migrate an outstanding numeric ticket into the new epoch. Upgrade all recorder-script copies on the client together, with no old recorder sessions still running. The bundled scripts require `flock` (util-linux on Linux/Termux); its persistent fence file must not be deleted while sessions may use it. No host compatibility switch permits acceptance-only ACKs.
 
 `/voice stop` remains an immediate UI/processing cancellation escape hatch: it need not wait for transcription or editing to finish. Microphone cleanup continues separately and must report failure honestly. Network loss/timeouts are **unconfirmed**, never proof the microphone stopped; a new capture must wait for a successful explicit stop retry after reconnection.
 
