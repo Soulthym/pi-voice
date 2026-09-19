@@ -1079,6 +1079,12 @@ export default async function (pi: ExtensionAPI) {
 			return;
 		}
 		scrollView.scrollToEnd();
+		recordBottomPin();
+	};
+
+	const recordBottomPin = (): void => {
+		const scrollView = activeScrollView();
+		if (!scrollView) return;
 		pinnedContentHeight = scrollView.contentHeight ?? 0;
 		narrationManuallyFramed = false;
 		atTranscriptTail = true;
@@ -2732,10 +2738,21 @@ export default async function (pi: ExtensionAPI) {
 		if (ctx.mode === "tui") {
 			ctx.ui.setWidget("pi-voice-render-driver", tui => {
 				narrationTui = tui;
+				// Native End (including remapped keys) and the mouse banner both route
+				// through this method, after Pi has handled overlays/key releases/hit tests.
+				// Observing the accepted action avoids mistaking wheel/search/layout motion for a pin.
+				const native = tui as typeof tui & { scrollToBottom?: () => void };
+				const originalBottom = native.scrollToBottom;
+				const onBottom = () => {
+					originalBottom!.call(tui);
+					recordBottomPin();
+				};
+				if (originalBottom) native.scrollToBottom = onBottom;
 				return {
 					render: () => [],
 					invalidate: () => {},
 					dispose: () => {
+						if (native.scrollToBottom === onBottom) native.scrollToBottom = originalBottom;
 						if (narrationTui === tui) narrationTui = null;
 					},
 				};
