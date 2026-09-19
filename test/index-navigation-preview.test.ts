@@ -53,6 +53,43 @@ test("failed previous-message acquisition keeps subsequent preview and audio on 
 	assert.equal((worker.sent.at(-1) as { text: string }).text, "A sentence.");
 });
 
+test("rapid F6 presses select two previous messages before preparation yields", async t => {
+	const host = await setup(t);
+	for (const id of ["A", "B", "C"]) host.addMessage(id, null, assistant(`${id} sentence.`));
+	await host.start();
+	const first = host.shortcut("f6");
+	assert.ok(host.render("B sentence.").includes(NARRATION_ACTIVE_MARKER));
+	const second = host.shortcut("f6");
+	assert.ok(host.render("A sentence.").includes(NARRATION_ACTIVE_MARKER));
+	await Promise.all([first, second]); await settle();
+	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
+	assert.equal((worker.sent.at(-1) as { text: string }).text, "A sentence.");
+	assert.match(host.widgetLines()?.join(" ") ?? "", /message 1\/3/);
+});
+
+for (const manual of [false, true]) test(`initial marker retry respects manual scrolling (${manual})`, async t => {
+	const host = await setup(t);
+	host.addMessage("answer", null, assistant("First sentence. Second sentence."));
+	await host.start();
+	const lines = Array.from({ length: 300 }, (_, i) => `line ${i}`);
+	host.scrollView.setDocument(lines, 40);
+	await host.command("bottom");
+	await host.shortcut("f11"); await settle();
+	assert.equal(host.scrollView.scrollTop, 260, "no marker has been rendered yet");
+	if (manual) host.scrollView.manualScrollTo(50);
+	lines[100] = `${NARRATION_ACTIVE_MARKER}First`;
+	host.scrollView.setDocument(lines, 40);
+	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
+	const segment = worker.sent.at(-1) as { utterance: number; segmentId: number };
+	worker.emit({ type: "segment-audio", ...segment, start: 0, duration: 2 });
+	worker.emit({ type: "playback", utterance: segment.utterance, position: 0.5 });
+	await new Promise(resolve => setTimeout(resolve, 150));
+	assert.equal(host.scrollView.scrollTop, manual ? 50 : 92);
+	worker.emit({ type: "idle", utterance: segment.utterance }); await settle();
+	assert.equal(host.scrollView.scrollTop, manual ? 50 : 260);
+	assert.equal(host.scrollView.isFollowingEnd, !manual);
+});
+
 test("sentence preview precedes whole-history identity preparation", async t => {
 	const host = await setup(t);
 	for (let i = 0; i < 40; i++) host.addMessage(`answer-${i}`, null,

@@ -1094,7 +1094,7 @@ export default async function (pi: ExtensionAPI) {
 		narrationMessageAnchor = undefined;
 		atTranscriptTail = false;
 		bottomPinned = false;
-		lastAutoScrollTop = undefined;
+		lastAutoScrollTop = activeScrollView()?.scrollTop;
 		autoScrollForceOnce = forceCanonicalAnchor;
 		hideFollowHint();
 		requestNarrationRender();
@@ -1143,12 +1143,13 @@ export default async function (pi: ExtensionAPI) {
 			bottomPinned = false;
 			atTranscriptTail = false;
 			lastAutoScrollTop = scrollView.scrollTop;
-		} else if (lastAutoScrollTop !== undefined && !autoScrollForceOnce &&
+		} else if (lastAutoScrollTop !== undefined &&
 			(!layoutChanged || (!transcriptIsFollowingEnd() && scrollView.scrollTop !== Math.min(lastAutoScrollTop,
 				Math.max(0, (scrollView.contentHeight ?? Infinity) - scrollView.viewportHeight)))) &&
 			isManualScrollAway({ scrollTop: scrollView.scrollTop, viewportHeight: scrollView.viewportHeight,
 				contentHeight: scrollView.contentHeight ?? 0 }, lastAutoScrollTop)) {
 			narrationManuallyFramed = true;
+			autoScrollForceOnce = false;
 			narrationMessageAnchor = undefined;
 			restoreBottomAfterSpeech = false;
 			bottomPinned = false;
@@ -3278,16 +3279,17 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	// Preview raw source before contextual identities yield or device acquisition waits.
-	const previewHistoricalTarget = (ctx: ExtensionContext, movement: -1 | 0 | 1, automatic = false): boolean => {
+	const previewHistoricalTarget = (ctx: ExtensionContext, movement: -1 | 0 | 1, automatic = false): PlaybackTarget | undefined => {
 		const messages = completedAssistantMessages(ctx, config.mode, false);
 		const selected = playbackHistory.selected();
 		const index = movement === 0 && pausedForAttention ? messages.length - 1 : messages.findIndex(message => message.id === selected?.id);
 		const live = index < 0 && !ownerTurnEnded && livePlaybackId !== undefined && selected?.id.startsWith("live:");
 		const target = live ? (movement === 0 ? selected : messages.at(-1))
 			: messages[Math.max(0, Math.min(messages.length - 1, (index < 0 ? messages.length - 1 : index) + movement))];
-		if (!target || (movement === 1 && index === messages.length - 1)) return false;
-		previewPlaybackTarget({ ...target, time: 0, sourceOffset: 0 }, !automatic);
-		return true;
+		if (!target || (movement === 1 && index === messages.length - 1)) return;
+		const preview = { ...target, time: 0, sourceOffset: 0 };
+		previewPlaybackTarget(preview, !automatic);
+		return preview;
 	};
 
 	const replaySelected = async (ctx: ExtensionContext, automatic = false): Promise<void> => {
@@ -3304,7 +3306,7 @@ export default async function (pi: ExtensionAPI) {
 		}
 		playbackPaused = false;
 		narration.setPaused(playbackPaused);
-		playTarget(target, !playbackHistory.hasCompleteTimingFor(target.id), true, automatic, framed, restoreTail);
+		playTarget(target, !playbackHistory.hasCompleteTimingFor(target.id), true, automatic, !!framed, restoreTail);
 	};
 
 	playRequestedAttention = ctx => {
@@ -3322,12 +3324,8 @@ export default async function (pi: ExtensionAPI) {
 		description: "Play the previous assistant message",
 		handler: async ctx => {
 			if (!requireEnabledVoice(ctx)) return;
-			const framed = previewHistoricalTarget(ctx, -1);
-			const request = await preparePlaybackAction(ctx);
-			if (request === undefined || !await preparePlaybackMessages(ctx, request) || request !== playbackRequestEpoch) return;
-			syncPlaybackMessages(ctx);
-			const message = playbackHistory.move(-1);
-			if (message) playTarget({ ...message, time: 0, sourceOffset: 0 }, !playbackHistory.hasCompleteTimingFor(message.id), true, false, framed);
+			const target = previewHistoricalTarget(ctx, -1);
+			if (target) await playTarget(target, true, true, false, true, false, ctx);
 		},
 	});
 
@@ -3525,7 +3523,7 @@ export default async function (pi: ExtensionAPI) {
 				return;
 			}
 			const message = playbackHistory.move(1);
-			if (message) playTarget({ ...message, time: 0, sourceOffset: 0 }, !playbackHistory.hasCompleteTimingFor(message.id), true, false, framed);
+			if (message) playTarget({ ...message, time: 0, sourceOffset: 0 }, !playbackHistory.hasCompleteTimingFor(message.id), true, false, !!framed);
 		},
 	});
 
