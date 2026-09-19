@@ -135,7 +135,103 @@ test("invalidates and replaces timing checkpoints for a full rerender", () => {
 	assert.ok(replacement);
 	assert.equal(replacement.renderKey, "new-render");
 	assert.equal(replacement.duration, 4);
+	history.setPlayback(3, 0.5);
+	assert.equal(history.status()?.position, 4, "completion before any tick still fences buffered ticks");
 	assert.deepEqual(replacement.checkpoints, [{ time: 0, duration: 4, sourceOffset: 0 }]);
+});
+
+test("capture ahead and delayed registration leave navigation and dirty resume on audible text", () => {
+	const history = new PlaybackHistory();
+	const text = "First sentence. Second sentence. Third sentence.";
+	const second = text.indexOf("Second");
+	const messages = ["before", "audible", "queued"].map(id => ({ id, text, renderKey: id }));
+	history.sync(messages);
+	history.beginCapture("audible", text, 0, true, 0, 0, false);
+	history.bindUtterance(1);
+	// The next block is captured before the earlier asynchronous description registers.
+	history.beginCapture("queued", text, 0, true, 0, 0, false);
+	history.bindUtterance(2);
+	history.registerSegment(segment(3, 2, 0));
+	history.setSegmentAudio(3, 0, 4);
+	history.registerSegment(segment(1, 1, 0));
+	history.registerSegment(segment(2, 1, second));
+	history.setSegmentAudio(1, 0, 4);
+	history.setSegmentAudio(2, 4, 4);
+	history.setPlayback(1, 5);
+	assert.equal(history.selected()?.id, "audible");
+	assert.equal(history.status()?.position, 5);
+	assert.equal(history.seekTarget(-5)?.id, "audible");
+	assert.equal(history.restartTarget()?.id, "audible");
+
+	// A further capture and registration must not steal an already audible cursor.
+	history.beginCapture("later", text, 0, true, 0, 0, false);
+	history.bindUtterance(3);
+	history.registerSegment(segment(4, 3, 0));
+	history.setPlayback(1, 6);
+	assert.equal(history.status()?.position, 6);
+	// Speed/render changes discard timing, but preserve the audible source unit.
+	history.sync(messages.map(message => ({ ...message, renderKey: `${message.id}-new-speed` })));
+	assert.deepEqual(history.resumeTarget(), {
+		id: "audible", text, time: 0, sourceOffset: second, skipUnits: 0,
+	});
+	assert.equal(history.sentenceTarget(1)?.sourceOffset, text.indexOf("Third"));
+	assert.equal(history.move(-1)?.id, "before");
+});
+
+test("audible transitions ignore delayed earlier registrations and ticks", () => {
+	const history = new PlaybackHistory();
+	const text = "First sentence. Second sentence.";
+	history.sync(["one", "two"].map(id => ({ id, text, renderKey: id })));
+	for (const [id, utterance] of [["one", 1], ["two", 2]] as const) {
+		history.beginCapture(id, text, 0, true, 0, 0, false);
+		history.bindUtterance(utterance);
+		history.registerSegment(segment(utterance, utterance, 0));
+		history.setSegmentAudio(utterance, 0, 4);
+	}
+	history.setPlayback(1, 1);
+	history.setPlayback(2, Number.NaN);
+	assert.equal(history.selected()?.id, "one");
+	history.setPlayback(2, 2);
+	history.registerSegment(segment(3, 1, text.indexOf("Second")));
+	history.setSegmentAudio(3, 4, 4);
+	history.setPlayback(1, 5);
+	history.finishUtterance(1);
+	assert.equal(history.selected()?.id, "two");
+	assert.equal(history.status()?.position, 2);
+	assert.equal(history.snapshotForUtterance(1)?.duration, 8, "earlier timing still completes");
+	history.finishUtterance(2);
+	history.setPlayback(2, 0.5);
+	history.setPlayback(1, 6);
+	assert.equal(history.status()?.position, 4, "completion must not reopen earlier ticks");
+});
+
+test("explicit replay selects immediately and fences displaced captures without losing their timings", () => {
+	const history = new PlaybackHistory();
+	const text = "First sentence. Second sentence.";
+	history.sync(["one", "two"].map(id => ({ id, text, renderKey: id })));
+	history.beginCapture("one", text, 0, true, 0, 0, false);
+	history.bindUtterance(1);
+	history.beginCapture("two", text, 0, true, 0, 0, false);
+	history.bindUtterance(2);
+	history.setPlayback(1, 1);
+	// Replay the audible message's suffix, including while waiting/paused.
+	const offset = text.indexOf("Second");
+	history.beginCapture("one", text, 4, false, offset, 1);
+	assert.deepEqual(history.resumeTarget(), { id: "one", text, time: 0, sourceOffset: offset, skipUnits: 1 });
+	history.registerSegment(segment(2, 2, 0));
+	history.setSegmentAudio(2, 0, 4);
+	history.setPlayback(2, 3);
+	history.setPlayback(1, 3);
+	history.finishUtterance(2);
+	assert.equal(history.selected()?.id, "one");
+	assert.equal(history.resumeTarget()?.sourceOffset, offset);
+	assert.equal(history.snapshotForUtterance(2)?.duration, 4);
+	history.bindUtterance(3);
+	history.registerSegment(segment(3, 3, 0));
+	history.setSegmentAudio(3, 0, 4);
+	history.setPlayback(3, 2);
+	assert.equal(history.status()?.position, 6);
+	assert.equal(history.resumeTarget()?.skipUnits, 1);
 });
 
 test("navigates session messages and preserves a live record when it receives its session id", () => {

@@ -105,6 +105,28 @@ test("default since-compaction scope skips blocks summarized away by compaction"
 	assert.match(JSON.stringify(host.modelRequests[0].context.messages), /keptCode/);
 });
 
+test("since-compaction backfill includes suffixed assistant blocks by their session entry ID", async t => {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-voice-budget-blocks-"));
+	const { host, restoreEnvironment } = await setup(root, { scope: "since-compaction" });
+	t.after(restoreEnvironment);
+	seedCompactedBranch(host);
+	host.addMessage("kept-answer", "compaction-entry", {
+		role: "assistant", stopReason: "stop", content: [
+			{ type: "text", text: "Retained introduction." },
+			{ type: "text", text: "```ts\nfirstRetained();\n```" },
+			{ type: "text", text: "```ts\nsecondRetained();\n```" },
+		],
+	});
+	await host.start();
+	await new Promise(resolve => setTimeout(resolve, 120));
+	await settle();
+	assert.equal(host.modelRequests.length, 2);
+	const requests = JSON.stringify(host.modelRequests);
+	assert.match(requests, /firstRetained/);
+	assert.match(requests, /secondRetained/);
+	assert.doesNotMatch(requests, /oldCode/);
+});
+
 test("scope all revisits blocks that compaction summarized away", async t => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-voice-budget-all-"));
 	const { host, restoreEnvironment } = await setup(root, { scope: "all" });

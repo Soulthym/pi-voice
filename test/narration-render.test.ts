@@ -2,6 +2,48 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Container, Markdown, type MarkdownTheme } from "@earendil-works/pi-tui";
 import { invalidateNarrationMarkdown } from "../src/narration-render.js";
+import { NARRATION_ACTIVE_MARKER, NarrationProgress } from "../src/narration-progress.js";
+
+test("joined thinking Markdown refreshes cached markers and clears old highlights", () => {
+	const progress = new NarrationProgress();
+	const first = "Alpha beta.";
+	const second = "Gamma delta.";
+	const joined = `${first}\n\n${second}`;
+	progress.begin();
+	progress.pushDelta("assistant-thinking", 0, first);
+	progress.pushDelta("assistant-thinking", 1, second, first.length + 2);
+	let transforms = 0;
+	const thinking = new Markdown(joined, 0, 0, theme, undefined, {
+		transform: text => {
+			transforms++;
+			return progress.transform(text, "assistant-thinking", plain, plain, undefined, true, undefined, NARRATION_ACTIVE_MARKER);
+		},
+	});
+	const tui = { children: [{ child: thinking }] };
+	const render = () => thinking.render(100).join("\n");
+	progress.previewSourceOffset(0);
+	const initial = render();
+	assert.ok(initial.includes(`${NARRATION_ACTIVE_MARKER}Alpha`));
+	const previousSources = new Set(progress.sourceTexts);
+	assert.deepEqual([...previousSources], [first, second]);
+	progress.previewSourceOffset(first.length);
+	assert.equal(render(), initial, "Pi Markdown retains its cached transform until invalidated");
+	invalidateNarrationMarkdown(tui, previousSources);
+	const moved = render();
+	assert.ok(moved.includes(`${NARRATION_ACTIVE_MARKER}Gamma`));
+	assert.ok(!moved.includes(`${NARRATION_ACTIVE_MARKER}Alpha`));
+	assert.equal(transforms, 2);
+
+	// Replay can track only the second block while Pi still displays the whole run.
+	progress.setCompletedText(second, "assistant-thinking", 1, first.length + 2);
+	progress.previewSourceOffset(6);
+	invalidateNarrationMarkdown(tui, new Set(progress.sourceTexts));
+	assert.ok(render().includes(`${NARRATION_ACTIVE_MARKER}delta`));
+	progress.begin();
+	invalidateNarrationMarkdown(tui, previousSources);
+	assert.ok(!render().includes(NARRATION_ACTIVE_MARKER), "previous sources clear cached markers after reset");
+	assert.equal(transforms, 4);
+});
 
 const plain = (text: string) => text;
 const theme: MarkdownTheme = {

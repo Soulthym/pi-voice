@@ -54,6 +54,7 @@ type MessageRecord = PlaybackMessage & {
 };
 
 type Capture = {
+	epoch: number;
 	record: MessageRecord;
 	baseTime: number;
 	recordTimings: boolean;
@@ -75,7 +76,9 @@ export class PlaybackHistory {
 	#segments = new Map<number, CapturedSegment>();
 	#utterances = new Map<number, Capture>();
 	#endedUtterances = new Set<number>();
+	#finishedUtterances = new Set<number>();
 	#activeUtterance: number | undefined;
+	#playbackEpoch = 0;
 	#persistedUtterances = new Set<number>();
 
 	sync(messages: PlaybackMessage[], selectLatest = false): void {
@@ -128,7 +131,7 @@ export class PlaybackHistory {
 		}
 	}
 
-	beginCapture(id: string, text: string, baseTime = 0, recordTimings = true, sourceOffset = 0, skipUnits = 0): void {
+	beginCapture(id: string, text: string, baseTime = 0, recordTimings = true, sourceOffset = 0, skipUnits = 0, select = true): void {
 		let record = this.#records.get(id);
 		if (!record) {
 			record = { id, text, checkpoints: [], duration: 0, position: baseTime, timingsComplete: false };
@@ -142,10 +145,15 @@ export class PlaybackHistory {
 			record.duration = 0;
 			record.timingsComplete = false;
 		}
-		this.#selectedId = id;
+		// Replay selects immediately and fences ticks from the displaced transport.
+		// Queued live captures must leave the audible selection and its ticks alone.
+		if (select) {
+			this.#selectedId = id;
+			this.#playbackEpoch++;
+			this.#activeUtterance = undefined;
+		}
 		record.cursor = { sourceOffset, skipUnits };
-		this.#capture = { record, baseTime, recordTimings, origin: record.cursor, segments: [] };
-		this.#activeUtterance = undefined;
+		this.#capture = { epoch: this.#playbackEpoch, record, baseTime, recordTimings, origin: record.cursor, segments: [] };
 	}
 
 	updateText(id: string, text: string, source?: Pick<PlaybackMessage, "messageType" | "contentIndex" | "displayOffset">): void {
@@ -193,7 +201,6 @@ export class PlaybackHistory {
 		this.#segments.set(segment.id, tracked);
 		capture.segments.push(tracked);
 		this.#utterances.set(segment.utterance, capture);
-		this.#activeUtterance = segment.utterance;
 	}
 
 	setSegmentAudio(segmentId: number, start: number, duration: number): void {
@@ -268,12 +275,13 @@ export class PlaybackHistory {
 	}
 
 	finishUtterance(utterance: number | undefined): void {
-		if (utterance === undefined || utterance !== this.#activeUtterance) return;
-		this.#activeUtterance = undefined;
+		if (utterance === undefined) return;
+		this.#finishedUtterances.add(utterance);
 		this.#endedUtterances.add(utterance);
 		this.#completeTimingsIfReady(utterance);
 		const capture = this.#utterances.get(utterance);
-		if (!capture) return;
+		if (!capture || capture.epoch !== this.#playbackEpoch ||
+			(this.#activeUtterance !== undefined && utterance !== this.#activeUtterance)) return;
 		const last = capture.segments.at(-1);
 		if (last) capture.record.cursor = { sourceOffset: last.sourceOffset, skipUnits: last.skipUnits };
 		if (capture.record.timingsComplete) capture.record.position = capture.record.duration;
@@ -293,7 +301,11 @@ export class PlaybackHistory {
 
 	setPlayback(utterance: number, position: number): void {
 		const capture = this.#utterances.get(utterance);
-		if (!capture || utterance !== this.#activeUtterance || !Number.isFinite(position)) return;
+		if (!capture || capture.epoch !== this.#playbackEpoch || this.#finishedUtterances.has(utterance) || !Number.isFinite(position) ||
+			(this.#activeUtterance !== undefined && utterance < this.#activeUtterance)) return;
+		// Utterance ids follow playback order, not asynchronous registration order.
+		this.#activeUtterance = utterance;
+		this.#selectedId = capture.record.id;
 		capture.record.position = Math.max(0, capture.baseTime + position);
 		const segment = capture.segments.findLast(segment => segment.audioStart !== undefined && segment.audioStart <= position);
 		if (segment) capture.record.cursor = { sourceOffset: segment.sourceOffset, skipUnits: segment.skipUnits };

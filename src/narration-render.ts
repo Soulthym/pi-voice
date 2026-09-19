@@ -9,6 +9,8 @@ export function invalidateNarrationMarkdown(
 	if (!Array.isArray(roots)) return false; // Older/custom TUIs retain the full-invalidation fallback.
 	const pending = [...roots];
 	const codes = [...changedCode];
+	// Pi joins consecutive thinking blocks with blank lines into one Markdown leaf.
+	const blocks = [...sources].filter(Boolean).map(source => `\n\n${source}\n\n`);
 	const visited = new Set<unknown>();
 	while (pending.length) {
 		const value = pending.pop();
@@ -20,7 +22,8 @@ export function invalidateNarrationMarkdown(
 		// Pi Markdown stores its source in `text`; Container.invalidate() would also rebuild siblings.
 		const text = node.text;
 		if (typeof text === "string" && typeof node.setText === "function" &&
-			(sources.has(text.trim()) || codes.some(code => text.includes(code)))) {
+			(sources.has(text.trim()) || blocks.some(block => `\n\n${text.trim()}\n\n`.includes(block)) ||
+				codes.some(code => text.includes(code)))) {
 			node.invalidate?.();
 		}
 	}

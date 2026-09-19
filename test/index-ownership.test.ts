@@ -121,3 +121,70 @@ test("sticky pause queues new responses; settings preserve ownership and dirty a
 	worker.emit({ type: "idle", utterance: segments.at(-1)!.utterance }); await settle();
 	assert.equal(segments.length, dirtyCount + 1, "the dirty message must not replay a second copy");
 });
+
+for (const paused of [false, true]) {
+	test(paused ? "paused multi-block code persisted after message_end resumes with assistant context" : "independent delayed block descriptions retain the lease until the last idle", async t => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-block-ownership-"));
+		const keys = ["PI_VOICE_CONFIG", "PI_VOICE_COORDINATOR_DIR", "PI_VOICE_DEVICE_DIR"];
+		const previous = keys.map(key => process.env[key]);
+		process.env.PI_VOICE_CONFIG = path.join(root, "config.json");
+		process.env.PI_VOICE_COORDINATOR_DIR = path.join(root, "coordinator");
+		process.env.PI_VOICE_DEVICE_DIR = path.join(root, "devices");
+		await fs.writeFile(process.env.PI_VOICE_CONFIG, JSON.stringify({ enabled: true, input: "disabled", output: "local", audioCache: false,
+			codeNarration: "summary", codeDescriptionContext: "conversation", codeDescriptionPreprocessConcurrency: 0, timingPreprocessConcurrency: 0 }));
+		const descriptions = [Promise.withResolvers<any>(), Promise.withResolvers<any>()];
+		const host = new FakeVoiceHost(root, "blocks", request => descriptions[JSON.stringify(request.context.messages.at(-2)).includes("secondAction") ? 1 : 0]!.promise);
+		const observer = new SessionCoordinator(path.join(root, "other"), "other"); observer.start();
+		t.after(async () => {
+			descriptions.forEach(response => response.resolve(assistant("Cleanup description.")));
+			await host.shutdown(); observer.shutdown();
+			keys.forEach((key, i) => { if (previous[i] === undefined) delete process.env[key]; else process.env[key] = previous[i]; });
+			await fs.rm(root, { recursive: true, force: true });
+		});
+		if (paused) host.addMessage("initial", null, assistant("Initial response."));
+		const workerIndex = MockedVoiceWorkerClient.instances.length;
+		await host.start();
+		const worker = MockedVoiceWorkerClient.instances[workerIndex]!;
+		const segments = worker.sent as Array<{ text: string; utterance: number }>;
+		if (paused) { await host.shortcut("f11"); await settle(); await host.shortcut("f8"); }
+		const oldUtterance = segments.at(-1)?.utterance;
+		const message = assistant("");
+		message.content = ["firstAction", "secondAction"].map(name => ({ type: "text", text: `\`\`\`ts\n${name}();\n\`\`\`` }));
+		await host.emit("before_agent_start", {});
+		await host.emit("message_start", { message });
+		for (const [contentIndex, block] of message.content.entries()) {
+			await host.emit("message_update", { message, assistantMessageEvent: { type: "text_delta", contentIndex, delta: block.text } });
+		}
+		await host.emit("message_end", { message });
+		// Pi persists the assistant only after extension message_end handlers return.
+		host.addMessage("answer", paused ? "initial" : null, message);
+		await host.emit("turn_end", { message });
+		await new Promise(resolve => setTimeout(resolve, 50));
+		await settle();
+		const ownerId = observer.speechOwner()?.instanceId;
+		assert.ok(ownerId);
+		if (paused) {
+			assert.equal(host.modelRequests.length, 0);
+			await host.shortcut("f8");
+			worker.emit({ type: "idle", utterance: oldUtterance! }); await settle();
+		} else assert.equal(host.modelRequests.length, 2, "both block descriptions start independently");
+		descriptions[0]!.resolve(assistant("First code description.")); await settle();
+		const first = segments.find(segment => segment.text === "First code description.");
+		assert.ok(first);
+		worker.emit({ type: "idle", utterance: first.utterance }); await settle();
+		assert.equal(observer.speechOwner()?.instanceId, ownerId, "first idle cannot release the pending second block's lease");
+		assert.equal(host.modelRequests.length, 2);
+		for (const [index, request] of host.modelRequests.entries()) {
+			const concerned = request.context.messages.at(-2) as any;
+			assert.equal(concerned.role, "assistant");
+			assert.match(JSON.stringify(concerned), new RegExp(index === 0 ? "firstAction" : "secondAction"));
+		}
+		descriptions[1]!.resolve(assistant("Second code description.")); await settle();
+		const second = segments.find(segment => segment.text === "Second code description.");
+		assert.ok(second);
+		assert.notEqual(second.utterance, first.utterance);
+		worker.emit({ type: "idle", utterance: second.utterance }); await settle();
+		assert.equal(observer.speechOwner(), undefined, "last idle releases the lease");
+		assert.equal(segments.filter(segment => segment.text.endsWith("code description.")).length, 2);
+	});
+}

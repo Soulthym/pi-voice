@@ -104,6 +104,7 @@ function assistantStopReason(message: unknown): string | undefined {
 }
 
 type ContextualPlaybackMessage = PlaybackMessage & {
+	entryId: string;
 	conversationMessages: Message[];
 	assistantMessage: unknown;
 	contentIndex: number;
@@ -189,6 +190,7 @@ function completedAssistantMessages(ctx: ExtensionContext, mode: VoiceMode, incl
 		const targets = eligibleAssistantBlocks(entry.message, mode).filter(block => hasSpeakableAudio(block.text)).map(block => ({
 			...block,
 			id: block.contentIndex === 0 ? entry.id : `${entry.id}:${block.contentIndex}`,
+			entryId: entry.id,
 			get conversationMessages() {
 				return includeContext ? contextBeforeEntry(ctx, entry.parentId).messages : [];
 			},
@@ -734,7 +736,7 @@ const chargeBackfillUnit = (): boolean => {
 		const all = completedAssistantMessages(ctx, mode, config.codeDescriptionContext === "conversation");
 		if (config.codeDescriptionPreprocessScope !== "since-compaction") return all;
 		const retained = retainedMessageIds(ctx);
-		return retained ? all.filter(message => retained.has(message.id)) : all;
+		return retained ? all.filter(message => retained.has(message.entryId)) : all;
 	};
 
 	const scheduleMissingCodeDescriptions = (ctx: ExtensionContext): void => {
@@ -1412,7 +1414,6 @@ const chargeBackfillUnit = (): boolean => {
 		},
 		segment => {
 			if (ownsSpeech) {
-				lastOwnerUtterance = segment.utterance;
 				ownerContentExpected = true;
 			}
 			narration.registerSegment(segment);
@@ -1841,7 +1842,8 @@ const chargeBackfillUnit = (): boolean => {
 		restoreBottomAfterSpeech = false;
 		const sourceOffset = Math.max(0, Math.min(target.text.length, target.sourceOffset));
 		const suffix = target.text.slice(sourceOffset);
-		const continueLiveTurn = queued && queueIncomingWhilePaused && livePlaybackId === target.id;
+		const liveTargetIndex = [...liveBlockIds].find(([, id]) => id === target.id)?.[0];
+		const continueLiveTurn = queued && queueIncomingWhilePaused && (livePlaybackId === target.id || liveTargetIndex !== undefined);
 		if (!suffix.trim() && !continueLiveTurn) return;
 		if (pendingSpeechPreemption) {
 			activeContext?.ui.notify("Voice device handoff is still stopping the previous transport", "warning");
@@ -1936,6 +1938,9 @@ const chargeBackfillUnit = (): boolean => {
 		liveTurnNarrationActive = continueLiveTurn;
 		if (continueLiveTurn) {
 			queueIncomingWhilePaused = false;
+			// Capture can be ahead of the audible block when a setting dirties the turn.
+			livePlaybackId = target.id;
+			liveBlockIndex = liveTargetIndex;
 			ownedSpeechText = target.text;
 		}
 		if (displacedLiveTurn && !continueLiveTurn) {
@@ -2044,6 +2049,8 @@ const chargeBackfillUnit = (): boolean => {
 		const completed = messages.findLast(message => message.text === text && (contentIndex === undefined || message.contentIndex === contentIndex));
 		if (completed) {
 			playbackHistory.rename(playbackId, completed);
+			const queued = queuedPausedMessages.find(message => message.id === playbackId);
+			if (queued) Object.assign(queued, completed);
 			playbackHistory.sync(messages);
 			return;
 		}
@@ -2701,7 +2708,7 @@ const chargeBackfillUnit = (): boolean => {
 			playbackPaused = false;
 			armNarrationFollow(true);
 			livePlaybackId = `live:${++nextLivePlaybackId}`;
-			playbackHistory.beginCapture(livePlaybackId, "", 0, true);
+			playbackHistory.beginCapture(livePlaybackId, "", 0, true, 0, 0, !continuingTurn);
 			refreshPlaybackTimeline();
 		}
 	});
@@ -2712,7 +2719,7 @@ const chargeBackfillUnit = (): boolean => {
 				vocalizer.flush();
 				vocalizer.setNarrationSourceOffset(narration.startMessage());
 				livePlaybackId = `live:${++nextLivePlaybackId}`;
-				playbackHistory.beginCapture(livePlaybackId, "", 0, true);
+				playbackHistory.beginCapture(livePlaybackId, "", 0, true, 0, 0, false);
 			}
 			liveBlockIndex = speechContentIndex = contentIndex;
 			liveDisplayOffset = eligibleAssistantBlocks(speechAssistantMessage, config.mode).find(block => block.contentIndex === contentIndex)?.displayOffset ?? 0;
@@ -2791,7 +2798,9 @@ const chargeBackfillUnit = (): boolean => {
 					if (id && activeContext) finalizePlaybackMessage(activeContext, id, block.text, 0, block.contentIndex);
 					else {
 						const message = activeContext && playbackMessages(activeContext).findLast(item => item.text === block.text && item.contentIndex === block.contentIndex);
-						queuedPausedMessages.push({ ...block, id: message?.id ?? `live:${++nextLivePlaybackId}`, time: 0, sourceOffset: 0 });
+						const queued = { ...block, id: message?.id ?? `live:${++nextLivePlaybackId}`, time: 0, sourceOffset: 0 };
+						queuedPausedMessages.push(queued);
+						if (!message && activeContext) finalizePlaybackMessage(activeContext, queued.id, block.text, 0, block.contentIndex);
 					}
 				}
 				livePlaybackId = undefined;
@@ -2842,14 +2851,16 @@ const chargeBackfillUnit = (): boolean => {
 			const text = assistantText(event.message);
 			if (text && stopReason !== "toolUse" && acquireSpeech("turn")) {
 				const messages = playbackMessages(ctx);
-				playbackHistory.sync(messages, true);
+				playbackHistory.sync(messages);
 				narration.begin();
+				let firstBlock = true;
 				for (const block of eligibleAssistantBlocks(event.message, config.mode)) {
 					if (!hasSpeakableAudio(block.text)) continue;
 					const contextual = completedAssistantMessages(ctx, config.mode, config.codeDescriptionContext === "conversation")
 						.findLast(message => message.text === block.text && message.contentIndex === block.contentIndex);
 					const completed = messages.find(message => message.id === contextual?.id);
-					if (completed) playbackHistory.beginCapture(completed.id, completed.text, 0, true);
+					if (completed) playbackHistory.beginCapture(completed.id, completed.text, 0, true, 0, 0, firstBlock);
+					firstBlock = false;
 					speechConversationMessages = contextual?.conversationMessages ?? liveSource?.before ?? [];
 					speechAssistantMessage = event.message;
 					speechContentIndex = block.contentIndex;

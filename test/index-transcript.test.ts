@@ -64,6 +64,7 @@ for (const mode of ["all", "assistant", "yield"]) test(`${mode}: live, replay an
 		if (segment.text === "Reason later." || segment.text === "Second thought.") assert.equal(snapshot.messageId, "answer:1");
 		if (segment.text === "After tool.") assert.equal(snapshot.messageId, "answer:4");
 	}
+	worker.emit({ type: "playback", utterance: segments.at(-1)!.utterance, position: 0.5 });
 	worker.sent.length = 0;
 	await host.shortcut("f11"); await settle();
 	assert.deepEqual(spoken(), ["After tool."]);
@@ -88,6 +89,29 @@ for (const mode of ["all", "assistant", "yield"]) test(`${mode}: live, replay an
 	worker.sent.length = 0;
 	await host.shortcut("f10"); await settle();
 	assert.deepEqual(spoken(), ["After tool."]);
+});
+
+for (const mode of ["all", "yield"]) for (const action of ["navigation", "dirty resume"]) test(`${mode}: ${action} uses the audible earlier block despite capture-ahead`, async t => {
+	const { host, worker, spoken } = await setup(t, mode);
+	const blocks = ["First answer.\n", "Middle answer.\n", "Latest answer.\n"].map(text => ({ type: "text", text }));
+	const partial = { ...assistant("", "pending"), content: [] as typeof blocks };
+	await host.emit("message_start", { message: partial });
+	for (const [contentIndex, block] of blocks.entries()) {
+		partial.content.push(block);
+		await host.emit("message_update", { message: structuredClone(partial), assistantMessageEvent: { type: "text_delta", contentIndex, delta: block.text } });
+	}
+	const complete = { ...partial, stopReason: "stop" };
+	host.addMessage("answer", null, complete);
+	await host.emit("message_end", { message: complete });
+	await host.emit("turn_end", { message: complete }); await settle();
+	assert.deepEqual(spoken(), blocks.map(block => block.text.trim()));
+	const first = (worker.sent as Array<{ utterance: number; segmentId: number; text: string }>).find(segment => segment.text === "First answer.")!;
+	worker.emit({ type: "segment-audio", utterance: first.utterance, segmentId: first.segmentId, start: 0, duration: 1 });
+	worker.emit({ type: "playback", utterance: first.utterance, position: 0.5 });
+	if (action === "dirty resume") await host.command("speed 1.2");
+	worker.sent.length = 0;
+	await host.shortcut(action === "navigation" ? "f10" : "f8"); await settle();
+	assert.deepEqual(spoken(), [action === "navigation" ? "Middle answer." : "First answer."]);
 });
 
 test("streaming waits through following prose and tool-separated blocks; replay/backfill use identical context keys", async t => {
@@ -170,18 +194,23 @@ test("consecutive thinking blocks retain distinct targets inside Pi's joined Mar
 test("dirty thinking-block resume retains its ordinal and block-local contextual boundary", async t => {
 	const { host, worker, spoken } = await setup(t);
 	t.mock.method(host, "completeModel", async () => assistant("First description sentence. Second description sentence."));
-	const code = "```ts\nreason();\n```\n";
+	const prefix = "Thinking aloud.\n";
+	const code = `${prefix}\`\`\`ts\nreason();\n\`\`\`\n`;
 	const partial = { ...assistant("", "pending"), content: [{ type: "text", text: "Earlier answer.\n" }, { type: "thinking", thinking: code }] };
 	await host.emit("message_start", { message: assistant("", "pending") });
 	await host.emit("message_update", { message: structuredClone(partial), assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: partial.content[0].text } });
 	await host.emit("message_update", { message: structuredClone(partial), assistantMessageEvent: { type: "thinking_delta", contentIndex: 1, delta: code } });
 	await settle();
 	assert.equal(host.modelRequests.length, 0);
+	const thinking = (worker.sent as Array<{ utterance: number; segmentId: number; text: string }>).find(segment => segment.text === "Thinking aloud.")!;
+	assert.ok(thinking);
+	worker.emit({ type: "segment-audio", utterance: thinking.utterance, segmentId: thinking.segmentId, start: 0, duration: 1 });
+	worker.emit({ type: "playback", utterance: thinking.utterance, position: 0.5 });
 	await host.command("speed 1.2");
 	const resume = PlaybackHistory.prototype.resumeTarget;
 	t.mock.method(PlaybackHistory.prototype, "resumeTarget", function (this: PlaybackHistory) {
 		const target = resume.call(this);
-		return target && { ...target, sourceOffset: 0, skipUnits: 1 };
+		return target && { ...target, sourceOffset: prefix.length, skipUnits: 1 };
 	});
 	worker.sent.length = 0;
 	await host.shortcut("f8"); await settle();
@@ -197,14 +226,21 @@ test("dirty thinking-block resume retains its ordinal and block-local contextual
 	assert.deepEqual(spoken(), ["Second description sentence.", "Reason following the code."]);
 });
 
-test("paused live transitions retain later thinking prefixes when resumed before message end", async t => {
+for (const pauseBeforeCapture of [true, false]) test(`live dirty resume retains later thinking prefixes (pause before capture: ${pauseBeforeCapture})`, async t => {
 	const { host, worker, spoken } = await setup(t);
 	const partial = { ...assistant("", "pending"), content: [{ type: "text", text: "First answer.\n" }] as any[] };
 	await host.emit("message_start", { message: assistant("", "pending") });
 	await host.emit("message_update", { message: structuredClone(partial), assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: partial.content[0].text } });
-	await host.command("speed 1.2");
+	await settle();
+	const first = (worker.sent as Array<{ utterance: number; segmentId: number; text: string }>).find(segment => segment.text === "First answer.")!;
+	assert.ok(first);
+	worker.emit({ type: "segment-audio", utterance: first.utterance, segmentId: first.segmentId, start: 0, duration: 1 });
+	worker.emit({ type: "playback", utterance: first.utterance, position: 0.5 });
+	if (pauseBeforeCapture) await host.command("speed 1.2");
 	partial.content.push({ type: "thinking", thinking: "Queued thought.\n" });
 	await host.emit("message_update", { message: structuredClone(partial), assistantMessageEvent: { type: "thinking_delta", contentIndex: 1, delta: partial.content[1].thinking } });
+	await settle();
+	if (!pauseBeforeCapture) await host.command("speed 1.2");
 	worker.sent.length = 0;
 	await host.shortcut("f8"); await settle();
 	partial.content[1].thinking += "Future thought.";
