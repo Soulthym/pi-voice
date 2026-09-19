@@ -85,7 +85,7 @@ if [[ $command == stop\ * && -z $issued_ticket ]]; then
     sleep 0.1
   done
   if [[ -z $owner || $(cat "$active_file" 2>/dev/null || true) != "$owner" ]]; then
-    printf 'ok %s\n' "$(encode_message stopped)"
+    printf 'ok %s\n' "$(encode_message "stopped $ticket")"
   else
     printf 'error %s\n' "$(encode_message 'Microphone stop not confirmed')"
   fi

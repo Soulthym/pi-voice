@@ -1,9 +1,15 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import * as fs from "node:fs/promises";
+import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
+import { PhoneInputClient } from "../src/phone-input.js";
+
+function receipt(ticket: string): string {
+	return `ok ${Buffer.from(`stopped ${ticket}`).toString("base64")}\n`;
+}
 
 async function waitFor(check: () => Promise<unknown>): Promise<void> {
 	for (let i = 0; i < 400; i++) {
@@ -69,7 +75,7 @@ esac`,
 			await new Promise(resolve => setTimeout(resolve, 50));
 			assert.equal(ack, "", "must not acknowledge the stop request before stopping");
 			await stopped;
-			assert.match(ack, /^ok /);
+			assert.equal(ack, receipt(output.split("\n")[0].slice(7)));
 			assert.equal(await fs.stat(path.join(root, "running")).catch(() => false), false);
 		}
 		await closed;
@@ -77,6 +83,63 @@ esac`,
 		assert.equal(await fs.stat(path.join(root, "running")).catch(() => false), false);
 	});
 }
+
+for (const script of ["client/pi-voice-stt-session", "client/pi-voice-termux-stt-session", "termux/pi-voice-stt-session"]) test(`${script}: reassigned generic bridge cannot release the host's origin ticket`, async t => {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-reassigned-"));
+	const other = path.join(root, "other"); await fs.mkdir(other);
+	const env = { ...process.env, PREFIX: "", PATH: "/usr/bin:/bin", TMPDIR: root, XDG_RUNTIME_DIR: root };
+	const otherEnv = { ...env, TMPDIR: other, XDG_RUNTIME_DIR: other };
+	for (let i = 0; i < 2; i++) {
+		const issued = session(script, otherEnv, "ticket"); issued.child.stdin.end();
+		assert.match(await issued.closed, /^ticket /);
+	}
+	let route: "generic" | "foreign" | "origin" = "generic";
+	let ticket = "";
+	const stops: string[] = [];
+	const recorded = Promise.withResolvers<void>();
+	const children: ReturnType<typeof spawn>[] = [];
+	const server = net.createServer(socket => {
+		socket.on("error", () => {});
+		socket.once("data", raw => {
+			const command = String(raw).trim();
+			if (command === "ticket") {
+				const child = spawn("bash", [path.resolve(script)], { env }); children.push(child);
+				child.stderr.resume();
+				child.stdout.once("data", data => { ticket = String(data).trim().slice(7); socket.write(data); });
+				child.stdin.write("ticket\n");
+				// Hold before record/admission: exercise real ticket state without any hardware.
+				socket.once("data", data => { assert.equal(String(data), `record ${ticket}\n`); recorded.resolve(); });
+				socket.on("close", () => child.stdin.end());
+			} else {
+				stops.push(command);
+				const child = route === "generic"
+					? spawn("bash", ["-c", "read -r command; printf 'ok c3RvcHBlZA==\\n'"], { env: otherEnv })
+					: spawn("bash", [path.resolve(script)], { env: route === "origin" ? env : otherEnv });
+				children.push(child); child.stderr.resume(); child.stdout.pipe(socket);
+				child.stdin.end(`${command}\n`);
+			}
+		});
+	});
+	await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+	t.after(async () => {
+		await new Promise<void>(resolve => server.close(() => resolve()));
+		await Promise.all(children.map(child => child.exitCode !== null ? undefined : new Promise(resolve => child.once("close", resolve))));
+		await fs.rm(root, { recursive: true, force: true });
+	});
+	const address = server.address(); assert.ok(address && typeof address === "object");
+	const client = new PhoneInputClient();
+	await client.stop("invalid endpoint"); // Empty ownership must not send an RPC.
+	const capture = assert.rejects(client.capture(`tcp://127.0.0.1:${address.port}`), /cancelled/);
+	await recorded.promise;
+	await assert.rejects(client.cancel(), /not confirmed/); await capture;
+	await assert.rejects(client.stop(), /not confirmed/);
+	route = "foreign";
+	await assert.rejects(client.stop(), /Invalid microphone ticket/);
+	route = "origin";
+	await client.stop();
+	await client.stop("invalid endpoint"); // Matching receipt cleared ownership.
+	assert.deepEqual(stops, Array(4).fill(`stop ${ticket}`));
+});
 
 for (const script of ["client/pi-voice-termux-stt-session", "termux/pi-voice-stt-session"]) test(`${script}: an unconfirmed Android stop retains the recording marker`, async t => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-recorder-failure-"));
@@ -150,7 +213,7 @@ mkdir() {
 		});
 		await waitFor(() => fs.stat(path.join(root, "check-blocked")));
 		const stop = session(script, env, `stop ${old.ticket}`); stop.child.stdin.end();
-		assert.equal(await stop.closed, "ok c3RvcHBlZA==\n");
+		assert.equal(await stop.closed, receipt(old.ticket));
 		assert.equal(await fs.stat(path.join(root, "running")).catch(() => false), false);
 		fresh = session(script, env, "record");
 		await waitFor(() => fs.stat(path.join(root, "running")));
@@ -158,14 +221,14 @@ mkdir() {
 		const owner = await fs.readFile(marker, "utf8");
 		assert.match(owner, /^[0-9a-f]{32}\.2:[0-9]+\n$/);
 		const delayedStop = session(script, env, `stop ${old.ticket}`); delayedStop.child.stdin.end();
-		assert.equal(await delayedStop.closed, "ok c3RvcHBlZA==\n");
+		assert.equal(await delayedStop.closed, receipt(old.ticket));
 		assert.equal(await fs.readFile(marker, "utf8"), owner);
 		assert.ok(await fs.stat(path.join(root, "running")));
 		await fs.writeFile(path.join(root, "release-check"), "");
 		assert.equal(await old.closed, "", "cancelled admission must never emit a stream/start recorder");
 		assert.equal(await fs.readFile(marker, "utf8"), owner, "old cleanup must preserve the new owner");
 		const finalStop = session(script, env, `stop ${fresh.ticket}`); finalStop.child.stdin.end();
-		assert.equal(await finalStop.closed, "ok c3RvcHBlZA==\n");
+		assert.equal(await finalStop.closed, receipt(fresh.ticket));
 	});
 }
 
@@ -219,12 +282,12 @@ esac\n`, { mode: 0o755 });
 		await new Promise(resolve => setTimeout(resolve, 50));
 		assert.equal(await fs.readFile(marker, "utf8"), staleOwner);
 		await fs.writeFile(path.join(root, "release-stop"), "");
-		assert.equal(await retry.closed, "ok c3RvcHBlZA==\n");
+		assert.equal(await retry.closed, receipt(old.ticket));
 		await waitFor(async () => (await fs.readFile(marker, "utf8")) !== staleOwner);
 		await waitFor(() => fs.stat(path.join(root, "running")));
 		assert.notEqual(await fs.readFile(marker, "utf8"), staleOwner);
 		const stop = session(script, env, `stop ${fresh.ticket}`); stop.child.stdin.end();
-		assert.equal(await stop.closed, "ok c3RvcHBlZA==\n");
+		assert.equal(await stop.closed, receipt(fresh.ticket));
 	});
 }
 
@@ -260,14 +323,14 @@ for (const script of ["client/pi-voice-stt-session", "client/pi-voice-termux-stt
 		for (const ticket of ["0", "3", "-1", "01", "1+1", "9007199254740992", "999999999999999999999999", "2 extra"]) {
 			assert.match(await exchange(`stop ${ticket}`), /^error /);
 		}
-		assert.equal(await exchange(`stop ${epoch}.2`), "ok c3RvcHBlZA==\n");
-		assert.equal(await exchange(`stop ${epoch}.1`), "ok c3RvcHBlZA==\n");
+		assert.equal(await exchange(`stop ${epoch}.2`), receipt(`${epoch}.2`));
+		assert.equal(await exchange(`stop ${epoch}.1`), receipt(`${epoch}.1`));
 		const lock = path.join(root, script === "client/pi-voice-stt-session"
 			? `pi-voice-client-${process.getuid!()}/recording-lock` : "pi-voice-recording-lock");
 		assert.equal(await fs.readFile(`${lock}.tickets`, "utf8"), `${epoch} 2 2\n`);
 		const cancelled = connect("ticket");
 		await waitFor(async () => cancelled.output === `ticket ${epoch}.3\n`);
-		assert.equal(await exchange(`stop ${epoch}.3`), "ok c3RvcHBlZA==\n");
+		assert.equal(await exchange(`stop ${epoch}.3`), receipt(`${epoch}.3`));
 		cancelled.child.stdin.end(`record ${epoch}.3\n`);
 		assert.equal(await cancelled.closed, `ticket ${epoch}.3\n`, "watermark rejects even the latest ticket");
 		// Ownerless recovery must never recursively delete an unexpected directory.

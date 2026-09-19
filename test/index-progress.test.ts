@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import * as os from "node:os";
@@ -32,19 +33,20 @@ function startFakeSttServer(socketPath: string): Promise<net.Server> {
 	return new Promise(resolve => {
 		const clients = new Map<string, net.Socket>();
 		let nextTicket = 0;
+		const epoch = randomUUID().replaceAll("-", "");
 		const server = net.createServer(socket => {
 			let ticket: string | undefined;
 			socket.on("close", () => { if (ticket) clients.delete(ticket); });
 			socket.on("data", chunk => {
 				const command = chunk.toString("utf8").trim();
 				if (command === "ticket") {
-					ticket = `${"a".repeat(32)}.${++nextTicket}`;
+					ticket = `${epoch}.${++nextTicket}`;
 					clients.set(ticket, socket);
 					socket.write(`ticket ${ticket}\n`);
 				} else if (command.startsWith("stop ")) {
 					assert.match(command, /^stop [0-9a-f]{32}\.[1-9][0-9]*$/);
 					clients.get(command.slice(5))?.destroy();
-					socket.end(`ok ${Buffer.from("stopped").toString("base64")}\n`);
+					socket.end(`ok ${Buffer.from(`stopped ${command.slice(5)}`).toString("base64")}\n`);
 				} else {
 					assert.ok(ticket);
 					assert.equal(command, `record ${ticket}`);

@@ -216,7 +216,7 @@ export class PhoneInputClient {
 				const line = response.slice(0, newline).trim();
 				const [status, payload = ""] = line.split(" ", 2);
 				const message = Buffer.from(payload, "base64").toString("utf8");
-				if (status === "ok" && message === "stopped") finish();
+				if (status === "ok" && message === `stopped ${ticket}`) finish();
 				else finish(new Error(status === "ok" ? "Microphone stop not confirmed; update the recorder client" : message || "Unable to stop phone microphone"));
 			});
 			socket.on("error", finish);

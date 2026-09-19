@@ -6,7 +6,7 @@ import * as path from "node:path";
 import test from "node:test";
 import { PhoneInputClient } from "../src/phone-input.js";
 
-function ticketServer(handler: (socket: net.Socket) => void): net.Server {
+function ticketServer(handler: (socket: net.Socket, receipt: string) => void): net.Server {
 	let ticket = 0;
 	const epoch = randomBytes(16).toString("hex");
 	return net.createServer(socket => {
@@ -14,10 +14,10 @@ function ticketServer(handler: (socket: net.Socket) => void): net.Server {
 			const command = String(raw);
 			if (command === "ticket\n") {
 				socket.write(`ticket ${epoch}.${++ticket}\n`);
-				socket.once("data", () => { handler(socket); socket.emit("data", "record\n"); });
+				socket.once("data", () => { handler(socket, ""); socket.emit("data", "record\n"); });
 			} else {
 				assert.match(command, /^stop [0-9a-f]{32}\.[1-9][0-9]*\n$/);
-				handler(socket); socket.emit("data", "stop\n");
+				handler(socket, `ok ${Buffer.from(`stopped ${command.trim().slice(5)}`).toString("base64")}\n`); socket.emit("data", "stop\n");
 			}
 		});
 	});
@@ -70,7 +70,7 @@ test("cancellation finishes the old stop before a replacement capture starts", a
 	let activeRecord: net.Socket | undefined;
 	let records = 0;
 	const commands: string[] = [];
-	const server = ticketServer(socket => {
+	const server = ticketServer((socket, receipt) => {
 		socket.on("error", (error: NodeJS.ErrnoException) => assert.equal(error.code, "ECONNRESET"));
 		socket.setEncoding("utf8");
 		socket.once("data", command => {
@@ -78,7 +78,7 @@ test("cancellation finishes the old stop before a replacement capture starts", a
 			if (String(command) === "stop\n") {
 				activeRecord?.destroy();
 				activeRecord = undefined;
-				socket.end(`ok ${Buffer.from("stopped").toString("base64")}\n`);
+				socket.end(receipt);
 				return;
 			}
 			records += 1;
@@ -132,9 +132,9 @@ test("connects to microphone bridges forwarded over Unix sockets", async () => {
 test("accepts a live binary phone audio stream and drains the decoder before resolving", async () => {
 	// Float WAV includes legal decoder overshoot, like Opus reconstructed from PCM16.
 	const expectedAudio = wav(16000, true);
-	const server = ticketServer(socket => {
+	const server = ticketServer((socket, receipt) => {
 		socket.once("data", command => socket.end(String(command) === "stop\n"
-			? `ok ${Buffer.from("stopped").toString("base64")}\n` : Buffer.concat([Buffer.from("stream\n"), expectedAudio])));
+			? receipt : Buffer.concat([Buffer.from("stream\n"), expectedAudio])));
 	});
 	const port = await listen(server);
 	try {
@@ -156,13 +156,13 @@ test("failed microphone stop rejects cancellation and prevents replacement captu
 	let records = 0;
 	let safe = false;
 	const recording = Promise.withResolvers<void>();
-	const server = ticketServer(socket => {
+	const server = ticketServer((socket, receipt) => {
 		socket.on("error", () => {});
 		socket.once("data", command => {
 			if (String(command) === "record\n") {
 				records++; recording.resolve();
 				if (safe) socket.end(`audio ${Buffer.from("replacement").toString("base64")}\n`);
-			} else socket.end(safe ? `ok ${Buffer.from("stopped").toString("base64")}\n` : `error ${Buffer.from("Stop unconfirmed").toString("base64")}\n`);
+			} else socket.end(safe ? receipt : `error ${Buffer.from("Stop unconfirmed").toString("base64")}\n`);
 		});
 	});
 	const port = await listen(server);
@@ -180,15 +180,20 @@ test("failed microphone stop rejects cancellation and prevents replacement captu
 	} finally { await new Promise<void>(resolve => server.close(() => resolve())); }
 });
 
-for (const response of ["legacy", "timeout", "disconnect"]) test(`microphone ${response} is not a stop acknowledgement`, async t => {
+for (const response of ["legacy", "generic", "foreign", "wrong-counter", "timeout", "disconnect"]) test(`microphone ${response} is not a stop acknowledgement`, async t => {
 	const commanded = Promise.withResolvers<void>();
 	let connection: net.Socket | undefined;
-	const server = ticketServer(socket => {
+	const server = ticketServer((socket, receipt) => {
 		connection = socket;
 		socket.once("data", command => {
 			if (String(command) === "record\n") { commanded.resolve(); return; }
 			commanded.resolve();
-			if (response === "legacy") socket.end(`ok ${Buffer.from("stopping").toString("base64")}\n`);
+			if (["legacy", "generic", "foreign", "wrong-counter"].includes(response)) {
+				const message = response === "legacy" ? "stopping" : response === "generic" ? "stopped"
+					: response === "foreign" ? `stopped ${"f".repeat(32)}.1`
+					: Buffer.from(receipt.trim().slice(3), "base64").toString().replace(/\.1$/, ".2");
+				socket.end(`ok ${Buffer.from(message).toString("base64")}\n`);
+			}
 			if (response === "disconnect") socket.end();
 		});
 	});
@@ -244,9 +249,9 @@ test("synchronous cancellation before connection setup never requests a ticket",
 test("stop uses the active capture endpoint, not a newly routed endpoint", async () => {
 	const recorded = Promise.withResolvers<void>();
 	let active: net.Socket | undefined;
-	const server = ticketServer(socket => socket.once("data", command => {
+	const server = ticketServer((socket, receipt) => socket.once("data", command => {
 		if (String(command) === "record\n") { active = socket; recorded.resolve(); }
-		else { socket.end("ok c3RvcHBlZA==\n"); active?.end("ok \n"); }
+		else { socket.end(receipt); active?.end("ok \n"); }
 	}));
 	const port = await listen(server);
 	try {
@@ -284,7 +289,7 @@ test("reassigned endpoint cannot confirm an unconfirmed origin; retry at origin 
 			else {
 				stops.push(command);
 				socket.end(command === `stop ${origin}.1` && latest >= 1 && confirmed
-					? "ok c3RvcHBlZA==\n" : `error ${Buffer.from("Stop unconfirmed").toString("base64")}\n`);
+					? `ok ${Buffer.from(`stopped ${origin}.1`).toString("base64")}\n` : `error ${Buffer.from("Stop unconfirmed").toString("base64")}\n`);
 			}
 		});
 	});

@@ -154,7 +154,7 @@ test("local STT session reports idle stop, missing ffmpeg, and honors XDG_RUNTIM
 			const stopped = await runScript(path.join(CLIENT_DIR, "pi-voice-stt-session"), [], ticket.stdout.replace(/^ticket /, "stop "), env);
 			assert.equal(stopped.code, 0);
 			assert.match(stopped.stdout, /^ok /);
-			assert.equal(decodeMessage(stopped.stdout.trim()).message, "stopped");
+			assert.equal(decodeMessage(stopped.stdout.trim()).message, `stopped ${ticket.stdout.trim().slice(7)}`);
 
 			const badCommand = await runScript(path.join(CLIENT_DIR, "pi-voice-stt-session"), [], "dance\n", env);
 			assert.equal(badCommand.code, 0);
@@ -286,7 +286,7 @@ test("stop cannot acknowledge until the active recording generation is removed",
 		const stopped = await pending;
 		assert.equal(stopped.code, 0);
 		assert.match(stopped.stdout, /^ok /);
-		assert.equal(decodeMessage(stopped.stdout.trim()).message, "stopped");
+		assert.equal(decodeMessage(stopped.stdout.trim()).message, `stopped ${MIC_EPOCH}.1`);
 		assert.ok(fs.existsSync(path.join(stateDir, "stop-recording")), "the stop flag must be created");
 	} finally {
 		fs.rmSync(root, { recursive: true, force: true });
@@ -358,7 +358,7 @@ test("Termux STT session validates commands, streams the recording, and stops", 
 		assert.match(ticket.stdout, /^ticket [0-9a-f]{32}\.1\n$/);
 		const idleStop = await runScript(script, [], ticket.stdout.replace(/^ticket /, "stop "), env);
 		assert.equal(idleStop.code, 0);
-		assert.equal(decodeMessage(idleStop.stdout.trim()).message, "stopped");
+		assert.equal(decodeMessage(idleStop.stdout.trim()).message, `stopped ${ticket.stdout.trim().slice(7)}`);
 
 		const unsupported = await runScript(script, [], "rewind\n", env);
 		assert.match(decodeMessage(unsupported.stdout.trim()).message, /Unsupported phone voice command/);
