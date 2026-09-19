@@ -91,6 +91,45 @@ test("maps playback time to approximate source checkpoints without audio storage
 	});
 });
 
+test("quality includes estimated suffix units after seeking beyond a refined prefix", () => {
+	const history = new PlaybackHistory();
+	const text = "First sentence. Second sentence.";
+	const offset = text.indexOf("Second");
+	history.sync([{ id: "message", text, renderKey: "render" }]);
+	history.beginCapture("message", text);
+	history.registerSegment(segment(1, 1, 0));
+	history.setSegmentAudio(1, 0, 4, "ctc-refined");
+	assert.equal(history.status()?.timingQuality, "ctc-refined");
+
+	const target = history.sentenceTarget(1)!;
+	assert.equal(target.sourceOffset, offset);
+	history.beginCapture(target.id, text, target.time, false, offset);
+	history.registerSegment(segment(2, 2, 0));
+	history.setSegmentAudio(2, 0, 4);
+	const before = history.status()!;
+	assert.equal(before.timingsComplete, false);
+	assert.equal(before.timingQuality, "mixed", "relative suffix estimates must not be reported as CTC");
+
+	history.setTimingQuality(2, "ctc-refined");
+	assert.deepEqual(history.status(), { ...before, timingQuality: "ctc-refined" },
+		"late refinement changes quality only, not position or completeness");
+});
+
+test("quality reports suffix-only timings before absolute checkpoints exist", () => {
+	const history = new PlaybackHistory();
+	const text = "First sentence. Second sentence.";
+	history.sync([{ id: "message", text, renderKey: "render" }]);
+	history.beginCapture("message", text, 0, false, text.indexOf("Second"));
+	history.registerSegment(segment(1, 1, 0));
+	history.setSegmentAudio(1, 0, 4);
+	assert.equal(history.status()?.hasTimings, false);
+	assert.equal(history.status()?.timingQuality, "estimated");
+	history.setTimingQuality(1, "mixed");
+	assert.equal(history.status()?.timingQuality, "mixed");
+	history.setTimingQuality(1, "ctc-refined");
+	assert.equal(history.status()?.timingQuality, "ctc-refined");
+});
+
 test("directional scrubs advance across ties until the final checkpoint", () => {
 	const text = "x".repeat(100);
 	const history = new PlaybackHistory();

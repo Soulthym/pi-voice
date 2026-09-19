@@ -421,6 +421,8 @@ export class PlaybackHistory {
 		if (!record) return undefined;
 		const index = this.#order.indexOf(record.id);
 		const qualities = record.checkpoints.filter(point => point.duration > 0).map(point => point.quality);
+		// Sought suffixes retain relative unit timing without absolute checkpoints.
+		for (const unit of record.units?.values() ?? []) if (unit[0]) qualities.push(unit[0].quality);
 		const known = qualities.filter(quality => quality === "estimated" || quality === "mixed" || quality === "ctc-refined");
 		const timingQuality = known.length === 0 ? undefined
 			: known.length === qualities.length && known.every(quality => quality === known[0]) ? known[0] : "mixed";
