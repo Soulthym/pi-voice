@@ -576,6 +576,7 @@ export default async function (pi: ExtensionAPI) {
 			resolvedKey = key;
 			const cached = codeDescriptionCache.get(key);
 			if (cached) return cached;
+			if (codeDescriptionOmissions.has(key)) return { records: [], guided: false, omitted: true };
 			const editModel = config.editModel;
 			const narrationMode = config.codeNarration;
 			const contextMode = config.codeDescriptionContext;
@@ -615,6 +616,7 @@ export default async function (pi: ExtensionAPI) {
 								undefined,
 								{
 									onAttempt: () => {
+										if (requestEpoch !== contextEpoch || !isCurrentContext(ctx)) throw new Error("Code description aborted");
 										if (options?.chargeBackfill && !options.chargeBackfill()) {
 											throw new CodeDescriptionBudgetExhaustedError();
 										}
@@ -673,6 +675,7 @@ export default async function (pi: ExtensionAPI) {
 				reason,
 				message: String(outerError instanceof Error ? outerError.message : outerError).slice(0, 200),
 			});
+			requestNarrationRender(block.code);
 			return { records: [], guided: false, omitted: true };
 		}
 	};
@@ -680,15 +683,17 @@ export default async function (pi: ExtensionAPI) {
 	const timingItemsFor = async (
 		ctx: ExtensionContext,
 		message: ContextualPlaybackMessage,
-	): Promise<Array<{ text: string; source: SpeakableSourceRange; wordTimings: boolean }>> => {
+	): Promise<{ items: Array<{ text: string; source: SpeakableSourceRange; wordTimings: boolean }>; codeDependencies: string[] }> => {
 		const stream = new SpeakableStream();
 		const result: Array<{ text: string; source: SpeakableSourceRange; wordTimings: boolean }> = [];
+		const codeDependencies: string[] = [];
 		for (const item of [...stream.push(message.text), ...stream.flush()]) {
 			if (item.kind === "speech") {
 				result.push({ text: item.text, source: item.source, wordTimings: true });
 				continue;
 			}
 			const completed = completedCodeItems(message).find(block => block.sourceEnd === item.source.end)!;
+			const key = descriptionCacheKey(ctx, completed.block, completed.identityContext);
 			const plan = await requestCodeDescription(
 				ctx,
 				completed.block,
@@ -696,12 +701,13 @@ export default async function (pi: ExtensionAPI) {
 				completed.providerMessagesThroughBlock,
 				{ chargeBackfill: chargeBackfillUnit },
 			);
+			codeDependencies.push(JSON.stringify([key, plan.omitted ? "omitted" : plan]));
 			if (plan.omitted) continue;
 			let chunks = chunkCodeNarration(plan);
 			if (chunks.length === 0) chunks = chunkCodeNarration(plainCodeNarration(fallbackCodeDescription(item.block)));
 			for (const chunk of chunks) result.push({ text: chunk.text, source: item.source, wordTimings: false });
 		}
-		return result;
+		return { items: result, codeDependencies };
 	};
 
 	let codeDescriptionPreprocessing: Promise<void> | undefined;
@@ -714,9 +720,8 @@ export default async function (pi: ExtensionAPI) {
 	const BACKFILL_EXHAUSTED = Symbol("pi-voice.backfill-exhausted");
 
 	/** Reserves one historical-backfill unit; live and replay requests never call this. */
-const chargeBackfillUnit = (): boolean => {
-		if (backfillAllowance === "unlimited") return true;
-		if (backfillUsed >= backfillAllowance) return false;
+	const chargeBackfillUnit = (): boolean => {
+		if (backfillAllowance !== "unlimited" && backfillUsed >= backfillAllowance) return false;
 		backfillUsed += 1;
 		backfillExhaustionReported = false;
 		return true;
@@ -730,7 +735,30 @@ const chargeBackfillUnit = (): boolean => {
 			if (entry.type === "compaction") lastCompactionIndex = index;
 		});
 		if (lastCompactionIndex < 0) return null;
-		return new Set(branch.slice(lastCompactionIndex).map(entry => entry.id));
+		const retained = new Set(branch.slice(lastCompactionIndex).map(entry => entry.id));
+		const compaction = branch[lastCompactionIndex] as unknown as { firstKeptEntryId?: string; retainedTail?: unknown[] };
+		if (Array.isArray(compaction.retainedTail)) {
+			// Match the retained message values, newest occurrence first (entries need not survive serialization by reference).
+			const remaining = new Map<string, number>();
+			for (const message of compaction.retainedTail) {
+				const key = JSON.stringify(message);
+				remaining.set(key, (remaining.get(key) ?? 0) + 1);
+			}
+			for (let index = lastCompactionIndex - 1; index >= 0 && remaining.size; index -= 1) {
+				const entry = branch[index];
+				if (entry.type !== "message") continue;
+				const key = JSON.stringify(entry.message);
+				const count = remaining.get(key);
+				if (!count) continue;
+				retained.add(entry.id);
+				if (count === 1) remaining.delete(key);
+				else remaining.set(key, count - 1);
+			}
+		} else if (compaction.firstKeptEntryId) {
+			const first = branch.findIndex(entry => entry.id === compaction.firstKeptEntryId);
+			if (first >= 0) for (const entry of branch.slice(first, lastCompactionIndex)) retained.add(entry.id);
+		}
+		return retained;
 	};
 
 	/** Background work honors the scope; playback and replay always see everything. */
@@ -745,8 +773,6 @@ const chargeBackfillUnit = (): boolean => {
 		if (codeDescriptionPreprocessing) return;
 		const epoch = contextEpoch;
 		const workEpoch = codeWorkEpoch;
-		backfillUsed = 0;
-		backfillExhaustionReported = false;
 		const queuedMessages: Array<
 			Array<{ block: FencedCodeBlock; identityContext: IdentityContext; providerMessagesThroughBlock: Message[] }>
 		> = [];
@@ -777,7 +803,7 @@ const chargeBackfillUnit = (): boolean => {
 				}
 				if (keyedBlocks.size === 0) continue;
 				totalMessages += 1;
-				const missing = [...keyedBlocks].filter(([key]) => !codeDescriptionCache.get(key)).map(([, item]) => item);
+				const missing = [...keyedBlocks].filter(([key]) => !codeDescriptionCache.get(key) && !codeDescriptionOmissions.has(key)).map(([, item]) => item);
 				missingBlocks += missing.length;
 				if (missing.length === 0) processedMessages += 1;
 				else queuedMessages.push(missing);
@@ -2031,16 +2057,14 @@ const chargeBackfillUnit = (): boolean => {
 		completeOwnerSpeech();
 	};
 
-	const renderKeyFor = (ctx: ExtensionContext, message: ContextualPlaybackMessage, legacy = false): string => {
+	const renderKeyFor = (ctx: ExtensionContext, message: ContextualPlaybackMessage): string => {
 		const codeDependencies: string[] = [];
 		for (const item of completedCodeItems(message)) {
 			const identity = item.identityContext;
 			try {
 				const key = descriptionCacheKey(ctx, item.block, identity);
 				const omittedPlan = codeDescriptionCache.get(key);
-				codeDependencies.push(JSON.stringify([key, legacy
-					? (omittedPlan ? (omittedPlan.omitted ? "omitted" : "ready") : "missing")
-					: omittedPlan ?? (codeDescriptionOmissions.has(key) ? "omitted" : "missing")]));
+				codeDependencies.push(JSON.stringify([key, omittedPlan ?? (codeDescriptionOmissions.has(key) ? "omitted" : "missing")]));
 			} catch {
 				codeDependencies.push(`fallback:${item.block.language}`);
 			}
@@ -2081,9 +2105,9 @@ const chargeBackfillUnit = (): boolean => {
 		}
 		// Never let sync replace a selected live id before its session entry exists.
 		if (pendingCanonicalizations.size > 0) return messages;
-		const selected = playbackHistory.selected();
+		const selected = playbackHistory.selected(true);
 		const updated = messages.find(message => message.id === selected?.id);
-		if (selected && updated && selected.text !== updated.text) pauseDirtyPlayback();
+		if (selected && updated && (selected.text !== updated.text || selected.renderKey !== updated.renderKey)) pauseDirtyPlayback();
 		playbackHistory.sync(messages, selectLatest);
 		return messages;
 	};
@@ -2176,8 +2200,13 @@ const chargeBackfillUnit = (): boolean => {
 					let timingSegmentId = 0;
 					let lastWordTime = Number.NEGATIVE_INFINITY;
 					let time = 0;
+					let measuredRenderKey: string;
 					try {
-						for (const item of await timingItemsFor(ctx, contextual)) {
+						const prepared = await timingItemsFor(ctx, contextual);
+						if (epoch !== contextEpoch || workEpoch !== timingWorkEpoch || !isCurrentContext(ctx)) return;
+						measuredRenderKey = narrationRenderKey(message.text, measurementConfig, prepared.codeDependencies);
+						if (renderKeyFor(ctx, contextual) !== measuredRenderKey) return;
+						for (const item of prepared.items) {
 							const duration = await workers[lane].measureSegment(item.text, measurementConfig);
 							if (epoch !== contextEpoch || workEpoch !== timingWorkEpoch || !isCurrentContext(ctx)) return;
 							if (!Number.isFinite(duration) || duration <= 0) continue;
@@ -2204,19 +2233,16 @@ const chargeBackfillUnit = (): boolean => {
 						// Live speech and microphone actions preempt low-priority timing work.
 						return;
 					}
-					if (checkpoints.length === 0 || epoch !== contextEpoch || !isCurrentContext(ctx)) return;
+					if (checkpoints.length === 0 || epoch !== contextEpoch || workEpoch !== timingWorkEpoch || !isCurrentContext(ctx)) return;
 					checkpoints.sort((left, right) => left.time - right.time);
 					// Preserve all sentence starts; dropping them shifts code-description unit ordinals.
 					try {
-						const resolvedRenderKey = renderKeyFor(ctx, contextual);
-						if (resolvedRenderKey !== message.renderKey) {
-							message.renderKey = resolvedRenderKey;
-							syncPlaybackMessages(ctx);
-						}
+						if (renderKeyFor(ctx, contextual) !== measuredRenderKey) return;
+						syncPlaybackMessages(ctx);
 						const snapshot: PlaybackTimingSnapshot = {
 							version: 3,
 							messageId: message.id,
-							renderKey: resolvedRenderKey,
+							renderKey: measuredRenderKey,
 							duration: time,
 							checkpoints,
 						};
@@ -2261,6 +2287,7 @@ const chargeBackfillUnit = (): boolean => {
 	// Dirty current assets keep their lease and frozen target, but cannot resume
 	// their obsolete sink. Explicit resume rebuilds with the current dependencies.
 	const pauseDirtyPlayback = (): void => {
+		playbackHistory.invalidateCaptures();
 		if ((!ownsSpeech || speechReservedForInput) && !pendingReplay) return;
 		if (speechPurpose === "turn" && !ownerTurnEnded) {
 			queueIncomingWhilePaused = true;
@@ -2299,9 +2326,6 @@ const chargeBackfillUnit = (): boolean => {
 			timingRescheduleRequested = true;
 			cancelTimingWorkers();
 		}
-		backfillAllowance = config.codeDescriptionPreprocessBudget;
-		backfillUsed = 0;
-		backfillExhaustionReported = false;
 		if (wasEnabled && !config.enabled) {
 			disabledAttentionPending = queuedPausedMessages.length > 0 || pausedForAttention || (coordinator?.isWaiting() ?? false);
 			queueIncomingWhilePaused = false;
@@ -2621,16 +2645,14 @@ const chargeBackfillUnit = (): boolean => {
 		codeDescriptionText.clear();
 		reportedDescriptionOverflows.clear();
 		codeDescriptionOmissions.clear();
+		backfillAllowance = config.codeDescriptionPreprocessBudget;
+		backfillUsed = 0;
+		backfillExhaustionReported = false;
 		codeDescriptionCache.restore(codeDescriptionSnapshots(ctx));
 		if (!await preparePlaybackMessages(ctx)) return;
 		syncPlaybackMessages(ctx, true);
-		// Upgrade compatible pre-content-dependency timings once, using the restored plans.
-		const legacyTimings = new Map(completedAssistantMessages(ctx, config.mode, config.codeDescriptionContext === "conversation")
-			.map(message => [message.id, { before: renderKeyFor(ctx, message, true), after: renderKeyFor(ctx, message) }]));
-		playbackHistory.restore(playbackTimingSnapshots(ctx).map(snapshot => {
-			const keys = legacyTimings.get(snapshot.messageId);
-			return keys?.before === snapshot.renderKey ? { ...snapshot, renderKey: keys.after } : snapshot;
-		}));
+		// Presence-only description keys cannot prove which wording was measured.
+		playbackHistory.restore(playbackTimingSnapshots(ctx));
 		scheduleMissingCodeDescriptions(ctx);
 		refreshPlaybackTimeline();
 		scheduleMissingTimings(ctx);
@@ -3798,7 +3820,7 @@ const chargeBackfillUnit = (): boolean => {
 						}
 						let scheduled = 0;
 						for (const failed of collectFailed()) {
-							if (!keys.has(failed.key)) continue;
+							if (!keys.delete(failed.key)) continue;
 							codeDescriptionOmissions.delete(failed.key);
 							codeDescriptionCache.invalidate(failed.key);
 							void requestCodeDescription(
@@ -3807,7 +3829,9 @@ const chargeBackfillUnit = (): boolean => {
 								structuredContextIdentity(failed.providerMessages),
 								failed.providerMessages,
 								{ chargeBackfill: chargeBackfillUnit },
-							).catch(() => {});
+							).then(() => {
+								if (isCurrentContext(retryCtx) && !livePlaybackId) syncPlaybackMessages(retryCtx);
+							}).catch(() => {});
 							scheduled += 1;
 						}
 						return scheduled;

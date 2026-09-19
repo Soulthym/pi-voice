@@ -238,6 +238,27 @@ test("render and timing dependencies stay live when a missing plan becomes ready
 	assert.equal(host.modelRequests.length, 1);
 });
 
+test("timing jobs cannot relabel old spoken wording after an in-flight plan change", async t => {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-voice-stale-plan-"));
+	const restoreEnvironment = await configure(root, "block-only");
+	const restoreWorker = mockWorker();
+	const measured = Promise.withResolvers<number>();
+	let started = false;
+	VoiceWorkerClient.prototype.measureSegment = async () => { started = true; return measured.promise; };
+	const host = new FakeVoiceHost(root, "stale-plan", async () => modelResponse("The original description."));
+	t.after(async () => { measured.resolve(1); await host.shutdown().catch(() => {}); restoreWorker(); await restoreEnvironment(); });
+	host.addMessage("answer", null, assistant("```ts\nrun();\n```"));
+	await host.start(); await settle();
+	assert.equal(started, true);
+	const get = CodeDescriptionCache.prototype.get;
+	t.mock.method(CodeDescriptionCache.prototype, "get", function (this: CodeDescriptionCache, key: string) {
+		const plan = get.call(this, key);
+		return plan ? plainCodeNarration("The replacement description.") : plan;
+	});
+	measured.resolve(1); await settle();
+	assert.equal(host.entries.filter(entry => entry.customType === "pi-voice.playback-timing").length, 0);
+});
+
 test("legacy descriptions and timing survive model changes/reload with fresh per-event contexts", async t => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-voice-source-cache-"));
 	const restoreEnvironment = await configure(root, "block-only");
@@ -263,12 +284,12 @@ test("legacy descriptions and timing survive model changes/reload with fresh per
 	host.addMessage("answer", null, assistant(text));
 	host.entries.push({ type: "custom", id: "description", parentId: "answer", customType: "pi-voice.code-description",
 		data: { version: 1, key: legacy, plan: plainCodeNarration("The legacy description explains the configured action.") } });
-	const renderKey = narrationRenderKey(text, await loadVoiceConfig(), [JSON.stringify([legacy, "ready"])]);
+	const renderKey = narrationRenderKey(text, await loadVoiceConfig(), [JSON.stringify([legacy, plainCodeNarration("The legacy description explains the configured action.")])]);
 	host.entries.push({ type: "custom", id: "timing", parentId: "description", customType: "pi-voice.playback-timing",
 		data: { version: 3, messageId: "answer", renderKey, duration: 1, checkpoints: [{ time: 0, duration: 1, sourceOffset: 0 }] } });
 	await host.start(); await settle();
 	assert.match(host.render(text), /legacy description/);
-	assert.equal(measurements, 0, "adopting a legacy plan must retain its old timing key");
+	assert.equal(measurements, 0, "adopting a legacy description key must retain content-identified timing");
 	assert.equal(host.modelRequests.length, 0);
 	assert.ok(host.entries.some(entry => entry.customType === "pi-voice.code-description" && entry.data.identity));
 	host.ctx.model = { ...host.model, provider: "other", id: "replacement" };

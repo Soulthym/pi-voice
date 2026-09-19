@@ -127,6 +127,29 @@ test("since-compaction backfill includes suffixed assistant blocks by their sess
 	assert.doesNotMatch(requests, /oldCode/);
 });
 
+for (const format of ["legacy", "retainedTail"] as const) {
+	test(`since-compaction includes pre-marker retained messages (${format}), missing only`, async t => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-voice-retained-"));
+		const { host, restoreEnvironment } = await setup(root);
+		t.after(restoreEnvironment);
+		seedCompactedBranch(host);
+		const marker = host.entries.pop()!;
+		host.addMessage("retained-answer", "kept-user", { role: "assistant", content: [{ type: "text", text: "```ts\nretainedCode();\n```" }], stopReason: "stop" });
+		if (format === "retainedTail") {
+			delete (marker as any).firstKeptEntryId;
+			(marker as any).retainedTail = [structuredClone((host.entries.at(-1) as any).message)];
+		}
+		host.entries.push(marker);
+		await host.start();
+		await new Promise(resolve => setTimeout(resolve, 150)); await settle();
+		assert.equal(host.modelRequests.length, 1);
+		assert.match(JSON.stringify(host.modelRequests), /retainedCode/);
+		assert.doesNotMatch(JSON.stringify(host.modelRequests), /oldCode/);
+		await host.emit("agent_settled", {}); await settle();
+		assert.equal(host.modelRequests.length, 1);
+	});
+}
+
 test("scope all revisits blocks that compaction summarized away", async t => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-voice-budget-all-"));
 	const { host, restoreEnvironment } = await setup(root, { scope: "all" });
@@ -175,6 +198,23 @@ test("backfill budget caps historical work while live descriptions stay free", a
 	await host.command("code-budget");
 	assert.match(host.notices.at(-1)!.message, /scope=all; budget=1; used=1;/);
 	await settle();
+	assert.equal(host.modelRequests.length, requestsBeforeQueries);
+
+	// Ordinary sweeps, replay and setting changes cannot replenish spent requests.
+	await host.emit("agent_settled", {});
+	await host.command("speed 1.1");
+	await host.shortcut("f11");
+	await settle();
+	assert.equal(host.modelRequests.length, requestsBeforeQueries);
+	await host.command("code-budget");
+	assert.match(host.notices.at(-1)!.message, /budget=1; used=1;/);
+
+	// Session-only authorization survives unrelated config updates too.
+	await host.command("code-budget 0");
+	await host.command("speed 1.2");
+	await settle();
+	await host.command("code-budget");
+	assert.match(host.notices.at(-1)!.message, /budget=0; used=0;/);
 	assert.equal(host.modelRequests.length, requestsBeforeQueries);
 
 	// Topping up resumes the skipped historical block.

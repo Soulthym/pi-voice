@@ -11,6 +11,31 @@ function segment(id: number, utterance: number, start: number) {
 	};
 }
 
+test("timings restore A to B to A in memory and after reload, fencing late audio", () => {
+	const history = new PlaybackHistory();
+	const a = { id: "one", text: "First sentence.", renderKey: "A" };
+	const snapshot = { version: 3 as const, messageId: a.id, renderKey: "A", duration: 2,
+		checkpoints: [{ time: 0, duration: 2, sourceOffset: 0 }] };
+	history.sync([a]); history.restore([snapshot]);
+	history.sync([{ ...a, renderKey: "B" }]);
+	assert.equal(history.hasCompleteTimingFor(a.id), false);
+	history.sync([a]);
+	assert.equal(history.hasCompleteTimingFor(a.id), true);
+	const reloaded = new PlaybackHistory();
+	reloaded.sync([{ ...a, renderKey: "B" }]); reloaded.restore([snapshot]);
+	reloaded.sync([a]);
+	assert.equal(reloaded.hasCompleteTimingFor(a.id), true);
+	history.beginCapture(a.id, a.text); history.bindUtterance(1);
+	history.registerSegment(segment(1, 1, 0));
+	history.sync([{ ...a, renderKey: "B" }]);
+	history.setSegmentAudio(1, 0, 999);
+	history.finishTimingGeneration(1);
+	assert.equal(history.snapshotForUtterance(1), undefined);
+	assert.equal(history.hasCompleteTimingFor(a.id), false);
+	history.sync([a]);
+	assert.equal(history.status()?.duration, 2, "late A audio cannot mutate either version");
+});
+
 test("maps playback time to approximate source checkpoints without audio storage", () => {
 	const history = new PlaybackHistory();
 	history.sync([{ id: "message", text: "x".repeat(120), renderKey: "render-a" }], true);

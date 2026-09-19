@@ -54,6 +54,8 @@ type MessageRecord = PlaybackMessage & {
 };
 
 type Capture = {
+	valid: boolean;
+	renderKey?: string;
 	epoch: number;
 	record: MessageRecord;
 	baseTime: number;
@@ -70,6 +72,8 @@ type CapturedSegment = {
 /** Keeps only text-source timing metadata; replayed audio is always regenerated. */
 export class PlaybackHistory {
 	#records = new Map<string, MessageRecord>();
+	#versions = new Map<string, Map<string, MessageRecord>>();
+	#snapshots = new Map<string, Map<string, PlaybackTimingSnapshot>>();
 	#order: string[] = [];
 	#selectedId: string | undefined;
 	#capture: Capture | undefined;
@@ -81,17 +85,40 @@ export class PlaybackHistory {
 	#playbackEpoch = 0;
 	#persistedUtterances = new Set<number>();
 
+	/** Bound historical variants independently of transcript length (current records remain available). */
+	#trimVersions(): void {
+		for (const cache of [this.#versions, this.#snapshots]) {
+			let points = 0;
+			for (const versions of cache.values()) for (const version of versions.values()) points += version.checkpoints.length;
+			for (const [id, versions] of cache) {
+				if (points <= 50_000 && cache.size <= 256) break;
+				for (const version of versions.values()) points -= version.checkpoints.length;
+				cache.delete(id);
+			}
+		}
+	}
+
 	sync(messages: PlaybackMessage[], selectLatest = false): void {
 		this.#order = messages.map(message => message.id);
 		for (const message of messages) {
-			const existing = this.#records.get(message.id);
+			let existing = this.#records.get(message.id);
 			if (existing) {
 				if (existing.text !== message.text || existing.renderKey !== message.renderKey) {
-					existing.checkpoints = [];
-					existing.duration = 0;
-					existing.position = 0;
-					if (existing.text !== message.text) existing.cursor = undefined;
-					existing.timingsComplete = false;
+					this.invalidateCaptures(message.id);
+					if (existing.renderKey) {
+						let versions = this.#versions.get(message.id);
+						if (!versions) this.#versions.set(message.id, versions = new Map());
+						versions.set(existing.renderKey, existing);
+						// ponytail: four variants for 256 targets; evicted variants are remeasured.
+						if (versions.size > 4) versions.delete(versions.keys().next().value!);
+						this.#trimVersions();
+					}
+					const compatible = message.renderKey ? this.#versions.get(message.id)?.get(message.renderKey) : undefined;
+					existing = { ...message, checkpoints: [], duration: 0, position: existing.position,
+						cursor: existing.text === message.text ? existing.cursor : undefined, timingsComplete: false,
+						...(compatible ? { checkpoints: compatible.checkpoints.map(point => ({ ...point })),
+							duration: compatible.duration, timingsComplete: compatible.timingsComplete } : {}) };
+					this.#records.set(message.id, existing);
 				}
 				existing.messageType = message.messageType;
 				existing.contentIndex = message.contentIndex;
@@ -99,6 +126,8 @@ export class PlaybackHistory {
 				existing.text = message.text;
 				existing.renderKey = message.renderKey;
 			} else this.#records.set(message.id, { ...message, checkpoints: [], duration: 0, position: 0, timingsComplete: false });
+			const saved = message.renderKey ? this.#snapshots.get(message.id)?.get(message.renderKey) : undefined;
+			if (saved && !this.hasCompleteTimingFor(message.id)) this.restore([saved]);
 		}
 		if (selectLatest || !this.#selectedId || !this.#order.includes(this.#selectedId)) {
 			this.#selectedId = this.#order.at(-1);
@@ -108,6 +137,12 @@ export class PlaybackHistory {
 	restore(snapshots: readonly PlaybackTimingSnapshot[]): void {
 		for (const snapshot of snapshots) {
 			if (snapshot.version !== 3 || !Number.isFinite(snapshot.duration) || snapshot.duration < 0) continue;
+			if (!snapshot.renderKey || !Array.isArray(snapshot.checkpoints) || snapshot.checkpoints.length > 100_000) continue;
+			let versions = this.#snapshots.get(snapshot.messageId);
+			if (!versions) this.#snapshots.set(snapshot.messageId, versions = new Map());
+			versions.set(snapshot.renderKey, snapshot);
+			if (versions.size > 4) versions.delete(versions.keys().next().value!);
+			this.#trimVersions();
 			const record = this.#records.get(snapshot.messageId);
 			if (
 				!record ||
@@ -131,7 +166,15 @@ export class PlaybackHistory {
 		}
 	}
 
+	/** Freeze metadata before cancelling a dirty transport; late callbacks cannot relabel it. */
+	invalidateCaptures(id?: string): void {
+		for (const capture of new Set([this.#capture, ...this.#utterances.values()])) {
+			if (capture && (id === undefined || capture.record.id === id)) capture.valid = false;
+		}
+	}
+
 	beginCapture(id: string, text: string, baseTime = 0, recordTimings = true, sourceOffset = 0, skipUnits = 0, select = true): void {
+		this.invalidateCaptures(id);
 		let record = this.#records.get(id);
 		if (!record) {
 			record = { id, text, checkpoints: [], duration: 0, position: baseTime, timingsComplete: false };
@@ -153,12 +196,14 @@ export class PlaybackHistory {
 			this.#activeUtterance = undefined;
 		}
 		record.cursor = { sourceOffset, skipUnits };
-		this.#capture = { epoch: this.#playbackEpoch, record, baseTime, recordTimings, origin: record.cursor, segments: [] };
+		this.#capture = { valid: true, renderKey: record.renderKey, epoch: this.#playbackEpoch, record, baseTime,
+			recordTimings: recordTimings && baseTime === 0 && sourceOffset === 0 && skipUnits === 0, origin: record.cursor, segments: [] };
 	}
 
 	updateText(id: string, text: string, source?: Pick<PlaybackMessage, "messageType" | "contentIndex" | "displayOffset">): void {
 		const record = this.#records.get(id);
 		if (!record) return;
+		if (!text.startsWith(record.text)) this.invalidateCaptures(id);
 		record.text = text;
 		if (source) {
 			record.messageType = source.messageType;
@@ -170,12 +215,20 @@ export class PlaybackHistory {
 	rename(fromId: string, message: PlaybackMessage): void {
 		const record = this.#records.get(fromId);
 		if (!record) return;
+		if (record.text !== message.text) this.invalidateCaptures(fromId);
 		this.#records.delete(fromId);
 		record.messageType = message.messageType;
 		record.contentIndex = message.contentIndex;
 		record.displayOffset = message.displayOffset;
 		record.id = message.id;
 		record.text = message.text;
+		// A live id is finalized once; never rebind an already-versioned capture.
+		for (const capture of new Set([this.#capture, ...this.#utterances.values()])) {
+			if (capture?.record === record && capture.valid) {
+				if (capture.renderKey && capture.renderKey !== message.renderKey) capture.valid = false;
+				else capture.renderKey = message.renderKey;
+			}
+		}
 		record.renderKey = message.renderKey;
 		this.#records.set(message.id, record);
 		if (this.#selectedId === fromId) this.#selectedId = message.id;
@@ -188,7 +241,7 @@ export class PlaybackHistory {
 
 	registerSegment(segment: NarrationSegment): void {
 		const capture = this.#utterances.get(segment.utterance) ?? this.#capture;
-		if (!capture) return;
+		if (!capture?.valid) return;
 		// The extension registers suffix-relative ranges; navigation uses whole-message ranges.
 		const sourceOffset = segment.source.start + capture.origin.sourceOffset;
 		const previous = capture.segments.at(-1);
@@ -205,7 +258,7 @@ export class PlaybackHistory {
 
 	setSegmentAudio(segmentId: number, start: number, duration: number): void {
 		const tracked = this.#segments.get(segmentId);
-		if (!tracked || !Number.isFinite(start) || !Number.isFinite(duration)) return;
+		if (!tracked?.capture.valid || !Number.isFinite(start) || !Number.isFinite(duration)) return;
 		const normalizedStart = Math.max(0, start);
 		tracked.audioStart = normalizedStart;
 		const absoluteTime = tracked.capture.baseTime + normalizedStart;
@@ -224,7 +277,7 @@ export class PlaybackHistory {
 
 	setWordTimings(segmentId: number, words: Array<{ time: number; sourceOffset: number }>): void {
 		const tracked = this.#segments.get(segmentId);
-		if (!tracked?.capture.recordTimings || tracked.code || tracked.audioStart === undefined || words.length === 0) return;
+		if (!tracked?.capture.valid || !tracked.capture.recordTimings || tracked.code || tracked.audioStart === undefined || words.length === 0) return;
 		const record = tracked.capture.record;
 		if (tracked.wordOffsets.size > 0) {
 			record.checkpoints = record.checkpoints.filter(
@@ -248,7 +301,7 @@ export class PlaybackHistory {
 	snapshotForUtterance(utterance: number): PlaybackTimingSnapshot | undefined {
 		const capture = this.#utterances.get(utterance);
 		if (
-			!capture?.recordTimings ||
+			!capture?.valid || !capture.recordTimings ||
 			capture.record.id.startsWith("live:") ||
 			capture.record.checkpoints.length === 0 ||
 			!capture.record.timingsComplete ||
@@ -257,13 +310,13 @@ export class PlaybackHistory {
 			return undefined;
 		}
 		this.#persistedUtterances.add(utterance);
-		if (!capture.record.renderKey) return undefined;
+		if (!capture.renderKey || capture.renderKey !== capture.record.renderKey) return undefined;
 		// Keep sentence boundaries intact; word checkpoints are already rate-limited.
 		const persisted = capture.record.checkpoints;
 		return {
 			version: 3,
 			messageId: capture.record.id,
-			renderKey: capture.record.renderKey,
+			renderKey: capture.renderKey,
 			duration: capture.record.duration,
 			checkpoints: persisted.map(checkpoint => ({ ...checkpoint })),
 		};
@@ -280,7 +333,7 @@ export class PlaybackHistory {
 		this.#endedUtterances.add(utterance);
 		this.#completeTimingsIfReady(utterance);
 		const capture = this.#utterances.get(utterance);
-		if (!capture || capture.epoch !== this.#playbackEpoch ||
+		if (!capture?.valid || capture.epoch !== this.#playbackEpoch ||
 			(this.#activeUtterance !== undefined && utterance !== this.#activeUtterance)) return;
 		const last = capture.segments.at(-1);
 		if (last) capture.record.cursor = { sourceOffset: last.sourceOffset, skipUnits: last.skipUnits };
@@ -290,7 +343,7 @@ export class PlaybackHistory {
 	#completeTimingsIfReady(utterance: number): void {
 		if (!this.#endedUtterances.has(utterance)) return;
 		const capture = this.#utterances.get(utterance);
-		if (!capture?.recordTimings) return;
+		if (!capture?.valid || !capture.recordTimings) return;
 		const segments = [...this.#segments.values()].filter(
 			tracked => tracked.capture === capture && tracked.utterance === utterance,
 		);
@@ -301,7 +354,7 @@ export class PlaybackHistory {
 
 	setPlayback(utterance: number, position: number): void {
 		const capture = this.#utterances.get(utterance);
-		if (!capture || capture.epoch !== this.#playbackEpoch || this.#finishedUtterances.has(utterance) || !Number.isFinite(position) ||
+		if (!capture?.valid || capture.epoch !== this.#playbackEpoch || this.#finishedUtterances.has(utterance) || !Number.isFinite(position) ||
 			(this.#activeUtterance !== undefined && utterance < this.#activeUtterance)) return;
 		// Utterance ids follow playback order, not asynchronous registration order.
 		this.#activeUtterance = utterance;
@@ -311,9 +364,9 @@ export class PlaybackHistory {
 		if (segment) capture.record.cursor = { sourceOffset: segment.sourceOffset, skipUnits: segment.skipUnits };
 	}
 
-	selected(): PlaybackMessage | undefined {
+	selected(includeIdentity = false): PlaybackMessage | undefined {
 		const record = this.#selectedId ? this.#records.get(this.#selectedId) : undefined;
-		return record ? { id: record.id, text: record.text, ...(record.messageType ? { messageType: record.messageType, contentIndex: record.contentIndex, displayOffset: record.displayOffset } : {}) } : undefined;
+		return record ? { id: record.id, text: record.text, ...(includeIdentity ? { renderKey: record.renderKey } : {}), ...(record.messageType ? { messageType: record.messageType, contentIndex: record.contentIndex, displayOffset: record.displayOffset } : {}) } : undefined;
 	}
 
 	status(): PlaybackStatus | undefined {

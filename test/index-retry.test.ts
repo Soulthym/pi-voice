@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import test from "node:test";
-import { VoiceWorkerClient } from "../src/worker-client.js";
-import { FakeVoiceHost, streamCompletedResponse, type ModelRequest } from "./helpers/fake-voice-host.js";
+import test, { mock } from "node:test";
+import { FakeVoiceHost, MockedVoiceWorkerClient as VoiceWorkerClient, streamCompletedResponse, type ModelRequest } from "./helpers/fake-voice-host.js";
+
+mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient } });
 
 async function settle(): Promise<void> {
 	for (let index = 0; index < 10; index += 1) await new Promise(resolve => setImmediate(resolve));
@@ -73,11 +74,11 @@ test("failed descriptions render retry errors, stay silent, and recover via code
 
 	host.addMessage("user-1", null, { role: "user", content: [{ type: "text", text: "Show it." }], timestamp: 1 });
 	await host.start();
-	const text = "Answer.\n```ts\nrun();\n```";
+	const text = "Answer.\n```ts\nrun();\n```\nSame block.\n```ts\nrun();\n```";
 	await streamCompletedResponse(host, "assistant-1", "user-1", text);
 
 	// Quality failures exhaust three attempts before the omission is recorded.
-	assert.ok(calls.length >= 3, `expected quality retries; got ${calls.length}`);
+	assert.equal(calls.length, 3, "matching occurrences share one sequence of quality retries");
 
 	await new Promise(resolve => setTimeout(resolve, 200));
 	// The written callout is a retry error, not filler.
@@ -85,22 +86,41 @@ test("failed descriptions render retry errors, stay silent, and recover via code
 	assert.match(rendered, /No semantic description available \(quality\)/);
 	assert.doesNotMatch(rendered, /contains 4 lines/);
 
+	// Sweeps, unrelated settings, generator changes, and replay do not retry omissions.
+	await host.command("autoscroll off");
+	await host.command("edit-model test/other");
+	await host.emit("agent_settled", {});
+	await settle();
+	assert.equal(calls.length, 3);
+	assert.match(host.render(text), /No semantic description available/);
+
 	// Recovery through the command after the provider improves.
 	providerHealthy = true;
 	const before = calls.length;
-	await host.shortcut("f11"); await settle();
+	const beforeReplay = spoken;
+	await host.shortcut("f11");
+	for (let index = 0; index < 150 && spoken === beforeReplay; index++) await new Promise(resolve => setTimeout(resolve, 10));
+	await settle();
+	assert.ok(spoken > beforeReplay, "replay acquired the mocked transport");
+	assert.equal(calls.length, before, "replay must leave omissions intact");
 	const spokenBefore = spoken;
 	await host.command("code-retry historical all");
-	assert.equal(pauses.at(-1), true, "retry pauses the dirty current asset before its replacement exists");
+	assert.equal(pauses.at(-1), true, `retry pauses the dirty current asset before its replacement exists: ${JSON.stringify(host.notices)}`);
 	healthyResult.resolve({ role: "assistant", content: [{ type: "text", text: "It registers the toggle shortcuts." }], stopReason: "stop" });
 	await new Promise(resolve => setTimeout(resolve, 150));
 	await settle();
 
+	assert.equal(calls.length, before + 1, "one retry per complete cache key, not per occurrence");
 	const recovered = host.render(text);
 	assert.match(recovered, /toggle shortcuts/);
 	assert.doesNotMatch(recovered, /No semantic description available/);
 	assert.equal(pauses.at(-1), true, "regeneration completion must not resume");
 	assert.equal(spoken, spokenBefore);
-	await host.shortcut("f8"); await settle();
-	assert.equal(pauses.at(-1), false, "one resume rebuilds the current description");
+	await host.shortcut("f8");
+	// The cold mocked transport has no cancel acknowledgement; wait for the bounded stop proof.
+	for (let index = 0; index < 150 && pauses.at(-1) !== false; index++) {
+		await new Promise(resolve => setTimeout(resolve, 10));
+	}
+	await settle();
+	assert.equal(pauses.at(-1), false, `one resume rebuilds the current description: ${JSON.stringify(host.notices)}`);
 });
