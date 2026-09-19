@@ -8,7 +8,7 @@ import { FakeVoiceHost, MockedVoiceWorkerClient, assistant } from "./helpers/fak
 
 mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: MockedVoiceWorkerClient } });
 const settle = async () => { for (let i = 0; i < 12; i++) await new Promise(resolve => setImmediate(resolve)); };
-for (const key of ["f11", "f8"]) test(`${key} replay from tail restores bottom unless the user browses away`, async t => {
+for (const key of ["f11", "f8"]) for (const pauseResume of [false, true]) test(`${key} replay from tail restores bottom unless the user browses away (pause/resume: ${pauseResume})`, async t => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-tail-"));
 	const keys = ["PI_VOICE_CONFIG", "PI_VOICE_COORDINATOR_DIR", "PI_VOICE_DEVICE_DIR"];
 	const previous = keys.map(key => process.env[key]);
@@ -35,6 +35,10 @@ for (const key of ["f11", "f8"]) test(`${key} replay from tail restores bottom u
 		const segments = worker.sent as Array<{ utterance: number; segmentId: number; text: string }>;
 		segments.filter(segment => segment.utterance === last.utterance).forEach((segment, i) =>
 			worker.emit({ type: "segment-audio", utterance: segment.utterance, segmentId: segment.segmentId, start: i * 2, duration: 2 }));
+		if (pauseResume) {
+			await host.shortcut("f8");
+			await host.shortcut("f8"); await settle();
+		}
 		if (manual) host.scrollView.manualScrollTo(50);
 		worker.emit({ type: "idle", utterance: last.utterance }); await settle();
 		assert.equal(host.scrollView.scrollTop, manual ? 50 : 260);

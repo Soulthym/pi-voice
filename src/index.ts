@@ -3460,7 +3460,9 @@ export default async function (pi: ExtensionAPI) {
 				await replaySelected(ctx);
 				return;
 			}
-			restoreBottomAfterSpeech = atTranscriptTail && transcriptIsFollowingEnd();
+			restoreBottomAfterSpeech = (atTranscriptTail && transcriptIsFollowingEnd()) ||
+				(restoreBottomAfterSpeech && !narrationManuallyFramed &&
+					(lastAutoScrollTop === undefined || activeScrollView()?.scrollTop === lastAutoScrollTop));
 			bottomPinned = false;
 			if (playbackPaused) {
 				if (lastPlaybackTick) narration.setPlayback(lastPlaybackTick.utterance, lastPlaybackTick.position, true);
