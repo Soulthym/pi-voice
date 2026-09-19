@@ -1321,6 +1321,10 @@ export default async function (pi: ExtensionAPI) {
 		ctx.ui.setStatus("pi-voice", ctx.ui.theme.fg(color, label));
 	};
 
+	const persistSegmentTiming = (segmentId: number): void => {
+		const snapshot = playbackHistory.snapshotForSegment(segmentId);
+		if (snapshot) pi.appendEntry(PLAYBACK_TIMING_ENTRY, snapshot);
+	};
 	const playbackUtterances = new Set<number>();
 	let lastPlaybackTick: { utterance: number; position: number } | undefined;
 	const handleWorkerEvent = (event: WorkerEvent): void => {
@@ -1379,12 +1383,14 @@ export default async function (pi: ExtensionAPI) {
 				narration.setSegmentAudio(event.segmentId, event.start, event.duration, event.timingQuality);
 				playbackHistory.setSegmentAudio(event.segmentId, event.start, event.duration, event.timingQuality);
 				playbackHistory.setWordTimings(event.segmentId, narration.sourceWordTimings(event.segmentId));
+				persistSegmentTiming(event.segmentId);
 				requestPlaybackTimeline();
 				return;
 			case "alignment":
 				narration.setAlignment(event.segmentId, event.words, event.quality);
 				playbackHistory.setTimingQuality(event.segmentId, narration.timingQuality(event.segmentId));
 				playbackHistory.setWordTimings(event.segmentId, narration.sourceWordTimings(event.segmentId));
+				persistSegmentTiming(event.segmentId);
 				refreshProgressWidget();
 				return;
 			case "playback":
@@ -1398,6 +1404,7 @@ export default async function (pi: ExtensionAPI) {
 			case "alignment-error":
 				// Overload/failure leaves duration-weighted estimates, not promised refinement.
 				playbackHistory.setTimingQuality(event.segmentId, event.quality ?? "estimated");
+				persistSegmentTiming(event.segmentId);
 				refreshProgressWidget();
 				return;
 			case "transcribing":

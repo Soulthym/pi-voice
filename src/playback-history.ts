@@ -87,7 +87,7 @@ export class PlaybackHistory {
 	#finishedUtterances = new Set<number>();
 	#activeUtterance: number | undefined;
 	#playbackEpoch = 0;
-	#persistedUtterances = new Set<number>();
+	#persistedUtterances = new Map<number, string>();
 
 	/** Bound historical variants independently of transcript length (current records remain available). */
 	#trimVersions(): void {
@@ -345,28 +345,36 @@ export class PlaybackHistory {
 		record.units.set(`${unit.sourceOffset}:${unit.skipUnits}`, checkpoints.map(point => ({ ...point })));
 	}
 
+	snapshotForSegment(segmentId: number): PlaybackTimingSnapshot | undefined {
+		const segment = this.#segments.get(segmentId);
+		return segment ? this.snapshotForUtterance(segment.utterance) : undefined;
+	}
+
 	snapshotForUtterance(utterance: number): PlaybackTimingSnapshot | undefined {
 		const capture = this.#utterances.get(utterance);
 		if (
 			!capture?.valid || !capture.recordTimings ||
 			capture.record.id.startsWith("live:") ||
 			capture.record.checkpoints.length === 0 ||
-			!capture.record.timingsComplete ||
-			this.#persistedUtterances.has(utterance)
+			!capture.record.timingsComplete
 		) {
 			return undefined;
 		}
-		this.#persistedUtterances.add(utterance);
 		if (!capture.renderKey || capture.renderKey !== capture.record.renderKey) return undefined;
 		// Keep sentence boundaries intact; word checkpoints are already rate-limited.
 		const persisted = capture.record.checkpoints;
-		return {
+		const snapshot: PlaybackTimingSnapshot = {
 			version: 3,
 			messageId: capture.record.id,
 			renderKey: capture.renderKey,
 			duration: capture.record.duration,
 			checkpoints: persisted.map(checkpoint => ({ ...checkpoint })),
 		};
+		// Compare the persisted content so duplicate events do not append duplicate revisions.
+		const revision = JSON.stringify(snapshot);
+		if (this.#persistedUtterances.get(utterance) === revision) return undefined;
+		this.#persistedUtterances.set(utterance, revision);
+		return snapshot;
 	}
 
 	finishTimingGeneration(utterance: number): void {
