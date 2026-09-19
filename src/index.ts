@@ -1915,6 +1915,32 @@ export default async function (pi: ExtensionAPI) {
 		lastPlaybackTick = undefined;
 		narration.setCompletedText(target.text, target.messageType, target.contentIndex, target.displayOffset);
 		narration.previewSourceOffset(target.sourceOffset);
+		// Cached descriptions already have a source map; no audio or provider work is needed.
+		const stream = new SpeakableStream();
+		const item = [...stream.push(target.text), ...stream.flush()]
+			.find(item => item.kind === "code" && item.source.start === target.sourceOffset);
+		if (item?.kind === "code" && activeContext) {
+			const contextual = config.codeDescriptionContext === "conversation"
+				? completedAssistantMessages(activeContext, config.mode, true).find(message => message.id === target.id) : undefined;
+			const messages = contextual ? assistantCodeContext(
+				contextual.conversationMessages, contextual.assistantMessage, contextual.contentIndex, item.source.end)! : [];
+			const plan = codeDescriptionCache.get(descriptionCacheKey(activeContext, item.block, structuredContextIdentity(messages)));
+			const chunks = plan && !plan.omitted ? chunkCodeNarration(plan) : [];
+			const skip = Math.min(target.skipUnits ?? 0, Math.max(0, chunks.length - 1));
+			const chunk = chunks[skip];
+			if (chunk) {
+				const inherited = chunks.slice(0, skip).flatMap(chunk => chunk.cues.flatMap(cue => cue.operations));
+				narration.registerSegment({ id: -1, utterance: -1, text: chunk.text,
+					source: { start: item.source.start, end: item.source.start }, revealAtEnd: true,
+					code: plan?.guided ? { blockSource: item.source, code: item.block.code, language: item.block.language,
+						cues: [{ offset: 0, operations: inherited }, ...chunk.cues] } : undefined,
+					codeDescription: { blockSource: item.source, text: chunks.map(chunk => chunk.text).join(" "),
+						offset: chunks.slice(0, skip).reduce((offset, chunk) => offset + chunk.text.length + 1, 0) },
+				});
+				narration.setSegmentAudio(-1, 0, 1);
+				narration.setPlayback(-1, 0, true);
+			}
+		}
 		armNarrationFollow(true, explicit);
 		flushNarrationRender();
 		requestNarrationAutoScroll(true, explicit);
@@ -3118,7 +3144,7 @@ export default async function (pi: ExtensionAPI) {
 	const previewHistoricalTarget = (ctx: ExtensionContext, movement: -1 | 0 | 1, automatic = false): boolean => {
 		const messages = completedAssistantMessages(ctx, config.mode, false);
 		const selected = playbackHistory.selected();
-		const index = pausedForAttention ? messages.length - 1 : messages.findIndex(message => message.id === selected?.id);
+		const index = movement === 0 && pausedForAttention ? messages.length - 1 : messages.findIndex(message => message.id === selected?.id);
 		const live = index < 0 && !ownerTurnEnded && livePlaybackId !== undefined && selected?.id.startsWith("live:");
 		const target = live ? (movement === 0 ? selected : messages.at(-1))
 			: messages[Math.max(0, Math.min(messages.length - 1, (index < 0 ? messages.length - 1 : index) + movement))];
@@ -3167,11 +3193,18 @@ export default async function (pi: ExtensionAPI) {
 		},
 	});
 
-	const stepSentence = async (ctx: ExtensionContext, direction: -1 | 1, fromPrevious = false): Promise<void> => {
-		const request = await preparePlaybackAction(ctx, false, true);
-		if (request === undefined || request !== playbackRequestEpoch) return;
-		syncPlaybackMessages(ctx);
-		const selected = playbackHistory.selected();
+	const stepSentence = async (ctx: ExtensionContext, direction: -1 | 1, fromPrevious = false, navigation?: PlaybackHistory): Promise<void> => {
+		if (!requireEnabledVoice(ctx)) return;
+		const request = ++playbackRequestEpoch;
+		const messages = completedAssistantMessages(ctx, config.mode, false);
+		let history = navigation ?? playbackHistory;
+		if (!navigation && messages.length !== playbackHistory.status()?.messageCount) {
+			history = new PlaybackHistory();
+			history.sync(messages);
+			const cursor = playbackHistory.resumeTarget();
+			if (cursor) history.beginCapture(cursor.id, cursor.text, cursor.time, false, cursor.sourceOffset, cursor.skipUnits ?? 0);
+		}
+		const selected = history.selected();
 		if (!selected) { ctx.ui.notify("There is no completed assistant message", "warning"); return; }
 		const contextual = config.codeDescriptionContext === "conversation"
 			? completedAssistantMessages(ctx, config.mode, true).find(message => message.id === selected.id) : undefined;
@@ -3191,23 +3224,34 @@ export default async function (pi: ExtensionAPI) {
 			}
 			for (let skipUnits = 0; skipUnits < count; skipUnits++) units.push({ sourceOffset: item.source.start, skipUnits });
 		}
-		const cursor = playbackHistory.resumeTarget();
+		const cursor = history.resumeTarget();
 		if (direction < 0 && !atTranscriptTail && complete &&
 			(!units.length || (!fromPrevious && (cursor?.sourceOffset ?? 0) <= units[0].sourceOffset && !cursor?.skipUnits)) &&
-			(playbackHistory.status()?.messageIndex ?? 0) > 0) {
-			playbackHistory.move(-1);
-			return stepSentence(ctx, direction, true);
+			(history.status()?.messageIndex ?? 0) > 0) {
+			history.move(-1);
+			return stepSentence(ctx, direction, true, history);
 		}
-		const target = playbackHistory.sentenceTarget(direction, units, atTranscriptTail || fromPrevious);
+		const target = history.sentenceTarget(direction, units, atTranscriptTail || fromPrevious);
 		if (target) {
+			previewPlaybackTarget(target);
+			await new Promise<void>(resolve => setImmediate(resolve));
+			if (!await preparePlaybackMessages(ctx, request) || request !== playbackRequestEpoch) return;
+			syncPlaybackMessages(ctx);
 			const fullCapture = target.sourceOffset === units[0]?.sourceOffset && !target.skipUnits;
-			void playTarget(target, fullCapture && !playbackHistory.hasCompleteTimingFor(target.id), true);
+			void playTarget(target, fullCapture && !playbackHistory.hasCompleteTimingFor(target.id), true, false, true);
 		} else if (direction > 0 && complete) {
-			const before = playbackHistory.status();
+			const before = history.status();
 			if (before && before.messageIndex === before.messageCount - 1) followTranscriptTail(ctx);
 			else {
-				const next = playbackHistory.move(1);
-				if (next) void playTarget({ ...next, time: 0, sourceOffset: 0 }, !playbackHistory.hasCompleteTimingFor(next.id), true);
+				const next = history.move(1);
+				if (next) {
+					const target = { ...next, time: 0, sourceOffset: 0 };
+					previewPlaybackTarget(target);
+					await new Promise<void>(resolve => setImmediate(resolve));
+					if (!await preparePlaybackMessages(ctx, request) || request !== playbackRequestEpoch) return;
+					syncPlaybackMessages(ctx);
+					void playTarget(target, !playbackHistory.hasCompleteTimingFor(next.id), true, false, true);
+				}
 			}
 		} else {
 			scheduleMissingTimings(ctx);
