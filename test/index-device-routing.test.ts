@@ -17,6 +17,41 @@ class Worker extends MockedVoiceWorkerClient {
 mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: Worker } });
 const settle = async () => { for (let i = 0; i < 20; i++) await new Promise(resolve => setImmediate(resolve)); };
 
+test("cancelled reconnect rejection does not block later automatic local narration", async t => {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-cancelled-lookup-"));
+	const keys = ["PI_VOICE_CONFIG", "PI_VOICE_COORDINATOR_DIR", "PI_VOICE_DEVICE_DIR", "PI_VOICE_DEVICE_ID"];
+	const old = keys.map(key => process.env[key]);
+	process.env.PI_VOICE_CONFIG = path.join(root, "config.json");
+	process.env.PI_VOICE_COORDINATOR_DIR = path.join(root, "coordinator");
+	process.env.PI_VOICE_DEVICE_DIR = path.join(root, "devices");
+	delete process.env.PI_VOICE_DEVICE_ID;
+	await fs.writeFile(process.env.PI_VOICE_CONFIG, JSON.stringify({ enabled: true, input: "disabled", audioCache: false, timingPreprocessConcurrency: 0 }));
+	const resolve = t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", async (): Promise<ConnectionDevice> => ({ kind: "intentional_local" }));
+	const host = new FakeVoiceHost(root, "cancelled-lookup");
+	const index = Worker.instances.length;
+	t.after(async () => {
+		await host.shutdown();
+		keys.forEach((key, i) => { if (old[i] === undefined) delete process.env[key]; else process.env[key] = old[i]; });
+		await fs.rm(root, { recursive: true, force: true });
+	});
+	await host.start();
+	const worker = Worker.instances[index] as Worker;
+	const lookup = Promise.withResolvers<ConnectionDevice>();
+	const started = Promise.withResolvers<void>();
+	resolve.mock.mockImplementation(() => { started.resolve(); return lookup.promise; });
+	const reconnect = host.command("reconnect");
+	await started.promise;
+	await host.command("stop");
+	lookup.reject(new Error("obsolete identity lookup"));
+	await reconnect; await settle();
+	assert.ok(!host.notices.some(notice => notice.message.startsWith("Voice device:")), "obsolete adoption must not request a retry");
+	await streamBlockedResponse(host, "Automatic local narration still works.");
+	await settle();
+	assert.ok(worker.sent.length, "cancelled lookup must not set the automatic narration retry gate");
+	assert.ok(worker.outputs.every(output => output === "local"));
+	assert.equal(resolve.mock.callCount(), 2, "automatic narration must not require another lookup");
+});
+
 test("session pins, fresh explicit attachment, read-only metadata and lookup/stop/rebind races", async t => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-device-integration-"));
 	const keys = ["PI_VOICE_CONFIG", "PI_VOICE_COORDINATOR_DIR", "PI_VOICE_DEVICE_DIR", "PI_VOICE_DEVICE_ID"];

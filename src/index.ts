@@ -1979,8 +1979,8 @@ export default async function (pi: ExtensionAPI) {
 				deviceRetryRequired = false;
 				return true;
 			} catch (error) {
-				deviceRetryRequired = true;
 				if (epoch === playbackRequestEpoch && ctx === activeContext) {
+					deviceRetryRequired = true;
 					ctx?.ui.notify(`Voice device: ${error instanceof Error ? error.message : String(error)}${stopUnconfirmed ? " Stop unconfirmed; ownership retained. Restore the old device connection and retry /voice reconnect." : " Explicitly reconnect/retry."}`, "error");
 				}
 				throw error;
