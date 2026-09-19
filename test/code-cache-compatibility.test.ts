@@ -5,6 +5,17 @@ import { assistantCodeContext, legacyStructuredContextIdentity, structuredContex
 import { codeDescriptionCacheKey } from "../src/code-describer.js";
 import { plainCodeNarration } from "../src/code-narration.js";
 
+test("empty and newly generated caches never evaluate legacy context", async () => {
+	const cache = new CodeDescriptionCache();
+	const identity = "a".repeat(64);
+	const unexpected = () => { throw new Error("legacy serialization on a cache without legacy assets"); };
+	assert.equal(cache.resolveKey(identity, unexpected), identity);
+	await cache.getOrCreate("b".repeat(64), async () => plainCodeNarration("New asset."));
+	assert.equal(cache.resolveKey(identity, unexpected), identity);
+	cache.restore([]);
+	assert.equal(cache.resolveKey(identity, unexpected), identity);
+});
+
 test("lazy conversation-cache adoption preserves old source keys and legacy timing aliases across reload", async () => {
 	const block = { language: "ts", code: "run();" };
 	const code = "```ts\nrun();\n```\n";

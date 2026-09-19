@@ -118,7 +118,7 @@ type ContextualPlaybackMessage = PlaybackMessage & {
 };
 
 const conversationBeforeCache = new WeakMap<object, Map<string, ResolvedCodeContext>>();
-const completedMessagesCache = new WeakMap<object, { session: string; leaf: string | null; messages: Map<string, ContextualPlaybackMessage[]> }>();
+const completedMessagesCache = new WeakMap<object, { session: string; leaf: string | null; branch?: ReturnType<ExtensionContext["sessionManager"]["getBranch"]>; messages: Map<string, ContextualPlaybackMessage[]> }>();
 const completedEntryCache = new WeakMap<object, Map<string, ContextualPlaybackMessage[]>>();
 type IdentityContext = string | (() => string);
 const completedBlocksCache = new WeakMap<ContextualPlaybackMessage, Array<DescribableCodeItem & { identityContext: () => string; providerMessagesThroughBlock: Message[] }>>();
@@ -164,7 +164,30 @@ function liveConversationBefore(ctx: ExtensionContext): ResolvedCodeContext {
 	return resolvedSessionContext(ctx.sessionManager.getEntries(), leafId);
 }
 
-function completedAssistantMessages(ctx: ExtensionContext, mode: VoiceMode, includeContext = false): ContextualPlaybackMessage[] {
+function completedEntryMessages(ctx: ExtensionContext, entry: ReturnType<ExtensionContext["sessionManager"]["getBranch"]>[number], mode: VoiceMode, includeContext: boolean): ContextualPlaybackMessage[] {
+	if (entry.type !== "message") return [];
+	const stopReason = assistantStopReason(entry.message);
+	if (stopReason === undefined || stopReason === "aborted" || stopReason === "error") return [];
+	if (mode === "yield" && stopReason === "toolUse") return [];
+	const key = `${mode}:${includeContext}`;
+	let variants = completedEntryCache.get(entry);
+	const existing = variants?.get(key);
+	if (existing) return existing;
+	const targets = eligibleAssistantBlocks(entry.message, mode).filter(block => hasSpeakableAudio(block.text)).map(block => ({
+		...block,
+		id: block.contentIndex === 0 ? entry.id : `${entry.id}:${block.contentIndex}`,
+		entryId: entry.id,
+		get conversationMessages() {
+			return includeContext ? contextBeforeEntry(ctx, entry.parentId).messages : [];
+		},
+		assistantMessage: entry.message,
+	}));
+	if (!variants) { variants = new Map(); completedEntryCache.set(entry, variants); }
+	variants.set(key, targets);
+	return targets;
+}
+
+function completedBranch(ctx: ExtensionContext) {
 	const session = ctx.sessionManager.getSessionId();
 	const leaf = ctx.sessionManager.getLeafId();
 	let cache = completedMessagesCache.get(ctx.sessionManager);
@@ -181,31 +204,18 @@ function completedAssistantMessages(ctx: ExtensionContext, mode: VoiceMode, incl
 		cache = { session, leaf, messages: new Map() };
 		completedMessagesCache.set(ctx.sessionManager, cache);
 	}
+	return cache.branch ??= ctx.sessionManager.getBranch();
+}
+
+function completedAssistantMessages(ctx: ExtensionContext, mode: VoiceMode, includeContext = false): ContextualPlaybackMessage[] {
+	const branch = completedBranch(ctx);
+	const cache = completedMessagesCache.get(ctx.sessionManager)!;
 	const key = `${mode}:${includeContext}`;
 	const cached = cache.messages.get(key);
 	if (cached) return cached;
 	const messages: ContextualPlaybackMessage[] = [];
-	for (const entry of ctx.sessionManager.getBranch()) {
-		if (entry.type !== "message") continue;
-		const stopReason = assistantStopReason(entry.message);
-		if (stopReason === undefined || stopReason === "aborted" || stopReason === "error") continue;
-		// Yield mode only speaks the final response, not intermediate text attached to tool/edit calls.
-		if (mode === "yield" && stopReason === "toolUse") continue;
-		let variants = completedEntryCache.get(entry);
-		const existing = variants?.get(key);
-		if (existing) { messages.push(...existing); continue; }
-		const targets = eligibleAssistantBlocks(entry.message, mode).filter(block => hasSpeakableAudio(block.text)).map(block => ({
-			...block,
-			id: block.contentIndex === 0 ? entry.id : `${entry.id}:${block.contentIndex}`,
-			entryId: entry.id,
-			get conversationMessages() {
-				return includeContext ? contextBeforeEntry(ctx, entry.parentId).messages : [];
-			},
-			assistantMessage: entry.message,
-		}));
-		if (!variants) { variants = new Map(); completedEntryCache.set(entry, variants); }
-		variants.set(key, targets);
-		messages.push(...targets);
+	for (const entry of branch) {
+		messages.push(...completedEntryMessages(ctx, entry, mode, includeContext));
 	}
 	cache.messages.set(key, messages);
 	return messages;
@@ -557,7 +567,7 @@ export default async function (pi: ExtensionAPI) {
 		let memo = sourceKeys.get(block);
 		if (!memo || memo.context !== identityContext || memo.settings !== settings) {
 			memo = { context: identityContext, settings, identity: codeDescriptionCacheKey(ctx, block, config.editModel,
-				config.codeNarration, context(), config.codeDescriptionContext) };
+				config.codeNarration, config.codeDescriptionContext === "conversation" ? context() : "", config.codeDescriptionContext) };
 			sourceKeys.set(block, memo);
 		}
 		const identity = memo.identity;
@@ -2009,11 +2019,13 @@ export default async function (pi: ExtensionAPI) {
 		const item = [...stream.push(target.text), ...stream.flush()]
 			.find(item => item.kind === "code" && item.source.start === target.sourceOffset);
 		if (item?.kind === "code" && activeContext) {
-			const contextual = config.codeDescriptionContext === "conversation"
-				? completedAssistantMessages(activeContext, config.mode, true).find(message => message.id === target.id) : undefined;
-			const messages = contextual ? assistantCodeContext(
-				contextual.conversationMessages, contextual.assistantMessage, contextual.contentIndex, item.source.end)! : [];
-			const plan = codeDescriptionCache.get(descriptionCacheKey(activeContext, item.block, structuredContextIdentity(messages)));
+			const entry = config.codeDescriptionContext === "conversation" ? completedBranch(activeContext)
+				.find(entry => entry.id === target.id || target.id.startsWith(`${entry.id}:`)) : undefined;
+			const contextual = entry ? completedEntryMessages(activeContext, entry, config.mode, true)
+				.find(message => message.id === target.id) : undefined;
+			const completed = contextual && completedCodeItems(contextual).find(candidate => candidate.sourceEnd === item.source.end);
+			const plan = codeDescriptionCache.get(descriptionCacheKey(activeContext, completed?.block ?? item.block,
+				completed?.identityContext ?? (() => structuredContextIdentity([]))));
 			const chunks = plan && !plan.omitted ? chunkCodeNarration(plan) : [];
 			const skip = Math.min(target.skipUnits ?? 0, Math.max(0, chunks.length - 1));
 			const chunk = chunks[skip];
@@ -2080,7 +2092,6 @@ export default async function (pi: ExtensionAPI) {
 		refreshPlaybackTimeline();
 
 		if (prepareContext) {
-			await new Promise<void>(resolve => setImmediate(resolve));
 			if (!await preparePlaybackMessages(prepareContext, request.epoch) || pendingReplay !== request) return;
 			const messages = syncPlaybackMessages(prepareContext, false, true);
 			if (!messages.some(message => message.id === target.id && message.text === target.text)) {
@@ -2241,13 +2252,17 @@ export default async function (pi: ExtensionAPI) {
 	const preparePlaybackMessages = async (ctx: ExtensionContext, request = playbackRequestEpoch): Promise<boolean> => {
 		const epoch = contextEpoch;
 		let sliceStart = performance.now();
-		for (const message of completedAssistantMessages(ctx, config.mode, config.codeDescriptionContext === "conversation")) {
+		for (const entry of completedBranch(ctx)) {
 			if (performance.now() - sliceStart >= 8) {
 				await new Promise<void>(resolve => setImmediate(resolve));
 				sliceStart = performance.now();
 			}
 			if (epoch !== contextEpoch || request !== playbackRequestEpoch || !isCurrentContext(ctx)) return false;
-			renderKeyFor(ctx, message);
+			// Navigation/scrolling also reads raw snapshots; warm those in the same bounded slice.
+			if (config.codeDescriptionContext === "conversation") completedEntryMessages(ctx, entry, config.mode, false);
+			for (const message of completedEntryMessages(ctx, entry, config.mode, config.codeDescriptionContext === "conversation")) {
+				renderKeyFor(ctx, message);
+			}
 		}
 		return epoch === contextEpoch && request === playbackRequestEpoch && isCurrentContext(ctx);
 	};
@@ -2262,7 +2277,9 @@ export default async function (pi: ExtensionAPI) {
 		const selected = playbackHistory.selected(true);
 		if (pendingCanonicalizations.size > 0 || (!ownerTurnEnded && livePlaybackId !== undefined && selected?.id.startsWith("live:") && !messages.some(message => message.id === selected.id))) return messages;
 		const updated = messages.find(message => message.id === selected?.id);
-		if (!replacing && selected && updated && (selected.text !== updated.text || selected.renderKey !== updated.renderKey)) pauseDirtyPlayback();
+		// A cold preview has no asset identity yet; first canonicalization is not a settings change.
+		if (!replacing && selected && updated && (selected.text !== updated.text ||
+			(selected.renderKey !== undefined && selected.renderKey !== updated.renderKey))) pauseDirtyPlayback();
 		playbackHistory.sync(messages, selectLatest);
 		return messages;
 	};
@@ -3280,13 +3297,28 @@ export default async function (pi: ExtensionAPI) {
 
 	// Preview raw source before contextual identities yield or device acquisition waits.
 	const previewHistoricalTarget = (ctx: ExtensionContext, movement: -1 | 0 | 1, automatic = false): PlaybackTarget | undefined => {
-		const messages = completedAssistantMessages(ctx, config.mode, false);
-		const selected = playbackHistory.selected();
-		const index = movement === 0 && pausedForAttention ? messages.length - 1 : messages.findIndex(message => message.id === selected?.id);
-		const live = index < 0 && !ownerTurnEnded && livePlaybackId !== undefined && selected?.id.startsWith("live:");
-		const target = live ? (movement === 0 ? selected : messages.at(-1))
-			: messages[Math.max(0, Math.min(messages.length - 1, (index < 0 ? messages.length - 1 : index) + movement))];
-		if (!target || (movement === 1 && index === messages.length - 1)) return;
+		const branch = completedBranch(ctx);
+		const selected = movement === 0 && pausedForAttention ? undefined : playbackHistory.selected();
+		const selectedEntry = selected ? branch.findIndex(entry => entry.id === selected.id || selected.id.startsWith(`${entry.id}:`)) : -1;
+		const live = selectedEntry < 0 && !ownerTurnEnded && livePlaybackId !== undefined && selected?.id.startsWith("live:");
+		if (movement === 1 && selectedEntry < 0 && !live) return; // No selection means the latest completed response.
+		const direction = selectedEntry >= 0 && movement === 1 ? 1 : -1;
+		let skip = selectedEntry >= 0 ? Math.abs(movement) : movement === -1 && !live ? 1 : 0;
+		let target: PlaybackMessage | undefined = live && movement === 0 ? selected : undefined;
+		let boundary = selected;
+		// Only parse the selected/adjacent source, not every completed response on a cold F11.
+		for (let i = selectedEntry >= 0 ? selectedEntry : branch.length - 1; !target && i >= 0 && i < branch.length; i += direction) {
+			const messages = completedEntryMessages(ctx, branch[i]!, config.mode, false);
+			const selectedBlock = i === selectedEntry ? messages.findIndex(message => message.id === selected?.id) : -1;
+			for (let j = selectedBlock >= 0 ? selectedBlock : direction === 1 ? 0 : messages.length - 1;
+				j >= 0 && j < messages.length; j += direction) {
+				if (skip-- > 0) { boundary = messages[j]; continue; }
+				target = messages[j];
+				break;
+			}
+		}
+		if (!target && movement === -1) target = boundary;
+		if (!target) return;
 		const preview = { ...target, time: 0, sourceOffset: 0 };
 		previewPlaybackTarget(preview, !automatic);
 		return preview;
@@ -3295,18 +3327,19 @@ export default async function (pi: ExtensionAPI) {
 	const replaySelected = async (ctx: ExtensionContext, automatic = false): Promise<void> => {
 		if (!requireEnabledVoice(ctx)) return;
 		const restoreTail = atTranscriptTail && transcriptIsFollowingEnd();
-		const framed = previewHistoricalTarget(ctx, 0, automatic);
-		const request = await preparePlaybackAction(ctx);
-		if (request === undefined || !await preparePlaybackMessages(ctx, request) || request !== playbackRequestEpoch) return;
-		syncPlaybackMessages(ctx, pausedForAttention);
-		const target = playbackHistory.restartTarget();
+		const target = previewHistoricalTarget(ctx, 0, automatic);
+		const request = await preparePlaybackAction(ctx, false, true);
+		if (request === undefined) return;
 		if (!target) {
 			ctx.ui.notify("There is no completed assistant message to replay yet", "warning");
 			return;
 		}
 		playbackPaused = false;
 		narration.setPaused(playbackPaused);
-		playTarget(target, !playbackHistory.hasCompleteTimingFor(target.id), true, automatic, !!framed, restoreTail);
+		// Select now; canonical timing/history catch-up yields inside playTarget.
+		void playTarget(target, true, true, automatic, true, restoreTail, ctx);
+		// Let already-warm preparation finish its microtask without waiting on cold slices/device handoff.
+		await Promise.resolve();
 	};
 
 	playRequestedAttention = ctx => {
@@ -3325,7 +3358,7 @@ export default async function (pi: ExtensionAPI) {
 		handler: async ctx => {
 			if (!requireEnabledVoice(ctx)) return;
 			const target = previewHistoricalTarget(ctx, -1);
-			if (target) await playTarget(target, true, true, false, true, false, ctx);
+			if (target) void playTarget(target, true, true, false, true, false, ctx);
 		},
 	});
 
@@ -3513,17 +3546,9 @@ export default async function (pi: ExtensionAPI) {
 		description: "Play the next assistant message; pause and follow transcript tail after the latest",
 		handler: async ctx => {
 			if (!requireEnabledVoice(ctx)) return;
-			const framed = previewHistoricalTarget(ctx, 1);
-			const request = await preparePlaybackAction(ctx);
-			if (request === undefined || !await preparePlaybackMessages(ctx, request) || request !== playbackRequestEpoch) return;
-			syncPlaybackMessages(ctx);
-			const before = playbackHistory.status();
-			if (before && before.messageIndex === before.messageCount - 1) {
-				followTranscriptTail(ctx);
-				return;
-			}
-			const message = playbackHistory.move(1);
-			if (message) playTarget({ ...message, time: 0, sourceOffset: 0 }, !playbackHistory.hasCompleteTimingFor(message.id), true, false, !!framed);
+			const target = previewHistoricalTarget(ctx, 1);
+			if (target) void playTarget(target, true, true, false, true, false, ctx);
+			else followTranscriptTail(ctx);
 		},
 	});
 

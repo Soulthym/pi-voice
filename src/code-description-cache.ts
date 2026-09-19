@@ -68,6 +68,7 @@ export class CodeDescriptionCache {
 	#plans = new Map<string, CodeNarrationPlan>();
 	#identities = new Map<string, string>();
 	#pending = new Map<string, Promise<CodeNarrationPlan>>();
+	#restoredKeys = new Set<string>();
 	#generation = 0;
 
 	restore(values: readonly unknown[]): void {
@@ -75,10 +76,12 @@ export class CodeDescriptionCache {
 		this.#plans.clear();
 		this.#identities.clear();
 		this.#pending.clear();
+		this.#restoredKeys.clear();
 		for (const value of values) {
 			const snapshot = parseCodeDescriptionCacheSnapshot(value);
 			if (snapshot) {
 				this.#plans.set(snapshot.key, snapshot.plan);
+				this.#restoredKeys.add(snapshot.key);
 				if (snapshot.identity) this.#identities.set(snapshot.identity, snapshot.key);
 			}
 		}
@@ -91,6 +94,8 @@ export class CodeDescriptionCache {
 	): string {
 		const known = this.#identities.get(identity) ?? identity;
 		if (known !== identity || this.#plans.has(known)) return known;
+		// Only restored assets can need migration; new/empty caches need no old contexts.
+		if (!this.#restoredKeys.size) return identity;
 		// Compute old serialized identities only on a miss; retain only their hashes.
 		for (const candidate of compatibleKeys?.() ?? []) {
 			const key = this.#identities.get(candidate) ?? candidate;
@@ -116,6 +121,7 @@ export class CodeDescriptionCache {
 	/** Drops a cached plan (e.g. an omission) so the next request generates anew. */
 	invalidate(key: string): void {
 		this.#plans.delete(key);
+		this.#restoredKeys.delete(key);
 		this.#pending.delete(key);
 	}
 

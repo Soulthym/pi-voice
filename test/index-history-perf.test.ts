@@ -8,7 +8,7 @@ import { assistant, FakeVoiceHost, MockedVoiceWorkerClient } from "./helpers/fak
 mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: MockedVoiceWorkerClient } });
 const tick = () => new Promise<void>(resolve => setImmediate(resolve));
 
-for (const scenario of ["f6", "f9", "timing", "aborted", "error", "prefix"] as const) {
+for (const scenario of ["f6", "f9", "timing", "aborted", "error", "prefix", "cold"] as const) {
 	test(`history preparation regression: ${scenario}`, async t => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-voice-history-perf-"));
 		const env = {
@@ -19,7 +19,7 @@ for (const scenario of ["f6", "f9", "timing", "aborted", "error", "prefix"] as c
 		const previous = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
 		Object.assign(process.env, env);
 		await fs.writeFile(env.PI_VOICE_CONFIG, JSON.stringify({
-			enabled: true, input: "disabled", audioCache: false, codeDescriptionContext: "block-only",
+			enabled: true, input: "disabled", output: "local", audioCache: false, codeDescriptionContext: scenario === "cold" ? "conversation" : "block-only",
 			codeDescriptionPreprocessConcurrency: 0, timingPreprocessConcurrency: 0,
 		}));
 		const host = new FakeVoiceHost(root, scenario);
@@ -32,6 +32,9 @@ for (const scenario of ["f6", "f9", "timing", "aborted", "error", "prefix"] as c
 			await fs.rm(root, { recursive: true, force: true });
 		});
 		const workerIndex = MockedVoiceWorkerClient.instances.length;
+		if (scenario === "prefix") host.entries.push({ type: "custom", id: "legacy", parentId: null,
+			customType: "pi-voice.code-description", data: { version: 1, key: "a".repeat(64),
+				plan: { guided: false, records: [{ speech: "Old description.", operations: [] }] } } });
 		await host.start();
 		const worker = MockedVoiceWorkerClient.instances[workerIndex]!;
 		if (scenario === "aborted" || scenario === "error") {
@@ -54,6 +57,42 @@ for (const scenario of ["f6", "f9", "timing", "aborted", "error", "prefix"] as c
 			worker.emit({ type: "idle", utterance: (worker.sent.at(-1) as { utterance: number }).utterance });
 			await tick();
 			await assert.rejects(fs.stat(lease), { code: "ENOENT" });
+			return;
+		}
+		if (scenario === "cold") {
+			for (let i = 0; i < 500; i++) host.addMessage(`m${i}`, i ? `m${i - 1}` : null,
+				assistant((`Synthetic explanation number ${i}. `).repeat(15) + `\n\`\`\`js\nconst value = ${i};\n\`\`\`\n`));
+			const memos: Array<{ identity: string; legacy?: string[] }> = [];
+			const set = WeakMap.prototype.set;
+			mock.method(WeakMap.prototype, "set", function (this: WeakMap<object, unknown>, key: object, value: any) {
+				if (value && typeof value.identity === "string" && "settings" in value) memos.push(value);
+				return set.call(this, key, value);
+			});
+			let last = performance.now(), maxGap = 0;
+			const heartbeat = setInterval(() => {
+				const now = performance.now();
+				maxGap = Math.max(maxGap, now - last);
+				last = now;
+			}, 1);
+			t.after(() => clearInterval(heartbeat));
+			let previewIdentities: number | undefined;
+			mock.method(host.tui, "requestRender", () => { previewIdentities ??= memos.length; });
+			const start = performance.now();
+			await host.shortcut("f11");
+			const handlerMs = performance.now() - start;
+			assert.equal(previewIdentities, 0, "immediate preview must not resolve the whole history");
+			assert.ok(memos.length < 500, "handler returns before cold history catch-up completes");
+			const deadline = performance.now() + 3000;
+			while (!worker.sent.length && performance.now() < deadline) await new Promise(resolve => setTimeout(resolve, 1));
+			assert.ok(worker.sent.length, `cold catch-up must finish and replay the selection (${memos.length} identities; workers ${MockedVoiceWorkerClient.instances.slice(workerIndex).map(worker => worker.sent.length)}; ${JSON.stringify(host.notices)})`);
+			assert.ok(memos.length >= 500, "catch-up resolves all canonical source identities");
+			assert.ok(memos.every(memo => !memo.legacy), "empty/new caches never serialize legacy context");
+			const warmed = memos.length;
+			await host.shortcut("f11");
+			for (let i = 0; i < 80; i++) await tick();
+			assert.ok(memos.length <= warmed + 1, "warm completed identities are reused");
+			assert.ok(maxGap < 100, `cold catch-up blocked heartbeat for ${maxGap.toFixed(1)}ms`);
+			t.diagnostic(`500 messages: F11 handler ${handlerMs.toFixed(1)}ms; max heartbeat gap ${maxGap.toFixed(1)}ms`);
 			return;
 		}
 		const texts = Array.from({ length: 30 }, (_, i) => scenario === "prefix"
