@@ -6,7 +6,8 @@ import test from "node:test";
 import { VoiceWorkerClient } from "../src/worker-client.js";
 import { CodeDescriptionCache } from "../src/code-description-cache.js";
 import { PlaybackHistory } from "../src/playback-history.js";
-import { legacyCodeDescriptionCacheKey } from "../src/code-describer.js";
+import { codeDescriptionCacheKey, legacyCodeDescriptionCacheKey } from "../src/code-describer.js";
+import { assistantCodeContext, legacyStructuredContextIdentity } from "../src/code-context.js";
 import { plainCodeNarration } from "../src/code-narration.js";
 import { loadVoiceConfig } from "../src/config.js";
 import { narrationRenderKey } from "../src/render-identity.js";
@@ -259,9 +260,10 @@ test("timing jobs cannot relabel old spoken wording after an in-flight plan chan
 	assert.equal(host.entries.filter(entry => entry.customType === "pi-voice.playback-timing").length, 0);
 });
 
-test("legacy descriptions and timing survive model changes/reload with fresh per-event contexts", async t => {
+for (const format of ["block-only", "serialized-source", "serialized-alias"] as const) {
+test(`legacy descriptions and timing survive model changes/reload with fresh per-event contexts (${format})`, async t => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-voice-source-cache-"));
-	const restoreEnvironment = await configure(root, "block-only");
+	const restoreEnvironment = await configure(root, format === "block-only" ? "block-only" : "conversation");
 	const restoreWorker = mockWorker();
 	let measurements = 0;
 	VoiceWorkerClient.prototype.measureSegment = async () => { measurements++; return 1; };
@@ -280,10 +282,15 @@ test("legacy descriptions and timing survive model changes/reload with fresh per
 	const parser = new SpeakableStream();
 	const item = [...parser.push(text), ...parser.flush()].find(item => item.kind === "code");
 	assert.ok(item?.kind === "code");
-	const legacy = legacyCodeDescriptionCacheKey(host.ctx, item.block, "current", "summary", "", "block-only");
+	const serialized = legacyStructuredContextIdentity(assistantCodeContext([], assistant(text), 0, item.source.end)!);
+	const oldSource = codeDescriptionCacheKey(host.ctx, item.block, "current", "summary", serialized, "conversation");
+	const legacy = format === "block-only"
+		? legacyCodeDescriptionCacheKey(host.ctx, item.block, "current", "summary", "", "block-only")
+		: format === "serialized-source" ? oldSource : "a".repeat(64);
 	host.addMessage("answer", null, assistant(text));
 	host.entries.push({ type: "custom", id: "description", parentId: "answer", customType: "pi-voice.code-description",
-		data: { version: 1, key: legacy, plan: plainCodeNarration("The legacy description explains the configured action.") } });
+		data: { version: 1, key: legacy, ...(format === "serialized-alias" ? { identity: oldSource } : {}),
+			plan: plainCodeNarration("The legacy description explains the configured action.") } });
 	const renderKey = narrationRenderKey(text, await loadVoiceConfig(), [JSON.stringify([legacy, plainCodeNarration("The legacy description explains the configured action.")])]);
 	host.entries.push({ type: "custom", id: "timing", parentId: "description", customType: "pi-voice.playback-timing",
 		data: { version: 3, messageId: "answer", renderKey, duration: 1, checkpoints: [{ time: 0, duration: 1, sourceOffset: 0 }] } });
@@ -316,6 +323,7 @@ test("legacy descriptions and timing survive model changes/reload with fresh per
 	assert.ok(restarted.entries.some(entry => entry.customType === "pi-voice.code-description" && entry.data.key !== legacy),
 		"fresh event contexts must not suppress cache persistence");
 });
+}
 
 test("extension narration uses the compaction summary applicable before a historical block", async t => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-voice-index-compaction-"));

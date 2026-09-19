@@ -61,7 +61,7 @@ for (const scenario of ["f6", "f9", "timing", "aborted", "error", "prefix"] as c
 		texts.forEach((text, i) => host.addMessage(String(i), i ? String(i - 1) : null, assistant(text)));
 		host.addMessage("tail", "29", assistant("Tail first. Tail second."));
 		if (scenario === "prefix") {
-			const memos: Array<{ identity: string; legacySettings?: string; legacy?: string }> = [];
+			const memos: Array<{ identity: string; legacySettings?: string; legacy?: string[] }> = [];
 			const set = WeakMap.prototype.set;
 			mock.method(WeakMap.prototype, "set", function (this: WeakMap<object, unknown>, key: object, value: any) {
 				if (value && typeof value.identity === "string" && "settings" in value) memos.push(value);
@@ -79,11 +79,12 @@ for (const scenario of ["f6", "f9", "timing", "aborted", "error", "prefix"] as c
 			await host.shortcut("f11");
 			for (const text of texts) host.render(text);
 			assert.ok(memos.some(memo => memo.legacySettings !== old.get(memo.identity)?.legacySettings), "runtime prefix changes invalidate the memo");
-			assert.ok(memos.every(memo => memo.legacy === old.get(memo.identity)?.legacy), "block-only legacy keys retain compatibility");
+			assert.deepEqual(memos.map(memo => memo.legacy), memos.map(memo => old.get(memo.identity)?.legacy), "block-only legacy keys retain compatibility");
+			assert.ok(memos.every(memo => memo.legacy?.every(key => /^[a-f0-9]{64}$/.test(key))), "legacy contexts retain only hashes");
 			host.ctx.model = { ...host.ctx.model, id: "changed-model" };
 			await host.shortcut("f11");
 			for (const text of texts) host.render(text);
-			assert.ok(memos.some(memo => memo.legacy !== old.get(memo.identity)?.legacy), "model changes refresh legacy keys");
+			assert.ok(memos.some(memo => JSON.stringify(memo.legacy) !== JSON.stringify(old.get(memo.identity)?.legacy)), "model changes refresh legacy keys");
 			assert.equal(host.modelRequests.length, 0);
 			return;
 		}

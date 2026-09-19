@@ -8,6 +8,7 @@ import {
 	eligibleAssistantBlocks,
 	resolvedSessionContext,
 	structuredContextIdentity,
+	legacyStructuredContextIdentity,
 	type ResolvedCodeContext,
 } from "./code-context.js";
 import { CodeDescriptionCache, type CodeDescriptionCacheSnapshot } from "./code-description-cache.js";
@@ -130,7 +131,8 @@ function completedCodeItems(message: ContextualPlaybackMessage) {
 			const providerMessages = () => assistantCodeContext(
 				message.conversationMessages, message.assistantMessage, message.contentIndex, item.sourceEnd)!;
 			return { ...item, get providerMessagesThroughBlock() { return providerMessages(); },
-				identityContext: () => structuredContextIdentity(providerMessages()) };
+				identityContext: Object.assign(() => structuredContextIdentity(providerMessages()),
+					{ legacy: () => legacyStructuredContextIdentity(providerMessages()) }) };
 		});
 		completedBlocksCache.set(message, items);
 	}
@@ -547,7 +549,7 @@ export default async function (pi: ExtensionAPI) {
 		return JSON.stringify({ context, systemPrompt: ctx.getSystemPrompt(), tools: activePromptTools() });
 	};
 
-	const sourceKeys = new WeakMap<FencedCodeBlock, { context: IdentityContext; settings: string; identity: string; legacySettings?: string; legacy?: string }>();
+	const sourceKeys = new WeakMap<FencedCodeBlock, { context: IdentityContext; settings: string; identity: string; legacySettings?: string; legacy?: string[] }>();
 	const descriptionCacheKey = (ctx: ExtensionContext, block: FencedCodeBlock, identityContext: IdentityContext): string => {
 		let serialized: string | undefined;
 		const context = () => serialized ??= typeof identityContext === "function" ? identityContext() : identityContext;
@@ -559,26 +561,30 @@ export default async function (pi: ExtensionAPI) {
 			sourceKeys.set(block, memo);
 		}
 		const identity = memo.identity;
-		const known = codeDescriptionCache.resolveKey(identity);
-		if (known !== identity || codeDescriptionCache.get(identity)) return known;
-		// Adopt resolvable old snapshots without changing their timing dependency key.
-		try {
+		return codeDescriptionCache.resolveKey(identity, () => {
 			const legacySettings = createHash("sha256").update(JSON.stringify([contextEpoch, config.editModel, ctx.model?.provider, ctx.model?.id,
 				codeDescriptionUsesActivePrompt(ctx, config.editModel) ? [ctx.getSystemPrompt(), activePromptTools()] : null])).digest("hex");
 			if (memo.legacySettings !== legacySettings) {
-				memo.legacy = legacyCodeDescriptionCacheKey(ctx, block, config.editModel, config.codeNarration,
-					contextualCodeDescription(ctx, context()), config.codeDescriptionContext);
+				// Completed contexts expose old serialization lazily; retain only derived hashes.
+				const legacyContext = typeof identityContext === "function"
+					? (identityContext as (() => string) & { legacy?: () => string }).legacy?.()
+					: undefined;
+				memo.legacy = [];
+				if (legacyContext !== undefined) memo.legacy.push(codeDescriptionCacheKey(ctx, block, config.editModel,
+					config.codeNarration, legacyContext, config.codeDescriptionContext));
+				for (const candidate of legacyContext === undefined ? [context()] : [legacyContext, context()]) {
+					try {
+						memo.legacy.push(legacyCodeDescriptionCacheKey(ctx, block, config.editModel, config.codeNarration,
+							contextualCodeDescription(ctx, candidate), config.codeDescriptionContext));
+					} catch { /* Source-key adoption does not require an available generator. */ }
+				}
 				memo.legacySettings = legacySettings;
 			}
-			const legacy = memo.legacy!;
-			const adopted = codeDescriptionCache.adopt(identity, legacy);
-			if (adopted) {
-				pendingCodeDescriptions.set(legacy, adopted);
-				scheduleDescriptionPersistence();
-				return legacy;
-			}
-		} catch { /* Cached source identities remain usable without an available generator. */ }
-		return identity;
+			return memo.legacy!;
+		}, snapshot => {
+			pendingCodeDescriptions.set(snapshot.key, snapshot);
+			scheduleDescriptionPersistence();
+		});
 	};
 
 	const isCurrentContext = (ctx: ExtensionContext): boolean =>
