@@ -82,8 +82,8 @@ test("uses forced-alignment word timestamps when they arrive", () => {
 		{ text: "beta", start: 3, end: 4 },
 	]);
 	assert.deepEqual(progress.sourceWordTimings(7), [
-		{ time: 0, sourceOffset: 0 },
-		{ time: 3, sourceOffset: 6 },
+		{ time: 0, sourceOffset: 0, quality: "ctc-refined" },
+		{ time: 3, sourceOffset: 6, quality: "ctc-refined" },
 	]);
 	progress.setPlayback(3, 2.5);
 

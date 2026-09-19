@@ -3,16 +3,18 @@ import { fileURLToPath } from "node:url";
 import * as readline from "node:readline";
 import { normalizeWorkerCount, type VoiceConfig } from "./config.js";
 
+import type { AlignmentWord, TimingQuality } from "./narration-progress.js";
+
 export type WorkerEvent =
 	| { type: "loading" }
 	| { type: "progress"; percent?: number; file?: string }
 	| { type: "ready"; requestId?: string }
 	| { type: "speaking" }
-	| { type: "segment-audio"; utterance: number; segmentId: number; start: number; duration: number }
+	| { type: "segment-audio"; utterance: number; segmentId: number; start: number; duration: number; timingQuality?: TimingQuality }
 	| { type: "measurement"; requestId: string; duration: number }
-	| { type: "alignment"; segmentId: number; words: Array<{ text: string; start: number; end: number }> }
+	| { type: "alignment"; segmentId: number; words: AlignmentWord[]; quality?: TimingQuality }
 	| { type: "playback"; utterance: number; position: number; estimated?: boolean }
-	| { type: "alignment-error"; segmentId: number; message: string }
+	| { type: "alignment-error"; segmentId: number; message: string; quality?: "estimated" }
 	| { type: "alignment-ready"; requestId: string }
 	| { type: "alignment-preload-error"; requestId: string; message: string }
 	| { type: "transcribing" }

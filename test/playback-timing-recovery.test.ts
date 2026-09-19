@@ -25,7 +25,7 @@ test("seek preserves compatible prefix and suffix units without claiming full co
 	history.finishTimingGeneration(2);
 	assert.deepEqual(history.timingForUnit(message.id, "A", { sourceOffset: 0, skipUnits: 0 }), first);
 	assert.deepEqual(history.timingForUnit(message.id, "A", { sourceOffset: 33, skipUnits: 0 }), [
-		{ time: 0, duration: 3, sourceOffset: 33 }, { time: 1, duration: 0, sourceOffset: 39 },
+		{ time: 0, duration: 3, sourceOffset: 33, quality: "estimated" }, { time: 1, duration: 0, sourceOffset: 39 },
 	]);
 	assert.equal(history.status()?.duration, 2, "unknown suffix origin must not relabel absolute timing");
 	assert.equal(history.hasCompleteTimingFor(message.id), false);

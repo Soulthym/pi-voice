@@ -57,6 +57,7 @@ test("maps playback time to approximate source checkpoints without audio storage
 		messageCount: 1,
 		hasTimings: true,
 		timingsComplete: false,
+		timingQuality: "estimated",
 	});
 	assert.deepEqual(history.seekTarget(-10), {
 		id: "message",
@@ -162,7 +163,7 @@ test("invalidates and replaces timing checkpoints for a full rerender", () => {
 	assert.equal(replacement.duration, 4);
 	history.setPlayback(3, 0.5);
 	assert.equal(history.status()?.position, 4, "completion before any tick still fences buffered ticks");
-	assert.deepEqual(replacement.checkpoints, [{ time: 0, duration: 4, sourceOffset: 0 }]);
+	assert.deepEqual(replacement.checkpoints, [{ time: 0, duration: 4, sourceOffset: 0, quality: "estimated" }]);
 });
 
 test("capture ahead and delayed registration leave navigation and dirty resume on audible text", () => {

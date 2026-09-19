@@ -1,3 +1,13 @@
+import type { TimingQuality } from "./narration-progress.js";
+
+/** Word alignment provenance is independent of the device playback clock. */
+export function playbackTimingStatus(quality: TimingQuality | undefined, clockEstimated: boolean): string {
+	const words = quality === "ctc-refined" ? "CTC-refined"
+		: quality === "mixed" ? "mixed (includes estimates)"
+		: quality === "estimated" ? "estimated" : "quality unknown";
+	return ` · word timing: ${words}${clockEstimated ? " · playback clock: estimated" : ""}`;
+}
+
 export interface ReadyProgress {
 	label: string;
 	processed: number;

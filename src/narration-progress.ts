@@ -40,10 +40,13 @@ export interface NarrationSegment {
 	};
 }
 
+export type TimingQuality = "estimated" | "mixed" | "ctc-refined";
+
 export interface AlignmentWord {
 	text: string;
 	start: number;
 	end: number;
+	quality?: Exclude<TimingQuality, "mixed">;
 }
 
 type SourceBlock = {
@@ -62,6 +65,7 @@ type DisplayWord = {
 	localStart: number;
 	localEnd: number;
 	time: number;
+	quality?: TimingQuality;
 };
 
 type TrackedSegment = NarrationSegment & {
@@ -176,7 +180,7 @@ function estimatedStarts(words: DisplayWord[], text: string, duration: number): 
 	});
 }
 
-function alignedStarts(spoken: DisplayWord[], recognized: AlignmentWord[], duration: number): number[] | undefined {
+function alignedStarts(spoken: DisplayWord[], recognized: AlignmentWord[], duration: number, quality?: TimingQuality): number[] | undefined {
 	if (spoken.length === 0 || recognized.length === 0) return undefined;
 	const left = spoken.map(word => canonicalWord(word.text));
 	const right = recognized.map(word => canonicalWord(word.text));
@@ -203,9 +207,15 @@ function alignedStarts(spoken: DisplayWord[], recognized: AlignmentWord[], durat
 	if (matches.length === 0) return undefined;
 
 	const starts = Array<number | undefined>(spoken.length).fill(undefined);
+	for (const word of spoken) word.quality = "estimated";
 	for (const [spokenIndex, recognizedIndex] of matches) {
-		const value = recognized[recognizedIndex]?.start;
-		if (typeof value === "number" && Number.isFinite(value)) starts[spokenIndex] = Math.max(0, Math.min(duration, value));
+		const word = recognized[recognizedIndex];
+		if (Number.isFinite(word.start)) {
+			starts[spokenIndex] = Math.max(0, Math.min(duration, word.start));
+			// Legacy alignment events were fully CTC-aligned; mixed events without
+			// per-word provenance must not promote individual words to refined.
+			spoken[spokenIndex].quality = word.quality ?? quality ?? "ctc-refined";
+		}
 	}
 	const anchors: Array<[number, number]> = [[-1, 0]];
 	for (let index = 0; index < starts.length; index += 1) {
@@ -548,7 +558,7 @@ export class NarrationProgress {
 		}
 	}
 
-	setSegmentAudio(segmentId: number, audioStart: number, duration: number): void {
+	setSegmentAudio(segmentId: number, audioStart: number, duration: number, quality: TimingQuality = "estimated"): void {
 		const segment = this.#segments.get(segmentId);
 		if (!segment) return;
 		segment.audioStart = audioStart;
@@ -557,15 +567,16 @@ export class NarrationProgress {
 		const starts = estimatedStarts(segment.words, segment.text, duration);
 		segment.words.forEach((word, index) => {
 			word.time = starts[index] ?? 0;
+			word.quality = quality;
 		});
 		this.#setCueTimes(segment);
 		this.#recompute(segment.utterance);
 	}
 
-	setAlignment(segmentId: number, words: AlignmentWord[]): void {
+	setAlignment(segmentId: number, words: AlignmentWord[], quality?: TimingQuality): void {
 		const segment = this.#segments.get(segmentId);
 		if (!segment || segment.duration === undefined) return;
-		const starts = alignedStarts(segment.words, words, segment.duration);
+		const starts = alignedStarts(segment.words, words, segment.duration, quality);
 		if (!starts) return;
 		segment.words.forEach((word, index) => {
 			word.time = starts[index] ?? word.time;
@@ -575,10 +586,17 @@ export class NarrationProgress {
 		this.#recompute(segment.utterance);
 	}
 
-	sourceWordTimings(segmentId: number): Array<{ time: number; sourceOffset: number }> {
+	timingQuality(segmentId: number): TimingQuality | undefined {
+		const words = this.#segments.get(segmentId)?.words;
+		if (!words?.length) return undefined;
+		const qualities = new Set(words.map(word => word.quality));
+		return qualities.size === 1 ? words[0].quality : "mixed";
+	}
+
+	sourceWordTimings(segmentId: number): Array<{ time: number; sourceOffset: number; quality?: TimingQuality }> {
 		const segment = this.#segments.get(segmentId);
 		if (!segment?.words.length || segment.duration === undefined) return [];
-		return segment.words.map(word => ({ time: word.time, sourceOffset: word.start }));
+		return segment.words.map(word => ({ time: word.time, sourceOffset: word.start, quality: word.quality }));
 	}
 
 	setPlayback(utterance: number, position: number, preview = false): void {

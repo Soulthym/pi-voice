@@ -1,5 +1,5 @@
 import { SpeakableStream } from "./speakable.js";
-import type { NarrationSegment } from "./narration-progress.js";
+import type { NarrationSegment, TimingQuality } from "./narration-progress.js";
 
 export interface PlaybackMessage {
 	id: string;
@@ -29,6 +29,7 @@ export interface PlaybackStatus {
 	messageCount: number;
 	hasTimings: boolean;
 	timingsComplete: boolean;
+	timingQuality?: TimingQuality;
 }
 
 export interface PlaybackTimingSnapshot {
@@ -36,13 +37,14 @@ export interface PlaybackTimingSnapshot {
 	messageId: string;
 	renderKey: string;
 	duration: number;
-	checkpoints: Array<{ time: number; duration: number; sourceOffset: number }>;
+	checkpoints: TimingCheckpoint[];
 }
 
 type TimingCheckpoint = {
 	time: number;
 	duration: number;
 	sourceOffset: number;
+	quality?: TimingQuality;
 };
 
 type MessageRecord = PlaybackMessage & {
@@ -259,7 +261,7 @@ export class PlaybackHistory {
 		this.#utterances.set(segment.utterance, capture);
 	}
 
-	setSegmentAudio(segmentId: number, start: number, duration: number): void {
+	setSegmentAudio(segmentId: number, start: number, duration: number, quality: TimingQuality = "estimated"): void {
 		const tracked = this.#segments.get(segmentId);
 		if (!tracked?.capture.valid || !Number.isFinite(start) || !Number.isFinite(duration) || duration <= 0) return;
 		const normalizedStart = Math.max(0, start);
@@ -276,6 +278,7 @@ export class PlaybackHistory {
 				time: absoluteTime,
 				duration: Math.max(0, duration),
 				sourceOffset: tracked.sourceOffset,
+				quality,
 			});
 			record.checkpoints.sort((left, right) => left.time - right.time);
 			record.duration = Math.max(record.duration, absoluteTime + Math.max(0, duration));
@@ -284,10 +287,23 @@ export class PlaybackHistory {
 		record.units ??= new Map();
 		const key = `${tracked.sourceOffset}:${tracked.skipUnits}`;
 		const words = record.units.get(key)?.slice(1) ?? [];
-		record.units.set(key, [{ time: 0, duration, sourceOffset: tracked.sourceOffset }, ...words]);
+		record.units.set(key, [{ time: 0, duration, sourceOffset: tracked.sourceOffset, quality }, ...words]);
+		this.setTimingQuality(segmentId, quality);
 	}
 
-	setWordTimings(segmentId: number, words: Array<{ time: number; sourceOffset: number }>): void {
+	/** Quality updates are metadata-only, including for code descriptions and paused captures. */
+	setTimingQuality(segmentId: number, quality: TimingQuality | undefined): void {
+		const tracked = this.#segments.get(segmentId);
+		if (!tracked?.capture.valid || tracked.audioStart === undefined || !quality) return;
+		const record = tracked.capture.record;
+		const unit = record.units?.get(`${tracked.sourceOffset}:${tracked.skipUnits}`);
+		if (unit?.[0]) unit[0].quality = quality;
+		const time = tracked.capture.baseTime + tracked.audioStart;
+		const point = record.checkpoints.find(point => point.duration > 0 && point.time === time && point.sourceOffset === tracked.sourceOffset);
+		if (point) point.quality = quality;
+	}
+
+	setWordTimings(segmentId: number, words: Array<{ time: number; sourceOffset: number; quality?: TimingQuality }>): void {
 		const tracked = this.#segments.get(segmentId);
 		if (!tracked?.capture.valid || tracked.code || tracked.audioStart === undefined || words.length === 0) return;
 		const record = tracked.capture.record;
@@ -306,8 +322,8 @@ export class PlaybackHistory {
 			const absoluteTime = tracked.capture.baseTime + tracked.audioStart + word.time;
 			const sourceOffset = word.sourceOffset - tracked.sourceBase + tracked.capture.origin.sourceOffset;
 			if (sourceOffset < 0 || sourceOffset === tracked.sourceOffset || absoluteTime - lastTime < 0.4) continue;
-			relative.push({ time: word.time, duration: 0, sourceOffset });
-			if (tracked.capture.recordTimings) record.checkpoints.push({ time: absoluteTime, duration: 0, sourceOffset });
+			relative.push({ time: word.time, duration: 0, sourceOffset, ...(word.quality ? { quality: word.quality } : {}) });
+			if (tracked.capture.recordTimings) record.checkpoints.push({ time: absoluteTime, duration: 0, sourceOffset, ...(word.quality ? { quality: word.quality } : {}) });
 			tracked.wordOffsets.add(sourceOffset);
 			lastTime = absoluteTime;
 		}
@@ -404,6 +420,10 @@ export class PlaybackHistory {
 		const record = this.#selectedId ? this.#records.get(this.#selectedId) : undefined;
 		if (!record) return undefined;
 		const index = this.#order.indexOf(record.id);
+		const qualities = record.checkpoints.filter(point => point.duration > 0).map(point => point.quality);
+		const known = qualities.filter(quality => quality === "estimated" || quality === "mixed" || quality === "ctc-refined");
+		const timingQuality = known.length === 0 ? undefined
+			: known.length === qualities.length && known.every(quality => quality === known[0]) ? known[0] : "mixed";
 		return {
 			messageId: record.id,
 			position: Math.max(0, Math.min(record.duration || record.position, record.position)),
@@ -412,6 +432,7 @@ export class PlaybackHistory {
 			messageCount: this.#order.length,
 			hasTimings: record.checkpoints.length > 0,
 			timingsComplete: record.timingsComplete,
+			timingQuality,
 		};
 	}
 

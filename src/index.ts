@@ -59,7 +59,7 @@ import {
 import { PhoneInputClient } from "./phone-input.js";
 import { prioritizeFromCurrent, processConcurrently, resolveTimingConcurrency } from "./preprocessing.js";
 import { SpeakableStream, type FencedCodeBlock, type SpeakableSourceRange } from "./speakable.js";
-import { pendingPlaybackTiming, voiceProgressLines } from "./status-text.js";
+import { pendingPlaybackTiming, playbackTimingStatus, voiceProgressLines } from "./status-text.js";
 import { anchorLineForMessage, computeAutoScrollTop, isManualScrollAway } from "./auto-scroll.js";
 import { applySpokenEdit, parseEditModelSelector, resolveDictationCandidates } from "./prompt-editor.js";
 import { formatAsrDisplay } from "./asr-display.js";
@@ -479,8 +479,7 @@ export default async function (pi: ExtensionAPI) {
 					const messageLabel =
 						playback.messageIndex >= 0 ? ` · message ${playback.messageIndex + 1}/${playback.messageCount}` : " · current response";
 					const icon = playbackPaused ? "⏸" : state === "speaking" ? "▶" : "■";
-					const estimate = playbackPositionEstimated ? "~" : "";
-					playbackLine = `${icon} ${playbackBar(playback.position, playback.duration)} ${estimate}${formatPlaybackTime(playback.position)} / ${formatPlaybackTime(playback.duration)}${messageLabel}`;
+					playbackLine = `${icon} ${playbackBar(playback.position, playback.duration)} ${formatPlaybackTime(playback.position)} / ${formatPlaybackTime(playback.duration)}${messageLabel}${playbackTimingStatus(playback.timingQuality, playbackPositionEstimated)}`;
 				}
 			}
 			const preprocessing = [codePreprocessingProgress, timingPreprocessingProgress].filter(
@@ -1377,14 +1376,16 @@ export default async function (pi: ExtensionAPI) {
 				// message transport and must not turn a paused message back into playing.
 				break;
 			case "segment-audio":
-				narration.setSegmentAudio(event.segmentId, event.start, event.duration);
-				playbackHistory.setSegmentAudio(event.segmentId, event.start, event.duration);
+				narration.setSegmentAudio(event.segmentId, event.start, event.duration, event.timingQuality);
+				playbackHistory.setSegmentAudio(event.segmentId, event.start, event.duration, event.timingQuality);
 				playbackHistory.setWordTimings(event.segmentId, narration.sourceWordTimings(event.segmentId));
 				requestPlaybackTimeline();
 				return;
 			case "alignment":
-				narration.setAlignment(event.segmentId, event.words);
+				narration.setAlignment(event.segmentId, event.words, event.quality);
+				playbackHistory.setTimingQuality(event.segmentId, narration.timingQuality(event.segmentId));
 				playbackHistory.setWordTimings(event.segmentId, narration.sourceWordTimings(event.segmentId));
+				refreshProgressWidget();
 				return;
 			case "playback":
 				if (!playbackUtterances.has(event.utterance) || event.utterance < (lastPlaybackTick?.utterance ?? 0) || pendingReplay?.waiting || playbackPaused) return;
@@ -1395,7 +1396,9 @@ export default async function (pi: ExtensionAPI) {
 				requestPlaybackTimeline();
 				return;
 			case "alignment-error":
-				// Duration-weighted word timing remains active as a fallback.
+				// Overload/failure leaves duration-weighted estimates, not promised refinement.
+				playbackHistory.setTimingQuality(event.segmentId, event.quality ?? "estimated");
+				refreshProgressWidget();
 				return;
 			case "transcribing":
 			case "transcript":
@@ -2242,7 +2245,7 @@ export default async function (pi: ExtensionAPI) {
 							// One failed unit leaves the whole target incomplete; never persist a prefix as complete.
 							if (!Number.isFinite(duration) || duration <= 0) return;
 							const unitStart = checkpoints.length;
-							checkpoints.push({ time, duration, sourceOffset: item.source.start });
+							checkpoints.push({ time, duration, sourceOffset: item.source.start, quality: "estimated" });
 							if (item.wordTimings) {
 								const segmentId = ++timingSegmentId;
 								timingNarration.registerSegment({
@@ -2255,7 +2258,7 @@ export default async function (pi: ExtensionAPI) {
 								for (const word of timingNarration.sourceWordTimings(segmentId)) {
 									const wordTime = time + word.time;
 									if (word.sourceOffset === item.source.start || wordTime - lastWordTime < 0.4) continue;
-									checkpoints.push({ time: wordTime, duration: 0, sourceOffset: word.sourceOffset });
+									checkpoints.push({ time: wordTime, duration: 0, sourceOffset: word.sourceOffset, quality: word.quality });
 									lastWordTime = wordTime;
 								}
 							}

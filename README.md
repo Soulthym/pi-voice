@@ -13,7 +13,7 @@ Kokoro, Whisper, Wav2Vec2 alignment, and audio-cache processing run on the machi
 - Dims unread prose, highlights the active sentence, and reveals words against the client player's real playback position.
 - Reads prose fences and Markdown tables naturally; can describe code and patches using the compaction-aware discussion through each block.
 - Supports guided code focus with synchronized line groups, bold ranges, and exact Tree-sitter targets for JavaScript/TypeScript families.
-- Replays historical messages with previous/next, seek, native pause/resume, and persisted timing controls.
+- Replays historical messages with previous/next, seek, native pause/resume, and persisted timing controls. Labels estimated/mixed/CTC-refined word timing separately from estimated playback clocks.
 - Reuses content-addressed 32 kbps VBR Opus segments by default; raw PCM is never retained.
 - Incrementally preprocesses missing code descriptions and speech timing from the selected message forward, then backward.
 - Routes multiple clients and Pi sessions safely with explicit device selection, speech ownership, attention requests, and manual preemption.

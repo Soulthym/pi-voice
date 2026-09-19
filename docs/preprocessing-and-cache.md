@@ -15,12 +15,14 @@ Preprocessing continues while spoken output is disabled. Live speech, microphone
 Session-wide progress and selected-message playback state use distinct labels:
 
 ```text
+○ Playback · message 280/284: speech timing pending
 Preprocessing · code descriptions (12/25 budget): 24/61 ready
 Preprocessing · speech timing: 109/284 ready
-○ Playback · message 280/284: speech timing pending
 ```
 
-“Ready” counts complete persisted message-level results. The selected message index is navigation state, not the current preprocessing worker index.
+Lines remain ordered input → playback → code descriptions → speech timing. “Ready” counts complete persisted message-level results, not forced-alignment accuracy. The selected message index is navigation state, not the current preprocessing worker index.
+
+Playback labels message word timing as `estimated`, `mixed (includes estimates)`, or `CTC-refined`. Estimates remain when alignment fails, exceeds resource/queue limits, or cannot reliably refine a long window; later refinement is not guaranteed. `playback clock: estimated` is separate: it describes the transport clock, not word alignment. Cached timing retains quality; older unlabeled snapshots show `quality unknown` rather than claiming refinement. These labels do not change transcript syntax colors or move paused highlights.
 
 ## Code descriptions
 
@@ -36,7 +38,7 @@ Failed model requests leave a silent omission and a retry callout. Omissions rem
 
 ## Speech timing
 
-A timing pass converts speakable text and persisted code narration into segments, obtains each segment's synthesized duration, and stores segment starts plus duration-weighted prose word checkpoints under a complete render identity. Live playback replaces estimates with sampled Wav2Vec2-aligned word checkpoints when alignment arrives. Sentence navigation uses complete generation units, not these sampled word checkpoints. All sentence starts are retained in snapshots so code-description unit ordinals remain stable.
+A timing pass converts speakable text and persisted code narration into segments, obtains each segment's synthesized duration, and stores segment starts plus duration-weighted prose word checkpoints under a complete render identity. Live playback replaces estimates with sampled Wav2Vec2-aligned word checkpoints when alignment arrives, retaining per-word quality and segment-level quality in timing snapshots. Duration-only background measurements remain explicitly estimated. Sentence navigation uses complete generation units, not these sampled word checkpoints. All sentence starts are retained in snapshots so code-description unit ordinals remain stable.
 
 `timingPreprocessConcurrency` accepts `auto` or `1..8`. Each lane is an independent CPU Kokoro worker because the runtime does not batch concurrent synthesis in one process. `auto` considers available RAM and CPU parallelism and caps at four. Kokoro is currently CPU-bound; VRAM is not used in this calculation.
 
