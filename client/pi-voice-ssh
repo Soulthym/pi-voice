@@ -168,17 +168,25 @@ bridge_pid_file=$runtime_root/client-bridge.pid
 # belong to an unrelated process, which previously left playback pointing at a
 # dead reverse tunnel (ECONNREFUSED) until the client restarted manually.
 probe_audio_port() {
-  # Prefer socat (a bridge dependency) or node; some bash builds lack /dev/tcp,
-  # whose failed exec can abort the shell outright.
+  # hello is a control-only request: even pre-v2 handlers ignore it safely.
+  # A TCP accept alone says nothing about protocol support.
+  local response
   if command -v socat >/dev/null 2>&1; then
-    printf '' | socat -T1 - "TCP:127.0.0.1:${AUDIO_PORT}" >/dev/null 2>&1
-    return $?
+    response=$(printf 'PI_VOICE_CONTROLhello\n' |
+      socat -T1 - "TCP:127.0.0.1:${AUDIO_PORT}" 2>/dev/null) || return 1
+  elif command -v node >/dev/null 2>&1; then
+    response=$(node -e '
+      const c=require("net").createConnection({host:"127.0.0.1",port:Number(process.argv[1])});
+      let response="";
+      c.on("connect",()=>c.end("PI_VOICE_CONTROLhello\n"));
+      c.on("data",b=>{response+=b;if(response.length>1024)process.exit(1)});
+      c.on("end",()=>{process.stdout.write(response);process.exit(0)});
+      c.on("error",()=>process.exit(1));setTimeout(()=>process.exit(1),1000);
+    ' "$AUDIO_PORT") || return 1
+  else
+    return 1
   fi
-  if command -v node >/dev/null 2>&1; then
-    node -e 'const n=require("net");const c=n.createConnection({host:"127.0.0.1",port:Number(process.env.PI_VOICE_AUDIO_PORT)});c.on("connect",()=>{c.end();process.exit(0)});c.on("error",()=>process.exit(1));setTimeout(()=>process.exit(1),700)'
-    return $?
-  fi
-  return 0
+  [[ $response == '{"type":"protocol","version":2}' ]]
 }
 
 bridge_alive() {
@@ -218,7 +226,7 @@ ensure_bridge() {
     "$bridge" >"$runtime_root/client-bridge.log" 2>&1 &
     pid=$!
     printf '%s\n' "$pid" >"$bridge_pid_file"
-    # Wait until the audio listener actually answers.
+    # Wait for a v2 capability ACK, not merely an open listener.
     local tick=0
     while (( tick < 20 )); do
       if probe_audio_port; then break; fi
@@ -228,6 +236,7 @@ ensure_bridge() {
     done
     if ! kill -0 "$pid" 2>/dev/null || ! probe_audio_port; then
       release_path_lock "$bridge_lock"
+      printf 'Audio bridge did not acknowledge protocol v2; legacy, malformed, or unavailable endpoint (update client scripts).\n' >&2
       cat "$runtime_root/client-bridge.log" >&2
       exit 1
     fi

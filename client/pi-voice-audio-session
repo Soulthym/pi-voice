@@ -39,6 +39,8 @@ trap '' PIPE HUP
 # player without framing or modifying the raw Float32 audio stream.
 exec 3<&0
 dd iflag=fullblock bs=16 count=1 of="$header_file" status=none <&3 2>/dev/null || true
+# An empty connection is not a new stream and must not replace a player.
+[[ -s $header_file ]] || exit 0
 if cmp -s "$header_file" <(printf 'PI_VOICE_CONTROL'); then
   command=
   target_id=

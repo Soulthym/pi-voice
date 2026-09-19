@@ -4,6 +4,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
+import * as net from "node:net";
+import { once } from "node:events";
 import test from "node:test";
 
 const CLIENT_WRAPPER = path.resolve("client/pi-voice-ssh");
@@ -19,7 +21,7 @@ const CORE_TOOLS = [
 /** socat stub that really dials TCP endpoints so liveness probes behave. */
 const DIAL_SOCAT = `if [[ $1 == -T1 ]]; then
   addr=$3; addr=\${addr#TCP:}; host=\${addr%:*}; port=\${addr##*:}
-  exec node -e 'const n=require("net");const c=n.createConnection({host:process.argv[1],port:+process.argv[2]});c.on("connect",()=>{c.end();process.exit(0)});c.on("error",()=>process.exit(1));setTimeout(()=>process.exit(1),700)' "$host" "$port"
+  exec node -e 'const n=require("net");const c=n.createConnection({host:process.argv[1],port:+process.argv[2]});c.on("connect",()=>process.stdin.pipe(c));c.pipe(process.stdout);c.on("end",()=>process.exit(0));c.on("error",()=>process.exit(1));setTimeout(()=>process.exit(1),700)' "$host" "$port"
 fi
 exit 0`;
 
@@ -156,7 +158,7 @@ async function scenario(
 	const bridge = path.join(root, "fake-pi-voice-client");
 	fs.writeFileSync(
 		bridge,
-		"#!/usr/bin/env bash\nexec node -e 'const n=require(\"net\");const s=n.createServer(c=>c.end());s.listen(Number(process.env.PI_VOICE_AUDIO_PORT)||8765,\"127.0.0.1\")'",
+		"#!/usr/bin/env bash\nexec node -e 'const n=require(\"net\");const s=n.createServer(c=>c.on(\"data\",b=>{if(String(b)!==\"PI_VOICE_CONTROLhello\\n\")process.exit(2);c.end(JSON.stringify({type:\"protocol\",version:2})+\"\\n\")}));s.listen(Number(process.env.PI_VOICE_AUDIO_PORT)||8765,\"127.0.0.1\")'",
 	);
 	fs.chmodSync(bridge, 0o755);
 	const result = await runScript(wrapper, args, {
@@ -174,6 +176,48 @@ async function scenario(
 		log: () => fs.readFileSync(logFile, "utf8").replaceAll("\0", "\n"),
 	};
 }
+
+test("wrapper fallback requires a v2 ACK, never an empty audio probe or TCP accept", async () => {
+	for (const wrapper of [CLIENT_WRAPPER, TERMUX_WRAPPER]) {
+		for (const socat of [true, false]) {
+			const root = fs.mkdtempSync(path.join(os.tmpdir(), "voice-probe-"));
+			const requests: string[] = [];
+			let reply = "";
+			const server = net.createServer({ allowHalfOpen: true }, socket => {
+				let request = "";
+				socket.on("data", b => request += b);
+				socket.on("end", () => { requests.push(request); socket.end(reply); });
+			});
+			server.listen(0, "127.0.0.1");
+			await once(server, "listening");
+			try {
+				const source = fs.readFileSync(wrapper, "utf8");
+				const probe = path.join(root, "probe.sh");
+				// Run the production functions without SSH lifecycle side effects.
+				fs.writeFileSync(probe, source.slice(source.indexOf("probe_audio_port()"), source.indexOf("ensure_bridge()")) + "\nprobe_audio_port\n");
+				const env = {
+					PATH: restrictedPath(root, socat ? { socat: DIAL_SOCAT } : {}),
+					// Deliberately not PI_VOICE_AUDIO_PORT: the fallback must use the shell port.
+					AUDIO_PORT: String((server.address() as net.AddressInfo).port),
+				};
+				for (const response of ["", "not JSON\n", '{"type":"protocol","version":1}\n', '{"type":"protocol","version":2}\n']) {
+					reply = response;
+					const result = await runScript(probe, [], env);
+					assert.equal(result.code, response.includes('"version":2') ? 0 : 1, `${wrapper} socat=${socat}: ${result.stderr}`);
+					assert.equal(requests.at(-1), "PI_VOICE_CONTROLhello\n");
+				}
+				const authoritative = path.join(root, "pi-voice-client");
+				fs.writeFileSync(authoritative, source.slice(source.indexOf("probe_audio_port()"), source.indexOf("ensure_bridge()")) + '\nbridge_alive "$$"\n');
+				const count = requests.length;
+				assert.equal((await runScript(authoritative, [], env)).code, 0);
+				assert.equal(requests.length, count, "authoritative live bridge PID needs no probe");
+			} finally {
+				server.close();
+				fs.rmSync(root, { recursive: true, force: true });
+			}
+		}
+	}
+});
 
 test("dry run resolves device-dir precedence and rejects invalid values", async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-voice-ssh-dry-"));
@@ -294,7 +338,7 @@ test("stale bridge pid files are replaced; live bridges are reused", async () =>
 	fs.writeFileSync(
 		bridgePath,
 		"#!/usr/bin/env bash\necho started >> " + JSON.stringify(path.join(root, "bridge-starts.log")) +
-			"\nexec node -e 'const n=require(\"net\");const s=n.createServer(c=>c.end());s.listen(Number(process.env.PI_VOICE_AUDIO_PORT)||8765,\"127.0.0.1\")'",
+			"\nexec node -e 'const n=require(\"net\");const s=n.createServer(c=>c.on(\"data\",b=>{if(String(b)!==\"PI_VOICE_CONTROLhello\\n\")process.exit(2);c.end(JSON.stringify({type:\"protocol\",version:2})+\"\\n\")}));s.listen(Number(process.env.PI_VOICE_AUDIO_PORT)||8765,\"127.0.0.1\")'",
 	);
 	fs.chmodSync(bridgePath, 0o755);
 
@@ -356,7 +400,7 @@ test("termux wrapper runs the lifecycle and clears stale players", async () => {
 	fs.writeFileSync(
 		path.join(root, "counting-bridge"),
 		"#!/usr/bin/env bash\necho started >> " + JSON.stringify(path.join(root, "bridge-starts.log")) +
-			"\nexec node -e 'const n=require(\"net\");const s=n.createServer(c=>c.end());s.listen(Number(process.env.PI_VOICE_AUDIO_PORT)||8765,\"127.0.0.1\")'\n",
+			"\nexec node -e 'const n=require(\"net\");const s=n.createServer(c=>c.on(\"data\",b=>{if(String(b)!==\"PI_VOICE_CONTROLhello\\n\")process.exit(2);c.end(JSON.stringify({type:\"protocol\",version:2})+\"\\n\")}));s.listen(Number(process.env.PI_VOICE_AUDIO_PORT)||8765,\"127.0.0.1\")'\n",
 	);
 	fs.chmodSync(path.join(root, "counting-bridge"), 0o755);
 

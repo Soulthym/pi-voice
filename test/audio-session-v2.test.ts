@@ -147,6 +147,18 @@ setTimeout(() => process.exit(0), 150);
 			assert.equal(await control("stop 99999999"), "", "absence is not a receipt");
 
 			const natural = await audio();
+			const playerFile = path.join(root, "pi-voice-active-player.pid");
+			const playingPid = fs.readFileSync(playerFile, "utf8");
+			for (const request of ["", "PI_VOICE_CONTROLhello\n"]) {
+				const probe = start();
+				probe.child.stdin.end(request);
+				await until(() => probe.child.exitCode !== null);
+				assert.equal(probe.output(), request ? '{"type":"protocol","version":2}\n' : "");
+				assert.equal(fs.existsSync(path.join(root, `fake-${probe.child.pid}.pid`)), false, "probe must not spawn a player");
+				assert.equal(fs.readFileSync(playerFile, "utf8"), playingPid);
+				process.kill(Number(playingPid), 0);
+				assert.equal(natural.child.exitCode, null, "probe must not stop existing playback");
+			}
 			natural.child.stdin.end(Buffer.alloc(128));
 			await until(() => fs.existsSync(natural.base + ".eof"));
 			assert.equal(fs.readFileSync(natural.base + ".eof", "utf8"), "128", "headers must not reach mpv");
