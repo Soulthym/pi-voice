@@ -36,6 +36,56 @@ test("timings restore A to B to A in memory and after reload, fencing late audio
 	assert.equal(history.status()?.duration, 2, "late A audio cannot mutate either version");
 });
 
+test("retired captures release checkpoint arrays while versions, paused cursors and late-event fences survive", () => {
+	const history = new PlaybackHistory();
+	const text = "x".repeat(1_000);
+	for (let version = 1; version <= 100; version++) {
+		history.sync([{ id: "one", text, renderKey: `render-${version}` }]);
+		history.beginCapture("one", text);
+		history.bindUtterance(version);
+		history.registerSegment(segment(version, version, 0));
+		history.setSegmentAudio(version, 0, 40);
+		history.setWordTimings(version, Array.from({ length: 63 }, (_, i) => ({ time: (i + 1) / 2, sourceOffset: i + 1 })));
+		history.finishTimingGeneration(version);
+		history.snapshotForUtterance(version); // Deduplication strings must retire as well.
+	}
+	assert.deepEqual(history.timingRetention(), { records: 5, checkpoints: 640, captures: 1, segments: 1 },
+		"counts all reachable records/arrays, including capture and segment roots, after 100 variants");
+	history.setPlayback(100, 12);
+	const paused = history.resumeTarget();
+	// A deleted utterance must not fall back to the current capture.
+	history.bindUtterance(1);
+	history.registerSegment(segment(101, 1, 700));
+	history.setSegmentAudio(101, 0, 999);
+	history.setWordTimings(1, [{ time: 1, sourceOffset: 700 }]);
+	history.setPlayback(1, 999);
+	history.finishUtterance(1);
+	assert.equal(history.snapshotForUtterance(1), undefined);
+	assert.deepEqual(history.resumeTarget(), paused);
+	assert.equal(history.timingRetention().segments, 1);
+	history.sync([{ id: "one", text, renderKey: "render-99" }]);
+	assert.equal(history.status()?.duration, 40);
+	assert.equal(history.hasCompleteTimingFor("one"), true);
+	assert.deepEqual(history.timingRetention(), { records: 5, checkpoints: 576, captures: 0, segments: 0 });
+	history.sync([{ id: "one", text, renderKey: "render-100" }]);
+	assert.equal(history.hasCompleteTimingFor("one"), true);
+});
+
+test("first resolved dependencies label existing capture timing but cannot relabel a retired render", () => {
+	const history = new PlaybackHistory();
+	const message = { id: "one", text: "First sentence.", renderKey: "missing" };
+	history.sync([message]); history.beginCapture(message.id, message.text);
+	history.registerSegment(segment(1, 1, 0)); history.setSegmentAudio(1, 0, 2);
+	history.resolveRenderKey(message.id, "missing", "ready");
+	history.sync([{ ...message, renderKey: "ready" }]);
+	history.finishTimingGeneration(1);
+	assert.equal(history.snapshotForUtterance(1)?.renderKey, "ready");
+	history.sync([{ ...message, renderKey: "changed" }]);
+	history.resolveRenderKey(message.id, "ready", "late");
+	assert.equal(history.selected(true)?.renderKey, "changed");
+	assert.equal(history.snapshotForUtterance(1), undefined);
+});
+
 test("maps playback time to approximate source checkpoints without audio storage", () => {
 	const history = new PlaybackHistory();
 	history.sync([{ id: "message", text: "x".repeat(120), renderKey: "render-a" }], true);

@@ -83,6 +83,8 @@ export class PlaybackHistory {
 	#capture: Capture | undefined;
 	#segments = new Map<number, CapturedSegment>();
 	#utterances = new Map<number, Capture>();
+	// Vocalizer ids are monotonic; this watermark replaces unbounded retired-id tombstones.
+	#latestUtterance = -1;
 	#endedUtterances = new Set<number>();
 	#finishedUtterances = new Set<number>();
 	#activeUtterance: number | undefined;
@@ -91,12 +93,14 @@ export class PlaybackHistory {
 
 	/** Bound historical variants independently of transcript length (current records remain available). */
 	#trimVersions(): void {
+		const size = (version: MessageRecord | PlaybackTimingSnapshot): number => version.checkpoints.length +
+			("units" in version ? [...version.units?.values() ?? []].reduce((sum, points) => sum + points.length, 0) : 0);
 		for (const cache of [this.#versions, this.#snapshots]) {
 			let points = 0;
-			for (const versions of cache.values()) for (const version of versions.values()) points += version.checkpoints.length;
+			for (const versions of cache.values()) for (const version of versions.values()) points += size(version);
 			for (const [id, versions] of cache) {
 				if (points <= 50_000 && cache.size <= 256) break;
-				for (const version of versions.values()) points -= version.checkpoints.length;
+				for (const version of versions.values()) points -= size(version);
 				cache.delete(id);
 			}
 		}
@@ -170,11 +174,41 @@ export class PlaybackHistory {
 		}
 	}
 
+	/** First resolution labels the plan actually used, rather than retiring its audio. */
+	resolveRenderKey(id: string, previous: string, resolved: string): void {
+		const record = this.#records.get(id);
+		if (!record || record.renderKey !== previous) return;
+		record.renderKey = resolved;
+		for (const capture of new Set([this.#capture, ...this.#utterances.values()])) {
+			if (capture?.valid && capture.record === record && capture.renderKey === previous) capture.renderKey = resolved;
+		}
+	}
+
+	/** Counts reachable timing storage, including transport references, not just the version pool. */
+	timingRetention(): { records: number; checkpoints: number; captures: number; segments: number } {
+		const captures = new Set([...this.#utterances.values(), ...(this.#capture ? [this.#capture] : []),
+			...[...this.#segments.values()].map(segment => segment.capture)]);
+		const records = new Set([...this.#records.values(), ...[...this.#versions.values()].flatMap(versions => [...versions.values()]),
+			...[...captures].map(capture => capture.record)]);
+		const arrays = new Set([...records].flatMap(record => [record.checkpoints, ...record.units?.values() ?? []]));
+		for (const versions of this.#snapshots.values()) for (const snapshot of versions.values()) arrays.add(snapshot.checkpoints);
+		return { records: records.size, checkpoints: [...arrays].reduce((sum, points) => sum + points.length, 0),
+			captures: captures.size, segments: this.#segments.size };
+	}
+
 	/** Freeze metadata before cancelling a dirty transport; late callbacks cannot relabel it. */
 	invalidateCaptures(id?: string): void {
 		for (const capture of new Set([this.#capture, ...this.#utterances.values()])) {
 			if (capture && (id === undefined || capture.record.id === id)) capture.valid = false;
 		}
+		if (this.#capture && !this.#capture.valid) this.#capture = undefined;
+		for (const [utterance, capture] of this.#utterances) if (!capture.valid) {
+			this.#utterances.delete(utterance);
+			this.#endedUtterances.delete(utterance);
+			this.#finishedUtterances.delete(utterance);
+			this.#persistedUtterances.delete(utterance);
+		}
+		for (const [segment, tracked] of this.#segments) if (!tracked.capture.valid) this.#segments.delete(segment);
 	}
 
 	beginCapture(id: string, text: string, baseTime = 0, recordTimings = true, sourceOffset = 0, skipUnits = 0, select = true): void {
@@ -230,7 +264,7 @@ export class PlaybackHistory {
 		// A live id is finalized once; never rebind an already-versioned capture.
 		for (const capture of new Set([this.#capture, ...this.#utterances.values()])) {
 			if (capture?.record === record && capture.valid) {
-				if (capture.renderKey && capture.renderKey !== message.renderKey) capture.valid = false;
+				if (capture.renderKey && capture.renderKey !== message.renderKey) this.invalidateCaptures(message.id);
 				else capture.renderKey = message.renderKey;
 			}
 		}
@@ -241,12 +275,16 @@ export class PlaybackHistory {
 
 	/** Bind before async descriptions resolve and another target becomes current. */
 	bindUtterance(utterance: number): void {
+		if (utterance <= this.#latestUtterance && !this.#utterances.has(utterance)) return;
+		this.#latestUtterance = Math.max(this.#latestUtterance, utterance);
 		if (this.#capture) this.#utterances.set(utterance, this.#capture);
 	}
 
 	registerSegment(segment: NarrationSegment): void {
-		const capture = this.#utterances.get(segment.utterance) ?? this.#capture;
+		const capture = this.#utterances.get(segment.utterance) ??
+			(segment.utterance > this.#latestUtterance ? this.#capture : undefined);
 		if (!capture?.valid) return;
+		this.#latestUtterance = Math.max(this.#latestUtterance, segment.utterance);
 		// The extension registers suffix-relative ranges; navigation uses whole-message ranges.
 		const sourceOffset = segment.source.start + capture.origin.sourceOffset;
 		const previous = capture.segments.at(-1);
@@ -378,12 +416,13 @@ export class PlaybackHistory {
 	}
 
 	finishTimingGeneration(utterance: number): void {
+		if (!this.#utterances.has(utterance)) return;
 		this.#endedUtterances.add(utterance);
 		this.#completeTimingsIfReady(utterance);
 	}
 
 	finishUtterance(utterance: number | undefined): void {
-		if (utterance === undefined) return;
+		if (utterance === undefined || !this.#utterances.has(utterance)) return;
 		this.#finishedUtterances.add(utterance);
 		this.#endedUtterances.add(utterance);
 		this.#completeTimingsIfReady(utterance);

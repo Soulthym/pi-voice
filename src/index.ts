@@ -412,6 +412,24 @@ export default async function (pi: ExtensionAPI) {
 	const reportedDescriptionOverflows = new Set<string>();
 	/** Runtime-only failed-description records; retry commands clear them. */
 	const codeDescriptionOmissions = new Map<string, { reason: "quality" | "provider"; message: string }>();
+	// Runtime-only overflow results: retry after session reload, never on each timing sweep.
+	const codeDescriptionFallbacks = new Map<string, CodeNarrationPlan>();
+	// Retain the original render settings until its first missing dependencies resolve.
+	const unresolvedRenders = new Map<string, { text: string; config: VoiceConfig; renderKey: string; dependencies: Array<{ key: string; value: string; missing: boolean }> }>();
+	const resolveDescriptionDependency = (key: string, plan: CodeNarrationPlan): CodeNarrationPlan => {
+		for (const [id, pending] of unresolvedRenders) {
+			if (!pending.dependencies.some(dependency => dependency.key === key && dependency.missing)) continue;
+			for (const dependency of pending.dependencies) if (dependency.key === key && dependency.missing) {
+				dependency.value = JSON.stringify([key, plan.omitted ? "omitted" : plan]);
+				dependency.missing = false;
+			}
+			const resolved = narrationRenderKey(pending.text, pending.config, pending.dependencies.map(dependency => dependency.value));
+			playbackHistory.resolveRenderKey(id, pending.renderKey, resolved);
+			pending.renderKey = resolved;
+			if (!pending.dependencies.some(dependency => dependency.missing)) unresolvedRenders.delete(id);
+		}
+		return plan;
+	};
 	let scheduleMissingTimings: (ctx: ExtensionContext, force?: boolean) => void = () => {};
 
 	let renderedNarrationSources = new Set<string>();
@@ -573,8 +591,8 @@ export default async function (pi: ExtensionAPI) {
 		try {
 			const key = descriptionCacheKey(ctx, block, identityContext);
 			resolvedKey = key;
-			const cached = codeDescriptionCache.get(key);
-			if (cached) return cached;
+			const cached = codeDescriptionCache.get(key) ?? codeDescriptionFallbacks.get(key);
+			if (cached) return resolveDescriptionDependency(key, cached);
 			if (codeDescriptionOmissions.has(key)) return { records: [], guided: false, omitted: true };
 			const editModel = config.editModel;
 			const narrationMode = config.codeNarration;
@@ -644,7 +662,7 @@ export default async function (pi: ExtensionAPI) {
 						codeDescriptionText.set(key, descriptionText(plan));
 						requestNarrationRender(block.code);
 					}
-					return plan;
+					return requestEpoch === contextEpoch && isCurrentContext(ctx) ? resolveDescriptionDependency(key, plan) : plan;
 				});
 		} catch (outerError) {
 			if (requestEpoch !== contextEpoch || !isCurrentContext(ctx)) return fallback;
@@ -666,7 +684,8 @@ export default async function (pi: ExtensionAPI) {
 						// Session replacement can invalidate the captured UI before generation settles.
 					}
 				}
-				return fallback;
+				codeDescriptionFallbacks.set(resolvedKey, fallback);
+				return resolveDescriptionDependency(resolvedKey, fallback);
 			}
 			// Cache the omission so neither speech nor preprocessing repeats the cost.
 			const reason = classifyCodeDescriptionFailure(outerError) === "quality" ? "quality" : "provider";
@@ -675,7 +694,7 @@ export default async function (pi: ExtensionAPI) {
 				message: String(outerError instanceof Error ? outerError.message : outerError).slice(0, 200),
 			});
 			requestNarrationRender(block.code);
-			return { records: [], guided: false, omitted: true };
+			return resolveDescriptionDependency(resolvedKey, { records: [], guided: false, omitted: true });
 		}
 	};
 
@@ -802,7 +821,7 @@ export default async function (pi: ExtensionAPI) {
 				}
 				if (keyedBlocks.size === 0) continue;
 				totalMessages += 1;
-				const missing = [...keyedBlocks].filter(([key]) => !codeDescriptionCache.get(key) && !codeDescriptionOmissions.has(key)).map(([, item]) => item);
+				const missing = [...keyedBlocks].filter(([key]) => !codeDescriptionCache.get(key) && !codeDescriptionFallbacks.has(key) && !codeDescriptionOmissions.has(key)).map(([, item]) => item);
 				missingBlocks += missing.length;
 				if (missing.length === 0) processedMessages += 1;
 				else queuedMessages.push(missing);
@@ -927,7 +946,7 @@ export default async function (pi: ExtensionAPI) {
 						const omission = codeDescriptionOmissions.get(key);
 						return `⚠ No semantic description available (${omissionRecord?.reason ?? "failed"}). Run /voice code-retry current or /voice code-retry historical.`;
 					}
-					const plan = codeDescriptionCache.get(key);
+					const plan = codeDescriptionCache.get(key) ?? codeDescriptionFallbacks.get(key);
 					if (!plan) return undefined;
 					const text = chunkCodeNarration(plan)
 						.map(chunk => chunk.text)
@@ -2133,18 +2152,23 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	const renderKeyFor = (ctx: ExtensionContext, message: ContextualPlaybackMessage): string => {
-		const codeDependencies: string[] = [];
+		const dependencies: Array<{ key: string; value: string; missing: boolean }> = [];
 		for (const item of completedCodeItems(message)) {
 			const identity = item.identityContext;
 			try {
 				const key = descriptionCacheKey(ctx, item.block, identity);
-				const omittedPlan = codeDescriptionCache.get(key);
-				codeDependencies.push(JSON.stringify([key, omittedPlan ?? (codeDescriptionOmissions.has(key) ? "omitted" : "missing")]));
+				const plan = codeDescriptionCache.get(key) ?? codeDescriptionFallbacks.get(key);
+				const omitted = plan?.omitted || codeDescriptionOmissions.has(key);
+				dependencies.push({ key, value: JSON.stringify([key, omitted ? "omitted" : plan ?? "missing"]), missing: !plan && !omitted });
 			} catch {
-				codeDependencies.push(`fallback:${item.block.language}`);
+				dependencies.push({ key: "", value: `fallback:${item.block.language}`, missing: false });
 			}
 		}
-		return narrationRenderKey(message.text, config, codeDependencies);
+		const renderKey = narrationRenderKey(message.text, config, dependencies.map(dependency => dependency.value));
+		if (dependencies.some(dependency => dependency.missing)) {
+			unresolvedRenders.set(message.id, { text: message.text, config: { ...config }, renderKey, dependencies });
+		} else unresolvedRenders.delete(message.id);
+		return renderKey;
 	};
 
 	const playbackMessages = (ctx: ExtensionContext): PlaybackMessage[] =>
@@ -2742,6 +2766,8 @@ export default async function (pi: ExtensionAPI) {
 		codeDescriptionText.clear();
 		reportedDescriptionOverflows.clear();
 		codeDescriptionOmissions.clear();
+		codeDescriptionFallbacks.clear();
+		unresolvedRenders.clear();
 		backfillAllowance = config.codeDescriptionPreprocessBudget;
 		backfillUsed = 0;
 		backfillExhaustionReported = false;
@@ -2800,6 +2826,8 @@ export default async function (pi: ExtensionAPI) {
 		interactiveVoiceSession = false;
 		pendingCodeDescriptions.clear();
 		codeDescriptionOmissions.clear();
+		codeDescriptionFallbacks.clear();
+		unresolvedRenders.clear();
 		clearInputProgress();
 		ctx.ui.setStatus("pi-voice", undefined);
 		ctx.ui.setWidget("pi-voice-render-driver", undefined);
@@ -3260,7 +3288,7 @@ export default async function (pi: ExtensionAPI) {
 				const messages = contextual ? assistantCodeContext(
 					contextual.conversationMessages, contextual.assistantMessage, contextual.contentIndex, item.source.end)! : [];
 				const key = descriptionCacheKey(ctx, item.block, structuredContextIdentity(messages));
-				const plan = codeDescriptionCache.get(key);
+				const plan = codeDescriptionCache.get(key) ?? codeDescriptionFallbacks.get(key);
 				const omitted = plan?.omitted || (!plan && codeDescriptionOmissions.has(key));
 				if (!plan && !omitted) complete = false;
 				count = omitted ? 0 : plan ? Math.max(1, chunkCodeNarration(plan).length) : 1;
