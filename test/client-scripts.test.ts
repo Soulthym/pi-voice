@@ -53,12 +53,19 @@ function runScript(
 			detached: true,
 			stdio: ["pipe", "pipe", "pipe"],
 		});
-		if (input === "record\n") child.stdin.write(input);
+		// Recording requests negotiate their ticket on the same connection.
+		if (input === "record\n") child.stdin.write("ticket\n");
 		else child.stdin.end(input);
+		let awaitingTicket = input === "record\n";
 		let stdout = "";
 		let stderr = "";
 		child.stdout.on("data", chunk => {
 			stdout += chunk.toString("utf8");
+			const ticket = awaitingTicket && /^ticket ([1-9][0-9]*)\n/.exec(stdout);
+			if (ticket) {
+				awaitingTicket = false;
+				child.stdin.write(`record ${ticket[1]}\n`);
+			}
 		});
 		child.stderr.on("data", chunk => {
 			stderr += chunk.toString("utf8");
@@ -80,7 +87,7 @@ function runScript(
 }
 
 function decodeMessage(line: string): { status: string; message: string } {
-	const parts = line.trim().split(" ", 2);
+	const parts = line.replace(/^ticket [1-9][0-9]*\n/, "").trim().split(" ", 2);
 	const status = parts[0] ?? "";
 	const payload = parts[1] ?? "";
 	return { status, message: Buffer.from(payload, "base64").toString("utf8") };
@@ -101,7 +108,7 @@ function makeFakeBin(root: string, scripts: Record<string, string>): string {
 /** Coreutils the client scripts legitimately need; everything else stays absent. */
 const RESTRICTED_TOOLS = [
 	"bash", "sh", "basename", "cat", "cmp", "dd", "dirname", "env", "grep", "sed", "head", "id", "kill",
-	"mkdir", "mkfifo", "printf", "readlink", "rm", "rmdir", "flock", "sh", "sleep", "stat", "tail", "timeout", "touch", "tr", "base64", "setsid", "ps",
+	"mkdir", "mkfifo", "mv", "printf", "readlink", "rm", "rmdir", "flock", "sh", "sleep", "stat", "tail", "timeout", "touch", "tr", "base64", "setsid", "ps",
 ];
 
 /** Builds a deterministic PATH: whitelisted coreutils plus explicit fakes only. */
@@ -141,7 +148,9 @@ test("local STT session reports idle stop, missing ffmpeg, and honors XDG_RUNTIM
 			fs.mkdirSync(runtime);
 			const env = baseEnv({ XDG_RUNTIME_DIR: runtime });
 
-			const stopped = await runScript(path.join(CLIENT_DIR, "pi-voice-stt-session"), [], "stop\n", env);
+			const ticket = await runScript(path.join(CLIENT_DIR, "pi-voice-stt-session"), [], "ticket\n", env);
+			assert.equal(ticket.stdout, "ticket 1\n");
+			const stopped = await runScript(path.join(CLIENT_DIR, "pi-voice-stt-session"), [], "stop 1\n", env);
 			assert.equal(stopped.code, 0);
 			assert.match(stopped.stdout, /^ok /);
 			assert.equal(decodeMessage(stopped.stdout.trim()).message, "stopped");
@@ -175,7 +184,8 @@ test("microphone sessions reject a second concurrent recorder", async () => {
 		const linuxRuntime = path.join(root, "linux-runtime");
 		const linuxState = path.join(linuxRuntime, `pi-voice-client-${process.getuid!()}`);
 		fs.mkdirSync(path.join(linuxState, "recording-lock"), { recursive: true });
-		fs.writeFileSync(path.join(linuxState, "recording-active"), `${owner.pid}\n`);
+		fs.writeFileSync(path.join(linuxState, "recording-active"), `1:${owner.pid}\n`);
+		fs.writeFileSync(path.join(linuxState, "recording-lock.tickets"), "1 0\n");
 		const linuxBin = restrictedPath(path.join(root, "linux-tools"), {
 			ffmpeg: "exit 0",
 			"pw-record": "exit 0",
@@ -193,7 +203,8 @@ test("microphone sessions reject a second concurrent recorder", async () => {
 
 		const termuxRuntime = path.join(root, "termux-runtime");
 		fs.mkdirSync(path.join(termuxRuntime, "pi-voice-recording-lock"), { recursive: true });
-		fs.writeFileSync(path.join(termuxRuntime, "pi-voice-recording-active"), `${owner.pid}\n`);
+		fs.writeFileSync(path.join(termuxRuntime, "pi-voice-recording-active"), `1:${owner.pid}\n`);
+		fs.writeFileSync(path.join(termuxRuntime, "pi-voice-recording-lock.tickets"), "1 0\n");
 		const termuxBin = restrictedPath(path.join(root, "termux-tools"), {
 			"termux-microphone-record": "exit 0",
 		});
@@ -246,7 +257,7 @@ test("local STT session records through PipeWire, forwards audio, and stops clea
 		);
 
 		assert.equal(result.timedOut, false, `script hung; stderr: ${result.stderr}`);
-				assert.match(result.stdout, /^stream\n/s, "the Ogg stream header must arrive before audio");
+		assert.match(result.stdout, /^ticket 1\nstream\n/s, "the ticket and Ogg stream header must arrive before audio");
 		const [, audio = ""] = result.stdout.split("stream\n");
 		assert.ok(audio.length > 0, "recorded audio must be forwarded after the header");
 		assert.equal(fs.existsSync(path.join(stateDir, "recording-active")), false, "active marker must be cleaned up");
@@ -263,10 +274,11 @@ test("stop cannot acknowledge until the active recording generation is removed",
 		const uid = process.getuid!();
 		const stateDir = path.join(runtime, `pi-voice-client-${uid}`);
 		fs.mkdirSync(stateDir, { recursive: true });
-		fs.writeFileSync(path.join(stateDir, "recording-active"), `${process.pid}\n`);
+		fs.writeFileSync(path.join(stateDir, "recording-active"), `1:${process.pid}\n`);
+		fs.writeFileSync(path.join(stateDir, "recording-lock.tickets"), "1 0\n");
 
 		let acknowledged = false;
-		const pending = runScript(path.join(CLIENT_DIR, "pi-voice-stt-session"), [], "stop\n", baseEnv({ XDG_RUNTIME_DIR: runtime })).then(result => { acknowledged = true; return result; });
+		const pending = runScript(path.join(CLIENT_DIR, "pi-voice-stt-session"), [], "stop 1\n", baseEnv({ XDG_RUNTIME_DIR: runtime })).then(result => { acknowledged = true; return result; });
 		await new Promise(resolve => setTimeout(resolve, 200));
 		assert.equal(acknowledged, false);
 		fs.unlinkSync(path.join(stateDir, "recording-active"));
@@ -325,7 +337,7 @@ exit 0`,
 		);
 
 		assert.equal(result.timedOut, false, `termux dispatch hung; stderr: ${result.stderr}`);
-		assert.match(result.stdout, /^stream\n/s);
+		assert.match(result.stdout, /^ticket 1\nstream\n/s);
 		assert.ok(fs.existsSync(path.join(runtime, "pi-voice-recording-active")) === false, "termux active marker must be cleaned up");
 		assert.ok(!fs.existsSync(path.join(runtime, `pi-voice-client-${process.getuid!()}`)), "the Linux state dir must not be created");
 	} finally {
@@ -341,7 +353,9 @@ test("Termux STT session validates commands, streams the recording, and stops", 
 		const script = path.join(CLIENT_DIR, "pi-voice-termux-stt-session");
 		const env = baseEnv({ TMPDIR: runtime });
 
-		const idleStop = await runScript(script, [], "stop\n", env);
+		const ticket = await runScript(script, [], "ticket\n", env);
+		assert.equal(ticket.stdout, "ticket 1\n");
+		const idleStop = await runScript(script, [], "stop 1\n", env);
 		assert.equal(idleStop.code, 0);
 		assert.equal(decodeMessage(idleStop.stdout.trim()).message, "stopped");
 
@@ -385,7 +399,7 @@ exit 0`,
 			root,
 		);
 		assert.equal(recorded.timedOut, false, `termux recording hung; stderr: ${recorded.stderr}`);
-		assert.match(recorded.stdout, /^stream\n/s);
+		assert.match(recorded.stdout, /^ticket 3\nstream\n/s);
 		const [, audio = ""] = recorded.stdout.split("stream\n");
 		assert.ok(audio.length > 0, "followed recording bytes must be forwarded");
 		assert.equal(fs.existsSync(path.join(runtime, "pi-voice-recording-active")), false);

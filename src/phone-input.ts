@@ -164,11 +164,14 @@ class LiveVoiceDetector {
 export class PhoneInputClient {
 	#socket: InputConnection | null = null;
 	#activeEndpoint: string | null = null;
+	#ticket: string | null = null;
+	#generation = 0;
 	#cancellation: Promise<void> = Promise.resolve();
 	#cancelCapture: (() => void) | null = null;
 	#stopPending: Promise<void> | null = null;
 
 	cancel(): Promise<void> {
+		this.#generation++;
 		const endpoint = this.#activeEndpoint;
 		if (this.#cancelCapture) this.#cancelCapture();
 		else if (endpoint) void this.stop(endpoint).catch(() => {});
@@ -177,7 +180,14 @@ export class PhoneInputClient {
 		return this.#cancellation;
 	}
 
-	stop(endpoint: string): Promise<void> {
+	stop(_endpoint?: string): Promise<void> {
+		const endpoint = this.#activeEndpoint;
+		const ticket = this.#ticket;
+		if (!endpoint || !ticket) {
+			this.#generation++;
+			this.#cancelCapture?.();
+			return this.#cancellation;
+		}
 		if (this.#stopPending) return this.#stopPending;
 		// All stop sources (VAD, timeout, UI, cancellation) must finish before a new recording.
 		const pending = this.#cancellation.catch(() => {}).then(() => new Promise<void>((resolve, reject) => {
@@ -191,14 +201,14 @@ export class PhoneInputClient {
 				socket.destroy();
 				if (error) reject(error);
 				else {
-					if (this.#activeEndpoint === endpoint) this.#activeEndpoint = null;
+					if (this.#ticket === ticket) { this.#activeEndpoint = null; this.#ticket = null; }
 					resolve();
 				}
 			};
 			const timer = setTimeout(() => finish(new Error("Voice microphone stop timed out")), 10_000);
 			timer.unref?.();
 			socket.setEncoding?.("utf8");
-			socket.on("connect", () => socket.write("stop\n"));
+			socket.on("connect", () => socket.write(`stop ${ticket}\n`));
 			socket.on("data", chunk => {
 				response += chunk;
 				const newline = response.indexOf("\n");
@@ -222,16 +232,21 @@ export class PhoneInputClient {
 	}
 
 	async capture(endpoint: string, options: PhoneCaptureOptions = {}): Promise<PhoneCapture> {
-		await this.cancel();
+		const cancelled = this.cancel();
+		const generation = ++this.#generation;
+		await cancelled;
+		if (generation !== this.#generation) throw new Error("Voice microphone cancelled");
 		const socket = connectEndpoint(endpoint);
 		this.#socket = socket;
 		this.#activeEndpoint = endpoint;
+		this.#ticket = null;
 		socket.setNoDelay?.(true);
 
 		return new Promise<PhoneCapture>((resolve, reject) => {
 			let settled = false;
 			let headerBuffer = Buffer.alloc(0);
 			let streamMode = false;
+			let ticketReceived = false;
 			let streamBytes = 0;
 			const audioChunks: Buffer[] = [];
 			let detector: LiveVoiceDetector | null = null;
@@ -244,9 +259,11 @@ export class PhoneInputClient {
 					this.#socket = null;
 					this.#cancelCapture = null;
 				}
-				const stopped = error || streamMode ? this.stop(endpoint) : Promise.resolve();
+				const stopped = this.#ticket && (error || streamMode) ? this.stop() : Promise.resolve();
 				void stopped.catch(() => {});
-				if (!error && !streamMode && this.#activeEndpoint === endpoint) this.#activeEndpoint = null;
+				if ((!this.#ticket || (!error && !streamMode)) && this.#activeEndpoint === endpoint) {
+					this.#activeEndpoint = null; this.#ticket = null;
+				}
 				socket.destroy();
 				// Child 'close' follows stdout drainage; socket EOF alone can precede final PCM.
 				void Promise.all([detector?.close(!!error), ...(error ? [] : [stopped])]).then(() => {
@@ -272,7 +289,7 @@ export class PhoneInputClient {
 				detector?.write(chunk);
 			};
 
-			socket.on("connect", () => socket.write("record\n"));
+			socket.on("connect", () => { if (!settled) socket.write("ticket\n"); });
 			socket.on("data", (raw: Buffer) => {
 				if (settled) return;
 				if (streamMode) {
@@ -288,6 +305,17 @@ export class PhoneInputClient {
 				if (newline === -1) return;
 				const header = headerBuffer.subarray(0, newline).toString("utf8").trim();
 				const remainder = headerBuffer.subarray(newline + 1);
+				if (!ticketReceived) {
+					if (!/^ticket [1-9][0-9]{0,15}$/.test(header) || !Number.isSafeInteger(Number(header.slice(7))) || remainder.length) {
+						finish(new Error("Microphone admission ticket missing; update the recorder client"));
+						return;
+					}
+					ticketReceived = true;
+					this.#ticket = header.slice(7);
+					headerBuffer = Buffer.alloc(0);
+					socket.write(`record ${this.#ticket}\n`);
+					return;
+				}
 				if (header === "stream") {
 					streamMode = true;
 					detector = new LiveVoiceDetector(

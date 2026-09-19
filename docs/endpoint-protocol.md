@@ -42,17 +42,28 @@ Forced local termination cannot confirm remote buffered audio stopped. This impl
 
 ## Input commands
 
-The host opens a separate input endpoint and writes one UTF-8 line:
+The host opens a recording connection and sends `ticket\n`. The server replies
+`ticket N\n` with a positive, monotonically increasing safe-integer admission ticket.
+Only then may the host send `record N\n` **on that same connection**. Keep its
+write side open throughout capture; EOF triggers generation-scoped cleanup.
+Cancellation before receiving a ticket must close the connection without sending record.
 
-```text
-record\n
-```
+A separate control connection sends `stop N\n`. It cancels that pending request
+before admission/publication, or stops only the active recording bearing N. A late
+old stop cannot stop a newer recording. Bare `record` / `stop` are rejected.
 
-or:
+The persistent fence protects an atomically replaced pair of counters (latest issued
+ticket and cancellation watermark). Admission requires the connection's ticket to
+be the latest issued and above the watermark; newer ticket issuance supersedes older
+unadmitted requests. Stop advances the watermark, but touches active state only for
+its exact ticket. Storage is bounded, including one fixed replacement temp file;
+ticket exhaustion fails closed. Never reset counters or delete the fence while
+requests/stop retries may remain. Runtime-directory loss requires a fresh session,
+not replaying old tickets. This is process-crash fencing, not power-loss durability.
 
-```text
-stop\n
-```
+Under the fence, an empty recording-lock directory with **no active marker** is
+provably pre-publication debris and is removed with `rmdir` before admission.
+Existing owner markers are never removed by that recovery.
 
 ### Streaming recording
 
@@ -63,7 +74,7 @@ stream\n
 <encoded audio bytes until EOF>
 ```
 
-The bundled clients stream Ogg/Opus. Host-side FFmpeg/VAD consumes the growing stream, and a second `stop` connection asks the recorder to finalize and close the original stream. Recording admission is published under a per-device fence **before** dependency/device checks. A concurrent second `record` request is rejected rather than sharing or replacing microphone state. Startup rechecks that same generation under the fence, so a stop can cancel a blocked pre-start request without allowing it to start later.
+The bundled clients stream Ogg/Opus. Host-side FFmpeg/VAD consumes the growing stream, and a second `stop N` connection asks the recorder to finalize and close the original stream. Recording admission is published under a per-device fence **before** dependency/device checks. A concurrent second `record` request is rejected rather than sharing or replacing microphone state. Startup rechecks that same generation under the fence, so a stop can cancel a blocked pre-start request without allowing it to start later.
 
 ### Single-response recording
 
@@ -92,9 +103,21 @@ The payload is base64 UTF-8 `stopped`. Send it **only after actual microphone st
 
 For `record`, an `ok` response is treated as direct recognized text for compatibility.
 
+### Host input API
+
+`PhoneInputClient.capture(endpoint, options)` acquires the ticket internally.
+`stop(endpoint?)` keeps its legacy optional argument for source compatibility but
+always uses the active capture's saved endpoint and ticket, never a newly routed
+endpoint. With no owned capture it is a no-op; before ticket acquisition it cancels
+without recording. `cancel()` aborts capture and returns stop confirmation (or
+rejection). No index integration changes are included. Await cleanup before
+releasing a microphone lease; a rejected stop retains ownership for scoped retry.
+The recording connection's EOF cleanup remains useful if an SSH listener changes;
+a control request reaching a different server is not proof about the old server.
+
 ### Microphone protocol migration
 
-Older documentation defined stop `ok` as acceptance only. That contract is **not safe or compatible** with the current host: `ok` with `stopping`, an empty payload, or any payload other than `stopped` is rejected. Do not relabel an acceptance response as `stopped`; implement confirmation and pre-start cancellation fencing first. Upgrade all recorder-script copies on the client together, with no old recorder sessions still running. The bundled scripts require `flock` (util-linux on Linux/Termux); its persistent fence file must not be deleted while sessions may use it. No host compatibility switch permits acceptance-only ACKs.
+Older documentation defined stop `ok` as acceptance only. That contract is **not safe or compatible** with the current host: `ok` with `stopping`, an empty payload, or any payload other than `stopped` is rejected. Do not relabel an acceptance response as `stopped`; implement confirmation and pre-start cancellation fencing first. Ticket negotiation is mandatory; upgrade both host and recorder scripts. Upgrade all recorder-script copies on the client together, with no old recorder sessions still running. The bundled scripts require `flock` (util-linux on Linux/Termux); its persistent fence file must not be deleted while sessions may use it. No host compatibility switch permits acceptance-only ACKs.
 
 `/voice stop` remains an immediate UI/processing cancellation escape hatch: it need not wait for transcription or editing to finish. Microphone cleanup continues separately and must report failure honestly. Network loss/timeouts are **unconfirmed**, never proof the microphone stopped; a new capture must wait for a successful explicit stop retry after reconnection.
 

@@ -18,12 +18,54 @@ encode_message() {
   printf '%s' "$1" | base64 | tr -d '\n'
 }
 
+# Both counters are replaced together while holding the persistent fence.
+ticket_state="$recording_lock.tickets"
+valid_counter() {
+  [[ $1 =~ ^(0|[1-9][0-9]{0,15})$ ]] && (( $1 <= 9007199254740991 ))
+}
+load_tickets() {
+  latest=0 watermark=0
+  if [[ -e $ticket_state ]]; then
+    IFS=' ' read -r latest watermark extra <"$ticket_state" || exit 1
+    valid_counter "$latest" && valid_counter "$watermark" && [[ -z $extra ]] && (( watermark <= latest )) || exit 1
+  fi
+}
+save_tickets() {
+  printf '%s %s\n' "$latest" "$watermark" >"$ticket_state.tmp" &&
+    mv -f "$ticket_state.tmp" "$ticket_state" || exit 1
+}
+
 # Never unlink this fence: admission, cancellation and start share its inode.
 exec 9>"$recording_lock.fence"
 IFS= read -r command || exit 1
 flock -x 9 || exit 1
-if [[ $command == stop ]]; then
+load_tickets
+issued_ticket=
+if [[ $command == ticket ]]; then
+  if (( latest == 9007199254740991 )); then
+    printf 'error %s\n' "$(encode_message 'Microphone ticket space exhausted')"
+    exit 0
+  fi
+  (( latest += 1 ))
+  save_tickets
+  issued_ticket=$latest
+  flock -u 9
+  printf 'ticket %s\n' "$issued_ticket"
+  IFS= read -r command || exit 1
+  [[ $command == "record $issued_ticket" ]] || exit 1
+  flock -x 9 || exit 1
+  load_tickets
+fi
+if [[ $command == stop\ * && -z $issued_ticket ]]; then
+  ticket=${command#stop }
+  if ! valid_counter "$ticket" || (( ticket == 0 || ticket > latest )); then
+    printf 'error %s\n' "$(encode_message 'Invalid microphone ticket')"
+    exit 0
+  fi
+  (( ticket > watermark )) && watermark=$ticket
+  save_tickets
   owner=$(cat "$active_file" 2>/dev/null || true)
+  [[ ${owner%%:*} == "$ticket" ]] || owner=
   if [[ -n $owner ]]; then
     : >"$stop_file"
     if [[ -e $pending_file ]]; then
@@ -44,18 +86,21 @@ if [[ $command == stop ]]; then
   fi
   exit 0
 fi
-if [[ $command != record ]]; then
+if [[ -z $issued_ticket ]]; then
   printf 'error %s\n' "$(encode_message "Unsupported local voice command: $command")"
   exit 0
 fi
+(( issued_ticket == latest && issued_ticket > watermark )) || exit 1
+# A crash between mkdir and marker publication leaves only an empty directory.
+[[ -e $active_file ]] || rmdir "$recording_lock" 2>/dev/null || true
 if [[ -e $active_file ]] || ! mkdir "$recording_lock" 2>/dev/null; then
   printf 'error %s\n' "$(encode_message 'The local microphone is already recording')"
   exit 0
 fi
-recording_owner=${BASHPID:-$$}
+recording_owner="$issued_ticket:${BASHPID:-$$}"
 rm -f "$stop_file"
-printf '%s\n' "$recording_owner" >"$active_file"
-: >"$pending_file"
+printf '%s\n' "$recording_owner" >"$active_file" || exit 1
+: >"$pending_file" || exit 1
 producer_pid=
 disconnect_pid=
 cleanup() {

@@ -5,6 +5,22 @@ import * as path from "node:path";
 import test from "node:test";
 import { PhoneInputClient } from "../src/phone-input.js";
 
+function ticketServer(handler: (socket: net.Socket) => void): net.Server {
+	let ticket = 0;
+	return net.createServer(socket => {
+		socket.once("data", raw => {
+			const command = String(raw);
+			if (command === "ticket\n") {
+				socket.write(`ticket ${++ticket}\n`);
+				socket.once("data", () => { handler(socket); socket.emit("data", "record\n"); });
+			} else {
+				assert.match(command, /^stop [1-9][0-9]*\n$/);
+				handler(socket); socket.emit("data", "stop\n");
+			}
+		});
+	});
+}
+
 async function listen(server: net.Server): Promise<number> {
 	await new Promise<void>((resolve, reject) => {
 		server.once("error", reject);
@@ -30,7 +46,7 @@ function wav(samples = 16000, overshoot = false): Buffer {
 
 test("requests a phone recording and decodes the returned audio", async () => {
 	const expectedAudio = Buffer.from([0, 1, 2, 3, 254, 255]);
-	const server = net.createServer(socket => {
+	const server = ticketServer(socket => {
 		socket.setEncoding("utf8");
 		socket.once("data", command => {
 			assert.equal(command, "record\n");
@@ -52,7 +68,7 @@ test("cancellation finishes the old stop before a replacement capture starts", a
 	let activeRecord: net.Socket | undefined;
 	let records = 0;
 	const commands: string[] = [];
-	const server = net.createServer(socket => {
+	const server = ticketServer(socket => {
 		socket.on("error", (error: NodeJS.ErrnoException) => assert.equal(error.code, "ECONNRESET"));
 		socket.setEncoding("utf8");
 		socket.once("data", command => {
@@ -92,7 +108,7 @@ test("cancellation finishes the old stop before a replacement capture starts", a
 
 test("connects to microphone bridges forwarded over Unix sockets", async () => {
 	const socketPath = path.join(os.tmpdir(), `pi-voice-input-${process.pid}-${Date.now()}.sock`);
-	const server = net.createServer(socket => {
+	const server = ticketServer(socket => {
 		socket.once("data", command => {
 			assert.equal(String(command), "record\n");
 			socket.end(`audio ${Buffer.from("unix-audio").toString("base64")}\n`);
@@ -114,7 +130,7 @@ test("connects to microphone bridges forwarded over Unix sockets", async () => {
 test("accepts a live binary phone audio stream and drains the decoder before resolving", async () => {
 	// Float WAV includes legal decoder overshoot, like Opus reconstructed from PCM16.
 	const expectedAudio = wav(16000, true);
-	const server = net.createServer(socket => {
+	const server = ticketServer(socket => {
 		socket.once("data", command => socket.end(String(command) === "stop\n"
 			? `ok ${Buffer.from("stopped").toString("base64")}\n` : Buffer.concat([Buffer.from("stream\n"), expectedAudio])));
 	});
@@ -138,7 +154,7 @@ test("failed microphone stop rejects cancellation and prevents replacement captu
 	let records = 0;
 	let safe = false;
 	const recording = Promise.withResolvers<void>();
-	const server = net.createServer(socket => {
+	const server = ticketServer(socket => {
 		socket.on("error", () => {});
 		socket.once("data", command => {
 			if (String(command) === "record\n") {
@@ -165,9 +181,10 @@ test("failed microphone stop rejects cancellation and prevents replacement captu
 for (const response of ["legacy", "timeout", "disconnect"]) test(`microphone ${response} is not a stop acknowledgement`, async t => {
 	const commanded = Promise.withResolvers<void>();
 	let connection: net.Socket | undefined;
-	const server = net.createServer(socket => {
+	const server = ticketServer(socket => {
 		connection = socket;
-		socket.once("data", () => {
+		socket.once("data", command => {
+			if (String(command) === "record\n") { commanded.resolve(); return; }
 			commanded.resolve();
 			if (response === "legacy") socket.end(`ok ${Buffer.from("stopping").toString("base64")}\n`);
 			if (response === "disconnect") socket.end();
@@ -177,13 +194,64 @@ for (const response of ["legacy", "timeout", "disconnect"]) test(`microphone ${r
 	t.mock.timers.enable({ apis: ["setTimeout"] });
 	try {
 		const client = new PhoneInputClient();
+		const capture = assert.rejects(client.capture(`tcp://127.0.0.1:${port}`));
+		await commanded.promise;
 		const stopped = assert.rejects(client.stop(`tcp://127.0.0.1:${port}`), /not confirmed|timed out|closed/);
 		await commanded.promise;
-		if (response === "timeout") t.mock.timers.tick(10_000);
+		if (response === "timeout") {
+			await new Promise(resolve => setImmediate(resolve));
+			t.mock.timers.tick(10_000);
+		}
 		await stopped;
-		await assert.rejects(client.cancel(), /not confirmed|timed out|closed/);
+		const cancelled = client.cancel();
+		if (response === "timeout") { await new Promise(resolve => setImmediate(resolve)); t.mock.timers.tick(10_000); }
+		await assert.rejects(cancelled, /not confirmed|timed out|closed/);
+		await capture;
 	} finally {
 		connection?.destroy();
 		await new Promise<void>(resolve => server.close(() => resolve()));
 	}
+});
+
+for (const stop of [false, true]) test(`${stop ? "stop" : "cancel"} before ticket never sends record`, async () => {
+	const requested = Promise.withResolvers<net.Socket>();
+	const commands: string[] = [];
+	const server = net.createServer(socket => {
+		socket.on("error", () => {});
+		socket.on("data", raw => { commands.push(String(raw)); requested.resolve(socket); });
+	});
+	const port = await listen(server);
+	const client = new PhoneInputClient();
+	try {
+		const capture = assert.rejects(client.capture(`tcp://127.0.0.1:${port}`), /cancelled/);
+		const socket = await requested.promise;
+		await (stop ? client.stop("tcp://127.0.0.1:1") : client.cancel());
+		socket.end("ticket 1\n");
+		await capture;
+		assert.deepEqual(commands, ["ticket\n"]);
+	} finally { await new Promise<void>(resolve => server.close(() => resolve())); }
+});
+
+test("synchronous cancellation before connection setup never requests a ticket", async () => {
+	const client = new PhoneInputClient();
+	const capture = assert.rejects(client.capture("invalid endpoint"), /cancelled/);
+	await client.cancel();
+	await capture;
+});
+
+test("stop uses the active capture endpoint, not a newly routed endpoint", async () => {
+	const recorded = Promise.withResolvers<void>();
+	let active: net.Socket | undefined;
+	const server = ticketServer(socket => socket.once("data", command => {
+		if (String(command) === "record\n") { active = socket; recorded.resolve(); }
+		else { socket.end("ok c3RvcHBlZA==\n"); active?.end("ok \n"); }
+	}));
+	const port = await listen(server);
+	try {
+		const client = new PhoneInputClient();
+		const capture = client.capture(`tcp://127.0.0.1:${port}`);
+		await recorded.promise;
+		await client.stop("tcp://127.0.0.1:1");
+		assert.deepEqual(await capture, { type: "text", data: "" });
+	} finally { active?.destroy(); await new Promise<void>(resolve => server.close(() => resolve())); }
 });
