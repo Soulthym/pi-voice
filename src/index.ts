@@ -566,7 +566,7 @@ export default async function (pi: ExtensionAPI) {
 				codeDescriptionUsesActivePrompt(ctx, config.editModel) ? [ctx.getSystemPrompt(), activePromptTools()] : null])).digest("hex");
 			if (memo.legacySettings !== legacySettings) {
 				// Completed contexts expose old serialization lazily; retain only derived hashes.
-				const legacyContext = typeof identityContext === "function"
+				const legacyContext = config.codeDescriptionContext === "conversation" && typeof identityContext === "function"
 					? (identityContext as (() => string) & { legacy?: () => string }).legacy?.()
 					: undefined;
 				memo.legacy = [];

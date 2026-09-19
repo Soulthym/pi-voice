@@ -154,7 +154,7 @@ test("completed conversation keys survive replay, settling and custom leaves; co
 	assert.equal(host.scrollView.scrollTop, 50, "audio startup must not rearm after manual browsing during identity work");
 	chargeKeyWork = () => {};
 	now.mock.restore();
-	assert.equal(sourceKeyCalls, texts.length, "cold preparation computes each source key once");
+	assert.equal(sourceKeyCalls, texts.length * 2, "cold misses compute the current and compatible serialized source key once");
 	assert.ok(slices.some(count => count > 0 && count < texts.length), "cold history must yield before finishing");
 	assert.ok(slices.slice(1).every((count, i) => count - slices[i]! <= 4),
 		`heartbeat gaps must stay bounded to four synthetic 4ms key computations: ${slices}`);
@@ -164,8 +164,8 @@ test("completed conversation keys survive replay, settling and custom leaves; co
 	await settle();
 	await replay();
 	await settle();
-	assert.equal(sourceKeyCalls, texts.length,
-		"conversation rendering shares the keys prepared by replay");
+	assert.equal(sourceKeyCalls, texts.length * 2,
+		"conversation rendering shares current and compatible keys prepared by replay");
 	const warmKeys = sourceKeyCalls;
 	branchReads = entriesReads = 0;
 	for (const text of texts) host.render(text);
@@ -193,6 +193,6 @@ test("completed conversation keys survive replay, settling and custom leaves; co
 	await replay();
 	await settle();
 	assert.ok(branchReads > 0, "message leaves still invalidate the branch index");
-	assert.equal(sourceKeyCalls, warmKeys + 1, "only the new message needs a source key after rebuilding history");
+	assert.equal(sourceKeyCalls, warmKeys + 2, "only the new message needs current and compatible source keys after rebuilding history");
 	assert.equal(host.modelRequests.length, 0, "all narration is synthetic; no provider calls");
 });
