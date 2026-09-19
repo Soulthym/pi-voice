@@ -37,7 +37,7 @@ function isOperation(value: unknown): value is CodeNarrationOperation {
 	);
 }
 
-function isPlan(value: unknown): value is CodeNarrationPlan {
+export function isCodeNarrationPlan(value: unknown): value is CodeNarrationPlan {
 	if (!value || typeof value !== "object" || !("guided" in value) || typeof value.guided !== "boolean") return false;
 	if (!("records" in value) || !Array.isArray(value.records) || value.records.length === 0 || value.records.length > 32) {
 		return false;
@@ -57,7 +57,7 @@ export function parseCodeDescriptionCacheSnapshot(value: unknown): CodeDescripti
 	if (!value || typeof value !== "object") return undefined;
 	if (!("version" in value) || value.version !== 1) return undefined;
 	if (!("key" in value) || typeof value.key !== "string" || !/^[a-f0-9]{64}$/.test(value.key)) return undefined;
-	if (!("plan" in value) || !isPlan(value.plan)) return undefined;
+	if (!("plan" in value) || !isCodeNarrationPlan(value.plan)) return undefined;
 	const identity = "identity" in value && typeof value.identity === "string" && /^[a-f0-9]{64}$/.test(value.identity)
 		? value.identity : undefined;
 	return { version: 1, key: value.key, plan: value.plan, ...(identity ? { identity } : {}) };

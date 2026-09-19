@@ -231,6 +231,7 @@ export class FakeVoiceHost {
 			modelRegistry: {
 				find: () => this.model,
 				complete: async (model: unknown, context: ModelRequest["context"], options: Record<string, unknown>) => {
+					await (options.onPayload as ((payload: unknown, model: unknown) => unknown) | undefined)?.(context, model);
 					const request = { model, context, options };
 					this.modelRequests.push(request);
 					return this.completeModel(request);

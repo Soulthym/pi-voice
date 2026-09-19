@@ -128,6 +128,7 @@ test("preserves the available system prompt and tools with a different pinned na
 test("rejects requests that cannot fit the selected model context", async () => {
 	const model = { provider: "test", id: "tiny", contextWindow: 700, maxTokens: 128 };
 	let completions = 0;
+	let charged = 0;
 	const ctx = {
 		model,
 		modelRegistry: {
@@ -150,10 +151,13 @@ test("rejects requests that cannot fit the selected model context", async () => 
 					{ role: "user", content: [{ type: "text", text: "A".repeat(200) }], timestamp: 1 },
 				] as never,
 			},
+			undefined,
+			{ onAttempt: () => { charged++; } },
 		),
 		CodeDescriptionContextOverflowError,
 	);
 	assert.equal(completions, 0);
+	assert.equal(charged, 0);
 });
 
 test("describes patch structure when model summarization is unavailable", () => {
@@ -193,7 +197,8 @@ function scriptedCtx(replies: Array<{ text?: string; fail?: Error }>): {
 		model: { provider: "test", id: "model", contextWindow: 8192, maxTokens: 1024 },
 		modelRegistry: {
 			find: () => ({ provider: "test", id: "model", contextWindow: 8192, maxTokens: 1024 }),
-			complete: async () => {
+			complete: async (model: unknown, context: unknown, options: { onPayload?: (payload: unknown, model: unknown) => unknown }) => {
+				await options.onPayload?.(context, model);
 				const next = replies[Math.min(index, replies.length - 1)];
 				index += 1;
 				if (next.fail) throw next.fail;

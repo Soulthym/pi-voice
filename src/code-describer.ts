@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { Message, Tool } from "@earendil-works/pi-ai";
 import { estimateTokens, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { parseCodeNarration, plainCodeNarration, type CodeNarrationPlan } from "./code-narration.js";
+import { isCodeNarrationPlan } from "./code-description-cache.js";
 import { buildCodeTargetCatalog } from "./code-targets.js";
 import type { VoiceCodeDescriptionContext } from "./config.js";
 import type { FencedCodeBlock } from "./speakable.js";
@@ -345,7 +346,6 @@ export async function describeCodeBlock(
 	const maxOutputTokens = mode === "guided" ? 512 : 384;
 
 	const attemptOnce = async (rejection?: string): Promise<CodeNarrationPlan> => {
-		options?.onAttempt?.();
 		const corrective = rejection
 			? `\nThe previous reply was rejected (${rejection}). Explain what the code does or why it matters instead.`
 			: "";
@@ -384,6 +384,7 @@ export async function describeCodeBlock(
 		}
 		const timeout = AbortSignal.timeout(60_000);
 		const combinedSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
+		let attemptError: unknown;
 		const response = await ctx.modelRegistry.complete(
 			model,
 			{
@@ -393,13 +394,26 @@ export async function describeCodeBlock(
 			},
 			{
 				signal: combinedSignal,
+				onPayload: () => {
+					// Pi resolves model/auth and builds the payload before this hook.
+					// Preflight failures are free; every submitted retry is charged.
+					try {
+						combinedSignal.throwIfAborted();
+						options?.onAttempt?.();
+					} catch (error) {
+						attemptError = error;
+						throw error;
+					}
+				},
 				reasoningEffort: "minimal",
 				maxTokens: maxOutputTokens,
 			...(reusesNormalPrompt
 				? { sessionId: conversation.normalPrompt!.sessionId }
 				: { cacheRetention: "none" as const, sessionId: randomUUID() }),
 		},
-	);
+	).catch(error => { throw attemptError ?? error; });
+		// Providers can serialize hook failures into an error response.
+		if (attemptError) throw attemptError;
 		if (response.stopReason === "aborted") {
 			throw new Error("Code description aborted");
 		}
@@ -412,7 +426,7 @@ export async function describeCodeBlock(
 			.join("\n");
 		if (mode === "guided") {
 			const plan = parseCodeNarration(text, block.code, catalog?.targets);
-			if (!plan) throw new CodeDescriptionQualityError("the reply was not a valid narration plan");
+			if (!plan || !isCodeNarrationPlan(plan)) throw new CodeDescriptionQualityError("the reply was not a valid bounded narration plan");
 			const spoken = plan.records.map(record => record.speech).filter(Boolean).join(" ").trim();
 			const spokenReason = assessCodeDescriptionQuality(spoken);
 			if (spokenReason) throw new CodeDescriptionQualityError(spokenReason);
@@ -422,7 +436,9 @@ export async function describeCodeBlock(
 		if (!description) throw new CodeDescriptionQualityError("the reply was empty");
 		const reason = assessCodeDescriptionQuality(description);
 		if (reason) throw new CodeDescriptionQualityError(reason);
-		return plainCodeNarration(description);
+		const plan = plainCodeNarration(description);
+		if (!isCodeNarrationPlan(plan)) throw new CodeDescriptionQualityError("the reply exceeded the 1500-character speech limit");
+		return plan;
 	};
 
 	for (let attempt = 1; ; attempt += 1) {
