@@ -56,7 +56,7 @@ stream\n
 <encoded audio bytes until EOF>
 ```
 
-The bundled clients stream Ogg/Opus. Host-side FFmpeg/VAD consumes the growing stream, and a second `stop` connection asks the recorder to finalize and close the original stream. Recording ownership is acquired with an atomic per-device lock; a concurrent second `record` request is rejected rather than sharing or replacing microphone state.
+The bundled clients stream Ogg/Opus. Host-side FFmpeg/VAD consumes the growing stream, and a second `stop` connection asks the recorder to finalize and close the original stream. Recording admission is published under a per-device fence **before** dependency/device checks. A concurrent second `record` request is rejected rather than sharing or replacing microphone state. Startup rechecks that same generation under the fence, so a stop can cancel a blocked pre-start request without allowing it to start later.
 
 ### Single-response recording
 
@@ -75,7 +75,21 @@ ok <base64-text>\n
 error <base64-error-message>\n
 ```
 
-For `stop`, `ok` means the stop request was accepted. For `record`, an `ok` response is treated as direct recognized text for compatibility.
+For `stop`, the only successful response is exactly:
+
+```text
+ok c3RvcHBlZA==\n
+```
+
+The payload is base64 UTF-8 `stopped`. Send it **only after actual microphone stop is confirmed**, or after cancelling an admitted pre-start generation so it can never start. Accepting a stop request, closing a socket, or observing a dead API client is not confirmation. Linux waits for its recorder process group; Android issues quit and requires `isRecording: false`. An unconfirmed stop returns `error <base64-error-message>` and retains the lease. A later explicit Android stop retries the actual recorder even after its original owner exits, and retires that stale lease only after confirmation, fenced against new admission. Disconnect cleanup is generation-scoped too.
+
+For `record`, an `ok` response is treated as direct recognized text for compatibility.
+
+### Microphone protocol migration
+
+Older documentation defined stop `ok` as acceptance only. That contract is **not safe or compatible** with the current host: `ok` with `stopping`, an empty payload, or any payload other than `stopped` is rejected. Do not relabel an acceptance response as `stopped`; implement confirmation and pre-start cancellation fencing first. Upgrade all recorder-script copies on the client together, with no old recorder sessions still running. The bundled scripts require `flock` (util-linux on Linux/Termux); its persistent fence file must not be deleted while sessions may use it. No host compatibility switch permits acceptance-only ACKs.
+
+`/voice stop` remains an immediate UI/processing cancellation escape hatch: it need not wait for transcription or editing to finish. Microphone cleanup continues separately and must report failure honestly. Network loss/timeouts are **unconfirmed**, never proof the microphone stopped; a new capture must wait for a successful explicit stop retry after reconnection.
 
 ## Limits
 

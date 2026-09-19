@@ -11,22 +11,32 @@ state_dir="$runtime_dir/pi-voice-client-${UID:-$(id -u)}"
 stop_file="$state_dir/stop-recording"
 active_file="$state_dir/recording-active"
 recording_lock="$state_dir/recording-lock"
+pending_file="$state_dir/recording-pending"
 mkdir -p "$state_dir"
 
 encode_message() {
   printf '%s' "$1" | base64 | tr -d '\n'
 }
 
+# Never unlink this fence: admission, cancellation and start share its inode.
+exec 9>"$recording_lock.fence"
 IFS= read -r command || exit 1
+flock -x 9 || exit 1
 if [[ $command == stop ]]; then
   owner=$(cat "$active_file" 2>/dev/null || true)
   if [[ -n $owner ]]; then
     : >"$stop_file"
-    for _ in {1..90}; do
-      [[ $(cat "$active_file" 2>/dev/null || true) != "$owner" ]] && break
-      sleep 0.1
-    done
+    if [[ -e $pending_file ]]; then
+      # A blocked device check can finish, but cannot start this generation.
+      rm -f "$active_file" "$stop_file" "$pending_file"
+      rmdir "$recording_lock" 2>/dev/null || true
+    fi
   fi
+  flock -u 9
+  for _ in {1..90}; do
+    [[ -z $owner || $(cat "$active_file" 2>/dev/null || true) != "$owner" ]] && break
+    sleep 0.1
+  done
   if [[ -z $owner || $(cat "$active_file" 2>/dev/null || true) != "$owner" ]]; then
     printf 'ok %s\n' "$(encode_message stopped)"
   else
@@ -38,11 +48,45 @@ if [[ $command != record ]]; then
   printf 'error %s\n' "$(encode_message "Unsupported local voice command: $command")"
   exit 0
 fi
+if [[ -e $active_file ]] || ! mkdir "$recording_lock" 2>/dev/null; then
+  printf 'error %s\n' "$(encode_message 'The local microphone is already recording')"
+  exit 0
+fi
+recording_owner=${BASHPID:-$$}
+rm -f "$stop_file"
+printf '%s\n' "$recording_owner" >"$active_file"
+: >"$pending_file"
+producer_pid=
+disconnect_pid=
+cleanup() {
+  trap - EXIT INT TERM
+  [[ -n ${disconnect_pid:-} ]] && kill "$disconnect_pid" 2>/dev/null || true
+  [[ -n ${producer_pid:-} ]] && kill -- "-$producer_pid" 2>/dev/null || true
+  [[ -n ${producer_pid:-} ]] && wait "$producer_pid" 2>/dev/null || true
+  flock -x 9
+  if [[ $(cat "$active_file" 2>/dev/null || true) == "$recording_owner" ]]; then
+    rm -f "$active_file" "$stop_file" "$pending_file"
+    rmdir "$recording_lock" 2>/dev/null || true
+  fi
+  flock -u 9
+}
+trap cleanup EXIT
+trap 'exit 1' INT TERM
+flock -u 9
+# EOF means the capture client disconnected. Only stop this recording generation.
+exec 3<&0
+( exec 9>"$recording_lock.fence"
+  while IFS= read -r _ <&3; do :; done
+  flock -x 9
+  [[ $(cat "$active_file" 2>/dev/null || true) == "$recording_owner" ]] && : >"$stop_file"
+) &
+disconnect_pid=$!
+
+# Publish admission before any potentially blocking dependency/device check.
 if ! command -v ffmpeg >/dev/null 2>&1; then
   printf 'error %s\n' "$(encode_message 'ffmpeg is required for local microphone capture')"
   exit 0
 fi
-
 pulse_source=
 command -v pactl >/dev/null 2>&1 && pulse_source=$(pactl get-default-source 2>/dev/null || true)
 if command -v pw-record >/dev/null 2>&1 && command -v wpctl >/dev/null 2>&1 && wpctl get-volume @DEFAULT_AUDIO_SOURCE@ >/dev/null 2>&1 && { [[ -z $pulse_source ]] || [[ $pulse_source != *.monitor ]]; }; then
@@ -53,53 +97,10 @@ else
   printf 'error %s\n' "$(encode_message 'No usable default Linux microphone found; connect one and install PipeWire or PulseAudio utilities')"
   exit 0
 fi
-
 max_record_seconds=${PI_VOICE_MAX_RECORD_SECONDS:-120}
-recording_owner=${BASHPID:-$$}
-lock_acquired=false
-if mkdir "$recording_lock" 2>/dev/null; then
-  lock_acquired=true
-else
-  old_owner=$(cat "$active_file" 2>/dev/null || true)
-  old_command=$(tr '\0' ' ' <"/proc/$old_owner/cmdline" 2>/dev/null || true)
-  if [[ -z $old_owner ]]; then
-    sleep 0.05
-    if [[ -z $(cat "$active_file" 2>/dev/null || true) ]]; then
-      rm -rf "$recording_lock" "$active_file" "$stop_file"
-      mkdir "$recording_lock" 2>/dev/null && lock_acquired=true
-    fi
-  elif [[ ! $old_owner =~ ^[0-9]+$ ]] || [[ $old_command != *pi-voice-stt-session* ]]; then
-    rm -rf "$recording_lock" "$active_file" "$stop_file"
-    mkdir "$recording_lock" 2>/dev/null && lock_acquired=true
-  fi
-fi
-if [[ $lock_acquired != true ]]; then
-  printf 'error %s\n' "$(encode_message 'The local microphone is already recording')"
-  exit 0
-fi
-rm -f "$stop_file"
-printf '%s\n' "$recording_owner" >"$active_file"
-producer_pid=
-disconnect_pid=
-cleanup() {
-  trap - EXIT INT TERM
-  [[ -n ${disconnect_pid:-} ]] && kill "$disconnect_pid" 2>/dev/null || true
-  [[ -n ${producer_pid:-} ]] && kill -- "-$producer_pid" 2>/dev/null || true
-  [[ -n ${producer_pid:-} ]] && wait "$producer_pid" 2>/dev/null || true
-  if [[ $(cat "$active_file" 2>/dev/null || true) == "$recording_owner" ]]; then
-    rm -f "$active_file" "$stop_file"
-    rmdir "$recording_lock" 2>/dev/null || true
-  fi
-}
-trap cleanup EXIT
-trap 'exit 1' INT TERM
-# EOF means the capture client disconnected. Only stop this recording generation.
-exec 3<&0
-( while IFS= read -r _ <&3; do :; done
-  [[ $(cat "$active_file" 2>/dev/null || true) == "$recording_owner" ]] && : >"$stop_file"
-) &
-disconnect_pid=$!
-
+flock -x 9
+[[ $(cat "$active_file" 2>/dev/null || true) == "$recording_owner" && ! -e $stop_file ]] || exit 1
+rm -f "$pending_file"
 printf 'stream\n'
 if [[ $recorder == pw-record ]]; then
   setsid bash -c '
@@ -107,16 +108,17 @@ if [[ $recorder == pw-record ]]; then
     pw-record --raw --format s16 --rate 16000 --channels 1 - 2>/dev/null |
       ffmpeg -hide_banner -loglevel error -f s16le -ar 16000 -ac 1 -i pipe:0 \
         -c:a libopus -application voip -b:a 32k -vbr on -f ogg pipe:1 2>/dev/null
-  ' &
+  ' 9>&- &
 else
   setsid bash -c '
     trap "wait; exit" TERM
     parec --raw --format=s16le --rate=16000 --channels=1 2>/dev/null |
       ffmpeg -hide_banner -loglevel error -f s16le -ar 16000 -ac 1 -i pipe:0 \
         -c:a libopus -application voip -b:a 32k -vbr on -f ogg pipe:1 2>/dev/null
-  ' &
+  ' 9>&- &
 fi
 producer_pid=$!
+flock -u 9
 
 for ((tick = 0; tick < max_record_seconds * 10; tick += 1)); do
   [[ -e $stop_file ]] && break

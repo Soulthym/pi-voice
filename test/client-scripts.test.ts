@@ -101,7 +101,7 @@ function makeFakeBin(root: string, scripts: Record<string, string>): string {
 /** Coreutils the client scripts legitimately need; everything else stays absent. */
 const RESTRICTED_TOOLS = [
 	"bash", "sh", "basename", "cat", "cmp", "dd", "dirname", "env", "grep", "sed", "head", "id", "kill",
-	"mkdir", "mkfifo", "printf", "readlink", "rm", "sh", "sleep", "stat", "tail", "timeout", "touch", "tr", "base64", "setsid", "ps",
+	"mkdir", "mkfifo", "printf", "readlink", "rm", "rmdir", "flock", "sh", "sleep", "stat", "tail", "timeout", "touch", "tr", "base64", "setsid", "ps",
 ];
 
 /** Builds a deterministic PATH: whitelisted coreutils plus explicit fakes only. */
