@@ -1,11 +1,11 @@
-/** Keep Pi's native end-follow/banner state when framing clamps at the tail. */
+/** Playing may follow a clamped tail; a paused narration anchor must stay fixed. */
 export function frameNarrationViewport(view: {
 	contentHeight?: number;
 	viewportHeight: number;
 	scrollTo(top: number, options?: { disableFollow?: boolean }): void;
-}, top: number): void {
+}, top: number, followAtTail = true): void {
 	const end = Math.max(0, (view.contentHeight ?? Infinity) - view.viewportHeight);
-	view.scrollTo(top, { disableFollow: top < end });
+	view.scrollTo(top, { disableFollow: !followAtTail || top < end });
 }
 
 /** Invalidate changed Markdown leaves, not Pi's entire transcript/layout tree. */

@@ -46,6 +46,13 @@ test("native ScrollView framing clamps at tail without suppressing native follow
 	assert.equal(view.isFollowingEnd, true, "native jump-to-end state must not be suppressed at the end");
 	view.updateLayout(301, 40, () => {});
 	assert.equal(view.scrollTop, 261);
+	frameNarrationViewport(adapter, computeAutoScrollTop(adapter, 300, true)!, false);
+	assert.equal(view.isFollowingEnd, false, "paused navigation to the last word is not a bottom pin");
+	view.updateLayout(320, 40, () => {});
+	assert.equal(view.scrollTop, 261, "incoming output must not move the paused anchor");
+	view.scrollToEnd();
+	view.updateLayout(321, 40, () => {});
+	assert.equal(view.scrollTop, 281, "explicit bottom pin still follows output while paused");
 	frameNarrationViewport(adapter, computeAutoScrollTop(adapter, 120, true)!);
 	assert.equal(view.scrollTop, 112);
 	assert.equal(view.isFollowingEnd, false);

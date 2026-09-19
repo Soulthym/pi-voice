@@ -1231,7 +1231,7 @@ export default async function (pi: ExtensionAPI) {
 		const topBand = Math.floor(scrollView.viewportHeight * 0.2);
 		const desired = Math.max(0, Math.min(maxScrollTop, target ?? anchor - topBand));
 		autoScrollForceOnce = false;
-		frameNarrationViewport(scrollView, desired);
+		frameNarrationViewport(scrollView, desired, !playbackPaused);
 		lastAutoScrollTop = scrollView.scrollTop;
 	};
 
