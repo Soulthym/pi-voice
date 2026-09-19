@@ -47,6 +47,11 @@ export class VoiceWorkerClient {
 	#nextCancelId = 0;
 	#paused = false;
 	#termination: Promise<void> | undefined;
+	#retiring = new Set<ChildProcessWithoutNullStreams>();
+	#signalled = new Set<ChildProcessWithoutNullStreams>();
+	#remoteUnconfirmed = false;
+	#remoteGeneration = 0;
+	#cancelGenerations = new Map<number, number>();
 	#ttsWorkers: number | undefined;
 	#activeUtterance: number | undefined;
 	#onEvent: (event: WorkerEvent) => void;
@@ -73,6 +78,10 @@ export class VoiceWorkerClient {
 			audioCacheBitrate: config.audioCacheBitrate,
 			output: config.output,
 		});
+		if (/^(tcp|unix):/.test(config.output)) {
+			this.#remoteUnconfirmed = true;
+			this.#remoteGeneration += 1;
+		}
 	}
 
 	endUtterance(utterance: number): void {
@@ -102,6 +111,7 @@ export class VoiceWorkerClient {
 		this.#pendingMeasurements.clear();
 		if (!this.#child) return undefined;
 		const cancelId = ++this.#nextCancelId;
+		this.#cancelGenerations.set(cancelId, this.#remoteGeneration);
 		this.#send({ type: "cancel", cancelId });
 		return cancelId;
 	}
@@ -203,6 +213,7 @@ export class VoiceWorkerClient {
 		return promise;
 	}
 
+	/** Escalation after a missing cancel ACK (e.g. 1s). Rejection means keep the speech lease. */
 	terminate(): Promise<void> {
 		if (this.#termination) return this.#termination;
 		const pending = this.#terminate();
@@ -214,7 +225,7 @@ export class VoiceWorkerClient {
 	async #terminate(): Promise<void> {
 		const child = this.#child;
 		this.#child = null;
-		if (!child) return;
+		if (child) this.#retiring.add(child);
 		for (const pending of this.#pendingPreloads.values()) {
 			clearTimeout(pending.timer);
 			pending.reject(new Error("Voice worker stopped"));
@@ -230,47 +241,67 @@ export class VoiceWorkerClient {
 			pending.reject(new Error("Voice worker stopped"));
 		}
 		this.#pendingMeasurements.clear();
+		for (const owned of this.#retiring) await this.#stopOwned(owned);
+		if (this.#remoteUnconfirmed) throw new Error("Remote playback stop unconfirmed; retain speech lease (host termination cannot stop buffered device audio)");
+	}
+
+	async #stopOwned(child: ChildProcessWithoutNullStreams): Promise<void> {
 		try {
-			child.stdin.write(`${JSON.stringify({ type: "shutdown" })}\n`);
+			const cancelId = ++this.#nextCancelId;
+			this.#cancelGenerations.set(cancelId, this.#remoteGeneration);
+			child.stdin.write(`${JSON.stringify({ type: "shutdown", cancelId })}\n`);
 			child.stdin.end();
 		} catch {
 			// The worker may already be gone.
 		}
-		if (child.exitCode !== null || child.signalCode != null) return;
+		const alreadyExited = child.exitCode !== null || child.signalCode != null;
 		let killedGroup: number | undefined;
 		await new Promise<void>((resolve, reject) => {
-			const timer = setTimeout(() => {
+			const closeDeadline = setTimeout(() => reject(new Error("Owned transport pipes did not close; retain speech lease")), 4_000);
+			const killOwned = () => {
 				try {
 					// Only this detached worker's process group, never the caller's group.
 					if (process.platform !== "win32" && child.pid) {
 						killedGroup = -child.pid;
-						process.kill(killedGroup, "SIGKILL");
+						if (!this.#signalled.has(child)) {
+							this.#signalled.add(child);
+							process.kill(killedGroup, "SIGKILL");
+						}
 					} else child.kill("SIGKILL");
 				} catch (error) {
 					if ((error as NodeJS.ErrnoException).code !== "ESRCH") reject(error);
 				}
 				// A signal request is not termination. Wait for transport pipes to close.
-			}, 2_000);
-			timer.unref?.();
+			};
+			if (alreadyExited) { clearTimeout(closeDeadline); killOwned(); resolve(); return; }
+			const timer = setTimeout(killOwned, 2_000);
 			child.once("close", () => {
 				clearTimeout(timer);
+				clearTimeout(closeDeadline);
+				// Even a clean leader exit may leave local descendants behind.
+				if (killedGroup === undefined) killOwned();
 				resolve();
 			});
 		});
+		if (process.platform === "win32") throw new Error("Owned descendant cleanup cannot be confirmed on Windows; retain speech lease");
 		// Closing the leader's pipes need not mean its players exited. Never signal
 		// again here: only observe the group we killed, retaining ownership if uncertain.
+		const deadline = Date.now() + 2_000;
 		while (killedGroup !== undefined) {
 			try { process.kill(killedGroup, 0); }
 			catch (error) {
 				if ((error as NodeJS.ErrnoException).code === "ESRCH") break;
 				throw error;
 			}
+			if (Date.now() >= deadline) throw new Error("Owned worker group cleanup unconfirmed; retain speech lease");
 			await new Promise(resolve => setTimeout(resolve, 10));
 		}
+		this.#retiring.delete(child);
+		this.#signalled.delete(child);
 	}
 
 	#ensureChild(): ChildProcessWithoutNullStreams {
-		if (this.#termination) throw new Error("Voice worker is stopping");
+		if (this.#termination || this.#retiring.size || this.#remoteUnconfirmed && !this.#child) throw new Error("Voice worker transport cleanup is unconfirmed");
 		if (this.#child && this.#child.exitCode === null) return this.#child;
 		const workerPath = fileURLToPath(new URL("./worker.mjs", import.meta.url));
 		const child = spawn(process.execPath, [workerPath], {
@@ -291,7 +322,10 @@ export class VoiceWorkerClient {
 		child.on("error", error => { if (this.#child === child) this.#handleFailure(error); });
 		child.on("exit", code => {
 			if (this.#child !== child) return;
+			this.#retiring.add(child);
 			this.#child = null;
+			// Retire immediately while the detached group identity is still owned.
+			void this.terminate().catch(error => this.#handleFailure(error));
 			if (code !== 0) {
 				const detail = stderr.trim();
 				this.#handleFailure(new Error(detail || `Voice worker exited with code ${code ?? "unknown"}`));
@@ -318,6 +352,12 @@ export class VoiceWorkerClient {
 			event = JSON.parse(line) as WorkerEvent;
 		} catch {
 			return;
+		}
+		if (event.type === "idle") {
+			if (event.cancelId !== undefined) {
+				if (this.#cancelGenerations.get(event.cancelId) === this.#remoteGeneration) this.#remoteUnconfirmed = false;
+				this.#cancelGenerations.delete(event.cancelId);
+			} else if (event.utterance !== undefined && event.utterance === this.#activeUtterance) this.#remoteUnconfirmed = false;
 		}
 		if (retired) {
 			if (event.type === "idle" && event.cancelId !== undefined) this.#onEvent(event);

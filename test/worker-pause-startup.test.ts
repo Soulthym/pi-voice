@@ -6,10 +6,11 @@ import { DEFAULT_VOICE_CONFIG } from "../src/config.js";
 
 test("cold/restarted workers receive pause intent before audio, while cancellation clears it", async t => {
 	const children: Array<{ messages: any[] }> = [];
+	t.mock.method(process, "kill", () => { throw Object.assign(new Error("owned group gone"), { code: "ESRCH" }); });
 	mock.module("node:child_process", { namedExports: { spawn: () => {
 		const child = Object.assign(new EventEmitter(), {
 			stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(),
-			exitCode: null as number | null, messages: [] as any[],
+			pid: 34567, signalCode: null, exitCode: null as number | null, messages: [] as any[],
 		});
 		child.stdin.on("data", bytes => {
 			const message = JSON.parse(String(bytes)); child.messages.push(message);

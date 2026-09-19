@@ -1,209 +1,128 @@
-import * as fs from "node:fs";
 import * as net from "node:net";
 
-const [output, sampleRateValue, utteranceValue] = process.argv.slice(2);
-const sampleRate = Number(sampleRateValue);
+const [output, rate, utteranceValue] = process.argv.slice(2);
 const utterance = Number(utteranceValue);
-const control = fs.createWriteStream(null, { fd: 3, autoClose: false });
-const controlInput = fs.createReadStream(null, { fd: 3, autoClose: true });
-control.on("error", () => {}); // fd 3 may be closed or read-only; control is best-effort.
-let stopped = false;
-let startedAt = null;
-let pausedAt = null;
-let pausedDuration = 0;
-let clientSessionId;
-let pendingControl;
+const endpoint = new URL(output);
+if (!((endpoint.protocol === "tcp:" && endpoint.hostname && endpoint.port) ||
+	(endpoint.protocol === "unix:" && !endpoint.hostname && endpoint.pathname.startsWith("/"))) ||
+	!Number.isFinite(Number(rate)) || Number(rate) <= 0 || !Number.isInteger(utterance)) throw new Error("Invalid playback parameters");
+const control = new net.Socket({ fd: 3, readable: true, writable: true });
+const input = control;
+control.on("error", fail);
+let session;
+let negotiated = false;
+let complete = false;
+let stopping = false;
+let pendingPause = false;
+let finished = false;
+let failing = false;
 let controlQueue = Promise.resolve();
-let lastFeedbackAt = performance.now();
-let samplesWritten = 0;
 let feedback = "";
-
-function send(message) {
-	process.stdout.write(`${JSON.stringify(message)}\n`);
+let commands = "";
+const connect = () => endpoint.protocol === "unix:"
+	? net.createConnection({ path: decodeURIComponent(endpoint.pathname) })
+	: net.createConnection({ host: endpoint.hostname.replace(/^\[|\]$/g, ""), port: Number(endpoint.port) });
+const socket = connect();
+const deadline = setTimeout(() => fail(new Error("Audio client v2 session readiness timed out; upgrade the client")), 5000);
+function finish(code) {
+	if (finished) return;
+	finished = true;
+	clearTimeout(deadline);
+	socket.destroy();
+	process.exit(code);
 }
-
-function controlLine(line) {
-	try {
-		control.write(`${line.replace(/\r?\n/g, " ")}\n`);
-	} catch {
-		// The parent may have already stopped the playback helper.
-	}
-}
-
 function fail(error) {
-	if (stopped) return;
-	stopped = true;
-	let message = error instanceof Error ? error.message : String(error);
-	const code = (error ?? {}).code ?? "";
-	if (code === "ECONNREFUSED" || code === "ENOENT") {
-		message += " (device bridge unreachable; rerun pi-voice-ssh)";
-	}
-	controlLine(`error ${message}`);
-	send({ type: "error", message, utterance });
-	process.exitCode = 1;
+	if (finished || failing) return;
+	failing = true;
+	const message = error instanceof Error ? error.message : String(error);
+	control.write(`error ${message}\n`);
+	process.stdout.write(`${JSON.stringify({ type: "error", message, utterance })}\n`, () => finish(1));
 }
-
-let endpoint;
-try {
-	endpoint = new URL(output);
-	if (
-		!((endpoint.protocol === "tcp:" && endpoint.hostname && endpoint.port) ||
-			(endpoint.protocol === "unix:" && !endpoint.hostname && endpoint.pathname.startsWith("/")))
-	) {
-		throw new Error(`Invalid network output: ${output}`);
+function command(command) {
+	if (!session) {
+		if (command === "stop") stopping = true;
+		return Promise.resolve();
 	}
-	if (!Number.isFinite(sampleRate) || sampleRate <= 0 || !Number.isInteger(utterance)) {
-		throw new Error("Invalid TCP playback parameters");
-	}
-} catch (error) {
-	fail(error);
-	process.exit(1);
+	return controlQueue = controlQueue.then(() => new Promise(resolve => {
+		const peer = connect();
+		let reply = "";
+		let ack = false;
+		peer.setTimeout(1500, () => peer.destroy(new Error("Remote playback control timed out")));
+		peer.on("connect", () => peer.end(`PI_VOICE_CONTROL${command} ${session}\n`));
+		peer.on("data", chunk => {
+			reply += chunk;
+			if (reply.length > 8192) return peer.destroy(new Error("Invalid playback control response"));
+			for (;;) {
+				const end = reply.indexOf("\n");
+				if (end < 0) break;
+				try {
+					const event = JSON.parse(reply.slice(0, end));
+					if (event.type === "stopped" && String(event.id) === session) ack = true;
+				} catch {}
+				reply = reply.slice(end + 1);
+			}
+		});
+		peer.on("error", fail);
+		peer.on("close", () => {
+			resolve();
+			if (command !== "stop") return;
+			if (ack) finish(0);
+			else fail(new Error("Remote stop unconfirmed: missing player-exit ACK"));
+		});
+	}));
 }
-
-function connectEndpoint() {
-	return endpoint.protocol === "unix:"
-		? net.createConnection({ path: decodeURIComponent(endpoint.pathname) })
-		: net.createConnection({
-				host: endpoint.hostname.replace(/^\[|\]$/g, ""),
-				port: Number(endpoint.port),
-			});
-}
-
-function sendPlaybackControl(command) {
-	if (!clientSessionId) {
-		pendingControl = command;
-		return;
-	}
-	controlQueue = controlQueue.then(
-		() =>
-			new Promise(resolve => {
-				const commandSocket = connectEndpoint();
-				commandSocket.on("connect", () => {
-					commandSocket.end(`PI_VOICE_CONTROL${command} ${clientSessionId}\n`);
-				});
-				commandSocket.on("error", resolve);
-				commandSocket.on("close", () => {
-					resolve();
-					if (command === "stop") {
-						stopped = true;
-						socket.destroy();
-						process.exit(0);
-					}
-				});
-			}),
-	);
-}
-
-let controlCommands = "";
-controlInput.on("data", chunk => {
-	controlCommands += String(chunk);
+input.on("data", chunk => {
+	commands += chunk;
 	for (;;) {
-		const newline = controlCommands.indexOf("\n");
-		if (newline < 0) break;
-		const command = controlCommands.slice(0, newline).trim();
-		controlCommands = controlCommands.slice(newline + 1);
-		if (command !== "pause" && command !== "resume" && command !== "stop") continue;
-		const now = performance.now();
-		if (command === "pause" && pausedAt === null) pausedAt = now;
-		if (command === "resume" && pausedAt !== null) {
-			pausedDuration += now - pausedAt;
-			pausedAt = null;
-		}
-		sendPlaybackControl(command);
+		const end = commands.indexOf("\n");
+		if (end < 0) break;
+		const value = commands.slice(0, end).trim();
+		commands = commands.slice(end + 1);
+		if (!["pause", "resume", "stop"].includes(value)) continue;
+		if (value === "stop") stopping = true;
+		else pendingPause = value === "pause";
+		command(value);
 	}
 });
-
-// The SSH reverse tunnel may still be coming back after a suspend or a
-// fresh pi-voice-ssh; retry refused/missing endpoints briefly instead of
-// failing the whole utterance immediately.
-const CONNECT_RETRY_MS = 250;
-const CONNECT_RETRY_LIMIT = 16;
-let connectAttempts = 0;
-
-let socket = connectEndpoint();
-socket.setNoDelay(true);
-
-function onSocketError(error) {
-	const retryable =
-		["ECONNREFUSED", "ENOENT", "ECONNRESET", "EHOSTUNREACH", "ENETUNREACH"].includes((error ?? {}).code) &&
-		!stopped &&
-		connectAttempts < CONNECT_RETRY_LIMIT;
-	if (!retryable) {
-		fail(error);
-		return;
+// This is an existing control header, not an audio probe. V1 safely ignores hello.
+socket.on("connect", () => socket.write("PI_VOICE_CONTROLhello\n"));
+socket.on("error", fail);
+socket.on("data", chunk => {
+	feedback += chunk;
+	if (feedback.length > 8192) return fail(new Error("Invalid audio client feedback"));
+	for (;;) {
+		const end = feedback.indexOf("\n");
+		if (end < 0) break;
+		const line = feedback.slice(0, end);
+		feedback = feedback.slice(end + 1);
+		let event;
+		try { event = JSON.parse(line); } catch { continue; }
+		if (!negotiated && event.type === "protocol" && event.version === 2) {
+			negotiated = true;
+			socket.write("PI_VOICE_AUDIO\n");
+		} else if (negotiated && event.type === "session" && event.version === 2 && /^\d+$/.test(String(event.id))) {
+			session = String(event.id);
+			clearTimeout(deadline);
+			if (stopping) command("stop");
+			else {
+				const start = () => {
+					if (stopping || finished || failing) return;
+					control.write("ready\n");
+					process.stdin.pipe(socket);
+				};
+				if (pendingPause) void command("pause").then(start);
+				else start();
+			}
+		} else if (session && event.type === "complete" && String(event.id) === session) {
+			complete = true;
+		} else if (session && event.type === "playback" && Number.isFinite(event.position) && event.position >= 0) {
+			process.stdout.write(`${JSON.stringify({ ...event, utterance })}\n`);
+		}
 	}
-	connectAttempts += 1;
-	socket.removeAllListeners();
-	setTimeout(() => {
-		if (stopped) return;
-		socket = connectEndpoint();
-		socket.setNoDelay(true);
-		wireSocket(socket);
-	}, CONNECT_RETRY_MS);
-}
-
-function onSocketConnect() {
-	controlLine("ready");
-	process.stdin.pipe(socket, { end: false });
-}
-
-function wireSocket(active) {
-	active.on("connect", onSocketConnect);
-	active.on("error", onSocketError);
-	active.on("data", onSocketData);
-	active.on("close", onSocketClose);
-}
-
-wireSocket(socket);
-
-const timer = setInterval(() => {
-	if (startedAt === null || performance.now() - lastFeedbackAt < 750) return;
-	const now = performance.now();
-	const paused = pausedDuration + (pausedAt === null ? 0 : now - pausedAt);
-	const position = Math.min((now - startedAt - paused) / 1_000, samplesWritten / sampleRate);
-	send({ type: "playback", utterance, position, estimated: true });
-}, 125);
-timer.unref?.();
-
-process.stdin.on("data", chunk => {
-	if (startedAt === null) startedAt = performance.now();
-	samplesWritten += Math.floor(chunk.length / Float32Array.BYTES_PER_ELEMENT);
+});
+socket.on("close", () => {
+	if (stopping) return; // Only the separate stop receipt proves remote termination.
+	if (complete) finish(0);
+	else fail(new Error("Audio client closed without v2 readiness/completion proof; upgrade client or repair forwarding (no replay)"));
 });
 process.stdin.on("error", fail);
-process.stdin.on("end", () => socket.end());
-
-function onSocketData(chunk) {
-	feedback = `${feedback}${String(chunk)}`.slice(-8_192);
-	for (;;) {
-		const newline = feedback.indexOf("\n");
-		if (newline < 0) break;
-		const line = feedback.slice(0, newline);
-		feedback = feedback.slice(newline + 1);
-		try {
-			const event = JSON.parse(line);
-			if (event.type === "session" && typeof event.id === "string") {
-				clientSessionId = event.id;
-				if (pendingControl) {
-					const command = pendingControl;
-					pendingControl = undefined;
-					sendPlaybackControl(command);
-				}
-				continue;
-			}
-			const position = Number(event.position);
-			if (event.type === "playback" && Number.isFinite(position) && position >= 0) {
-				lastFeedbackAt = performance.now();
-				send({ type: "playback", utterance, position });
-			}
-		} catch {
-			// Ignore malformed feedback from an interrupted phone session.
-		}
-	}
-}
-
-function onSocketClose() {
-	clearInterval(timer);
-	// fd 3 is a live duplex control pipe; destroying its pending read can block.
-	// The network session is complete, so terminate the dedicated helper directly.
-	process.kill(process.pid, "SIGTERM");
-}

@@ -8,18 +8,19 @@ Endpoints may use `tcp://host:port` or `unix:///absolute/path`. Explicit TCP is 
 
 ## Output connection
 
-For each utterance, the Pi host opens an output connection and writes mono little-endian Float32 PCM at 24 kHz. The byte stream has no audio header.
+Audio protocol v2 requires a handshake on the actual output connection (never an empty connection probe):
 
-The client keeps the same socket open in the reverse direction and sends newline-delimited JSON:
+1. Host sends `PI_VOICE_CONTROLhello\n` (the existing 16-byte control prefix).
+2. Client replies `{"type":"protocol","version":2}\n`.
+3. Host sends `PI_VOICE_AUDIO\n`.
+4. After player startup, client replies `{"type":"session","version":2,"id":12345}\n`.
+5. Only then does the host send mono little-endian Float32 PCM at 24 kHz.
 
-```json
-{"type":"session","id":"12345"}
-{"type":"playback","position":1.234}
-```
+The client keeps the reverse direction open for newline-delimited JSON `{"type":"playback","position":1.234}`. Position is the actual player position in seconds. The client-generated session ID scopes control to this player.
 
-`position` is the player's actual position in seconds from the beginning of that connection. The session ID identifies the client player for pause/resume control.
+The host appends approximately one second of silence before clean EOF. After feeder EOF and successful player exit, the client sends `{"type":"complete","id":12345}` and closes. TCP acceptance, EOF, helper exit by signal, and elapsed duration are not completion proof. Premature close fails without automatic replay.
 
-The host appends approximately one second of silent PCM before clean EOF so Android output buffers do not clip the last word. The client should drain normal EOF and close after playback completes.
+**Migration:** upgrade both host and client audio scripts. A v1 bundled client safely ignores the existing control command `hello`; the new host fails clearly without sending PCM or unknown raw headers. Custom clients must implement this safe control negotiation before use. New bundled clients retain legacy raw-input support for older hosts, but new hosts never accept legacy non-proof feedback.
 
 ## Pause/resume control connection
 
@@ -31,7 +32,13 @@ PI_VOICE_CONTROLresume 12345\n
 PI_VOICE_CONTROLstop 12345\n
 ```
 
-The bundled client maps pause/resume to mpv's `pause` property and stop to mpv's `quit` command. Control connections carry no PCM and close immediately. Starting a new audio stream also atomically replaces any previous Pi Voice player on that endpoint, preventing buffered stale audio from overlapping rapid seeks.
+The bundled client maps pause/resume to mpv's `pause` property and stop to mpv's `quit` command. Stop replies `{"type":"stopped","id":12345}` only after the owning session has waited for actual player exit. Missing socket/PID alone is not proof. Exit receipts remain in the runtime directory so a scoped retry can recover a lost ACK. Control connections carry no PCM. Starting a new stream also replaces the previous endpoint player.
+
+### Host cancellation API and limitations
+
+`VoiceWorkerClient.cancel()` returns a cancel ID; only matching `idle.cancelId` confirms stop. Integration may wait one second, then await `VoiceWorkerClient.terminate()`. Termination cleans up its owned detached local worker group, including descendants after unexpected worker exit. **A rejected termination must retain the speech lease.** No index integration is included here.
+
+Forced local termination cannot confirm remote buffered audio stopped. This implementation deliberately rejects termination and blocks replacement worker creation when remote completion/stop proof is missing; it does not claim that killing SSH/helper/worker stops the phone. A lost ACK, disconnected endpoint, stuck player, or unconfirmed local cleanup therefore requires recovery rather than lease release. Local cleanup is bounded and retains retiring handles on failure. Process-group cleanup is POSIX-only; Windows lacks descendant group confirmation. Player-exit proof does not measure physical speaker latency or hardware buffers. Runtime receipt cleanup must not occur while stop confirmation is outstanding.
 
 ## Input commands
 

@@ -11,29 +11,20 @@ active_player_file="$runtime_dir/pi-voice-active-player.pid"
 mpv_pid=
 feeder_pid=
 lock_held=false
-protocol=1
-state_dir="$runtime_dir/pi-voice-session-$session_id"
 
 cleanup() {
   trap - EXIT INT TERM
   [[ -n "$feeder_pid" ]] && kill "$feeder_pid" 2>/dev/null || true
   [[ -n "$mpv_pid" ]] && kill "$mpv_pid" 2>/dev/null || true
   [[ -n "$feeder_pid" ]] && wait "$feeder_pid" 2>/dev/null || true
-  if [[ -n "$mpv_pid" ]]; then
-    wait "$mpv_pid" 2>/dev/null || true
-    # Only the owning shell can certify that its actual child has exited.
-    touch "$state_dir/exited"
-  fi
+  [[ -n "$mpv_pid" ]] && wait "$mpv_pid" 2>/dev/null || true
   if [[ -n "$mpv_pid" ]] && [[ $(cat "$active_player_file" 2>/dev/null || true) == "$mpv_pid" ]]; then
     rm -f "$active_player_file"
   fi
   [[ $lock_held == true ]] && rm -rf "$player_lock" 2>/dev/null || true
   rm -f "$ipc_socket" "$audio_fifo" "$header_file"
 }
-trap cleanup EXIT
-trap 'exit 1' INT TERM
-# Losing the feedback connection must not truncate buffered playback.
-trap '' PIPE HUP
+trap cleanup EXIT INT TERM
 
 # A short control connection can pause, resume, or stop a specific existing
 # player without framing or modifying the raw Float32 audio stream.
@@ -43,40 +34,18 @@ if cmp -s "$header_file" <(printf 'PI_VOICE_CONTROL'); then
   command=
   target_id=
   IFS=' ' read -r command target_id <&3 || true
-  if [[ $command == hello && -z $target_id ]]; then
-    protocol=2
-    printf '{"type":"protocol","version":2}\n' || exit 1
-    audio_header=
-    IFS= read -r audio_header <&3 || exit 1
-    [[ $audio_header == PI_VOICE_AUDIO ]] || exit 1
-  else
-    [[ $target_id =~ ^[0-9]+$ ]] || exit 0
-    target_socket="$runtime_dir/pi-voice-mpv-$target_id.sock"
-    target_state="$runtime_dir/pi-voice-session-$target_id"
-    if [[ $command == pause || $command == resume ]] && [[ -S $target_socket ]]; then
-      paused=false
-      [[ $command == pause ]] && paused=true
-      printf '{"command":["set_property","pause",%s]}\n' "$paused" |
-        socat -T 1 - "UNIX-CONNECT:$target_socket" >/dev/null 2>&1 || true
-    elif [[ $command == stop ]]; then
-      [[ -d $target_state ]] && touch "$target_state/stopped"
-      if [[ -S $target_socket ]]; then
-        printf '{"command":["quit"]}\n' |
-          socat -T 1 - "UNIX-CONNECT:$target_socket" >/dev/null 2>&1 || true
-      fi
-      # A missing socket/PID is not proof of exit. Retain the owner's receipt
-      # for retries when a stop ACK (or natural completion) was lost.
-      for _ in {1..100}; do
-        if [[ -f $target_state/exited ]]; then
-          printf '{"type":"stopped","id":%s}\n' "$target_id" || true
-          break
-        fi
-        [[ -d $target_state ]] || break
-        sleep 0.05
-      done
-    fi
-    exit 0
+  [[ $target_id =~ ^[0-9]+$ ]] || exit 0
+  target_socket="$runtime_dir/pi-voice-mpv-$target_id.sock"
+  if [[ $command == pause || $command == resume ]] && [[ -S $target_socket ]]; then
+    paused=false
+    [[ $command == pause ]] && paused=true
+    printf '{"command":["set_property","pause",%s]}\n' "$paused" |
+      socat -T 1 - "UNIX-CONNECT:$target_socket" >/dev/null 2>&1 || true
+  elif [[ $command == stop ]] && [[ -S $target_socket ]]; then
+    printf '{"command":["quit"]}\n' |
+      socat -T 1 - "UNIX-CONNECT:$target_socket" >/dev/null 2>&1 || true
   fi
+  exit 0
 fi
 
 # Starting a new stream atomically replaces any prior Pi Voice player. This is
@@ -109,9 +78,6 @@ if [[ $old_player =~ ^[0-9]+$ ]] && [[ $old_player_command == *mpv* && $old_play
   kill -0 "$old_player" 2>/dev/null && kill -KILL "$old_player" 2>/dev/null || true
 fi
 
-# ponytail: receipts last until runtime cleanup; add expiry if session volume warrants it.
-rm -rf "$state_dir"
-mkdir -m 700 "$state_dir" || exit 1
 rm -f "$ipc_socket" "$audio_fifo"
 mkfifo "$audio_fifo"
 
@@ -130,11 +96,7 @@ lock_held=false
 # stdin is the TCP audio direction. stdout is deliberately kept free for JSON
 # playback-position feedback over the reverse direction of the same socket.
 # Preserve bytes consumed during control-header detection, then stream the rest.
-if [[ $protocol == 1 ]]; then
-  cat "$header_file" - <&3 >"$audio_fifo" &
-else
-  cat <&3 >"$audio_fifo" &
-fi
+{ cat "$header_file"; cat <&3; } >"$audio_fifo" &
 feeder_pid=$!
 
 for _ in {1..50}; do
@@ -143,11 +105,7 @@ for _ in {1..50}; do
   sleep 0.02
 done
 [[ -S "$ipc_socket" ]] || exit 1
-if [[ $protocol == 2 ]]; then
-  printf '{"type":"session","version":2,"id":%s}\n' "$session_id" || true
-else
-  printf '{"type":"session","id":"%s"}\n' "$session_id" || true
-fi
+printf '{"type":"session","id":"%s"}\n' "$session_id" || exit 0
 
 request_id=0
 while kill -0 "$mpv_pid" 2>/dev/null; do
@@ -159,7 +117,7 @@ while kill -0 "$mpv_pid" 2>/dev/null; do
   position=${response#*\"data\":}
   position=${position%%,*}
   if [[ "$position" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-    printf '{"type":"playback","position":%s}\n' "$position" || true
+    printf '{"type":"playback","position":%s}\n' "$position" || exit 0
   fi
   sleep 0.08
 done
@@ -167,16 +125,7 @@ done
 if kill -0 "$feeder_pid" 2>/dev/null; then
   kill "$feeder_pid" 2>/dev/null || true
 fi
-feeder_status=0
-wait "$feeder_pid" 2>/dev/null || feeder_status=$?
+wait "$feeder_pid" 2>/dev/null || true
 feeder_pid=
-player_status=0
-wait "$mpv_pid" 2>/dev/null || player_status=$?
-if [[ $(cat "$active_player_file" 2>/dev/null || true) == "$mpv_pid" ]]; then
-  rm -f "$active_player_file"
-fi
+wait "$mpv_pid" 2>/dev/null || true
 mpv_pid=
-touch "$state_dir/exited"
-if [[ $protocol == 2 && $player_status == 0 && $feeder_status == 0 && ! -f $state_dir/stopped ]]; then
-  printf '{"type":"complete","id":%s}\n' "$session_id" || true
-fi

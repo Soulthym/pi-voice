@@ -568,6 +568,8 @@ function waitForDrainOrClose(writable) {
 	});
 }
 
+// The shared controller is best-effort; network stop proof must not be swallowed.
+let networkStopFailure;
 function createNetworkSink(output, sampleRate, utterance) {
 	validateNetworkEndpoint(output);
 	const helperPath = fileURLToPath(new URL("./tcp-playback.mjs", import.meta.url));
@@ -580,6 +582,11 @@ function createNetworkSink(output, sampleRate, utterance) {
 	let stderr = "";
 	let readySettled = false;
 	let intentionallyStopped = false;
+	const exited = new Promise((resolve, reject) => {
+		child.once("error", reject);
+		child.once("exit", (code, signal) => code === 0 ? resolve() : reject(new Error(`Remote playback unconfirmed: helper exited ${code ?? signal}`)));
+	});
+	void exited.catch(error => { networkStopFailure = error; });
 	const { promise: ready, resolve: resolveReady, reject: rejectReady } = Promise.withResolvers();
 	const control = child.stdio[3];
 	const controlLines = readline.createInterface({ input: control });
@@ -609,22 +616,18 @@ function createNetworkSink(output, sampleRate, utterance) {
 		},
 		async close() {
 			await ready;
-			if (child.exitCode !== null) return;
+			if (child.exitCode !== null || child.signalCode !== null) return exited;
 			// Android/Termux audio output can buffer well over half a second. Keep
 			// the stream alive with silence so EOF cannot discard the final word.
 			const padding = Buffer.alloc(Math.round(sampleRate * 1) * Float32Array.BYTES_PER_ELEMENT);
 			if (!child.stdin.write(padding)) await waitForDrainOrClose(child.stdin);
-			if (this.stopped) return;
-			const exited = new Promise(resolve => child.once("exit", resolve));
+			if (this.stopped) return exited;
 			child.stdin.end();
 			await exited;
 		},
 		stop() {
 			this.stopped = true;
 			intentionallyStopped = true;
-			const exited = child.exitCode !== null
-				? Promise.resolve()
-				: new Promise(resolve => child.once("exit", resolve));
 			if (!readySettled) {
 				readySettled = true;
 				resolveReady();
@@ -637,9 +640,9 @@ function createNetworkSink(output, sampleRate, utterance) {
 				// The helper may have failed before its control fd became writable.
 			}
 			child.stdin.destroy();
-			const killTimer = setTimeout(() => child.kill("SIGKILL"), 500);
+			const killTimer = setTimeout(() => child.kill("SIGKILL"), 2_000);
 			killTimer.unref?.();
-			return exited.then(() => clearTimeout(killTimer));
+			return exited.finally(() => clearTimeout(killTimer));
 		},
 		setPaused(paused) {
 			control.write(`${paused ? "pause" : "resume"}\n`);
@@ -654,7 +657,8 @@ function createNetworkSink(output, sampleRate, utterance) {
 			if (intentionallyStopped) resolveReady();
 			else rejectReady(new Error(stderr.trim() || `TCP playback helper exited with code ${code ?? "unknown"}`));
 		}
-		if (playback.currentPlayer === sink) playback.clearCurrentPlayer();
+		// Keep failed remote transports owned: helper death is not sink stop proof.
+		if (code === 0 && playback.currentPlayer === sink) playback.clearCurrentPlayer();
 	});
 	return sink;
 }
@@ -675,8 +679,9 @@ function setPlayerPaused(paused) {
 	playback.setPlayerPaused(paused);
 }
 
-function stopPlayer() {
-	return playback.stopPlayer();
+async function stopPlayer() {
+	await playback.stopPlayer();
+	if (networkStopFailure) throw networkStopFailure;
 }
 
 async function writeAudio(sink, pcm) {
@@ -731,9 +736,8 @@ async function runOperation(operation) {
 	}
 	if (operation.type === "end") {
 		const completed = await closePlayer(operation.utterance);
-		// Code-only omissions and failed/replaced sinks still need a terminal
-		// utterance event so the extension cannot retain the device lease forever.
-		if (!completed) send({ type: "idle", utterance: operation.utterance });
+		// Empty utterances complete, but cancelled drains must await the stop ACK.
+		if (!completed && operation.epoch === epoch && !networkStopFailure) send({ type: "idle", utterance: operation.utterance });
 		return;
 	}
 	if (operation.type === "measure") {
@@ -812,7 +816,7 @@ async function pump() {
 	} finally {
 		activeOperation = undefined;
 		pumping = false;
-		if (queue.length > 0 && !shuttingDown) void cancelBarrier.then(() => pump());
+		if (queue.length > 0 && !shuttingDown) void cancelBarrier.then(() => pump()).catch(error => send({ type: "error", message: String(error) }));
 	}
 }
 
@@ -826,7 +830,7 @@ function enqueue(operation) {
 		else queue.splice(backgroundAt, 0, queued);
 	}
 	primeAudio();
-	void cancelBarrier.then(() => pump());
+	void cancelBarrier.then(() => pump()).catch(error => send({ type: "error", message: String(error) }));
 }
 
 function scheduleCancel(cancelId) {
@@ -849,14 +853,17 @@ function scheduleCancel(cancelId) {
 	return cancelBarrier;
 }
 
-function shutdown() {
+function shutdown(cancelId) {
 	if (shuttingDown) return;
 	shuttingDown = true;
 	// Wait for transport stop before exiting; otherwise children can outlive the speech lease.
-	void scheduleCancel().finally(() => {
+	void scheduleCancel(cancelId).then(() => {
 		sentencePool.close();
 		stopAlignment();
 		process.exit(0);
+	}, error => {
+		send({ type: "error", message: String(error) });
+		process.exit(1);
 	});
 }
 
@@ -955,10 +962,10 @@ lines.on("line", line => {
 			setPlayerPaused(message.paused === true);
 			break;
 		case "cancel":
-			void scheduleCancel(message.cancelId);
+			void scheduleCancel(message.cancelId).catch(error => send({ type: "error", message: String(error) }));
 			break;
 		case "shutdown":
-			shutdown();
+			shutdown(message.cancelId);
 			break;
 	}
 });
