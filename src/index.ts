@@ -3481,6 +3481,8 @@ export default async function (pi: ExtensionAPI) {
 			if (requestEpoch === undefined || requestEpoch !== playbackRequestEpoch) return;
 			if (pendingReplay) {
 				const request = pendingReplay;
+				request.restoreTail &&= !narrationManuallyFramed &&
+					(lastAutoScrollTop === undefined || activeScrollView()?.scrollTop === lastAutoScrollTop);
 				if (request.paused && !request.waiting) {
 					playbackPaused = false;
 					narration.setPaused(playbackPaused);
