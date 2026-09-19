@@ -141,3 +141,22 @@ test("cached description sentence previews carry description offsets before acqu
 	assert.ok(host.render(text).includes(`${NARRATION_ACTIVE_MARKER}Second`), "skipUnits maps to the second description sentence");
 	assert.equal(MockedVoiceWorkerClient.instances.at(-1)?.sent.length ?? 0, 0, "failed acquisition never sends audio");
 });
+
+
+test("paused buffered idle records timing without advancing sentence selection", async t => {
+	const host = await setup(t);
+	host.addMessage("answer", null, assistant("First sentence. Second sentence. Third sentence."));
+	await host.start(); await host.shortcut("f11"); await settle();
+	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
+	const segments = worker.sent as Array<{ text: string; utterance: number; segmentId: number }>;
+	segments.forEach((segment, i) => worker.emit({ type: "segment-audio", utterance: segment.utterance,
+		segmentId: segment.segmentId, start: i * 2, duration: 2 }));
+	worker.emit({ type: "playback", utterance: segments[0].utterance, position: 0.5 });
+	await host.shortcut("f8");
+	worker.emit({ type: "idle", utterance: segments[0].utterance });
+	await settle();
+	const before = segments.length;
+	await host.shortcut("f9"); await settle();
+	assert.equal(segments[before]?.text, "Second sentence.");
+	assert.equal(worker.pauses.at(-1), true);
+});

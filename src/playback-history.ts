@@ -429,13 +429,13 @@ export class PlaybackHistory {
 		this.#completeTimingsIfReady(utterance);
 	}
 
-	finishUtterance(utterance: number | undefined): void {
+	finishUtterance(utterance: number | undefined, advanceCursor = true): void {
 		if (utterance === undefined || !this.#utterances.has(utterance)) return;
 		this.#finishedUtterances.add(utterance);
 		this.#endedUtterances.add(utterance);
 		this.#completeTimingsIfReady(utterance);
 		const capture = this.#utterances.get(utterance);
-		if (!capture?.valid || capture.epoch !== this.#playbackEpoch ||
+		if (!advanceCursor || !capture?.valid || capture.epoch !== this.#playbackEpoch ||
 			(this.#activeUtterance !== undefined && utterance !== this.#activeUtterance)) return;
 		const last = capture.segments.at(-1);
 		if (last) capture.record.cursor = { sourceOffset: last.sourceOffset, skipUnits: last.skipUnits };

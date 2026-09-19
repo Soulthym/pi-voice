@@ -1404,7 +1404,7 @@ export default async function (pi: ExtensionAPI) {
 				const narratedIdle = event.utterance !== undefined && playbackUtterances.delete(event.utterance);
 				if (!inputInProgress) state = "idle";
 				downloadPercent = undefined;
-				playbackHistory.finishUtterance(event.utterance);
+				playbackHistory.finishUtterance(event.utterance, !playbackPaused);
 				playbackPositionEstimated = false;
 				if (event.utterance !== undefined) {
 					const snapshot = playbackHistory.snapshotForUtterance(event.utterance);
