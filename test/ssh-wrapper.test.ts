@@ -13,7 +13,7 @@ const TERMUX_WRAPPER = path.resolve("termux/pi-voice-ssh");
 const CORE_TOOLS = [
 	"awk", "basename", "bash", "cat", "chmod", "cmp", "cut", "date", "dd", "dirname", "env", "grep", "head", "id", "kill",
 	"ln", "mkdir", "mkfifo", "mv", "rmdir", "printf", "readlink", "rm", "sh", "sha256sum", "sleep", "sort", "stat", "tail", "touch",
-	"tr", "base64", "setsid", "timeout", "uname", "pkill",
+	"tr", "base64", "setsid", "timeout", "uname",
 ];
 
 /** socat stub that really dials TCP endpoints so liveness probes behave. */
@@ -26,7 +26,11 @@ exit 0`;
 function restrictedPath(root: string, fakes: Record<string, string>): string {
 	const bin = path.join(root, "bin");
 	fs.mkdirSync(bin, { recursive: true });
-	for (const [name, body] of Object.entries(fakes)) {
+	// Never let wrapper cleanup signal other tests or live voice sessions.
+	for (const [name, body] of Object.entries({
+		pkill: '[[ $* == "-f pi-voice-audio-session" && -n ${FAKE_STALE_PLAYER_PID:-} ]] && kill "$FAKE_STALE_PLAYER_PID"; exit 0',
+		...fakes,
+	})) {
 		const file = path.join(bin, name);
 		fs.writeFileSync(file, `#!/usr/bin/env bash\n${body}\n`);
 		fs.chmodSync(file, 0o755);
@@ -356,8 +360,7 @@ test("termux wrapper runs the lifecycle and clears stale players", async () => {
 	);
 	fs.chmodSync(path.join(root, "counting-bridge"), 0o755);
 
-	// A leftover player from a previous bridge instance: argv[0] renamed so
-	// pkill -f can find it exactly like the real session scripts.
+	// Simulate a leftover player; the pkill fixture may signal only this PID.
 	const { spawn } = await import("node:child_process");
 	const stalePlayer = spawn("bash", ["-c", "exec -a pi-voice-audio-session sleep 60"], {
 		detached: true,
@@ -372,6 +375,7 @@ test("termux wrapper runs the lifecycle and clears stale players", async () => {
 		PREFIX: path.join(root, "com.termux"),
 		PI_VOICE_DEVICE_NAME: "t",
 		PI_VOICE_CLIENT_COMMAND: path.join(root, "counting-bridge"),
+		FAKE_STALE_PLAYER_PID: String(stalePlayer.pid),
 		PI_VOICE_AUDIO_PORT: String(audioPort),
 		FAKE_SSH_LOG: path.join(root, "ssh.log"),
 	});
