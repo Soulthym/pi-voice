@@ -2134,8 +2134,11 @@ export default async function (pi: ExtensionAPI) {
 			const contextual = entry ? completedEntryMessages(activeContext, entry, config.mode, true)
 				.find(message => message.id === target.id) : undefined;
 			const completed = contextual && completedCodeItems(contextual).find(candidate => candidate.sourceEnd === item.source.end);
-			const plan = codeDescriptionCache.get(descriptionCacheKey(activeContext, completed?.block ?? item.block,
-				completed?.identityContext ?? (() => structuredContextIdentity([]))));
+			const source = pendingReplay?.source ?? liveSource;
+			const messages = config.codeDescriptionContext === "conversation" && !completed && source
+				? assistantCodeContext(source.before, source.assistant, target.contentIndex ?? 0, item.source.end, source.final) : [];
+			const plan = messages && codeDescriptionCache.get(descriptionCacheKey(activeContext, completed?.block ?? item.block,
+				completed?.identityContext ?? (() => structuredContextIdentity(messages))));
 			const chunks = plan && !plan.omitted ? chunkCodeNarration(plan) : [];
 			const skip = Math.min(target.skipUnits ?? 0, Math.max(0, chunks.length - 1));
 			const chunk = chunks[skip];
@@ -2165,6 +2168,7 @@ export default async function (pi: ExtensionAPI) {
 		framed = false,
 		restoreTail = false,
 		prepareContext?: ExtensionContext,
+		explicitPlay = false,
 	): Promise<void> => {
 		if (!interactiveVoiceSession) return;
 		if (!queued) restoreBottomAfterSpeech = restoreTail;
@@ -2198,7 +2202,7 @@ export default async function (pi: ExtensionAPI) {
 			recordTimings,
 			previewTarget,
 			restoreTail,
-			paused: pendingReplay?.paused ?? playbackPaused,
+			paused: explicitPlay ? false : pendingReplay?.paused ?? playbackPaused,
 			waiting: true,
 			continueLiveTurn,
 			source: replaySource,
@@ -2392,7 +2396,11 @@ export default async function (pi: ExtensionAPI) {
 			liveCaptureOrigin = sourceOffset;
 			vocalizer.setNarrationSourceOffset(0, target.skipUnits ?? 0);
 			const prefix = request.target.tailPrefix ?? target.text.slice(0, sourceOffset);
-			vocalizer.seedLivePrefix(prefix);
+			const content = (replaySource?.assistant as { content?: unknown[] } | undefined)?.content;
+			const closedPrefix = prefix === target.text && (replaySource?.final || (liveTargetIndex ?? 0) < (content?.length ?? 0) - 1);
+			// A closed block has no unfinished unit to retain at Tail.
+			if (closedPrefix) vocalizer.setNarrationSourceOffset(prefix.length);
+			vocalizer.seedLivePrefix(closedPrefix ? "" : prefix);
 			vocalizer.pushDelta(target.text.slice(prefix.length));
 			// Later content blocks can arrive while a dirty/paused live target is
 			// retained. Catch up from the source snapshot before accepting deltas.
@@ -3650,14 +3658,17 @@ export default async function (pi: ExtensionAPI) {
 		const selected = fromTail || (movement === 0 && pausedForAttention) ? undefined : playbackHistory.selected();
 		const liveMessages = liveNavigationMessages();
 		const liveIndex = liveMessages.findIndex(message => message.id === selected?.id);
+		const livePosition = liveSource && !liveSource.final ? [...liveBlockIds].find(([, id]) => id === selected?.id)?.[0] : undefined;
 		const liveTarget = fromTail ? liveMessages.at(-1)
-			: liveIndex >= 0 ? liveMessages[liveIndex + movement] : undefined;
+			: liveIndex >= 0 ? liveMessages[liveIndex + movement]
+			: livePosition !== undefined && movement === 1 ? liveMessages.find(message => message.contentIndex! > livePosition)
+			: livePosition !== undefined && movement === -1 ? liveMessages.findLast(message => message.contentIndex! < livePosition) : undefined;
 		if (liveTarget) {
 			const preview = { ...liveTarget, time: 0, sourceOffset: 0 };
 			previewPlaybackTarget(preview, !automatic);
 			return preview;
 		}
-		if (liveIndex >= 0 && movement > 0) return;
+		if ((liveIndex >= 0 || livePosition !== undefined) && movement > 0) return;
 		const selectedEntry = selected ? branch.findIndex(entry => entry.id === selected.id || selected.id.startsWith(`${entry.id}:`)) : -1;
 		const live = liveIndex >= 0 || (selectedEntry < 0 && !ownerTurnEnded && livePlaybackId !== undefined && selected?.id.startsWith("live:"));
 		if (movement === 1 && selectedEntry < 0 && !live) return; // No selection means the latest completed response.
@@ -3701,7 +3712,7 @@ export default async function (pi: ExtensionAPI) {
 		playbackPaused = false;
 		narration.setPaused(playbackPaused);
 		// Select now; canonical timing/history catch-up yields inside playTarget.
-		void playTarget(target, !prepared || !playbackHistory.hasCompleteTimingFor(target.id), true, automatic, true, restoreTail, prepared ? undefined : ctx);
+		void playTarget(target, !prepared || !playbackHistory.hasCompleteTimingFor(target.id), true, automatic, true, restoreTail, prepared ? undefined : ctx, true);
 		// Let already-warm preparation finish its microtask without waiting on cold slices/device handoff.
 		await Promise.resolve();
 	};

@@ -10,6 +10,9 @@ import { DeviceRouter, type ConnectionDevice } from "../src/device-router.js";
 import { PhoneInputClient, type PhoneCapture } from "../src/phone-input.js";
 import { CodeDescriptionCache } from "../src/code-description-cache.js";
 import * as describer from "../src/code-describer.js";
+import { assistantCodeContext, structuredContextIdentity } from "../src/code-context.js";
+import { SpeakableStream } from "../src/speakable.js";
+import { DEFAULT_VOICE_CONFIG } from "../src/config.js";
 
 let keys = 0;
 mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: MockedVoiceWorkerClient } });
@@ -972,13 +975,26 @@ for (const stopReason of ["aborted", "error"]) test(`pending live replay is reti
 for (const code of [false, true]) test(`live prefix cursor survives a tick without double offsets (code: ${code})`, async t => {
 	const host = await setup(t);
 	const previews = t.mock.method(NarrationProgress.prototype, "registerSegment");
-	if (code) t.mock.method(CodeDescriptionCache.prototype, "get", () => ({ guided: true,
-		records: [{ speech: "B description. C description. D description.",
-			operations: [{ kind: "line-add", id: "active", range: { startLine: 1, endLine: 1 } }] }] }));
+	let expectedKey: string;
+	if (code) {
+		const config = JSON.parse(await fs.readFile(process.env.PI_VOICE_CONFIG!, "utf8"));
+		await fs.writeFile(process.env.PI_VOICE_CONFIG!, JSON.stringify({ ...config, codeDescriptionContext: "conversation" }));
+		t.mock.method(CodeDescriptionCache.prototype, "get", (key: string) => key === expectedKey ? ({ guided: true,
+			records: [{ speech: "B description. C description. D description.",
+				operations: [{ kind: "line-add", id: "active", range: { startLine: 1, endLine: 1 } }] }] }) : undefined);
+	}
 	await host.start(); await host.emit("before_agent_start", {});
 	const text = "A deliberately much longer first sentence than any subsequent sentence. " +
-		(code ? "\n```js\nconst x = 1;\n```\nAfter code. " : "B sentence. C sentence. D sentence. ");
+		(code ? "\n```js\nconst x = 1;\n```\nAfter code. \n```js\nconst y = 2;" : "B sentence. C sentence. D sentence. ");
 	const message = assistant(text, "pending");
+	if (code) {
+		const stream = new SpeakableStream();
+		const item = [...stream.push(text), ...stream.flush()].find(item => item.kind === "code")!;
+		assert.equal(item.kind, "code");
+		if (item.kind === "code") expectedKey = describer.codeDescriptionCacheKey(host.ctx, item.block,
+			DEFAULT_VOICE_CONFIG.editModel, DEFAULT_VOICE_CONFIG.codeNarration,
+			structuredContextIdentity(assistantCodeContext([], message, 0, item.source.end)!), "conversation");
+	}
 	await host.emit("message_start", { message });
 	await host.emit("message_update", { message, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: text } }); await settle();
 	await host.shortcut("f9"); await settle();
@@ -1062,6 +1078,10 @@ for (const trailing of ["toolCall", "thinking"]) test(`live final eligible sente
 	await host.shortcut("f9"); await settle();
 	assert.ok(host.render("First sentence. Final sentence.").includes(`${NARRATION_ACTIVE_MARKER}Final`));
 	assert.equal(worker.sent.length, before, "closed final sentence may still await stream flush, but must be selected instead of Tail");
+	await host.shortcut("f9"); await settle();
+	const atTail = worker.sent.length;
+	await host.emit("message_end", { message: { ...message, stopReason: "stop" } }); await settle();
+	assert.equal(worker.sent.length, atTail, "closing the message must not replay the consumed final unit");
 });
 
 test("live message navigation skips markup-only blocks", async t => {
@@ -1076,3 +1096,33 @@ test("live message navigation skips markup-only blocks", async t => {
 	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
 	assert.equal((worker.sent.at(-1) as { text: string }).text, "Last sentence.");
 });
+
+ test("F11 explicitly resumes while paused navigation awaits cancellation", async t => {
+ const host = await setup(t);
+ await host.start();
+ const message = assistant("First sentence. Second sentence. Third sentence. ", "pending");
+ await host.emit("message_start", { message });
+ await host.emit("message_update", { message, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: message.content[0].text } }); await settle();
+ const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
+ await host.shortcut("f8");
+ const cancel = t.mock.method(worker, "cancel", () => 702 as never);
+ void host.shortcut("f9"); await settle();
+ await host.shortcut("f11"); await settle();
+ cancel.mock.restore();
+ worker.emit({ type: "idle", cancelId: 702 }); await settle();
+ assert.equal(worker.pauses.at(-1), false);
+ });
+
+ test("F10 moves forward from a selected silent live block before any tick", async t => {
+ const host = await setup(t);
+ host.addMessage("old", null, assistant("Historical sentence."));
+ await host.start();
+ const message = { ...assistant("", "pending"), content: [
+ { type: "text", text: "---\n" }, { type: "text", text: "Next live sentence. " },
+ ] };
+ await host.emit("message_start", { message });
+ await host.emit("message_update", { message, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "---\n" } }); await settle();
+ await host.shortcut("f10"); await settle();
+ const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
+ assert.equal((worker?.sent.at(-1) as { text: string })?.text, "Next live sentence.");
+ });
