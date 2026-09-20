@@ -131,6 +131,9 @@ test("streaming waits through following prose and tool-separated blocks; replay/
 	assert.equal(host.modelRequests.length, 0);
 	await delta(0, "Following explanation.\n");
 	assert.equal(host.modelRequests.length, 0);
+	await host.shortcut("f11"); await settle();
+	assert.deepEqual(spoken(), ["Preceding prose.", "Preceding prose."]);
+	assert.equal(host.modelRequests.length, 0, "live replay must still wait for the agreed code context boundary");
 	partial.content.push({ type: "toolCall", id: "call", name: "read", arguments: { path: "source.ts" } }, { type: "text", text: "" });
 	await delta(2, "More relevant prose.\n``");
 	assert.equal(host.modelRequests.length, 0);
@@ -147,7 +150,7 @@ test("streaming waits through following prose and tool-separated blocks; replay/
 	await host.emit("message_end", { message: complete }); await settle();
 	assert.equal(host.modelRequests.length, 2);
 	assert.match(JSON.stringify(host.modelRequests[1].context), /Last explanation/);
-	assert.deepEqual(spoken(), ["Preceding prose.", "The code performs the requested operation.", "Following explanation.", "More relevant prose.", "The code performs the requested operation.", "Last explanation."]);
+	assert.deepEqual(spoken(), ["Preceding prose.", "Preceding prose.", "The code performs the requested operation.", "Following explanation.", "More relevant prose.", "The code performs the requested operation.", "Last explanation."]);
 	const sent = worker.sent as Array<{ utterance: number; segmentId: number; text: string }>;
 	const times = new Map<number, number>();
 	for (const segment of sent) {

@@ -179,13 +179,17 @@ test("STT model and dtype changes drain capture and release its reservation", as
 test("explicit dirty-stream resume preserves prefix and future deltas in order", async t => {
 	const { host, worker } = await lifecycleHost(t);
 	await host.emit("message_start", { message: assistant("", "pending") });
-	await delta(host, "First sentence. "); await settle();
+	let text = "";
+	const liveDelta = (chunk: string) => host.emit("message_update", {
+		message: assistant(text += chunk, "pending"), assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: chunk },
+	});
+	await liveDelta("First sentence. "); await settle();
 	await host.command("speed 1.2");
-	await delta(host, "Second sentence. ");
+	await liveDelta("Second sentence. ");
 	const before = worker.sent.length;
 	const sent = mock.method(worker, "sendSegment");
 	await host.shortcut("f8"); await settle();
-	await delta(host, "Third sentence.");
+	await liveDelta("Third sentence.");
 	const complete = assistant("First sentence. Second sentence. Third sentence.");
 	host.addMessage("b", "a", complete);
 	await host.emit("message_end", { message: complete });

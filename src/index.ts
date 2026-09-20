@@ -334,7 +334,7 @@ export default async function (pi: ExtensionAPI) {
 	let liveDisplayOffset = 0;
 	let liveSource: { assistant: unknown; final: boolean; before: Message[]; existingEntries: Set<string>; waiters: Set<() => void> } | undefined;
 	let liveBlockIndex: number | undefined;
-	const liveBlockIds = new Map<number, string>();
+	let liveBlockIds = new Map<number, string>();
 	const setDescriptionSource = (contentIndex: number, suffixOffset = 0): void => {
 		const source = liveSource?.assistant === speechAssistantMessage ? liveSource : undefined;
 		const assistant = speechAssistantMessage;
@@ -400,6 +400,9 @@ export default async function (pi: ExtensionAPI) {
 				restoreTail: boolean;
 				paused: boolean;
 				waiting: boolean;
+				continueLiveTurn: boolean;
+				source: typeof liveSource;
+				blockIds: Map<number, string>;
 			}
 		| undefined;
 	let playbackPositionEstimated = false;
@@ -1715,7 +1718,7 @@ export default async function (pi: ExtensionAPI) {
 
 	const completeOwnerSpeech = (): void => {
 		const expectedUtterance = ownerContentExpected ? lastOwnerUtterance : projectPrefixUtterance;
-		if (!ownsSpeech || !ownerTurnEnded || completingOwnerSpeech || playbackPaused || deviceRebind || transportStopPending || inputStopPending) return;
+		if (!ownsSpeech || !ownerTurnEnded || completingOwnerSpeech || pendingReplay || playbackPaused || deviceRebind || transportStopPending || inputStopPending) return;
 		if (expectedUtterance === undefined) projectAnnouncementPending = false;
 		else if (completedOwnerUtterance !== expectedUtterance) return;
 		completingOwnerSpeech = true;
@@ -2060,16 +2063,23 @@ export default async function (pi: ExtensionAPI) {
 		if (!interactiveVoiceSession) return;
 		if (!queued) restoreBottomAfterSpeech = restoreTail;
 		const sourceOffset = Math.max(0, Math.min(target.text.length, target.sourceOffset));
-		const suffix = target.text.slice(sourceOffset);
-		const liveTargetIndex = [...liveBlockIds].find(([, id]) => id === target.id)?.[0];
-		const continueLiveTurn = queued && queueIncomingWhilePaused && (livePlaybackId === target.id || liveTargetIndex !== undefined);
+		let suffix = target.text.slice(sourceOffset);
+		const retry = pendingReplay?.target.id === target.id ? pendingReplay : undefined;
+		const replayBlockIds = retry?.blockIds ?? liveBlockIds;
+		let liveTargetIndex = [...replayBlockIds].find(([, id]) => id === target.id)?.[0];
+		const replaySource = retry?.source ?? (liveSource && !liveSource.final &&
+			(livePlaybackId === target.id || liveTargetIndex !== undefined) ? liveSource : undefined);
+		const continueLiveTurn = !!replaySource && (livePlaybackId === target.id || (queued && queueIncomingWhilePaused) || retry?.continueLiveTurn === true);
 		if (!suffix.trim() && !continueLiveTurn) return;
 		if (pendingSpeechPreemption) {
 			activeContext?.ui.notify("Voice device handoff is still stopping the previous transport", "warning");
 			return;
 		}
 
-		if (!queued) queuedPausedMessages.length = 0;
+		if (!queued) {
+			queuedPausedMessages.length = 0;
+			queueIncomingWhilePaused = false;
+		}
 		attentionSuppressed = false;
 		coordinator?.setAttentionEnabled(config.enabled);
 		coordinator?.cancelSpeechAcquisition();
@@ -2082,8 +2092,15 @@ export default async function (pi: ExtensionAPI) {
 			restoreTail,
 			paused: playbackPaused,
 			waiting: true,
+			continueLiveTurn,
+			source: replaySource,
+			blockIds: replayBlockIds,
 		};
 		pendingReplay = request;
+		if (replaySource && !replaySource.final) {
+			queueIncomingWhilePaused = true;
+			vocalizer.setPlaybackPaused(true);
+		}
 		// Keep the requested target usable by F6–F10 and F8 while another process
 		// acknowledges shutdown. Do not destroy the current sink before ownership.
 		playbackHistory.beginCapture(target.id, target.text, target.time, false, sourceOffset, target.skipUnits ?? 0);
@@ -2096,7 +2113,8 @@ export default async function (pi: ExtensionAPI) {
 		if (prepareContext) {
 			if (!await preparePlaybackMessages(prepareContext, request.epoch) || pendingReplay !== request) return;
 			const messages = syncPlaybackMessages(prepareContext, false, true);
-			if (!messages.some(message => message.id === target.id && message.text === target.text)) {
+			target = request.target;
+			if (!replaySource && !messages.some(message => message.id === target.id && message.text === target.text)) {
 				pendingReplay = undefined;
 				return;
 			}
@@ -2166,20 +2184,62 @@ export default async function (pi: ExtensionAPI) {
 			return;
 		}
 
-		if (!activateSpeechOwnership(continueLiveTurn ? "turn" : "replay", true)) {
+		if (!activateSpeechOwnership(continueLiveTurn && !replaySource?.final ? "turn" : "replay", true)) {
 			pendingReplay = undefined;
 			return;
 		}
+		if (replaySource) {
+			// Keep collecting the source until the old sink acknowledges cancellation.
+			// Starting continuation earlier would lose deltas behind transportStopPending.
+			const cancelId = clearPlaybackTransport();
+			request.epoch = playbackRequestEpoch;
+			pendingReplay = request;
+			try { await waitForTransportCancellation(cancelId); }
+			catch (error) {
+				if (pendingReplay === request) {
+					request.waiting = false;
+					request.paused = playbackPaused = true;
+					narration.setPaused(true);
+					refreshStatus();
+					activeContext?.ui.notify(`Voice replay stop failed; ownership retained: ${String(error)}`, "error");
+				}
+				return;
+			}
+			if (pendingReplay !== request || request.epoch !== playbackRequestEpoch) return;
+		}
+		// Preparation, microphone shutdown, device adoption and acquisition can all
+		// outlive the prefix or even message_end. Replay the latest source once.
+		if (replaySource) {
+			target = request.target;
+			const blocks = eligibleAssistantBlocks(replaySource.assistant, config.mode);
+			liveTargetIndex ??= blocks[0]?.contentIndex;
+			const block = blocks.find(block => block.contentIndex === liveTargetIndex);
+			if (block) target = { ...target, ...block };
+			suffix = target.text.slice(sourceOffset);
+			speechConversationMessages = replaySource.before;
+			speechAssistantMessage = replaySource.assistant;
+			narration.setCompletedText(target.text, target.messageType, target.contentIndex, target.displayOffset);
+			narration.previewSourceOffset(sourceOffset);
+			queueIncomingWhilePaused = false;
+		}
+		if (!queued) {
+			queueIncomingWhilePaused = false;
+			queuedPausedMessages.length = 0;
+		}
+		const currentLiveSource = replaySource === liveSource;
+		speechPurpose = continueLiveTurn && currentLiveSource && !replaySource?.final ? "turn" : "replay";
 		pendingReplay = undefined;
-		liveTurnNarrationActive = continueLiveTurn;
-		if (continueLiveTurn) {
+		liveTurnNarrationActive = continueLiveTurn && currentLiveSource;
+		if (continueLiveTurn && currentLiveSource) {
 			queueIncomingWhilePaused = false;
 			// Capture can be ahead of the audible block when a setting dirties the turn.
 			livePlaybackId = target.id;
 			liveBlockIndex = liveTargetIndex;
+			liveDisplayOffset = target.displayOffset ?? 0;
+			if (liveTargetIndex !== undefined) liveBlockIds.set(liveTargetIndex, target.id);
 			ownedSpeechText = target.text;
 		}
-		if (displacedLiveTurn && !continueLiveTurn) {
+		if (displacedLiveTurn && (!continueLiveTurn || !currentLiveSource)) {
 			// Keep the streaming response independent from this completed snapshot.
 			// Later deltas are collected for attention instead of joining replay audio.
 			speechBlocked = true;
@@ -2189,15 +2249,16 @@ export default async function (pi: ExtensionAPI) {
 		codeWorkEpoch += 1;
 		if (activeContext) scheduleMissingCodeDescriptions(activeContext);
 		cancelTimingWorkers();
-		clearPlaybackTransport();
+		if (!replaySource) clearPlaybackTransport();
 		// Timeline movement replaces the sink without changing transport state.
 		// Sticky worker pause applies even before the replacement sink exists.
 		vocalizer.setPlaybackPaused(request.paused);
 		playbackHistory.beginCapture(target.id, target.text, target.time, recordTimings, sourceOffset, target.skipUnits ?? 0);
+		if (replaySource) playbackHistory.updateText(target.id, target.text, target);
 		const contextual = activeContext
 			? completedAssistantMessages(activeContext, config.mode, config.codeDescriptionContext === "conversation").find(message => message.id === target.id)
 			: undefined;
-		if (!continueLiveTurn) {
+		if (!replaySource) {
 			speechConversationMessages = contextual?.conversationMessages ?? [];
 			speechAssistantMessage = contextual?.assistantMessage;
 		}
@@ -2215,11 +2276,36 @@ export default async function (pi: ExtensionAPI) {
 			vocalizer.pushDelta(suffix);
 			// Later content blocks can arrive while a dirty/paused live target is
 			// retained. Catch up from the source snapshot before accepting deltas.
-			for (const block of eligibleAssistantBlocks(liveSource?.assistant, config.mode)) {
-				if (block.contentIndex > (liveBlockIndex ?? -1)) pushLiveDelta(block.messageType, block.contentIndex, block.text);
+			if (liveTargetIndex !== undefined) replayBlockIds.set(liveTargetIndex, target.id);
+			for (const block of eligibleAssistantBlocks(replaySource?.assistant, config.mode)) {
+				if (block.contentIndex <= (liveTargetIndex ?? -1)) continue;
+				if (currentLiveSource) pushLiveDelta(block.messageType, block.contentIndex, block.text);
+				else {
+					// A new tool turn owns live capture now. Drain the old source as
+					// completed blocks without lending its IDs to the new assistant.
+					vocalizer.flush();
+					const offset = narration.startMessage();
+					const id = replayBlockIds.get(block.contentIndex) ?? `live:${++nextLivePlaybackId}`;
+					replayBlockIds.set(block.contentIndex, id);
+					playbackHistory.beginCapture(id, block.text, 0, true, 0, 0, false);
+					playbackHistory.updateText(id, block.text, block);
+					setDescriptionSource(block.contentIndex);
+					narration.pushDelta(block.messageType, block.contentIndex, block.text, block.displayOffset);
+					vocalizer.setNarrationSourceOffset(offset);
+					vocalizer.pushDelta(block.text);
+				}
+			}
+			if (replaySource?.final) {
+				vocalizer.flush();
+				if (activeContext) finalizePlaybackMessages(activeContext,
+					eligibleAssistantBlocks(replaySource.assistant, config.mode).flatMap(block => {
+						const id = replayBlockIds.get(block.contentIndex);
+						return id ? [{ ...block, id }] : [];
+					}), replaySource.assistant, replaySource.existingEntries, replayBlockIds);
+				if (currentLiveSource) livePlaybackId = undefined;
 			}
 		} else vocalizer.speakFrom(suffix, sourceOffset, target.skipUnits ?? 0);
-		ownerTurnEnded = !continueLiveTurn;
+		ownerTurnEnded = !continueLiveTurn || !!replaySource?.final;
 		completeOwnerSpeech();
 	};
 
@@ -2294,6 +2380,7 @@ export default async function (pi: ExtensionAPI) {
 		targets: Array<{ id: string; text: string; contentIndex: number }>,
 		assistant: unknown,
 		existingEntries: Set<string>,
+		blockIds = liveBlockIds,
 	): void => {
 		if (targets.length === 0) return;
 		for (const target of targets) playbackHistory.updateText(target.id, target.text);
@@ -2307,6 +2394,8 @@ export default async function (pi: ExtensionAPI) {
 				const completed = messages.find(message => message.id === (target.contentIndex === 0 ? entry.id : `${entry.id}:${target.contentIndex}`));
 				if (!completed) continue;
 				playbackHistory.rename(target.id, completed);
+				if (pendingReplay?.target.id === target.id) Object.assign(pendingReplay.target, completed);
+				if (blockIds.get(target.contentIndex) === target.id) blockIds.set(target.contentIndex, completed.id);
 				const queued = queuedPausedMessages.find(message => message.id === target.id);
 				if (queued) Object.assign(queued, completed);
 			}
@@ -3008,9 +3097,10 @@ export default async function (pi: ExtensionAPI) {
 		if (interactiveVoiceSession && (event.message as { role?: string })?.role === "assistant") {
 			attentionSuppressed = false;
 			coordinator?.setAttentionEnabled(config.enabled);
-			queueIncomingWhilePaused = config.enabled && playbackPaused;
+			queueIncomingWhilePaused = config.enabled && (playbackPaused || !!pendingReplay);
 			liveBlockIndex = undefined;
-			liveBlockIds.clear();
+			liveBlockIds = new Map();
+			if (pendingReplay) livePlaybackId = undefined;
 			liveSource = { assistant: event.message, final: false,
 				existingEntries: new Set(activeContext?.sessionManager.getBranch().filter(entry => entry.type !== "message" || entry.message !== event.message).map(entry => entry.id)), before: activeContext && config.codeDescriptionContext === "conversation"
 				? liveConversationBefore(activeContext).messages : [], waiters: new Set() };
@@ -3065,7 +3155,7 @@ export default async function (pi: ExtensionAPI) {
 			if (liveBlockIndex !== undefined) {
 				vocalizer.flush();
 				vocalizer.setNarrationSourceOffset(narration.startMessage());
-				livePlaybackId = `live:${++nextLivePlaybackId}`;
+				livePlaybackId = liveBlockIds.get(contentIndex) ?? `live:${++nextLivePlaybackId}`;
 				playbackHistory.beginCapture(livePlaybackId, "", 0, true, 0, 0, false);
 			}
 			liveBlockIndex = speechContentIndex = contentIndex;
@@ -3093,7 +3183,7 @@ export default async function (pi: ExtensionAPI) {
 			delta.type === "text_delta" || (delta.type === "thinking_delta" && config.mode === "all")
 				? delta.delta
 				: undefined;
-		if (deviceRebind || transportStopPending) {
+		if (deviceRebind || transportStopPending || (pendingReplay && !queueIncomingWhilePaused)) {
 			speechBlocked = true;
 			if (speakableDelta !== undefined) blockedSpeechText += speakableDelta;
 			return;
@@ -3143,6 +3233,16 @@ export default async function (pi: ExtensionAPI) {
 			for (const check of liveSource.waiters) check();
 		}
 		const eligible = eligibleAssistantBlocks(event.message, config.mode).filter(block => hasSpeakableAudio(block.text));
+		if ((stopReason === "aborted" || stopReason === "error") && pendingReplay?.source && pendingReplay.source === liveSource) {
+			queueIncomingWhilePaused = false;
+			queuedPausedMessages.length = 0;
+			liveTurnNarrationActive = false;
+			const cancelId = clearPlaybackTransport();
+			narration.finish();
+			livePlaybackId = undefined;
+			if (!speechReservedForInput && !inputInProgress) releaseAfterTransportCancellation(cancelId, true);
+			return;
+		}
 		if (queueIncomingWhilePaused) {
 			if (config.enabled && !attentionSuppressed && stopReason !== "aborted" && stopReason !== "error" && !(config.mode === "yield" && stopReason === "toolUse")) {
 				const targets = eligible.map(block => {
@@ -3274,9 +3374,8 @@ export default async function (pi: ExtensionAPI) {
 		},
 	});
 
-	// Playback controls act on completed assistant snapshots and never mutate a
-	// response that is still generating. Manual controls are also how users
-	// preempt speech ownership, so they must stay available while Pi streams.
+	// Manual controls also preempt speech ownership while Pi streams. Live replay
+	// replaces only the transport; the source continues collecting deltas.
 	const requireEnabledVoice = (ctx: ExtensionContext): boolean => {
 		if (!config.enabled) {
 			ctx.ui.notify("Voice mode is disabled", "warning");
@@ -3331,12 +3430,6 @@ export default async function (pi: ExtensionAPI) {
 
 	const replaySelected = async (ctx: ExtensionContext, automatic = false): Promise<void> => {
 		if (!requireEnabledVoice(ctx)) return;
-		// ponytail: reject live replay until preparation can preserve live capture/context;
-		// previewing it as completed history would detach ongoing ticks and deltas.
-		if (!ownerTurnEnded && livePlaybackId !== undefined && playbackHistory.selected()?.id.startsWith("live:")) {
-			ctx.ui.notify("Replay is unavailable until this assistant response finishes streaming", "warning");
-			return;
-		}
 		if (!automatic) {
 			restoreBottomAfterSpeech = false;
 			bottomPinned = false;
