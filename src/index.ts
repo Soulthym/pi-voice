@@ -64,7 +64,7 @@ import { anchorLineForMessage, computeAutoScrollTop, isManualScrollAway } from "
 import { applySpokenEdit, parseEditModelSelector, resolveDictationCandidates } from "./prompt-editor.js";
 import { formatAsrDisplay } from "./asr-display.js";
 import { narrationRenderKey } from "./render-identity.js";
-import { frameNarrationViewport, invalidateNarrationMarkdown, narrationJumpButton } from "./narration-render.js";
+import { frameNarrationViewport, invalidateNarrationMarkdown, narrationJumpButton, withNarrationLayout } from "./narration-render.js";
 import { SessionCoordinator, type AttentionRequest, type WaitingSession } from "./session-coordinator.js";
 import { supportsInteractiveVoice } from "./session-mode.js";
 import { Vocalizer } from "./vocalizer.js";
@@ -473,7 +473,8 @@ export default async function (pi: ExtensionAPI) {
 	const invalidateNarration = (): void => {
 		const sources = new Set(narration.sourceTexts);
 		const affected = new Set([...renderedNarrationSources, ...sources]);
-		if (invalidateAllNarration || !invalidateNarrationMarkdown(narrationTui, affected, changedDescriptionCode)) {
+		const attached = invalidateNarrationMarkdown(narrationTui, affected, changedDescriptionCode);
+		if (invalidateAllNarration || !attached) {
 			narrationTui?.invalidate();
 		}
 		renderedNarrationSources = sources;
@@ -1124,8 +1125,9 @@ export default async function (pi: ExtensionAPI) {
 	const renderedNarrationMarkerLine = (text: string, width: number): number => {
 		if (!text) return -1;
 		try {
-			const transformed = transformNarrationMarkdown(text, "assistant");
-			const component = new Markdown(transformed, 1, 0, getMarkdownTheme());
+			const component = withNarrationLayout(new Markdown(text, 1, 0, getMarkdownTheme(), undefined, {
+				transform: source => transformNarrationMarkdown(source, "assistant"),
+			}));
 			return component.render(width).findIndex(line => line.includes(narration.activeMarker));
 		} catch {
 			return -1;

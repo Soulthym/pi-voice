@@ -6,13 +6,59 @@ import { mock, test } from "node:test";
 import { getMarkdownTheme, initTheme } from "@earendil-works/pi-coding-agent";
 import { NARRATION_ACTIVE_MARKER } from "../src/narration-progress.js";
 import { FakeVoiceHost, MockedVoiceWorkerClient, assistant } from "./helpers/fake-voice-host.js";
+import * as describer from "../src/code-describer.js";
+import { plainCodeNarration } from "../src/code-narration.js";
 
 mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: MockedVoiceWorkerClient } });
+mock.module("../src/code-describer.js", { namedExports: { ...describer,
+	describeCodeBlock: async () => plainCodeNarration("This code declares a long constant."),
+} });
 // Optional installed Pi runtime exercises newer native mouse/banner code without changing dependencies.
 const native = await import(process.env.PI_VOICE_TEST_TUI_MODULE ?? "@earendil-works/pi-tui");
 if (process.env.PI_VOICE_TEST_TUI_MODULE) mock.module("@earendil-works/pi-tui", { namedExports: { ...native } });
 const settle = () => new Promise(resolve => setTimeout(resolve, 120));
 initTheme("dark");
+
+for (const messageType of ["assistant", "assistant-thinking"] as const) test(`mounted ${messageType} code survives full invalidation without layout shifts`, async t => {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-mounted-layout-"));
+	const names = ["PI_VOICE_CONFIG", "PI_VOICE_COORDINATOR_DIR", "PI_VOICE_DEVICE_DIR"];
+	const previous = names.map(name => process.env[name]);
+	process.env.PI_VOICE_CONFIG = path.join(root, "voice.json");
+	process.env.PI_VOICE_COORDINATOR_DIR = path.join(root, "coordinator");
+	process.env.PI_VOICE_DEVICE_DIR = path.join(root, "devices");
+	await fs.writeFile(process.env.PI_VOICE_CONFIG, JSON.stringify({ enabled: true, mode: "all", input: "disabled", output: "local",
+		codeDescriptionPreprocessConcurrency: 0, timingPreprocessConcurrency: 0 }));
+	const host = new FakeVoiceHost(root, messageType);
+	const source = "First sentence.\n\n```js\nconst veryLongConstantName = 'a long literal value that must wrap predictably';\n```\n\nLast sentence.";
+	const theme = getMarkdownTheme();
+	let leaf = new native.Markdown(source, 1, 0, theme, undefined, { transform: (text: string) => host.render(text, messageType) });
+	Object.assign(host.tui, { getMountedRoots: () => [leaf], invalidate: () => leaf.invalidate() });
+	host.ctx.ui.theme.fg = (_name: string, text: string) => `\x1b[2m${text}\x1b[22m`;
+	host.ctx.ui.theme.bg = (_name: string, text: string) => `\x1b[44m${text}\x1b[49m`;
+	host.addMessage("answer", null, messageType === "assistant" ? assistant(source)
+		: { ...assistant(""), content: [{ type: "thinking", thinking: source }] });
+	t.after(async () => {
+		await host.shutdown();
+		names.forEach((name, i) => { if (previous[i] === undefined) delete process.env[name]; else process.env[name] = previous[i]; });
+		await fs.rm(root, { recursive: true, force: true });
+	});
+	await host.start(); await host.shortcut("f11"); await settle();
+	await host.shortcut("f8");
+	// Replace the mounted leaf, so only the full-invalidation path can attach it.
+	leaf = new native.Markdown(source, 1, 0, theme, undefined, { transform: (text: string) => host.render(text, messageType) });
+	await host.command("highlight off"); await settle();
+	const clean = (lines: string[]) => lines.map(line => native.stripTerminalSequences(line).replaceAll(NARRATION_ACTIVE_MARKER, ""));
+	const baselines = new Map([28, 100, 120].map(width => [width, clean(leaf.render(width))]));
+	await host.command("highlight on"); await settle();
+	for (const action of ["f9", "f7", "f9"]) {
+		await host.shortcut(action); await settle();
+		for (const width of [28, 100, 120]) {
+			const lines = leaf.render(width);
+			assert.deepEqual(clean(lines), baselines.get(width), `${messageType}, ${action}, width ${width}`);
+			assert.equal(lines.filter(line => line.includes(NARRATION_ACTIVE_MARKER)).length, 1);
+		}
+	}
+});
 
 for (const action of ["paused anchor", "button", "End", "banner", "controls", "search", "search forced render", "drag", "PageDown bottom", "wheel bottom", "scrollbar bottom", "narrow cached", "wide cached", "current cached"]) test(`native viewport: ${action}`, async t => {
 	if (action === "button" && !native.MouseRegion) {
@@ -36,16 +82,20 @@ for (const action of ["paused anchor", "button", "End", "banner", "controls", "s
 	let marker = 100;
 	const text = Array.from({ length: 60 }, (_, i) => `Sentence ${i} contains several narrated words.`).join(" ");
 	let renderText = () => text;
+	let transform = (source: string) => source;
+	const narrationLeaf = new native.Markdown(text, 1, 0, getMarkdownTheme(), undefined, {
+		transform: (source: string) => transform(source),
+	});
 	let quotedHistory = () => "";
 	let historyHeight = 1500;
 	let tailHeight = 100;
 	let editorHeight = 5;
 	let progressHeight = 2;
 	let footerHeight = 1;
-	const transcript = new native.ScrollView({ invalidate() {}, render: (width: number) => cached
+	const transcript = new native.ScrollView({ children: [narrationLeaf], invalidate() { narrationLeaf.invalidate(); }, render: (width: number) => cached
 		? [...new native.Markdown(quotedHistory(), 1, 0, getMarkdownTheme()).render(width),
 			...Array.from({ length: historyHeight }, (_, i) => `history ${i}`),
-			...new native.Markdown(renderText(), 1, 0, getMarkdownTheme()).render(width), ...Array(tailHeight).fill("later")]
+			...narrationLeaf.render(width), ...Array(tailHeight).fill("later")]
 		: Array.from({ length: count }, (_, i) => i === marker ? renderText() : `line ${i}`)
 	}, { primary: true, follow: "end", scrollbar: action === "scrollbar bottom" ? "always" : "hidden" });
 	tui.setLayoutRoot(cached ? new native.VStack([
@@ -83,7 +133,8 @@ for (const action of ["paused anchor", "button", "End", "banner", "controls", "s
 	if (action === "controls") host.addMessage("previous", null, assistant("Older sentence. Another sentence."));
 	host.addMessage("answer", null, assistant(cached ? text : "First sentence. Second sentence."));
 	await host.start();
-	renderText = () => cached ? host.render(text)
+	transform = source => host.render(source);
+	renderText = () => cached ? narrationLeaf.render(width).join("\n")
 		: ["First sentence. Second sentence.", "Older sentence. Another sentence."].map(source => host.render(source)).join(" ");
 	await host.shortcut("f11");
 	await settle();
@@ -132,6 +183,9 @@ for (const action of ["paused anchor", "button", "End", "banner", "controls", "s
 				assertFramed(`height ${terminal.rows}, editor ${editorHeight}, progress ${progressHeight}, footer ${footerHeight}`);
 			}
 			const target = markerLine();
+			assert.deepEqual(narrationLeaf.render(width).map((line: string) => native.stripTerminalSequences(line).replaceAll(NARRATION_ACTIVE_MARKER, "")),
+				new native.Markdown(text, 1, 0, getMarkdownTheme()).render(width).map(native.stripTerminalSequences),
+				"mounted post-wrap highlighting must preserve native layout");
 			const relative = target - view.scrollTop;
 			assert.ok(relative >= Math.floor(view.viewportHeight * 0.2) && relative <= Math.ceil(view.viewportHeight * 0.8),
 				`word ${i}: marker ${target}, top ${view.scrollTop}, height ${view.viewportHeight}`);
