@@ -759,7 +759,7 @@ async function runOperation(operation) {
 				if (shuttingDown || operation.epoch !== epoch) throw new Error("Sentence preload cancelled");
 				await Promise.all(Array.from({ length: synthesisWorkers }, () => sentencePool.generate(operation)));
 				if (shuttingDown || operation.epoch !== epoch) throw new Error("Sentence preload cancelled");
-				send({ type: "ready", requestId: operation.requestId });
+				send({ type: "preload-ready", requestId: operation.requestId });
 			} catch (error) {
 				send({ type: "error", requestId: operation.requestId, message: error instanceof Error ? error.message : String(error) });
 			}

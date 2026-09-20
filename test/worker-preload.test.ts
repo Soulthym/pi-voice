@@ -4,6 +4,9 @@ import * as fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { mock, test } from "node:test";
+import { PassThrough } from "node:stream";
+import * as readline from "node:readline";
+import { DEFAULT_VOICE_CONFIG } from "../src/config.js";
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
@@ -17,6 +20,10 @@ test("preload warms asynchronously, reports aggregate results and fences cancell
 	} });
 	mock.module("kokoro-js", { namedExports: { KokoroTTS: {} } });
 	const children: any[] = [], requests: any[] = [], events: any[] = [];
+	const transport = Object.assign(new EventEmitter(), {
+		stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(),
+		exitCode: null as number | null, signalCode: null, kill: () => {},
+	});
 	mock.module("node:child_process", { namedExports: {
 		fork: () => {
 			const child = Object.assign(new EventEmitter(), {
@@ -26,20 +33,24 @@ test("preload warms asynchronously, reports aggregate results and fences cancell
 			});
 			children.push(child); return child;
 		},
-		spawn: () => { throw Error("No real playback/alignment allowed"); },
+		spawn: (_command: string, args: string[]) => {
+			if (args[0]?.endsWith("/worker.mjs")) return transport;
+			throw Error("No real playback/alignment allowed");
+		},
 	} });
 	const lines = new EventEmitter();
-	mock.module("node:readline", { namedExports: { createInterface: () => lines } });
+	mock.module("node:readline", { namedExports: { createInterface: (options: any) => options.input === process.stdin ? lines : readline.createInterface(options) } });
+	transport.stdin.on("data", bytes => lines.emit("line", String(bytes).trim()));
 	const played: number[] = [];
 	const sink = { ready: Promise.resolve(), stopped: false, samplesWritten: 0 };
-	mock.module("../src/playback-controller.mjs", { namedExports: { createPlaybackController: () => ({
-		startPlayer: () => sink,
+	mock.module("../src/playback-controller.mjs", { namedExports: { createPlaybackController: ({ send }: any) => ({
+		startPlayer: () => { send({ type: "speaking" }); return sink; },
 		writeAudio: async (_sink: unknown, pcm: Float32Array) => { played.push(pcm[0]!); },
-		resetPlayerPaused: () => {}, stopPlayer: async () => {},
+		resetPlayerPaused: () => {}, setPlayerPaused: () => {}, stopPlayer: async () => {},
 	}) } });
 	const stdout = process.stdout.write.bind(process.stdout);
 	mock.method(process.stdout, "write", (chunk: any, ...args: any[]) => {
-		try { events.push(JSON.parse(String(chunk))); return true; }
+		try { events.push(JSON.parse(String(chunk))); transport.stdout.write(chunk); return true; }
 		catch { return (stdout as any)(chunk, ...args); }
 	});
 	const exits: unknown[] = [];
@@ -65,7 +76,20 @@ test("preload warms asynchronously, reports aggregate results and fences cancell
 		audio: request.operation.type === "preload" ? undefined : { pcm: Float32Array.of(request.operation.segmentId), sampleRate: 24000 },
 	});
 
-	const warming = await preload("warm");
+	const { VoiceWorkerClient } = await import("../src/worker-client.js");
+	let state = "idle";
+	let paused = false;
+	const ui = () => paused && state === "speaking" ? "paused" : state;
+	const clientEvents: string[] = [];
+	const client = new VoiceWorkerClient(event => {
+		clientEvents.push(event.type);
+		if (event.type === "ready") state = "idle";
+		if (event.type === "speaking") state = "speaking";
+	});
+	let completed = false;
+	const warm = client.preload({ ...DEFAULT_VOICE_CONFIG, ttsWorkers: 3 }).then(() => { completed = true; });
+	await tick();
+	const warming = requests.slice();
 	assert.equal(warming.length, 3);
 	segment(1); segment(2); segment(3); await tick();
 	complete(warming[0]); await tick();
@@ -73,9 +97,15 @@ test("preload warms asynchronously, reports aggregate results and fences cancell
 	assert.ok(first, "one ready worker must synthesize while two still warm");
 	complete(first); await tick();
 	assert.deepEqual(played, [1], "first playback must not await aggregate preload readiness");
-	assert.deepEqual(results("warm"), []);
-	complete(warming[1]); complete(warming[2]); await tick();
-	assert.deepEqual(results("warm"), [{ type: "ready", requestId: "warm" }]);
+	assert.equal(ui(), "speaking");
+	assert.equal(completed, false);
+	complete(warming[1]); await tick();
+	assert.equal(ui(), "speaking", "second warm slot cannot reset playing UI");
+	paused = true;
+	complete(warming[2]); await warm;
+	assert.equal(ui(), "paused", "aggregate warm completion cannot reset paused UI");
+	assert.deepEqual(results("1"), [{ type: "preload-ready", requestId: "1" }]);
+	assert.ok(!clientEvents.includes("preload-ready"), "request completion stays out of playback UI");
 	// Resizing while warm/playback jobs overlap retains the pool's ordered results.
 	send({ type: "tts-workers", workers: 1 });
 	const second = requests.find(request => request.operation.segmentId === 2);
@@ -88,12 +118,16 @@ test("preload warms asynchronously, reports aggregate results and fences cancell
 	assert.equal(children.filter(child => !child.killed).length, 1);
 	send({ type: "tts-workers", workers: 3 });
 
-	const failed = await preload("failed");
-	complete(failed[0], "warm failed"); await tick();
-	assert.equal(results("failed")[0]?.type, "error");
-	assert.match(results("failed")[0].message, /warm failed/);
+	const failedStart = requests.length;
+	const failedRequest = client.preload({ ...DEFAULT_VOICE_CONFIG, ttsWorkers: 3 });
+	const rejected = assert.rejects(failedRequest, /warm failed/);
+	await tick();
+	const failed = requests.slice(failedStart);
+	complete(failed[0], "warm failed"); await rejected;
+	assert.equal(results("2")[0]?.type, "error");
+	assert.match(results("2")[0].message, /warm failed/);
 	complete(failed[1]); complete(failed[2]); await tick();
-	assert.equal(results("failed").length, 1);
+	assert.equal(results("2").length, 1);
 
 	const cancelled = await preload("cancelled");
 	send({ type: "cancel", cancelId: 1 }); await tick();
@@ -116,4 +150,10 @@ test("preload warms asynchronously, reports aggregate results and fences cancell
 	assert.equal(results("closing")[0]?.type, "error");
 	assert.ok(children.every(child => child.killed));
 	assert.deepEqual(exits, [0]);
+	// Ordinary cold-model readiness still reaches the UI unchanged.
+	transport.stdout.write('{"type":"ready"}\n');
+	assert.equal(state, "idle");
+	transport.exitCode = 0;
+	transport.emit("close", 0);
+	await client.terminate();
 });

@@ -16,6 +16,7 @@ export type WorkerEvent =
 	| { type: "loading" }
 	| { type: "progress"; percent?: number; file?: string }
 	| { type: "ready"; requestId?: string }
+	| { type: "preload-ready"; requestId: string }
 	| { type: "speaking" }
 	| { type: "segment-audio"; utterance: number; segmentId: number; start: number; duration: number; timingQuality?: TimingQuality }
 	| { type: "measurement"; requestId: string; duration: number }
@@ -401,6 +402,7 @@ export class VoiceWorkerClient {
 		}
 		if (
 			(event.type === "ready" ||
+				event.type === "preload-ready" ||
 				event.type === "error" ||
 				event.type === "alignment-ready" ||
 				event.type === "alignment-preload-error") &&
@@ -410,10 +412,12 @@ export class VoiceWorkerClient {
 			if (pending) {
 				this.#pendingPreloads.delete(event.requestId);
 				clearTimeout(pending.timer);
-				if (event.type === "ready" || event.type === "alignment-ready") pending.resolve();
+				if (event.type === "ready" || event.type === "preload-ready" || event.type === "alignment-ready") pending.resolve();
 				else pending.reject(new Error(event.message));
 			}
 		}
+		// Pool warming completes a request, not playback. Keep it out of UI state.
+		if (event.type === "preload-ready") return;
 		if (event.type === "measurement-progress") {
 			if (event.phase === "cache-decode" || event.phase === "synthesis") {
 				this.#pendingMeasurements.get(event.requestId)?.onPhase?.(event.phase);
