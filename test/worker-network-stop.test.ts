@@ -23,6 +23,7 @@ test("network padding cancellation waits for confirmed helper exit", { timeout: 
 	mock.module("kokoro-js", { namedExports: { KokoroTTS: {} } });
 	const players: any[] = [];
 	let rejectHandshake = false;
+	let lateRefusal = false;
 	mock.module("node:child_process", { namedExports: { ...(await import("node:child_process")),
 		fork: () => {
 			const child = Object.assign(new EventEmitter(), {
@@ -49,7 +50,7 @@ test("network padding cancellation waits for confirmed helper exit", { timeout: 
 				kill: () => { throw Error("Test must explicitly confirm helper exit"); },
 			});
 			players.push(child);
-			queueMicrotask(() => control.write(rejectHandshake ? "no-audio\nerror Upgrade the audio client\n" : "ready\n"));
+			if (!lateRefusal) queueMicrotask(() => control.write(rejectHandshake ? "no-audio\nerror Upgrade the audio client\n" : "ready\n"));
 			return child;
 		},
 	} });
@@ -70,6 +71,8 @@ test("network padding cancellation waits for confirmed helper exit", { timeout: 
 
 	for (const [name, code, signal] of [
 		["rejected handshake", 2, null],
+		["refusal after exit", 2, null],
+		["refusal after audio admission", 2, null],
 		["confirmed stop", 0, null],
 		["nonzero exit", 1, null],
 		["signal exit", null, "SIGTERM"],
@@ -78,7 +81,8 @@ test("network padding cancellation waits for confirmed helper exit", { timeout: 
 			lines = new EventEmitter();
 			events.length = 0;
 			players.length = 0;
-			rejectHandshake = name === "rejected handshake";
+			lateRefusal = name === "refusal after exit";
+			rejectHandshake = name === "rejected handshake" || lateRefusal;
 			st.after(async () => {
 				for (const child of players) {
 					if (child.exitCode === null && child.signalCode === null) {
@@ -88,6 +92,8 @@ test("network padding cancellation waits for confirmed helper exit", { timeout: 
 					child.stdin.destroy();
 					child.stdio[3].end();
 					child.stderr.destroy();
+					await wait(0);
+					child.emit("close", child.exitCode, child.signalCode);
 				}
 				send({ type: "shutdown" });
 				await wait(0);
@@ -102,13 +108,22 @@ test("network padding cancellation waits for confirmed helper exit", { timeout: 
 			if (rejectHandshake) {
 				await wait(20);
 				assert.deepEqual(child.writes, [], "failed handshake sent no PCM or padding");
-				assert.ok(events.some(e => e.type === "error" && /Upgrade/.test(e.message)));
+				if (!lateRefusal) assert.ok(events.some(e => e.type === "error" && /Upgrade/.test(e.message)));
 				assert.ok(!events.some(e => e.type === "idle"), "handshake failure is not completion");
 				child.exitCode = 2;
 				child.emit("exit", 2, null);
 				await wait(20);
+				if (lateRefusal) child.stdio[3].write("no-audio\nerror Upgrade the audio client\n");
 				send({ type: "cancel", cancelId: 42 });
 				await wait(20);
+				assert.ok(child.commands.includes("stop\n"), "sink stays owned until control drains");
+				assert.ok(!events.some(e => e.type === "idle"), "exit alone is not stop proof");
+				child.stdio[3].end();
+				child.stderr.end();
+				await wait(0);
+				child.emit("close", 2, null);
+				await wait(20);
+				assert.ok(!events.some(e => e.type === "error" && /Remote playback unconfirmed/.test(e.message)));
 				assert.deepEqual(events.filter(e => e.type === "idle"), [{ type: "idle" }, { type: "idle", cancelId: 42 }], "nothing was admitted; cancellation needs no invented remote stop receipt");
 				return;
 			}
@@ -131,6 +146,13 @@ test("network padding cancellation waits for confirmed helper exit", { timeout: 
 			child.exitCode = code;
 			child.signalCode = signal;
 			child.emit("exit", code, signal);
+			await wait(20);
+			assert.ok(!events.some(e => e.type === "idle"), "exit must wait for control drain");
+			if (code === 2) child.stdio[3].write("no-audio\n");
+			child.stdio[3].end();
+			child.stderr.end();
+			await wait(0);
+			child.emit("close", code, signal);
 			await wait(20);
 			const idle = events.filter(e => e.type === "idle");
 			if (code === 0) {

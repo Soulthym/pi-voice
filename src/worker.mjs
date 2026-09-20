@@ -586,7 +586,7 @@ function createNetworkSink(output, sampleRate, utterance) {
 	let audioAdmitted = false;
 	const exited = new Promise((resolve, reject) => {
 		child.once("error", reject);
-		child.once("exit", (code, signal) => code === 0 || code === 2 && noAudio && !audioAdmitted ? resolve() : reject(new Error(`Remote playback unconfirmed: helper exited ${code ?? signal}`)));
+		child.once("close", (code, signal) => code === 0 || code === 2 && noAudio && !audioAdmitted ? resolve() : reject(new Error(`Remote playback unconfirmed: helper exited ${code ?? signal}`)));
 	});
 	void exited.catch(error => { networkStopFailure = error; });
 	const { promise: ready, resolve: resolveReady, reject: rejectReady } = Promise.withResolvers();
@@ -661,6 +661,9 @@ function createNetworkSink(output, sampleRate, utterance) {
 			if (intentionallyStopped) resolveReady();
 			else rejectReady(new Error(stderr.trim() || `TCP playback helper exited with code ${code ?? "unknown"}`));
 		}
+	});
+	child.on("close", code => {
+		// Classify only after fd3 drains; exit can precede the no-audio marker.
 		// Keep failed remote transports owned: helper death is not sink stop proof.
 		if ((code === 0 || code === 2 && noAudio && !audioAdmitted) && playback.currentPlayer === sink) playback.clearCurrentPlayer();
 	});
