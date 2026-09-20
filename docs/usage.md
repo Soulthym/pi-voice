@@ -56,7 +56,7 @@ F8 preserves the current audio connection, highlighting position, and transcript
 
 F7/F9 select sentence/newline source units independently of timing availability; alignment refines playback highlighting without redefining the navigation units. Unchanged messages reuse valid timing maps and cached Opus segments. Message and time movement preserves the transport's paused versus unpaused state: while paused it updates the highlighted position and queues the replacement sink in paused state; from idle, message replay starts unpaused.
 
-Transcript-tail following acts as the timeline position after the latest completed message. F10 while that message is selected, or F9 from its final known sentence/newline unit, pauses active playback before behaving like `Alt+T`/`/voice bottom`: it snaps to the transcript end and follows new output without restarting or regenerating audio. If playback is already paused or complete, the transport is left untouched.
+Transcript-tail following acts as the timeline position after the latest completed message. F10 while that message is selected, or F9 from its final known sentence/newline unit, pauses active playback before behaving like `Alt+T`/`/voice bottom`: it snaps to the transcript end and follows new output without restarting or regenerating audio. If playback is already paused or complete, the transport is left untouched. After F10 moves beyond the last target to Tail, the first F6 selects the last eligible message (not the penultimate); a second F6 selects its predecessor. Selection follows immediately and retains the paused, silent state.
 
 ## Highlighting and status
 

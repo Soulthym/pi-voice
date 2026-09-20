@@ -55,6 +55,32 @@ test("failed previous-message acquisition keeps subsequent preview and audio on 
 	assert.equal((worker.sent.at(-1) as { text: string }).text, "A sentence.");
 });
 
+for (const count of [0, 1, 3]) for (const playing of [false, true]) test(`explicit next-past-last then previous selects the last message (${count}, playing: ${playing})`, async t => {
+	const host = await setup(t);
+	for (let i = 0; i < count; i++) {
+		host.addMessage(`m${i}`, null, assistant(`Message ${i}.`));
+		host.addMessage(`hidden${i}`, null, { ...assistant(""), content: [{ type: "thinking", thinking: "Filtered thinking." }] });
+	}
+	await host.start();
+	if (count) {
+		await host.shortcut("f11"); await settle();
+		if (!playing) await host.shortcut("f8");
+	}
+	await host.shortcut("f10"); await settle();
+	await host.shortcut("f6");
+	if (count) assert.ok(host.render(`Message ${count - 1}.`).includes(NARRATION_ACTIVE_MARKER), "selection follows immediately");
+	await settle();
+	if (count) {
+		const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
+		assert.equal(worker.pauses.at(-1), true, "replacement transport stays paused and silent");
+		assert.match(host.widgetLines()?.join(" ") ?? "", /Paused/);
+	}
+	if (count > 1) {
+		await host.shortcut("f6"); await settle();
+		assert.ok(host.render(`Message ${count - 2}.`).includes(NARRATION_ACTIVE_MARKER));
+	}
+});
+
 test("rapid F6 presses select two previous messages before preparation yields", async t => {
 	const host = await setup(t);
 	for (const id of ["A", "B", "C"]) host.addMessage(id, null, assistant(`${id} sentence.`));

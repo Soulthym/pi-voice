@@ -3567,15 +3567,17 @@ export default async function (pi: ExtensionAPI) {
 		return epoch === playbackRequestEpoch && interactiveVoiceSession ? epoch : undefined;
 	};
 
+	let navigatedPastLastMessage = false;
 	// Preview raw source before contextual identities yield or device acquisition waits.
 	const previewHistoricalTarget = (ctx: ExtensionContext, movement: -1 | 0 | 1, automatic = false): PlaybackTarget | undefined => {
 		const branch = completedBranch(ctx);
-		const selected = movement === 0 && pausedForAttention ? undefined : playbackHistory.selected();
+		const fromTail = movement === -1 && atTranscriptTail && navigatedPastLastMessage;
+		const selected = fromTail || (movement === 0 && pausedForAttention) ? undefined : playbackHistory.selected();
 		const selectedEntry = selected ? branch.findIndex(entry => entry.id === selected.id || selected.id.startsWith(`${entry.id}:`)) : -1;
 		const live = selectedEntry < 0 && !ownerTurnEnded && livePlaybackId !== undefined && selected?.id.startsWith("live:");
 		if (movement === 1 && selectedEntry < 0 && !live) return; // No selection means the latest completed response.
 		const direction = selectedEntry >= 0 && movement === 1 ? 1 : -1;
-		let skip = selectedEntry >= 0 ? Math.abs(movement) : movement === -1 && !live ? 1 : 0;
+		let skip = fromTail ? 0 : selectedEntry >= 0 ? Math.abs(movement) : movement === -1 && !live ? 1 : 0;
 		let target: PlaybackMessage | undefined = live && movement === 0 ? selected : undefined;
 		let boundary = selected;
 		// Only parse the selected/adjacent source, not every completed response on a cold F11.
@@ -3591,6 +3593,7 @@ export default async function (pi: ExtensionAPI) {
 		}
 		if (!target && movement === -1) target = boundary;
 		if (!target) return;
+		navigatedPastLastMessage = false;
 		const preview = { ...target, time: 0, sourceOffset: 0 };
 		previewPlaybackTarget(preview, !automatic);
 		return preview;
@@ -3894,7 +3897,10 @@ export default async function (pi: ExtensionAPI) {
 			if (!requireEnabledVoice(ctx)) return;
 			const target = previewHistoricalTarget(ctx, 1);
 			if (target) void playTarget(target, true, true, false, true, false, ctx);
-			else followTranscriptTail(ctx);
+			else {
+				navigatedPastLastMessage = true;
+				followTranscriptTail(ctx);
+			}
 		},
 	});
 
