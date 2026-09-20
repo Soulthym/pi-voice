@@ -156,10 +156,10 @@ test("unified progress widget orders input, playback, and preprocessing and clea
 	await settle();
 
 	let lines = await waitForWidgetLines(host, candidate => candidate.length >= 2);
-	assert.match(lines[0], /Playback · message 1\/1: speech timing pending/);
-	assert.match(lines[1], /Preprocessing · code descriptions \(0\/25 budget\): 0\/1 ready/);
+	assert.match(lines[0], /Playback · message 1\/1 · timing pending/);
+	assert.match(lines[1], /Preparing code descriptions · 0\/1 targets processed/);
 	assert.equal(
-		lines.some(line => line.includes("Preprocessing · speech timing")),
+		lines.some(line => line.includes("Recovering speech timing")),
 		false,
 		"timing work must not contend with an allocated deferred speech utterance",
 	);
@@ -167,8 +167,8 @@ test("unified progress widget orders input, playback, and preprocessing and clea
 	void host.command("talk");
 	await new Promise(resolve => setTimeout(resolve, 150));
 	lines = host.widgetLines() ?? lines;
-	assert.match(lines[0], /🎙 Listening: 0s|🎙 Listening: 1s/);
-	assert.equal(lines.some(line => line.includes("Preprocessing · code descriptions")), true);
+	assert.match(lines[0], /🎙 Input · (connecting|listening) · [01]s/);
+	assert.equal(lines.some(line => line.includes("Preparing code descriptions")), true);
 
 	// Stop the recording; once its lease is released, timing preprocessing joins
 	// the still-pending code work in deterministic playback/code/timing order.
@@ -177,11 +177,11 @@ test("unified progress widget orders input, playback, and preprocessing and clea
 		host,
 		candidate =>
 			candidate.every(line => !line.includes("🎙")) &&
-			candidate.some(line => line.includes("Preprocessing · speech timing")),
+			candidate.some(line => line.includes("Recovering speech timing")),
 	);
 	assert.match(lines[0], /Playback · message 1\/1/);
-	assert.match(lines[1], /Preprocessing · code descriptions/);
-	assert.match(lines[2], /Preprocessing · speech timing/);
+	assert.match(lines[1], /Preparing code descriptions/);
+	assert.match(lines[2], /Recovering speech timing/);
 
 	deferredDescription.resolve({
 		role: "assistant",
@@ -190,7 +190,7 @@ test("unified progress widget orders input, playback, and preprocessing and clea
 	});
 	lines = await waitForWidgetLines(
 		host,
-		candidate => candidate.length > 0 && candidate.every(line => !line.includes("Preprocessing ·")),
+		candidate => candidate.length > 0 && candidate.every(line => !/Preparing code|Recovering speech/.test(line)),
 	);
 	assert.match(lines[0], /message 1\/1/);
 	const timingEntry = host.entries.findLast(

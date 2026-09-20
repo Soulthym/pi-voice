@@ -60,7 +60,7 @@ import {
 import { PhoneInputClient } from "./phone-input.js";
 import { prioritizeFromCurrent, processConcurrently, resolveTimingConcurrency } from "./preprocessing.js";
 import { SpeakableStream, type FencedCodeBlock, type SpeakableSourceRange } from "./speakable.js";
-import { pendingPlaybackTiming, playbackTimingStatus, voiceProgressLines } from "./status-text.js";
+import { notifyVoice, pendingPlaybackTiming, playbackTimingStatus, voiceProgressLines, type ReadyProgress } from "./status-text.js";
 import { anchorLineForMessage, computeAutoScrollTop, isManualScrollAway } from "./auto-scroll.js";
 import { applySpokenEdit, parseEditModelSelector, resolveDictationCandidates } from "./prompt-editor.js";
 import { formatAsrDisplay } from "./asr-display.js";
@@ -74,7 +74,7 @@ import { VoiceWorkerClient, type WorkerEvent } from "./worker-client.js";
 
 type VoiceState = "downloading" | "error" | "idle" | "listening" | "loading" | "speaking";
 type InputPhase = "idle" | "acquiring" | "recording" | "transcribing";
-type PreprocessingProgress = { label: string; processed: number; total: number };
+type PreprocessingProgress = ReadyProgress;
 type SpeechPurpose = "turn" | "replay" | "notification";
 
 const PLAYBACK_TIMING_ENTRY = "pi-voice.playback-timing";
@@ -373,7 +373,6 @@ export default async function (pi: ExtensionAPI) {
 	let finishSpeechPreemption: () => void = () => {};
 	const transportCancelWaiters = new Map<number, () => void>();
 	let state: VoiceState = "idle";
-	let downloadPercent: number | undefined;
 	let lastError = "";
 	let inputInProgress = false;
 	let inputEpoch = 0;
@@ -517,12 +516,12 @@ export default async function (pi: ExtensionAPI) {
 			let playbackLine: string | undefined;
 			if (playback) {
 				if (!playback.hasTimings || playback.duration <= 0) {
-					playbackLine = `○ ${pendingPlaybackTiming(playback.messageIndex, playback.messageCount)}`;
+					playbackLine = `${playbackPaused ? "⏯ Paused · " : "○ "}${pendingPlaybackTiming(playback.messageIndex, playback.messageCount)}`;
 				} else {
 					const messageLabel =
 						playback.messageIndex >= 0 ? ` · message ${playback.messageIndex + 1}/${playback.messageCount}` : " · current response";
-					const icon = playbackPaused ? "⏸" : state === "speaking" ? "▶" : "■";
-					playbackLine = `${icon} ${playbackBar(playback.position, playback.duration)} ${formatPlaybackTime(playback.position)} / ${formatPlaybackTime(playback.duration)}${messageLabel}${playbackTimingStatus(playback.timingQuality, playbackPositionEstimated)}`;
+					const icon = playbackPaused ? "⏯ Paused" : state === "speaking" ? "▶ Playing" : "Playback";
+					playbackLine = `${icon} · ${playbackBar(playback.position, playback.duration)} ${formatPlaybackTime(playback.position)} / ${formatPlaybackTime(playback.duration)}${messageLabel}${playbackTimingStatus(playback.timingQuality, playbackPositionEstimated)}`;
 				}
 			}
 			const preprocessing = [codePreprocessingProgress, timingPreprocessingProgress].filter(
@@ -708,8 +707,8 @@ export default async function (pi: ExtensionAPI) {
 					reportedDescriptionOverflows.add(overflowId);
 					try {
 						if (isCurrentContext(ctx)) {
-							ctx.ui.notify(
-								`Voice used local code narration because ${lastOverflowModel} has insufficient context`,
+							notifyVoice(ctx,
+								`Local code narration · ${lastOverflowModel} has insufficient context`,
 								"warning",
 							);
 						}
@@ -861,12 +860,10 @@ export default async function (pi: ExtensionAPI) {
 			}
 			if (queuedMessages.length === 0) return;
 			codePreprocessingProgress = {
-				label:
-					backfillAllowance === "unlimited"
-						? "Code descriptions"
-						: `Code descriptions (${backfillUsed}/${backfillAllowance} budget)`,
+				label: "Preparing code descriptions",
 				processed: processedMessages,
 				total: totalMessages,
+				unit: "processed",
 			};
 			refreshPreprocessingProgress();
 			const concurrency = config.codeDescriptionPreprocessConcurrency;
@@ -884,8 +881,8 @@ export default async function (pi: ExtensionAPI) {
 						if (error === BACKFILL_EXHAUSTED || error instanceof CodeDescriptionBudgetExhaustedError) {
 							if (!backfillExhaustionReported) {
 								backfillExhaustionReported = true;
-								ctx.ui.notify(
-									`Voice code-description backfill stopped at its budget of ${backfillAllowance} requests; run /voice code-budget unlimited for this session`,
+								notifyVoice(ctx,
+									`Descriptions blocked · budget ${backfillAllowance} requests used; /voice code-budget <n|unlimited> to authorize more`,
 									"warning",
 								);
 							}
@@ -897,12 +894,10 @@ export default async function (pi: ExtensionAPI) {
 				if (workEpoch !== codeWorkEpoch) return;
 				processedMessages += 1;
 				codePreprocessingProgress = {
-					label:
-						backfillAllowance === "unlimited"
-							? "Code descriptions"
-							: `Code descriptions (${backfillUsed}/${backfillAllowance} budget)`,
+					label: "Preparing code descriptions",
 					processed: processedMessages,
 					total: totalMessages,
+					unit: "processed",
 				};
 				refreshPreprocessingProgress();
 			});
@@ -976,8 +971,7 @@ export default async function (pi: ExtensionAPI) {
 					if (existing !== undefined) return existing;
 					const omissionRecord = codeDescriptionOmissions.get(key);
 					if (omissionRecord || codeDescriptionCache.get(key)?.omitted) {
-						const omission = codeDescriptionOmissions.get(key);
-						return `⚠ No semantic description available (${omissionRecord?.reason ?? "failed"}). Run /voice code-retry current or /voice code-retry historical.`;
+						return `Voice · Description omitted (${omissionRecord?.reason ?? "failed"}) · ↺ /voice code-retry current; historical for older messages.`;
 					}
 					const plan = codeDescriptionCache.get(key) ?? codeDescriptionFallbacks.get(key);
 					if (!plan) return undefined;
@@ -1127,7 +1121,7 @@ export default async function (pi: ExtensionAPI) {
 	const scrollToBottom = (ctx: ExtensionContext): void => {
 		const scrollView = activeScrollView();
 		if (!scrollView?.scrollToEnd) {
-			ctx.ui.notify("Scroll-to-bottom is unavailable in this runtime", "warning");
+			notifyVoice(ctx, "Scroll-to-bottom unavailable in this runtime; use Pi's native End", "warning");
 			return;
 		}
 		scrollView.scrollToEnd();
@@ -1335,13 +1329,14 @@ export default async function (pi: ExtensionAPI) {
 		setInputProgress(undefined);
 	};
 
+	const finishInputHint = (): string => `${[...effectiveTalkShortcuts][0] ?? "/voice talk"} to ${inputPhase === "acquiring" ? "cancel" : "finish"}`;
 	const beginInputProgress = (): void => {
 		inputInProgress = true;
 		inputPhase = "acquiring";
 		inputStartedAt = Date.now();
 		const update = (): void => {
 			const elapsed = Math.floor((Date.now() - inputStartedAt) / 1000);
-			setInputProgress(`🎙 Listening: ${elapsed}s — stops on silence; Alt+M to finish`);
+			setInputProgress(`🎙 Input · ${inputPhase === "acquiring" ? "connecting" : "listening"} · ${elapsed}s · ${finishInputHint()}`);
 		};
 		update();
 		inputProgressTimer = setInterval(update, 1_000);
@@ -1355,25 +1350,37 @@ export default async function (pi: ExtensionAPI) {
 			ctx.ui.setStatus("pi-voice", undefined);
 			return;
 		}
-		let label = `voice: ${config.voice}`;
+		let label = `Voice · ready · ${config.voice}`;
 		let color: "accent" | "dim" | "error" | "success" | "warning" = "dim";
-		if (pausedForAttention) {
-			label = `voice: waiting (${coordinator?.projectLabel() ?? "project"})`;
+		if (transportStopPending) {
+			label = "Voice · stopping · waiting for device confirmation";
+			color = "warning";
+		} else if (deviceRetryRequired) {
+			label = "Voice · blocked · /voice reconnect";
+			color = "warning";
+		} else if (inputInProgress) {
+			label = `🎙 Voice · ${inputPhase === "acquiring" ? "connecting" : inputPhase}`;
+			color = "accent";
+		} else if (pausedForAttention) {
+			label = `Voice · waiting · ${coordinator?.projectLabel() ?? "project"} · ↺ F11`;
+			color = "warning";
+		} else if (playbackPaused) {
+			label = "⏯ Voice · paused · F8 resume";
 			color = "warning";
 		} else if (state === "loading") {
-			label = "voice: loading Kokoro";
+			label = "Voice · loading speech model";
 			color = "warning";
 		} else if (state === "downloading") {
-			label = `voice: downloading${downloadPercent === undefined ? "" : ` ${downloadPercent}%`}`;
+			label = "Voice · downloading model files";
 			color = "warning";
 		} else if (state === "speaking") {
-			label = `voice: speaking (${config.voice})`;
+			label = `Voice · speaking · ${config.voice}`;
 			color = "accent";
 		} else if (state === "listening") {
-			label = "voice: listening on phone";
+			label = "🎙 Voice · listening";
 			color = "accent";
 		} else if (state === "error") {
-			label = "voice: error";
+			label = "Voice · error · see notice";
 			color = "error";
 		} else {
 			color = "success";
@@ -1398,29 +1405,21 @@ export default async function (pi: ExtensionAPI) {
 		switch (event.type) {
 			case "loading":
 				state = "loading";
-				downloadPercent = undefined;
 				break;
 			case "progress":
 				if (inputInProgress) {
 					state = "listening";
-					setInputProgress(
-						event.percent === undefined
-							? "♬ Loading local speech recognition…"
-							: `♬ Downloading speech recognition: ${event.percent}%`,
-					);
+					setInputProgress("🎙 Input · loading speech recognition model…");
 				} else {
 					state = "downloading";
-					downloadPercent = event.percent;
 				}
 				break;
 			case "ready":
 				if (!inputInProgress) state = "idle";
-				downloadPercent = undefined;
 				break;
 			case "idle":
 				const narratedIdle = event.utterance !== undefined && playbackUtterances.delete(event.utterance);
 				if (!inputInProgress) state = "idle";
-				downloadPercent = undefined;
 				playbackHistory.finishUtterance(event.utterance, !playbackPaused);
 				playbackPositionEstimated = false;
 				if (event.utterance !== undefined) {
@@ -1495,7 +1494,7 @@ export default async function (pi: ExtensionAPI) {
 				state = "error";
 				if (event.message !== lastError) {
 					lastError = event.message;
-					activeContext?.ui.notify(`Voice mode: ${event.message}`, "error");
+					notifyVoice(activeContext, event.message, "error");
 				}
 				break;
 		}
@@ -1599,7 +1598,7 @@ export default async function (pi: ExtensionAPI) {
 		void barrier.then(() => {
 			if (cancelId !== undefined) transportStops.delete(cancelId);
 			if (transportStopBarrier === barrier) transportStopPending = false;
-		}, error => activeContext?.ui.notify(`Voice stop failed; ownership retained: ${String(error)}`, "error"));
+		}, error => notifyVoice(activeContext, `Stop failed; ownership retained: ${String(error)} · restore the device connection; /voice reconnect to retry cleanup`, "error"));
 		return barrier;
 	};
 
@@ -1610,7 +1609,7 @@ export default async function (pi: ExtensionAPI) {
 				if (ownsSpeech && speechLeaseEpoch === leaseEpoch) releaseSpeechOwnership(announceNext);
 			});
 			if (ownsSpeech && speechLeaseEpoch === leaseEpoch) releaseSpeechOwnership(announceNext);
-		}).catch(error => activeContext?.ui.notify(`Voice stop failed; ownership retained: ${error instanceof Error ? error.message : String(error)}`, "error"));
+		}).catch(error => notifyVoice(activeContext, `Stop failed; ownership retained: ${error instanceof Error ? error.message : String(error)} · restore the device connection; /voice reconnect to retry cleanup`, "error"));
 	};
 
 	const phoneInput = new PhoneInputClient();
@@ -1758,7 +1757,7 @@ export default async function (pi: ExtensionAPI) {
 			const cancelId = clearPlaybackTransport();
 			if (ownsSpeech) releaseAfterTransportCancellation(cancelId, false);
 			else coordinator?.releaseSpeech();
-			activeContext?.ui.notify(`Voice device: ${error instanceof Error ? error.message : String(error)}`, "error");
+			notifyVoice(activeContext, `Device: ${error instanceof Error ? error.message : String(error)}`, "error");
 			return false;
 		}
 		if (!coordinator) return true;
@@ -1886,7 +1885,7 @@ export default async function (pi: ExtensionAPI) {
 		void Promise.all([inputCancellation, waitForTransportCancellation(cancelId)]).then(async () => {
 			if (deviceRebind) await deviceRebind;
 			if (pendingSpeechPreemption === pending) finishSpeechPreemption();
-		}).catch(error => activeContext?.ui.notify(`Voice handoff stop failed; ownership retained: ${error instanceof Error ? error.message : String(error)}`, "error"));
+		}).catch(error => notifyVoice(activeContext, `Handoff stop failed; ownership retained: ${error instanceof Error ? error.message : String(error)} · restore the device connection; /voice reconnect to retry cleanup`, "error"));
 	};
 
 	const pollWaitingAttention = (): void => {
@@ -1922,7 +1921,7 @@ export default async function (pi: ExtensionAPI) {
 			coordinator.releaseSpeech();
 			attentionSuppressed = true;
 			deviceRetryRequired = true;
-			activeContext?.ui.notify(`Voice device: ${error instanceof Error ? error.message : String(error)}`, "error");
+			notifyVoice(activeContext, `Device: ${error instanceof Error ? error.message : String(error)}`, "error");
 			return;
 		}
 		if (voiceWorkerIdleTimer) clearTimeout(voiceWorkerIdleTimer);
@@ -2010,7 +2009,7 @@ export default async function (pi: ExtensionAPI) {
 			} catch (error) {
 				if (epoch === playbackRequestEpoch && ctx === activeContext) {
 					deviceRetryRequired = true;
-					ctx?.ui.notify(`Voice device: ${error instanceof Error ? error.message : String(error)}${stopUnconfirmed ? " Stop unconfirmed; ownership retained. Restore the old device connection and retry /voice reconnect." : " Explicitly reconnect/retry."}`, "error");
+					notifyVoice(ctx, `Device: ${error instanceof Error ? error.message : String(error)}${stopUnconfirmed ? " Stop unconfirmed; ownership retained. Restore the old device connection and retry /voice reconnect." : " Retry /voice reconnect."}`, "error");
 				}
 				throw error;
 			}
@@ -2088,7 +2087,7 @@ export default async function (pi: ExtensionAPI) {
 		const continueLiveTurn = !!replaySource && (livePlaybackId === target.id || (queued && queueIncomingWhilePaused) || retry?.continueLiveTurn === true);
 		if (!suffix.trim() && !continueLiveTurn) return;
 		if (pendingSpeechPreemption) {
-			activeContext?.ui.notify("Voice device handoff is still stopping the previous transport", "warning");
+			notifyVoice(activeContext, "Handoff waiting · stopping the previous device", "warning");
 			return;
 		}
 
@@ -2153,7 +2152,7 @@ export default async function (pi: ExtensionAPI) {
 			playbackPaused = true;
 			narration.setPaused(true);
 			refreshStatus();
-			activeContext?.ui.notify(`Voice replay failed; microphone ownership retained: ${error instanceof Error ? error.message : String(error)}`, "error");
+			notifyVoice(activeContext, `Replay blocked; microphone ownership retained: ${error instanceof Error ? error.message : String(error)} · restore the device connection; /voice reconnect to retry cleanup`, "error");
 			return;
 		}
 		try {
@@ -2194,7 +2193,7 @@ export default async function (pi: ExtensionAPI) {
 			vocalizer.setPlaybackPaused(true);
 			pausedForAttention = true;
 			refreshStatus();
-			activeContext?.ui.notify("Another Pi project currently owns voice playback; this replay remains paused", "warning");
+			notifyVoice(activeContext, "Replay paused · another project owns playback; retry ↺ when it finishes", "warning");
 			return;
 		}
 
@@ -2219,7 +2218,7 @@ export default async function (pi: ExtensionAPI) {
 					request.paused = playbackPaused = true;
 					narration.setPaused(true);
 					refreshStatus();
-					activeContext?.ui.notify(`Voice replay stop failed; ownership retained: ${String(error)}`, "error");
+					notifyVoice(activeContext, `Replay stop failed; ownership retained: ${String(error)} · restore the device connection; /voice reconnect to retry cleanup`, "error");
 				}
 				return;
 			}
@@ -2362,7 +2361,7 @@ export default async function (pi: ExtensionAPI) {
 		}));
 
 	// ponytail: yield between historical messages; a single large context/hash is still synchronous.
-	const preparePlaybackMessages = async (ctx: ExtensionContext, request = playbackRequestEpoch): Promise<boolean> => {
+	const preparePlaybackMessages = async (ctx: ExtensionContext, request = playbackRequestEpoch, onChecked?: () => void): Promise<boolean> => {
 		const epoch = contextEpoch;
 		let sliceStart = performance.now();
 		for (const entry of completedBranch(ctx)) {
@@ -2375,6 +2374,7 @@ export default async function (pi: ExtensionAPI) {
 			if (config.codeDescriptionContext === "conversation") completedEntryMessages(ctx, entry, config.mode, false);
 			for (const message of completedEntryMessages(ctx, entry, config.mode, config.codeDescriptionContext === "conversation")) {
 				renderKeyFor(ctx, message);
+				onChecked?.();
 			}
 		}
 		return epoch === contextEpoch && request === playbackRequestEpoch && isCurrentContext(ctx);
@@ -2466,18 +2466,28 @@ export default async function (pi: ExtensionAPI) {
 			);
 			const missing = ordered.filter(message => !playbackHistory.hasCompleteTimingFor(message.id));
 			if (missing.length === 0) return;
-			let processedMessages = messages.length - missing.length;
-			timingPreprocessingProgress = {
-				label: "Speech timing",
-				processed: processedMessages,
-				total: messages.length,
+			let processedMessages = ordered.length - missing.length;
+			const phases = new Map<number, string>();
+			let failedMessages = 0;
+			let failureReason = "";
+			const updateTimingProgress = (): void => {
+				if (epoch !== contextEpoch || workEpoch !== timingWorkEpoch || !isCurrentContext(ctx)) return;
+				const counts = new Map<string, number>();
+				for (const phase of phases.values()) counts.set(phase, (counts.get(phase) ?? 0) + 1);
+				timingPreprocessingProgress = {
+					label: "Recovering speech timing", processed: processedMessages, total: ordered.length,
+					detail: [...counts].map(([phase, count]) => `${phase}: ${count}`).join(" · "),
+				};
+				refreshPreprocessingProgress();
 			};
-			refreshPreprocessingProgress();
+			updateTimingProgress();
 			const concurrency = resolveTimingConcurrency(config.timingPreprocessConcurrency, config.ttsDtype);
 			const workers = ensureTimingWorkers(concurrency);
 			const measurementConfig = config;
 			let sliceStart = performance.now();
 			await processConcurrently(missing, concurrency, async (message, lane) => {
+				const phase = (label: string): void => { phases.set(lane, label); updateTimingProgress(); };
+				phase("waiting for timing slot");
 				const processMessage = async (): Promise<void> => {
 					if (performance.now() - sliceStart >= 8) {
 						await new Promise<void>(resolve => setImmediate(resolve));
@@ -2494,6 +2504,7 @@ export default async function (pi: ExtensionAPI) {
 					let time = 0;
 					let measuredRenderKey: string;
 					try {
+						phase("preparing text / descriptions");
 						const prepared = await timingItemsFor(ctx, contextual);
 						if (epoch !== contextEpoch || workEpoch !== timingWorkEpoch || !isCurrentContext(ctx)) return;
 						measuredRenderKey = narrationRenderKey(message.text, measurementConfig, prepared.codeDependencies);
@@ -2507,17 +2518,22 @@ export default async function (pi: ExtensionAPI) {
 							const unit = { sourceOffset: item.source.start, skipUnits };
 							const cached = playbackHistory.timingForUnit(message.id, measuredRenderKey, unit);
 							if (cached) {
+								phase("restoring timing units");
 								checkpoints.push(...cached.map(point => ({ ...point, time: time + point.time })));
 								time += cached[0].duration;
 								continue;
 							}
-							const duration = await workers[lane].measureSegment(item.text, measurementConfig);
+							phase("measuring audio");
+							const duration = await workers[lane].measureSegment(item.text, measurementConfig, step => {
+								phase(step === "cache-decode" ? "decoding cached audio" : "generating speech");
+							});
 							if (epoch !== contextEpoch || workEpoch !== timingWorkEpoch || !isCurrentContext(ctx) || !canRecover()) return;
 							// One failed unit leaves the whole target incomplete; never persist a prefix as complete.
-							if (!Number.isFinite(duration) || duration <= 0) return;
+							if (!Number.isFinite(duration) || duration <= 0) throw new Error("Audio duration unavailable");
 							const unitStart = checkpoints.length;
 							checkpoints.push({ time, duration, sourceOffset: item.source.start, quality: "estimated" });
 							if (item.wordTimings) {
+								phase("estimating word timing");
 								const segmentId = ++timingSegmentId;
 								timingNarration.registerSegment({
 									id: segmentId,
@@ -2538,8 +2554,13 @@ export default async function (pi: ExtensionAPI) {
 								checkpoints.slice(unitStart).map(point => ({ ...point, time: point.time - time })));
 							time += duration;
 						}
-					} catch {
-						// Live speech and microphone actions preempt low-priority timing work.
+					} catch (error) {
+						// Preemption is not a failed cache check or completed timing target.
+						if (epoch === contextEpoch && workEpoch === timingWorkEpoch && isCurrentContext(ctx) && canRecover() &&
+							error !== BACKFILL_EXHAUSTED && !/interrupted|cancelled/i.test(String(error))) {
+							failedMessages += 1;
+							failureReason = error instanceof Error ? error.message : String(error);
+						}
 						return;
 					}
 					if (checkpoints.length === 0 || epoch !== contextEpoch || workEpoch !== timingWorkEpoch || !isCurrentContext(ctx)) return;
@@ -2559,19 +2580,22 @@ export default async function (pi: ExtensionAPI) {
 						requestPlaybackTimeline();
 						pi.appendEntry(PLAYBACK_TIMING_ENTRY, snapshot);
 						processedMessages += 1;
-						timingPreprocessingProgress = {
-							label: "Speech timing",
-							processed: processedMessages,
-							total: messages.length,
-						};
-						refreshPreprocessingProgress();
+						updateTimingProgress();
 					} catch {
 						// Session replacement can invalidate ctx between the epoch check and access.
 					}
 				};
-				if (coordinator) await coordinator.withResource("timing", concurrency, processMessage);
-				else await processMessage();
+				try {
+					if (coordinator) await coordinator.withResource("timing", concurrency, processMessage);
+					else await processMessage();
+				} finally {
+					phases.delete(lane);
+					updateTimingProgress();
+				}
 			});
+			if (failedMessages && epoch === contextEpoch && workEpoch === timingWorkEpoch && isCurrentContext(ctx)) {
+				notifyVoice(ctx, `Timing incomplete · ${failedMessages} targets failed: ${failureReason} · ↺ replay to retry the selected message`, "warning");
+			}
 		})()
 			.catch(() => {
 				// Reload/session replacement cancels captured-context preprocessing.
@@ -2667,7 +2691,7 @@ export default async function (pi: ExtensionAPI) {
 
 	const toggle = async (ctx: ExtensionContext): Promise<void> => {
 		await updateConfig({ ...config, enabled: !config.enabled });
-		ctx.ui.notify(`Voice mode ${config.enabled ? "enabled" : "disabled"}`, "info");
+		notifyVoice(ctx, `Mode ${config.enabled ? "on" : "off"}`, "info");
 	};
 
 	const talk = async (ctx: ExtensionContext): Promise<void> => {
@@ -2680,9 +2704,9 @@ export default async function (pi: ExtensionAPI) {
 			if (talkEpoch !== contextEpoch || requestedPlaybackEpoch !== playbackRequestEpoch) return;
 		}
 		if (inputPhase === "recording" && activeInputEndpoint) {
-			setInputProgress("🎙 Stopping voice recording…");
+			setInputProgress("🎙 Input · stopping recording…");
 			try { await phoneInput.stop(activeInputEndpoint); }
-			catch (error) { ctx.ui.notify(`Voice microphone: ${String(error)}`, "error"); }
+			catch (error) { notifyVoice(ctx, `Microphone: ${String(error)}`, "error"); }
 			return;
 		}
 		if (inputPhase === "acquiring") {
@@ -2702,25 +2726,25 @@ export default async function (pi: ExtensionAPI) {
 		} catch (error) {
 			if (captureEpoch !== inputEpoch) return;
 			clearInputProgress();
-			ctx.ui.notify(`Voice microphone: ${error instanceof Error ? error.message : String(error)}`, "error");
+			notifyVoice(ctx, `Microphone: ${error instanceof Error ? error.message : String(error)}`, "error");
 			return;
 		}
 		if (routed.input === "disabled") {
 			clearInputProgress();
-			ctx.ui.notify("Voice microphone input is disabled", "warning");
+			notifyVoice(ctx, "Microphone disabled · /voice input auto to enable", "warning");
 			return;
 		}
 		if (inputPhase === "recording") {
-			setInputProgress("🎙 Stopping voice recording…");
+			setInputProgress("🎙 Input · stopping recording…");
 			try {
 				await phoneInput.stop(activeInputEndpoint ?? routed.input);
 			} catch (error) {
-				ctx.ui.notify(`Voice microphone: ${error instanceof Error ? error.message : String(error)}`, "error");
+				notifyVoice(ctx, `Microphone: ${error instanceof Error ? error.message : String(error)}`, "error");
 			}
 			return;
 		}
 		if (inputPhase === "transcribing") {
-			ctx.ui.notify("The previous voice recording is still being transcribed", "info");
+			notifyVoice(ctx, "Waiting for the previous transcript", "info");
 			return;
 		}
 		cancelTimingWorkers();
@@ -2738,7 +2762,7 @@ export default async function (pi: ExtensionAPI) {
 		if (captureEpoch !== inputEpoch || talkEpoch !== contextEpoch) return;
 		if (!reserved) {
 			clearInputProgress();
-			ctx.ui.notify("Another Pi session still owns the selected voice device", "warning");
+			notifyVoice(ctx, "Microphone blocked · another session owns this device", "warning");
 			return;
 		}
 		activeInputEndpoint = routed.input;
@@ -2798,11 +2822,11 @@ export default async function (pi: ExtensionAPI) {
 			const capture = await phoneInput.capture(routed.input, {
 				onProgress: progress => {
 					if (talkEpoch !== contextEpoch || captureEpoch !== inputEpoch) return;
-					const elapsed = progress.elapsedSeconds.toFixed(1);
+					const elapsed = Math.floor(progress.elapsedSeconds);
 					setInputProgress(
 						progress.speechDetected
-							? `🎙 Live dictation: ${elapsed}s — stops after silence; Alt+M to finish`
-							: `🎙 Waiting for speech: ${elapsed}s — Alt+M to finish`,
+							? `🎙 Input · listening · ${elapsed}s · stops on silence; ${finishInputHint()}`
+							: `🎙 Input · waiting for speech · ${elapsed}s · ${finishInputHint()}`,
 					);
 				},
 				onAudio: audio => {
@@ -2818,7 +2842,7 @@ export default async function (pi: ExtensionAPI) {
 			inputPhase = "transcribing";
 			if (inputProgressTimer) clearInterval(inputProgressTimer);
 			inputProgressTimer = null;
-			setInputProgress("♬ Finalizing transcript…");
+			setInputProgress("🎙 Input · finalizing transcript…");
 			let liveTranscript = "";
 			try {
 				liveTranscript = (await live.finish()).trim();
@@ -2834,20 +2858,20 @@ export default async function (pi: ExtensionAPI) {
 			if (candidates.length === 0) {
 				releaseSpeechOwnership(false);
 				writeEditor(editorBase);
-				ctx.ui.notify("No speech recognized", "warning");
+				notifyVoice(ctx, "No speech recognized · 🎙 /voice talk to retry", "warning");
 				return;
 			}
 			if (!writeEditor(appendDictation(editorBase, formatAsrDisplay(candidates)))) {
 				releaseSpeechOwnership(false);
-				ctx.ui.notify("Dictation left your manual edits untouched; review the draft before submitting", "info");
+				notifyVoice(ctx, "Manual edits preserved · review the draft before submitting", "info");
 				return;
 			}
 			const editingModel = config.editModel === "current" ? (ctx.model?.id ?? "the current model") : config.editModel;
 			const candidateLabel = `${candidates.length} ASR candidate${candidates.length === 1 ? "" : "s"}`;
 			setInputProgress(
 				config.editMode === "smart" && editorBase.trim()
-					? `✎ Resolving ${candidateLabel} and applying spoken edits with ${editingModel}…`
-					: `✎ Resolving ${candidateLabel} with ${editingModel}…`,
+					? `🎙 Input · resolving ${candidateLabel} + spoken edits · ${editingModel}…`
+					: `🎙 Input · resolving ${candidateLabel} · ${editingModel}…`,
 			);
 			let prompt = appendDictation(editorBase, candidates[0]);
 			try {
@@ -2859,20 +2883,20 @@ export default async function (pi: ExtensionAPI) {
 				}
 			} catch (error) {
 				if (!current()) return;
-				ctx.ui.notify(
-					`Voice dictation resolution failed; used the primary ASR candidate: ${error instanceof Error ? error.message : String(error)}`,
+				notifyVoice(ctx,
+					`Dictation resolution failed · using first transcript candidate; review the draft: ${error instanceof Error ? error.message : String(error)}`,
 					"warning",
 				);
 			}
 			if (!current()) return;
 			if (!writeEditor(prompt)) {
 				releaseSpeechOwnership(false);
-				ctx.ui.notify("Dictation left your manual edits untouched; review the draft before submitting", "info");
+				notifyVoice(ctx, "Manual edits preserved · review the draft before submitting", "info");
 				return;
 			}
 			if (reviewOnly || config.submitMode === "review") {
 				releaseSpeechOwnership(false);
-				ctx.ui.notify("Dictation ready to review — press Enter to submit", "info");
+				notifyVoice(ctx, "Dictation ready · review, then Enter to submit", "info");
 				return;
 			}
 			ctx.ui.setEditorText("");
@@ -2886,7 +2910,7 @@ export default async function (pi: ExtensionAPI) {
 			clearInputProgress();
 			state = "error";
 			refreshStatus();
-			ctx.ui.notify(`Voice microphone: ${error instanceof Error ? error.message : String(error)}`, "error");
+			notifyVoice(ctx, `Microphone: ${error instanceof Error ? error.message : String(error)}`, "error");
 		} finally {
 			finished.resolve();
 			if (finishPendingDictation === finishForPlayback) finishPendingDictation = undefined;
@@ -2913,7 +2937,7 @@ export default async function (pi: ExtensionAPI) {
 			transportStopPending = false;
 			transportStops.clear();
 		} catch (error) {
-			ctx.ui.notify(`Voice reload stop failed; ownership retained: ${String(error)}`, "error");
+			notifyVoice(ctx, `Reload stop failed; ownership retained: ${String(error)} · restore the device connection; /voice reconnect to retry cleanup`, "error");
 			throw error;
 		}
 		ownsSpeech = false;
@@ -2964,10 +2988,29 @@ export default async function (pi: ExtensionAPI) {
 		backfillUsed = 0;
 		backfillExhaustionReported = false;
 		codeDescriptionCache.restore(codeDescriptionSnapshots(ctx));
-		if (!await preparePlaybackMessages(ctx)) return;
+		const checkProgress: ReadyProgress = {
+			label: "Checking saved timing", processed: 0,
+			total: completedAssistantMessages(ctx, config.mode).length, unit: "checked",
+		};
+		timingPreprocessingProgress = checkProgress;
+		refreshPreprocessingProgress();
+		let lastCheckPaint = performance.now();
+		const checked = await preparePlaybackMessages(ctx, playbackRequestEpoch, () => {
+			checkProgress.processed += 1;
+			if (performance.now() - lastCheckPaint >= 80 || checkProgress.processed === checkProgress.total) {
+				lastCheckPaint = performance.now();
+				refreshPreprocessingProgress();
+			}
+		});
+		if (!checked) {
+			if (timingPreprocessingProgress === checkProgress) timingPreprocessingProgress = undefined;
+			refreshPreprocessingProgress();
+			return;
+		}
 		syncPlaybackMessages(ctx, true);
 		// Presence-only description keys cannot prove which wording was measured.
 		playbackHistory.restore(playbackTimingSnapshots(ctx));
+		timingPreprocessingProgress = undefined;
 		scheduleMissingCodeDescriptions(ctx);
 		refreshPlaybackTimeline();
 		scheduleMissingTimings(ctx);
@@ -3060,7 +3103,7 @@ export default async function (pi: ExtensionAPI) {
 			await Promise.all([inputCancelled, cleanup()]);
 			deviceRebind = undefined;
 		} catch (error) {
-			ctx.ui.notify(`Voice shutdown stop failed; ownership retained: ${String(error)}`, "error");
+			notifyVoice(ctx, `Shutdown stop failed; ownership retained: ${String(error)} · restore the device connection; /voice reconnect to retry cleanup`, "error");
 			throw error;
 		}
 		for (const resolve of transportCancelWaiters.values()) resolve();
@@ -3098,7 +3141,7 @@ export default async function (pi: ExtensionAPI) {
 			if (request !== playbackRequestEpoch || !interactiveVoiceSession || deviceRebind) return;
 			releaseSpeechOwnership(false);
 			if (!attentionSuppressed) await reserveSpeechForInput();
-		}).catch(error => activeContext?.ui.notify(`Voice input stop failed; ownership retained: ${String(error)}`, "error"));
+		}).catch(error => notifyVoice(activeContext, `Input stop failed; ownership retained: ${String(error)} · restore the device connection; /voice reconnect to retry cleanup`, "error"));
 	});
 
 	pi.on("before_agent_start", async () => {
@@ -3114,7 +3157,7 @@ export default async function (pi: ExtensionAPI) {
 		void waitForTransportCancellation(cancelId).then(() => {
 			if (request !== playbackRequestEpoch || !interactiveVoiceSession || deviceRebind) return;
 			if (!speechReservedForInput) releaseSpeechOwnership(false);
-		}).catch(error => activeContext?.ui.notify(`Voice turn stop failed; ownership retained: ${String(error)}`, "error"));
+		}).catch(error => notifyVoice(activeContext, `Turn stop failed; ownership retained: ${String(error)} · restore the device connection; /voice reconnect to retry cleanup`, "error"));
 	});
 
 	pi.on("message_start", event => {
@@ -3367,7 +3410,7 @@ export default async function (pi: ExtensionAPI) {
 				blockedSpeechText = "";
 				if (!blockedWarningIssued) {
 					blockedWarningIssued = true;
-					ctx.ui.notify("Voice response paused behind another project; run /voice attention or press F11 to play it", "warning");
+					notifyVoice(ctx, "Response waiting · ↺ F11 plays this project; /voice attention switches projects", "warning");
 				}
 				refreshStatus();
 			} else if (speechBlocked) {
@@ -3392,7 +3435,7 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	pi.registerShortcut("ctrl+shift+v", {
-		description: "Toggle Kokoro voice mode",
+		description: "Toggle Voice output",
 		handler: async ctx => {
 			restoreBottomAfterSpeech = false;
 			bottomPinned = false;
@@ -3404,7 +3447,7 @@ export default async function (pi: ExtensionAPI) {
 	// replaces only the transport; the source continues collecting deltas.
 	const requireEnabledVoice = (ctx: ExtensionContext): boolean => {
 		if (!config.enabled) {
-			ctx.ui.notify("Voice mode is disabled", "warning");
+			notifyVoice(ctx, "Mode off · /voice on to enable", "warning");
 			return false;
 		}
 		return true;
@@ -3419,7 +3462,7 @@ export default async function (pi: ExtensionAPI) {
 		if (!deferInput && inputInProgress) {
 			try { await finishInputForPlayback(); }
 			catch (error) {
-				ctx.ui.notify(`Voice microphone: ${error instanceof Error ? error.message : String(error)}`, "error");
+				notifyVoice(ctx, `Microphone: ${error instanceof Error ? error.message : String(error)}`, "error");
 				return;
 			}
 		}
@@ -3466,7 +3509,7 @@ export default async function (pi: ExtensionAPI) {
 		const request = prepared ? playbackRequestEpoch : await preparePlaybackAction(ctx, false, true);
 		if (request === undefined || request !== playbackRequestEpoch) return;
 		if (!target) {
-			ctx.ui.notify("There is no completed assistant message to replay yet", "warning");
+			notifyVoice(ctx, "Replay unavailable · no completed assistant message yet", "warning");
 			return;
 		}
 		playbackPaused = false;
@@ -3512,7 +3555,7 @@ export default async function (pi: ExtensionAPI) {
 			await replaySelected(ctx, true, true);
 			if (!ownsSpeech && !pendingReplay) owner.releaseSpeech();
 		})().catch(error => {
-			if (current()) ctx.ui.notify(`Voice attention failed: ${String(error)}`, "error");
+			if (current()) notifyVoice(ctx, `Attention failed: ${String(error)}`, "error");
 		}).finally(() => finishAttentionPreparation(preparation));
 	};
 
@@ -3546,14 +3589,14 @@ export default async function (pi: ExtensionAPI) {
 			releaseSpeechOwnership(false);
 			owner.requestAttention(waiting.instanceId, connection);
 		} catch (error) {
-			if (current()) ctx.ui.notify(`Voice attention failed: ${String(error)}`, "error");
+			if (current()) notifyVoice(ctx, `Attention failed: ${String(error)}`, "error");
 		} finally {
 			finishAttentionPreparation(preparation);
 		}
 	};
 
 	pi.registerShortcut("f6", {
-		description: "Play the previous assistant message",
+		description: "⏮ Previous message",
 		handler: async ctx => {
 			if (!requireEnabledVoice(ctx)) return;
 			const target = previewHistoricalTarget(ctx, -1);
@@ -3573,7 +3616,7 @@ export default async function (pi: ExtensionAPI) {
 			}
 		}
 		const selected = history.selected();
-		if (!selected) { ctx.ui.notify("There is no completed assistant message", "warning"); return; }
+		if (!selected) { notifyVoice(ctx, "No completed assistant message", "warning"); return; }
 		const contextual = config.codeDescriptionContext === "conversation"
 			? completedAssistantMessages(ctx, config.mode, true).find(message => message.id === selected.id) : undefined;
 		const stream = new SpeakableStream();
@@ -3615,12 +3658,12 @@ export default async function (pi: ExtensionAPI) {
 			}
 		} else {
 			scheduleMissingTimings(ctx);
-			ctx.ui.notify("Sentence boundaries for this code description are still pending", "info");
+			notifyVoice(ctx, "Waiting for code-description sentence boundaries", "info");
 		}
 	};
 
 	pi.registerShortcut("f7", {
-		description: "Play the previous sentence or literal newline unit",
+		description: "↶ Previous sentence or newline",
 		handler: ctx => stepSentence(ctx, -1),
 	});
 
@@ -3661,7 +3704,7 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	pi.registerShortcut("f8", {
-		description: "Pause or resume regenerated voice playback",
+		description: "⏯ Pause or resume playback",
 		handler: async ctx => {
 			const requestEpoch = await preparePlaybackAction(ctx, true);
 			if (requestEpoch === undefined || requestEpoch !== playbackRequestEpoch) return;
@@ -3687,7 +3730,7 @@ export default async function (pi: ExtensionAPI) {
 				return;
 			}
 			if (pendingSpeechPreemption) {
-				ctx.ui.notify("Voice device handoff is still stopping the previous transport", "warning");
+				notifyVoice(ctx, "Handoff waiting · stopping the previous device", "warning");
 				return;
 			}
 			if (atTranscriptTail && !attentionSuppressed && (pausedOwnerUtterance === undefined || !ownsSpeech)) {
@@ -3735,18 +3778,18 @@ export default async function (pi: ExtensionAPI) {
 				return;
 			}
 			if (!pauseCurrentPlayback(true)) {
-				ctx.ui.notify("There is no assistant message playing", "warning");
+				notifyVoice(ctx, "Nothing playing · ↺ F11 to replay", "warning");
 			}
 		},
 	});
 
 	pi.registerShortcut("f9", {
-		description: "Play the next sentence/newline; after the latest message, pause and follow the transcript tail",
+		description: "↷ Next sentence/newline; follow tail after the last",
 		handler: ctx => stepSentence(ctx, 1),
 	});
 
 	pi.registerShortcut("f10", {
-		description: "Play the next assistant message; pause and follow transcript tail after the latest",
+		description: "⏭ Next message; follow tail after the last",
 		handler: async ctx => {
 			if (!requireEnabledVoice(ctx)) return;
 			const target = previewHistoricalTarget(ctx, 1);
@@ -3756,7 +3799,7 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	pi.registerShortcut("f11", {
-		description: "Replay this project's response",
+		description: "↺ Replay this project's response",
 		handler: async ctx => { await replaySelected(ctx); },
 	});
 
@@ -3766,7 +3809,7 @@ export default async function (pi: ExtensionAPI) {
 		const registerTalkShortcut = (key: Exclude<VoiceConfig["talkShortcut"], "disabled">): void => {
 			effectiveTalkShortcuts.add(key);
 			pi.registerShortcut(key, {
-				description: "Start or stop a prompt with the phone microphone",
+				description: "🎙 Start or stop dictation",
 				handler: ctx => {
 					void talk(ctx);
 				},
@@ -3778,7 +3821,7 @@ export default async function (pi: ExtensionAPI) {
 
 	const scrollToNarration = (ctx: ExtensionContext): void => {
 		if (!ownsSpeech || narration.activeWordStart === undefined) {
-			ctx.ui.notify("There is no active narrated position to scroll to", "warning");
+			notifyVoice(ctx, "No narrated position · replay first, then Alt+V to follow", "warning");
 			return;
 		}
 		restoreBottomAfterSpeech = false;
@@ -3788,7 +3831,7 @@ export default async function (pi: ExtensionAPI) {
 
 	if (config.scrollToShortcut !== "disabled" && config.scrollToShortcut !== config.scrollBottomShortcut) {
 		pi.registerShortcut(config.scrollToShortcut, {
-			description: "Scroll to the current narrated position",
+			description: "Follow the narrated position without resuming",
 			handler: scrollToNarration,
 		});
 		effectiveTalkShortcuts.delete(config.scrollToShortcut);
@@ -3802,7 +3845,7 @@ export default async function (pi: ExtensionAPI) {
 	}
 
 	pi.registerCommand("voice", {
-		description: "Control local Kokoro voice mode",
+		description: "Voice playback and dictation · /voice help",
 		getArgumentCompletions: prefix => {
 			const values = [
 				"on",
@@ -3836,6 +3879,7 @@ export default async function (pi: ExtensionAPI) {
 				"scroll-to",
 				"bottom",
 				"timing",
+				"help",
 				"code-narration",
 				"code-budget",
 				"code-retry",
@@ -3954,7 +3998,7 @@ export default async function (pi: ExtensionAPI) {
 			}
 			if (parts[0] === "output") {
 				return [
-					{ value: "output auto", label: "auto", description: "Prefer the selected SSH client, then local speakers" },
+					{ value: "output auto", label: "auto", description: "Use the selected connection's output; no fallback from an unavailable pin" },
 					{ value: "output local", label: "local", description: "Play through this machine's speakers" },
 					{
 						value: "output tcp://127.0.0.1:8765",
@@ -3980,7 +4024,7 @@ export default async function (pi: ExtensionAPI) {
 			}
 			if (parts[0] === "input") {
 				return [
-					{ value: "input auto", label: "auto", description: "Prefer the selected SSH client, then the local microphone" },
+					{ value: "input auto", label: "auto", description: "Use the selected connection's microphone; no fallback from an unavailable pin" },
 					{ value: "input local", label: "local", description: "Use this machine's default microphone" },
 					{ value: "input disabled", label: "disabled" },
 					{
@@ -4035,12 +4079,12 @@ export default async function (pi: ExtensionAPI) {
 					// Metadata only: no attachment lookup, claim, transport, or selection mutation.
 					const selection = activeDeviceId ?? deviceSelection;
 					if (normalizedAction !== "device" && config[normalizedAction] !== "auto") {
-						ctx.ui.notify(`${normalizedAction}: ${config[normalizedAction]} → ${config[normalizedAction]}`, "info");
+						notifyVoice(ctx, `${normalizedAction}: ${config[normalizedAction]} (explicit)`, "info");
 						return;
 					}
 					let device;
 					try { device = deviceRouter.resolve(selection); } catch (error) {
-						ctx.ui.notify(`${normalizedAction}: ${normalizedAction === "device" ? selection : config[normalizedAction]} → unavailable (${error instanceof Error ? error.message : String(error)}); metadata only`, "info");
+						notifyVoice(ctx, `${normalizedAction}: ${normalizedAction === "device" ? selection : config[normalizedAction]} → unavailable (${error instanceof Error ? error.message : String(error)}); metadata only`, "info");
 						return;
 					}
 					const current = normalizedAction === "device"
@@ -4048,28 +4092,28 @@ export default async function (pi: ExtensionAPI) {
 						: `${config[normalizedAction]} → ${normalizedAction === "output"
 							? (config.output === "auto" ? device?.audioEndpoint ?? "local" : config.output)
 							: (activeInputEndpoint ?? (config.input === "auto" ? device?.inputEndpoint ?? "local" : config.input))}`;
-					ctx.ui.notify(`${normalizedAction}: ${current}`, "info");
+					notifyVoice(ctx, `${normalizedAction}: ${current}`, "info");
 					return;
 				}
 				if (Object.hasOwn(queries, normalizedAction)) {
 					const current = queries[normalizedAction]();
 					const label = normalizedAction === "tts-worker" ? "tts-workers" : normalizedAction;
-					ctx.ui.notify(`${label}${label === "tts-workers" ? " " : ": "}${typeof current === "boolean" ? (current ? "on" : "off") : current}`, "info");
+					notifyVoice(ctx, `${label}${label === "tts-workers" ? " " : ": "}${typeof current === "boolean" ? (current ? "on" : "off") : current}`, "info");
 					return;
 				}
 			}
-			if (!["", "status", "timing", "bottom", "tts-workers", "tts-worker"].includes(normalizedAction)) {
+			if (!["", "status", "timing", "help", "bottom", "tts-workers", "tts-worker"].includes(normalizedAction)) {
 				restoreBottomAfterSpeech = false;
 				bottomPinned = false;
 			}
 			switch (normalizedAction) {
 				case "on":
 					await updateConfig({ ...config, enabled: true });
-					ctx.ui.notify("Voice mode enabled", "info");
+					notifyVoice(ctx, "Mode on", "info");
 					return;
 				case "off":
 					await updateConfig({ ...config, enabled: false });
-					ctx.ui.notify("Voice mode disabled", "info");
+					notifyVoice(ctx, "Mode off", "info");
 					return;
 				case "toggle":
 					await toggle(ctx);
@@ -4091,6 +4135,7 @@ export default async function (pi: ExtensionAPI) {
 					releaseAfterTransportCancellation(cancelId, false, inputCancelled);
 					state = "idle";
 					refreshStatus();
+					notifyVoice(ctx, "Stop requested · draft preserved", "info");
 					return;
 				}
 				case "talk":
@@ -4100,12 +4145,12 @@ export default async function (pi: ExtensionAPI) {
 					await attendNextProject(ctx);
 					return;
 				case "setup":
-					ctx.ui.notify("Preparing speech synthesis and alignment models…", "info");
+					notifyVoice(ctx, "Loading speech synthesis and word-alignment models…", "info");
 					try {
 						await warmModels();
-						ctx.ui.notify("Speech synthesis and alignment models are resident in RAM", "info");
+						notifyVoice(ctx, "Speech synthesis and word-alignment models ready", "info");
 					} catch (error) {
-						ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+						notifyVoice(ctx, error instanceof Error ? error.message : String(error), "error");
 					}
 					return;
 				case "tts-model":
@@ -4113,14 +4158,14 @@ export default async function (pi: ExtensionAPI) {
 				case "alignment-model": {
 					const model = normalizeModelId(value);
 					if (!model) {
-						ctx.ui.notify(`Usage: /voice ${action} <huggingface-repo>`, "error");
+						notifyVoice(ctx, `Usage: /voice ${action} <model-repo>`, "error");
 						return;
 					}
 					if (inputInProgress && action.toLowerCase() === "stt-model") await cancelActiveInput();
 					if (action.toLowerCase() === "tts-model") await updateConfig({ ...config, ttsModel: model });
 					else if (action.toLowerCase() === "stt-model") await updateConfig({ ...config, sttModel: model });
 					else await updateConfig({ ...config, alignmentModel: model });
-					ctx.ui.notify(`${action.toUpperCase()} set to ${model}; it will download on first use`, "info");
+					notifyVoice(ctx, `${action}: ${model} · downloads on first use if not cached`, "info");
 					return;
 				}
 				case "tts-dtype":
@@ -4128,24 +4173,24 @@ export default async function (pi: ExtensionAPI) {
 				case "alignment-dtype": {
 					const dtype = normalizeModelDtype(value.toLowerCase());
 					if (!dtype) {
-						ctx.ui.notify(`Usage: /voice ${action} fp32|q8|q4`, "error");
+						notifyVoice(ctx, `Usage: /voice ${action} fp32|q8|q4`, "error");
 						return;
 					}
 					if (inputInProgress && action.toLowerCase() === "stt-dtype") await cancelActiveInput();
 					if (action.toLowerCase() === "tts-dtype") await updateConfig({ ...config, ttsDtype: dtype });
 					else if (action.toLowerCase() === "stt-dtype") await updateConfig({ ...config, sttDtype: dtype });
 					else await updateConfig({ ...config, alignmentDtype: dtype });
-					ctx.ui.notify(`${action.toUpperCase()} set to ${dtype}`, "info");
+					notifyVoice(ctx, `${action}: ${dtype}`, "info");
 					return;
 				}
 				case "stt-candidates": {
 					const count = normalizeSttCandidates(Number(value));
 					if (!count) {
-						ctx.ui.notify("Usage: /voice stt-candidates <1..8>", "error");
+						notifyVoice(ctx, "Usage: /voice stt-candidates <1..8>", "error");
 						return;
 					}
 					await updateConfig({ ...config, sttCandidates: count });
-					ctx.ui.notify(`Final ASR candidate count set to ${count}`, "info");
+					notifyVoice(ctx, `stt-candidates: ${count}`, "info");
 					return;
 				}
 				case "reconnect": {
@@ -4160,7 +4205,7 @@ export default async function (pi: ExtensionAPI) {
 						playbackPaused = ownsSpeech;
 						narration.setPaused(playbackPaused);
 						vocalizer.setPlaybackPaused(playbackPaused);
-						ctx.ui.notify(`Voice pinned to ${activeDeviceId ?? deviceSelection}; no playback started (metadata only)`, "info");
+						notifyVoice(ctx, `Device pinned: ${activeDeviceId ?? deviceSelection} · no playback started`, "info");
 					}
 					return;
 				}
@@ -4171,7 +4216,7 @@ export default async function (pi: ExtensionAPI) {
 						requested !== "local" &&
 						!deviceRouter.connected().some(device => device.id === requested)
 					) {
-						ctx.ui.notify("Usage: /voice device auto|local|<connected-device-id>", "error");
+						notifyVoice(ctx, "Usage: /voice device auto|local|<connected-device-id>", "error");
 						return;
 					}
 					if (inputInProgress) await cancelActiveInput();
@@ -4184,11 +4229,11 @@ export default async function (pi: ExtensionAPI) {
 					if (requested === "auto" && !await adoptCurrentConnection(playbackRequestEpoch, true)) return;
 					let device;
 					try { device = deviceRouter.resolve(activeDeviceId ?? deviceSelection); } catch (error) {
-						ctx.ui.notify(`Voice device: ${error instanceof Error ? error.message : String(error)}`, "warning");
+						notifyVoice(ctx, `Device: ${error instanceof Error ? error.message : String(error)}`, "warning");
 						return;
 					}
-					ctx.ui.notify(
-						device ? `Voice device set to ${device.name} (metadata only)` : "Voice device set to local input/output",
+					notifyVoice(ctx,
+						device ? `device: ${device.name} · metadata only` : "device: local input/output",
 						"info",
 					);
 					refreshStatus();
@@ -4197,28 +4242,28 @@ export default async function (pi: ExtensionAPI) {
 				case "audio-cache": {
 					const enabled = value.toLowerCase();
 					if (enabled !== "on" && enabled !== "off") {
-						ctx.ui.notify("Usage: /voice audio-cache on|off", "error");
+						notifyVoice(ctx, "Usage: /voice audio-cache on|off", "error");
 						return;
 					}
 					await updateConfig({ ...config, audioCache: enabled === "on" });
-					ctx.ui.notify(`Audio caching ${enabled === "on" ? "enabled" : "disabled"}`, "info");
+					notifyVoice(ctx, `audio-cache: ${enabled}`, "info");
 					return;
 				}
 				case "audio-bitrate": {
 					const bitrate = normalizeAudioCacheBitrate(Number(value));
 					if (bitrate === undefined) {
-						ctx.ui.notify("Usage: /voice audio-bitrate <12..128>", "error");
+						notifyVoice(ctx, "Usage: /voice audio-bitrate <12..128>", "error");
 						return;
 					}
 					await updateConfig({ ...config, audioCacheBitrate: bitrate });
-					ctx.ui.notify(`Opus audio cache bitrate set to ${bitrate} kbps`, "info");
+					notifyVoice(ctx, `audio-bitrate: ${bitrate} kbps (Opus)`, "info");
 					return;
 				}
 				case "tts-worker":
 				case "tts-workers": {
 					const workers = /^[1-8]$/.test(value) && restArgs.length === 0 ? normalizeWorkerCount(Number(value)) : undefined;
 					if (workers === undefined) {
-						ctx.ui.notify("Usage: /voice tts-workers <1..8>", "error");
+						notifyVoice(ctx, "Usage: /voice tts-workers <1..8>", "error");
 						break;
 					}
 					const next = { ...config, ttsWorkers: workers };
@@ -4226,23 +4271,23 @@ export default async function (pi: ExtensionAPI) {
 					config = next;
 					// Scheduling only: do not reset playback, assets, preprocessing or its budget.
 					vocalizer.setTtsWorkers(workers);
-					ctx.ui.notify(`tts-workers concurrency set to ${workers}`, "info");
+					notifyVoice(ctx, `tts-workers concurrency: ${workers}`, "info");
 					break;
 				}
 				case "code-preprocess": {
 					const concurrency = normalizeWorkerCount(Number(value));
 					if (concurrency === undefined) {
-						ctx.ui.notify("Usage: /voice code-preprocess <1..8>", "error");
+						notifyVoice(ctx, "Usage: /voice code-preprocess <1..8>", "error");
 						return;
 					}
 					await updateConfig({ ...config, codeDescriptionPreprocessConcurrency: concurrency });
-					ctx.ui.notify(`code-preprocess concurrency set to ${concurrency}`, "info");
+					notifyVoice(ctx, `code-preprocess: ${concurrency} workers`, "info");
 					return;
 				}
 				case "code-budget": {
 					const parsed = normalizeBackfillBudget(value.toLowerCase() === "unlimited" ? "unlimited" : Number(value));
 					if (parsed === undefined) {
-						ctx.ui.notify("Usage: /voice code-budget [unlimited|<0..n>] | code-retry current|historical [all|<id>]", "error");
+						notifyVoice(ctx, "Usage: /voice code-budget <0..n|unlimited>", "error");
 						return;
 					}
 					// Session-runtime only; the persisted config keeps its own budget.
@@ -4250,7 +4295,7 @@ export default async function (pi: ExtensionAPI) {
 					backfillUsed = 0;
 					backfillExhaustionReported = false;
 					if (activeContext) scheduleMissingCodeDescriptions(activeContext);
-					ctx.ui.notify(`code-description backfill budget set to ${parsed} for this session`, "info");
+					notifyVoice(ctx, `code-budget: ${parsed} requests · this session`, "info");
 					return;
 				}
 				case "scroll-to": {
@@ -4313,14 +4358,14 @@ export default async function (pi: ExtensionAPI) {
 						const selectedId = playbackHistory.selected()?.id ?? playbackHistory.status()?.messageId;
 						const keys = new Set(collectFailed().filter(failed => failed.messageId === selectedId).map(failed => failed.key));
 						if (keys.size === 0) {
-							ctx.ui.notify("No failed descriptions on the currently selected message", "info");
+							notifyVoice(ctx, "No failed descriptions on this message", "info");
 							return;
 						}
-						ctx.ui.notify(`Retrying ${retryKeys(keys)} description(s) on ${selectedId}`, "info");
+						notifyVoice(ctx, `↺ Retrying ${retryKeys(keys)} descriptions · current message`, "info");
 						return;
 					}
 					if (mode0 !== "historical") {
-						ctx.ui.notify("Usage: /voice code-retry current | historical [all|<message-id>]", "error");
+						notifyVoice(ctx, "Usage: /voice code-retry current | historical [all|<message-id>]", "error");
 						return;
 					}
 					const arg1 = retryArgs[1];
@@ -4329,7 +4374,7 @@ export default async function (pi: ExtensionAPI) {
 							try {
 								const failed = collectFailed();
 								if (failed.length === 0) {
-									ctx.ui.notify("No failed descriptions to retry", "info");
+									notifyVoice(ctx, "No failed descriptions to retry", "info");
 									return;
 								}
 								// Chronological order; the entry nearest the current selection is
@@ -4353,14 +4398,14 @@ export default async function (pi: ExtensionAPI) {
 									`[${position === 0 ? "closest" : `#${entry.index + 1}`}] ${entry.messageId.slice(0, 10)} · ${entry.preview}`,
 								);
 								labels.push("Retry ALL failed descriptions");
-								const picked = await ctx.ui.select("Retry a failed code description", labels);
+								const picked = await ctx.ui.select("Voice · ↺ Retry a failed description", labels);
 								if (!picked) return;
 								if (picked === "Retry ALL failed descriptions") {
-									ctx.ui.notify(`Retrying ${retryKeys(new Set(failed.map(entry => entry.key)))} description(s)`, "info");
+									notifyVoice(ctx, `↺ Retrying ${retryKeys(new Set(failed.map(entry => entry.key)))} descriptions`, "info");
 									return;
 								}
 								const chosen = ordered[labels.indexOf(picked)];
-								if (chosen) ctx.ui.notify(`Retrying ${retryKeys(new Set([chosen.key]))} description(s)`, "info");
+								if (chosen) notifyVoice(ctx, `↺ Retrying ${retryKeys(new Set([chosen.key]))} descriptions`, "info");
 							} catch {
 								// Dialog failures leave state untouched.
 							}
@@ -4372,107 +4417,107 @@ export default async function (pi: ExtensionAPI) {
 						(arg1 === "all" ? failed : failed.filter(entry => entry.messageId.includes(arg1))).map(entry => entry.key),
 					);
 					if (keys.size === 0) {
-						ctx.ui.notify("No matching failed descriptions to retry", "info");
+						notifyVoice(ctx, "No matching failed descriptions to retry", "info");
 						return;
 					}
-					ctx.ui.notify(`Retrying ${retryKeys(keys)} description(s)`, "info");
+					notifyVoice(ctx, `↺ Retrying ${retryKeys(keys)} descriptions`, "info");
 					return;
 				}
 				case "timing-preprocess": {
 					const concurrency = normalizePreprocessConcurrency(value.toLowerCase() === "auto" ? "auto" : Number(value));
 					if (concurrency === undefined) {
-						ctx.ui.notify("Usage: /voice timing-preprocess auto|<1..8>", "error");
+						notifyVoice(ctx, "Usage: /voice timing-preprocess auto|<1..8>", "error");
 						return;
 					}
 					await updateConfig({ ...config, timingPreprocessConcurrency: concurrency });
-					ctx.ui.notify(`timing-preprocess concurrency set to ${concurrency}`, "info");
+					notifyVoice(ctx, `timing-preprocess: ${concurrency} workers`, "info");
 					return;
 				}
 				case "code-narration": {
 					const narrationMode = value.toLowerCase();
 					if (narrationMode !== "guided" && narrationMode !== "summary") {
-						ctx.ui.notify("Usage: /voice code-narration guided|summary", "error");
+						notifyVoice(ctx, "Usage: /voice code-narration guided|summary", "error");
 						return;
 					}
 					await updateConfig({ ...config, codeNarration: narrationMode });
-					ctx.ui.notify(`Code narration mode set to ${narrationMode}`, "info");
+					notifyVoice(ctx, `code-narration: ${narrationMode}`, "info");
 					return;
 				}
 				case "highlight": {
 					const normalized = value.toLowerCase();
 					if (normalized !== "on" && normalized !== "off") {
-						ctx.ui.notify("Usage: /voice highlight on|off", "error");
+						notifyVoice(ctx, "Usage: /voice highlight on|off", "error");
 						return;
 					}
 					await updateConfig({ ...config, playbackHighlight: normalized === "on" });
 					requestNarrationRender(true);
-					ctx.ui.notify(`Spoken-word highlighting ${normalized === "on" ? "enabled" : "disabled"}`, "info");
+					notifyVoice(ctx, `highlight: ${normalized}`, "info");
 					return;
 				}
 				case "autoscroll": {
 					const normalized = value.toLowerCase();
 					if (normalized !== "on" && normalized !== "off") {
-						ctx.ui.notify("Usage: /voice autoscroll on|off", "error");
+						notifyVoice(ctx, "Usage: /voice autoscroll on|off", "error");
 						return;
 					}
 					await updateConfig({ ...config, autoScroll: normalized === "on" });
 					// Display settings retain paused/playing state and manual framing.
 					hideFollowHint();
 					requestNarrationRender(true);
-					ctx.ui.notify(`Spoken-text auto-scroll ${normalized === "on" ? "enabled" : "disabled"}`, "info");
+					notifyVoice(ctx, `autoscroll: ${normalized} · Alt+V still follows the narrated position`, "info");
 					return;
 				}
 				case "edit-model": {
 					const model = normalizeEditModel(value);
 					if (!model) {
-						ctx.ui.notify("Usage: /voice edit-model current|provider/model-id", "error");
+						notifyVoice(ctx, "Usage: /voice edit-model current|provider/model-id", "error");
 						return;
 					}
 					if (model !== "current") {
 						const separator = model.indexOf("/");
 						if (!ctx.modelRegistry.find(model.slice(0, separator), model.slice(separator + 1))) {
-							ctx.ui.notify(`Editing model is not available in Pi: ${model}`, "error");
+							notifyVoice(ctx, `Editing model unavailable in Pi: ${model}`, "error");
 							return;
 						}
 					}
 					await updateConfig({ ...config, editModel: model });
-					ctx.ui.notify(`Dictation resolution model set to ${model}`, "info");
+					notifyVoice(ctx, `edit-model: ${model}`, "info");
 					return;
 				}
 				case "mode": {
 					const mode = parseMode(value.toLowerCase());
 					if (!mode) {
-						ctx.ui.notify("Usage: /voice mode assistant|all|yield", "error");
+						notifyVoice(ctx, "Usage: /voice mode assistant|all|yield", "error");
 						return;
 					}
 					await updateConfig({ ...config, mode });
-					ctx.ui.notify(`Voice mode set to ${mode}`, "info");
+					notifyVoice(ctx, `mode: ${mode}`, "info");
 					return;
 				}
 				case "voice": {
 					const selected = value;
 					if (!isVoice(selected)) {
-						ctx.ui.notify("Unknown voice. Use /voice voice <voice-id>; completion lists available voices.", "error");
+						notifyVoice(ctx, "Unknown voice · /voice voice <voice-id>; Tab lists voices", "error");
 						return;
 					}
 					await updateConfig({ ...config, voice: selected });
-					ctx.ui.notify(`Kokoro voice set to ${selected}`, "info");
+					notifyVoice(ctx, `voice: ${selected}`, "info");
 					return;
 				}
 				case "speed": {
 					const speed = Number(value);
 					if (!Number.isFinite(speed) || speed < 0.5 || speed > 2) {
-						ctx.ui.notify("Usage: /voice speed <0.5..2>", "error");
+						notifyVoice(ctx, "Usage: /voice speed <0.5..2>", "error");
 						return;
 					}
 					await updateConfig({ ...config, speed });
-					ctx.ui.notify(`Voice speed set to ${speed}`, "info");
+					notifyVoice(ctx, `speed: ${speed}`, "info");
 					return;
 				}
 				case "output": {
 					const output = normalizeVoiceOutput(value);
 					if (!output) {
-						ctx.ui.notify("Usage: /voice output auto|local|tcp://host:port|unix:///path", "error");
+						notifyVoice(ctx, "Usage: /voice output auto|local|tcp://host:port|unix:///path", "error");
 						return;
 					}
 					if (inputInProgress) await cancelActiveInput();
@@ -4480,20 +4525,20 @@ export default async function (pi: ExtensionAPI) {
 					narration.finish();
 					releaseAfterTransportCancellation(cancelId);
 					await updateConfig({ ...config, output });
-					ctx.ui.notify(`Voice output set to ${output}`, "info");
+					notifyVoice(ctx, `output: ${output}`, "info");
 					return;
 				}
 				case "edit": {
 					const editMode = parseEditMode(value.toLowerCase());
 					if (!editMode) {
-						ctx.ui.notify("Usage: /voice edit smart|append", "error");
+						notifyVoice(ctx, "Usage: /voice edit smart|append", "error");
 						return;
 					}
 					await updateConfig({ ...config, editMode });
-					ctx.ui.notify(
+					notifyVoice(ctx,
 						editMode === "smart"
-							? "Spoken corrections enabled after ASR candidate resolution"
-							: "Resolved dictation will be appended without executing spoken corrections",
+							? "edit: smart · apply spoken corrections after transcript resolution"
+							: "edit: append · no spoken corrections",
 						"info",
 					);
 					return;
@@ -4501,22 +4546,22 @@ export default async function (pi: ExtensionAPI) {
 				case "submit": {
 					const submitMode = parseSubmitMode(value.toLowerCase());
 					if (!submitMode) {
-						ctx.ui.notify("Usage: /voice submit review|auto", "error");
+						notifyVoice(ctx, "Usage: /voice submit review|auto", "error");
 						return;
 					}
 					await updateConfig({ ...config, submitMode });
-					ctx.ui.notify(`Voice dictation submit mode set to ${submitMode}`, "info");
+					notifyVoice(ctx, `submit: ${submitMode}`, "info");
 					return;
 				}
 				case "shortcut": {
 					const shortcut = normalizeTalkShortcut(value);
 					if (!shortcut) {
-						ctx.ui.notify("Usage: /voice shortcut <key|disabled> (for example alt+m, ctrl+shift+m, or f8)", "error");
+						notifyVoice(ctx, "Usage: /voice shortcut <key|disabled> · e.g. alt+m or f8", "error");
 						return;
 					}
 					await updateConfig({ ...config, talkShortcut: shortcut });
-					ctx.ui.notify(
-						`Voice microphone shortcut set to ${shortcut}. Run /reload to apply it.`,
+					notifyVoice(ctx,
+						`shortcut: ${shortcut} · /reload to apply`,
 						"info",
 					);
 					return;
@@ -4524,18 +4569,18 @@ export default async function (pi: ExtensionAPI) {
 				case "input": {
 					const input = normalizeVoiceInput(value);
 					if (!input) {
-						ctx.ui.notify("Usage: /voice input auto|local|disabled|tcp://host:port|unix:///path", "error");
+						notifyVoice(ctx, "Usage: /voice input auto|local|disabled|tcp://host:port|unix:///path", "error");
 						return;
 					}
 					if (inputInProgress) await cancelActiveInput();
 					if (speechReservedForInput) releaseSpeechOwnership(false);
 					await updateConfig({ ...config, input });
-					ctx.ui.notify(`Voice input set to ${input}`, "info");
+					notifyVoice(ctx, `input: ${input}`, "info");
 					return;
 				}
 				case "test": {
 					if (!config.enabled) {
-						ctx.ui.notify("Enable voice mode first with /voice on", "warning");
+						notifyVoice(ctx, "Mode off · /voice on to enable", "warning");
 						return;
 					}
 					const text = args.slice(action.length).trim() || "Pi voice mode is ready.";
@@ -4556,19 +4601,39 @@ export default async function (pi: ExtensionAPI) {
 					return;
 				}
 				case "timing":
-					ctx.ui.notify(narration.timingSummary(), "info");
+					notifyVoice(ctx, `Timing${playbackTimingStatus(playbackHistory.status()?.timingQuality, playbackPositionEstimated)}\n${narration.timingSummary()}`, "info");
 					return;
 				case "status":
 				case "":
-					ctx.ui.notify(
-						`Voice ${config.enabled ? "on" : "off"}; mode=${config.mode}; voice=${config.voice}; speed=${config.speed}; tts=${config.ttsModel}@${config.ttsDtype}; ttsWorkers=${config.ttsWorkers}; stt=${config.sttModel}@${config.sttDtype}; sttCandidates=${config.sttCandidates}; alignment=${config.alignmentModel}@${config.alignmentDtype}; editModel=${config.editModel}; highlight=${config.playbackHighlight ? "on" : "off"}; autoScroll=${config.autoScroll ? "on" : "off"}; scrollToShortcut=${config.scrollToShortcut}; bottomShortcut=${config.scrollBottomShortcut}; codeNarration=${config.codeNarration}; codeContext=${config.codeDescriptionContext}; codePreprocess=${config.codeDescriptionPreprocessConcurrency}; codeScope=${config.codeDescriptionPreprocessScope}; codeBudget=${backfillAllowance}; timingPreprocess=${config.timingPreprocessConcurrency}; audioCache=${config.audioCache ? `${config.audioCacheBitrate}kbps` : "off"}; device=${deviceSelection}${activeDeviceId ? `→${activeDeviceId}` : "→local"}; output=${config.output}; input=${config.input}; shortcut=${config.talkShortcut}; submit=${config.submitMode}; edit=${config.editMode}`,
+					notifyVoice(ctx, [
+						`${config.enabled ? "On" : "Off"} · mode: ${config.mode} · voice: ${config.voice} · speed: ${config.speed}`,
+						`Playback · ${playbackPaused ? "paused" : state} · device: ${deviceSelection}${activeDeviceId ? ` → ${activeDeviceId}` : ""} · output: ${config.output}`,
+						`Synthesis · ${config.ttsModel}@${config.ttsDtype} · tts-workers: ${config.ttsWorkers} · audio-cache: ${config.audioCache ? `${config.audioCacheBitrate} kbps` : "off"}`,
+						`Word alignment · ${config.alignmentModel}@${config.alignmentDtype} · /voice timing for quality`,
+						`🎙 Input · ${config.input} · ${config.sttModel}@${config.sttDtype} · candidates: ${config.sttCandidates} · shortcut: ${config.talkShortcut}`,
+						`Dictation · edit: ${config.editMode} · model: ${config.editModel} · submit: ${config.submitMode}`,
+						`Descriptions · ${config.codeNarration} · ${config.codeDescriptionContext} · workers: ${config.codeDescriptionPreprocessConcurrency} · scope: ${config.codeDescriptionPreprocessScope} · budget: ${backfillUsed}/${backfillAllowance}`,
+						`Timing recovery · workers: ${config.timingPreprocessConcurrency} · measures audio; new word timing is estimated`,
+						`View · highlight: ${config.playbackHighlight ? "on" : "off"} · autoscroll: ${config.autoScroll ? "on" : "off"} · ${config.scrollToShortcut}: follow · ${config.scrollBottomShortcut}: tail`,
+					].join("\n"),
 						"info",
 					);
 					return;
+				case "help":
 				default:
-					ctx.ui.notify(
-						"Usage: /voice [on|off|toggle|status|stop|setup|test|talk|attention|mode|voice|speed|tts-model|tts-dtype|tts-workers|stt-model|stt-dtype|stt-candidates|alignment-model|alignment-dtype|edit-model|highlight|autoscroll|scroll-to|bottom|timing|code-narration|code-budget|code-retry|code-preprocess|timing-preprocess|audio-cache|audio-bitrate|device|reconnect|output|input|shortcut|submit|edit]",
-						"error",
+					notifyVoice(ctx, [
+						"/voice <command> · settings without a value show the current value",
+						"🎙 talk · ↺ F11 replay this project · ⏯ F8 pause/resume",
+						"⏮/⏭ F6/F10 previous/next message · ↶/↷ F7/F9 previous/next sentence",
+						`${config.scrollToShortcut}: follow narrated position · ${config.scrollBottomShortcut}: transcript tail`,
+						"Control · on | off | toggle | stop | attention | reconnect | setup | test",
+						"Playback · mode | voice | speed | device | output | highlight | autoscroll | scroll-to | bottom",
+						"Models · tts-model | tts-dtype | tts-workers | alignment-model | alignment-dtype",
+						"Input · input | shortcut | stt-model | stt-dtype | stt-candidates | edit | edit-model | submit",
+						"Cache · code-narration | code-preprocess | code-budget | code-retry current|historical | timing-preprocess | audio-cache | audio-bitrate",
+						"Inspect · status | timing | help",
+					].join("\n"),
+						normalizedAction === "help" ? "info" : "error",
 					);
 			}
 		},

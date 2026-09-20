@@ -192,9 +192,10 @@ function runFfmpeg(args, input) {
 	});
 }
 
-async function readCachedAudio(file) {
+async function readCachedAudio(file, onDecode) {
 	try {
 		await fs.promises.access(file, fs.constants.R_OK);
+		onDecode?.();
 		const bytes = await runFfmpeg(["-i", file, "-f", "f32le", "-ar", String(DEFAULT_SAMPLE_RATE), "-ac", "1", "pipe:1"]);
 		if (bytes.length === 0 || bytes.length % Float32Array.BYTES_PER_ELEMENT !== 0) throw new Error("Empty audio cache entry");
 		const array = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
@@ -242,9 +243,14 @@ async function writeCachedAudio(file, pcm, bitrate) {
 }
 
 async function audioForOperation(operation) {
+	const report = phase => {
+		if (operation.type === "measure" && operation.epoch === epoch) {
+			send({ type: "measurement-progress", requestId: operation.requestId, phase });
+		}
+	};
 	const file = audioCachePath(operation);
 	if (file) {
-		const cached = await readCachedAudio(file);
+		const cached = await readCachedAudio(file, () => report("cache-decode"));
 		if (cached) return { pcm: cached, sampleRate: DEFAULT_SAMPLE_RATE };
 	}
 	if (operation.type === "segment" && !synthesisChild) {
@@ -252,6 +258,7 @@ async function audioForOperation(operation) {
 		const { audioPromise, ...input } = operation;
 		return sentencePool.generate(input);
 	}
+	report("synthesis");
 	const operationEpoch = epoch;
 	const model = await getModel(operation.model, operation.dtype);
 	const output = await generateSentenceAudio(model, operation.text,
@@ -260,7 +267,7 @@ async function audioForOperation(operation) {
 	const pcm = Array.isArray(output.audio) ? output.audio[0] : output.audio;
 	if (file && pcm instanceof Float32Array && sampleRate === DEFAULT_SAMPLE_RATE) {
 		await writeCachedAudio(file, pcm, Number(operation.audioCacheBitrate));
-		const cached = await readCachedAudio(file);
+		const cached = await readCachedAudio(file, () => report("cache-decode"));
 		if (cached) return { pcm: cached, sampleRate: DEFAULT_SAMPLE_RATE };
 	}
 	return { pcm, sampleRate };

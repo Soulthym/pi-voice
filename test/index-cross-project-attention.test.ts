@@ -365,7 +365,7 @@ test("disabled attention does not request another project", async t => {
 	const { host, waiting } = await setup(t);
 	await host.command("off"); await host.command("attention");
 	assert.equal(waiting.hasAttentionRequest(), false);
-	assert.ok(host.notices.some(n => n.message === "Voice mode is disabled"));
+	assert.ok(host.notices.some(n => n.message === "Voice · Mode off · /voice on to enable"));
 });
 
 for (const cancelled of [false, true]) test(`waiting receiver adopts only current origin pin without resolving detached attachment (cancelled: ${cancelled})`, async t => {

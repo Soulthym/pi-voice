@@ -15,12 +15,14 @@ Preprocessing continues while spoken output is disabled. Live speech, microphone
 Session-wide progress and selected-message playback state use distinct labels:
 
 ```text
-○ Playback · message 280/284: speech timing pending
-Preprocessing · code descriptions (12/25 budget): 24/61 ready
-Preprocessing · speech timing: 109/284 ready
+○ Playback · message 280/605 · timing pending
+↺ Preparing code descriptions · 24/61 targets processed
+↺ Recovering speech timing · 109/605 targets ready · decoding cached audio: 2
 ```
 
-Lines remain ordered input → playback → code descriptions → speech timing. “Ready” counts complete persisted message-level results, not forced-alignment accuracy. The selected message index is navigation state, not the current preprocessing worker index.
+Lines remain ordered input → playback → code descriptions → speech timing. Counts are narration targets (eligible text/thinking blocks), not words or percentages. Timing “ready” means complete compatible coverage; descriptions “processed” can include omissions with retry callouts. Recovery totals cover the configured historical scope. The selected message index is navigation state, not a worker index.
+
+On startup, `↺ Checking saved timing · 109/605 targets checked` means preparing identities and validating/restoring saved maps—not inference. Compatible complete maps need no audio decoding, synthesis or alignment. If timing is missing/incompatible, **Recovering speech timing** separately shows active lanes preparing descriptions, restoring timing units, measuring audio, decoding cached audio, generating speech, or estimating word timing. Cached Opus decoding is real work but does not run Kokoro. Background measurement uses duration-weighted word estimates, not forced alignment. A fast recovery counter alone does not prove regeneration or cache loss.
 
 Playback labels message word timing as `estimated`, `mixed (includes estimates)`, or `CTC-refined`. Estimates remain when alignment fails, exceeds resource/queue limits, or cannot reliably refine a long window; later refinement is not guaranteed. `playback clock: estimated` is separate: it describes the transport clock, not word alignment. Cached timing retains quality; older unlabeled snapshots show `quality unknown` rather than claiming refinement. These labels do not change transcript syntax colors or move paused highlights.
 

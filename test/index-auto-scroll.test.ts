@@ -308,7 +308,7 @@ test("TUI follows exact words, respects manual browsing, and explicit controls r
 	const pauseCommandsAfterStop = worker!.pauses.length;
 	await host.shortcut("f8");
 	assert.equal(worker!.pauses.length, pauseCommandsAfterStop);
-	assert.ok(host.notices.some(notice => notice.message.includes("no assistant message playing")));
+	assert.ok(host.notices.some(notice => notice.message.includes("Nothing playing")));
 
 	// Message movement previews and anchors at 20% while paused, including
 	// in-band targets, without starting the replacement sink.

@@ -144,7 +144,7 @@ test("failed rebind keeps its barrier and lease through later playback and shutd
  assert.ok(await fs.stat(lease));
  await assert.rejects(host.shutdown(), /unconfirmed remote stop/);
  assert.ok(await fs.stat(lease));
- assert.ok(host.notices.some(notice => /shutdown stop failed; ownership retained/.test(notice.message)));
+ assert.ok(host.notices.some(notice => /Shutdown stop failed; ownership retained/.test(notice.message)));
 });
 
 test("failed session_shutdown followed by replacement cannot steal same-PID ownership; reconnect retries cleanup only", async t => {

@@ -73,7 +73,7 @@ test("cancelled dictation ignores late decoder progress, PCM and ASR results dur
 		assert.equal(host.notices.at(-1)?.level, "info", command);
 	}
 	await host.command("device");
-	assert.equal(host.notices.at(-1)?.message, "device: auto → phone (Phone)", "capture retains its pinned device");
+	assert.equal(host.notices.at(-1)?.message, "Voice · device: auto → phone (Phone)", "capture retains its pinned device");
 	assert.equal(claim.mock.callCount(), claims, "queries must not claim a device");
 	assert.equal(cancel.mock.callCount(), cancellations, "queries must not cancel active capture");
 	assert.equal(host.widgetOperations.length, widgetOperations, "queries must leave input progress intact");

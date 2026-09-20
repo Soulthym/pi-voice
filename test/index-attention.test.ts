@@ -72,11 +72,11 @@ test("extension attention ignores tool-only turns, warns once per response, and 
 	await host.start();
 
 	await streamBlockedResponse(host, "", "toolUse");
-	assert.equal(host.notices.filter(item => item.message.includes("paused behind another project")).length, 0);
+	assert.equal(host.notices.filter(item => item.message.includes("Response waiting")).length, 0);
 
 	await streamBlockedResponse(host, "A completed response that should request attention.");
 	await streamBlockedResponse(host, "Another update while the same project is waiting.");
-	assert.equal(host.notices.filter(item => item.message.includes("paused behind another project")).length, 2);
+	assert.equal(host.notices.filter(item => item.message.includes("Response waiting")).length, 2);
 	assert.equal(spoken.length, 0);
 
 	owner.releaseSpeech();

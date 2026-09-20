@@ -261,7 +261,7 @@ for (const latest of ["f6", "stop"]) test(`late F11 acquisition failure cannot r
 		assert.deepEqual(sent.map(segment => segment.text).filter(text => !text.startsWith("Project ")), ["B sentence."]);
 		assert.equal(workers.findLast(worker => worker.sent.length)?.pauses.at(-1), false);
 	}
-	assert.ok(!host.notices.some(notice => /replay remains paused/.test(notice.message)));
+	assert.ok(!host.notices.some(notice => /Replay paused/.test(notice.message)));
 });
 
 test("rapid F10 to Tail pauses the still-audible previous transport before retiring preparation", async t => {
@@ -325,7 +325,7 @@ for (const [key, live] of [["f11", false], ["f6", false], ["f9", false], ["f11",
 	assert.equal(stop.mock.callCount(), 1);
 	stopped.reject(new Error("Recorder stop unconfirmed"));
 	await playback; await settle();
-	assert.ok(host.notices.some(notice => /Voice replay failed.*Recorder stop unconfirmed/.test(notice.message)));
+	assert.ok(host.notices.some(notice => /Voice · Replay blocked.*Recorder stop unconfirmed/.test(notice.message)));
 	assert.equal(worker.sent.length, before);
 	await host.shortcut("f8"); await settle();
 	assert.equal(worker.sent.length, before, "failed recorder stop still fences playback");
@@ -497,7 +497,7 @@ test("failed live acquisition retry retains continuation after canonical finaliz
 	const acquire = t.mock.method(SessionCoordinator.prototype, "tryAcquireSpeech", () => false);
 	const force = t.mock.method(SessionCoordinator.prototype, "forceAcquireSpeech", async () => false);
 	await host.shortcut("f11"); await settle();
-	assert.match(host.notices.at(-1)?.message ?? "", /replay remains paused/);
+	assert.match(host.notices.at(-1)?.message ?? "", /Replay paused/);
 	const complete = { ...partial, stopReason: "stop", content: [...partial.content, { type: "text", text: "Final block." }] };
 	await host.emit("message_update", { message: complete, assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: "Final block." } });
 	await host.emit("message_end", { message: complete });
@@ -661,7 +661,7 @@ for (const wait of ["device", "history"]) for (const scenario of ["partial", "co
 	assert.equal(worker.sent.length, before, "neither source may bypass the gate");
 	gate.resolve(); await settle();
 	if (scenario === "retry") {
-		assert.ok(host.notices.some(notice => /replay remains paused/.test(notice.message)));
+		assert.ok(host.notices.some(notice => /Replay paused/.test(notice.message)));
 		for (const method of acquisition) method.mock.restore();
 		await host.shortcut("f8"); await settle();
 	}
@@ -687,12 +687,12 @@ for (const wait of ["device", "history"]) for (const scenario of ["partial", "co
 		host.addMessage("third", "new", third);
 		await host.emit("message_end", { message: third });
 		await host.emit("turn_end", { message: third });
-		assert.ok(host.notices.some(notice => /response paused/.test(notice.message)));
+		assert.ok(host.notices.some(notice => /Response waiting/.test(notice.message)));
 	}
 	await idle();
 	if (scenario === "third-completed") assert.equal(cleared.mock.callCount(), 0, "draining B must not clear completed C's waiting source");
 	if (!completed) {
-		assert.ok(host.notices.some(notice => /response paused/.test(notice.message)), "displaced partial response must retain completion attention");
+		assert.ok(host.notices.some(notice => /Response waiting/.test(notice.message)), "displaced partial response must retain completion attention");
 		await host.shortcut("f11"); await settle();
 	}
 	assert.deepEqual(spoken(), ["Old prefix", "Old final.", "New prefix completed."]);
@@ -710,7 +710,7 @@ for (const wait of ["device", "history"]) for (const scenario of ["partial", "co
 		host.addMessage("third", "new", third);
 		await host.emit("message_end", { message: third });
 		await host.emit("turn_end", { message: third });
-		assert.ok(host.notices.some(notice => /response paused/.test(notice.message)), "queued playback must preserve the latest partial source's attention");
+		assert.ok(host.notices.some(notice => /Response waiting/.test(notice.message)), "queued playback must preserve the latest partial source's attention");
 		await host.shortcut("f11"); await settle();
 		await idle();
 		assert.deepEqual(spoken(), ["Old prefix", "Old final.", "New prefix completed.", "Third prefix completed."]);

@@ -1,4 +1,10 @@
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { TimingQuality } from "./narration-progress.js";
+
+/** Pi supplies severity icons/colors; the text also stands alone in RPC/plain output. */
+export function notifyVoice(ctx: ExtensionContext | null | undefined, message: string, level: "info" | "warning" | "error"): void {
+	ctx?.ui.notify(`Voice · ${message.replace(/^Voice(?: · |: | )/, "")}`, level);
+}
 
 /** Word alignment provenance is independent of the device playback clock. */
 export function playbackTimingStatus(quality: TimingQuality | undefined, clockEstimated: boolean): string {
@@ -12,6 +18,8 @@ export interface ReadyProgress {
 	label: string;
 	processed: number;
 	total: number;
+	unit?: "checked" | "processed" | "ready";
+	detail?: string;
 }
 
 export interface VoiceProgressLine {
@@ -20,12 +28,12 @@ export interface VoiceProgressLine {
 }
 
 export function preprocessingStatus(progress: ReadyProgress): string {
-	return `Preprocessing · ${progress.label.toLowerCase()}: ${progress.processed}/${progress.total} ready`;
+	return `↺ ${progress.label} · ${progress.processed}/${progress.total} targets ${progress.unit ?? "ready"}${progress.detail ? ` · ${progress.detail}` : ""}`;
 }
 
 export function pendingPlaybackTiming(messageIndex: number, messageCount: number): string {
 	const message = messageIndex >= 0 ? `message ${messageIndex + 1}/${messageCount}` : "current response";
-	return `Playback · ${message}: speech timing pending`;
+	return `Playback · ${message} · timing pending`;
 }
 
 /** Keeps foreground activity nearest the editor and background work last. */

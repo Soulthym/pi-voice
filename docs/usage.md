@@ -60,14 +60,16 @@ Transcript-tail following acts as the timeline position after the latest complet
 
 ## Highlighting and status
 
-Unread prose is dimmed. The active sentence or clause receives a subtle background, and each reached word returns to the normal foreground. The playback line shows player state, position, duration, and selected message. A `~` indicates estimated playback position.
+Unread prose is dimmed. The active sentence or clause receives a subtle background, and each reached word returns to the normal foreground. The playback line shows player state in words, position, duration, and selected message. `playback clock: estimated` identifies an estimated device clock separately from word-timing quality.
 
 Background status intentionally separates session work from selected-message state:
 
 ```text
-Preprocessing · speech timing: 109/284 ready
-○ Playback · message 280/284: speech timing pending
+○ Playback · message 280/605 · timing pending
+↺ Checking saved timing · 109/605 targets checked
 ```
+
+Checks restore compatible saved maps without inference. Actual recovery uses a separate `Recovering speech timing` line naming cached-audio decoding, synthesis or word-timing estimates. `/voice help` lists controls; `/voice status` groups settings by task. Notices use `Voice · …` with Pi's native severity styling; icons supplement readable words.
 
 See [Narration and highlighting](narration-and-highlighting.md) and [Preprocessing and cache](preprocessing-and-cache.md).
 

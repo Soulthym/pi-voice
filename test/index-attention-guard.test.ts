@@ -95,7 +95,7 @@ test("manual playback controls work while a response is generating", async t => 
 	// F8 without any playback reports the specific state instead of an idle guard.
 	await host.shortcut("f8");
 	assert.ok(
-		host.notices.some(notice => notice.message.includes("no assistant message playing")),
+		host.notices.some(notice => notice.message.includes("Nothing playing")),
 		`F8 should report playback state; got: ${JSON.stringify(host.notices)}`,
 	);
 

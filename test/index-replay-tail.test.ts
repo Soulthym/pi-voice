@@ -35,7 +35,7 @@ for (const key of ["f11", "f8"]) for (const pauseResume of (key === "f11" ? [fal
 		await host.shortcut(key); await settle();
 		assert.equal(host.scrollView.scrollTop, 92, "replay immediately leaves tail for the spoken position");
 		if (pauseResume === "retry") {
-			assert.ok(host.notices.some(notice => /replay remains paused/.test(notice.message)));
+			assert.ok(host.notices.some(notice => /Replay paused/.test(notice.message)));
 			if (manual) host.scrollView.manualScrollTo(50);
 			acquire!.mock.restore(); force!.mock.restore();
 			await host.shortcut("f8"); await settle();

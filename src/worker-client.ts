@@ -5,6 +5,8 @@ import { normalizeWorkerCount, type VoiceConfig } from "./config.js";
 
 import type { AlignmentWord, TimingQuality } from "./narration-progress.js";
 
+export type MeasurementPhase = "cache-decode" | "synthesis";
+
 export type WorkerEvent =
 	| { type: "loading" }
 	| { type: "progress"; percent?: number; file?: string }
@@ -12,6 +14,7 @@ export type WorkerEvent =
 	| { type: "speaking" }
 	| { type: "segment-audio"; utterance: number; segmentId: number; start: number; duration: number; timingQuality?: TimingQuality }
 	| { type: "measurement"; requestId: string; duration: number }
+	| { type: "measurement-progress"; requestId: string; phase: MeasurementPhase }
 	| { type: "alignment"; segmentId: number; words: AlignmentWord[]; quality?: TimingQuality }
 	| { type: "playback"; utterance: number; position: number; estimated?: boolean }
 	| { type: "alignment-error"; segmentId: number; message: string; quality?: "estimated" }
@@ -29,6 +32,7 @@ type PendingPreload = {
 };
 
 type PendingMeasurement = {
+	onPhase?: (phase: MeasurementPhase) => void;
 	resolve: (duration: number) => void;
 	reject: (error: Error) => void;
 	timer: NodeJS.Timeout;
@@ -118,7 +122,7 @@ export class VoiceWorkerClient {
 		return cancelId;
 	}
 
-	measureSegment(text: string, config: VoiceConfig): Promise<number> {
+	measureSegment(text: string, config: VoiceConfig, onPhase?: (phase: MeasurementPhase) => void): Promise<number> {
 		const requestId = String(++this.#nextRequestId);
 		const { promise, resolve, reject } = Promise.withResolvers<number>();
 		const timer = setTimeout(() => {
@@ -126,7 +130,7 @@ export class VoiceWorkerClient {
 			reject(new Error("Speech timing measurement timed out after 10 minutes"));
 		}, 10 * 60_000);
 		timer.unref?.();
-		this.#pendingMeasurements.set(requestId, { resolve, reject, timer });
+		this.#pendingMeasurements.set(requestId, { resolve, reject, timer, onPhase });
 		this.#send({
 			type: "measure",
 			requestId,
@@ -379,6 +383,12 @@ export class VoiceWorkerClient {
 				if (event.type === "ready" || event.type === "alignment-ready") pending.resolve();
 				else pending.reject(new Error(event.message));
 			}
+		}
+		if (event.type === "measurement-progress") {
+			if (event.phase === "cache-decode" || event.phase === "synthesis") {
+				this.#pendingMeasurements.get(event.requestId)?.onPhase?.(event.phase);
+			}
+			return;
 		}
 		if ((event.type === "measurement" || event.type === "error") && event.requestId) {
 			const pending = this.#pendingMeasurements.get(event.requestId);

@@ -83,7 +83,7 @@ test("failed descriptions render retry errors, stay silent, and recover via code
 	await new Promise(resolve => setTimeout(resolve, 200));
 	// The written callout is a retry error, not filler.
 	const rendered = host.render(text);
-	assert.match(rendered, /No semantic description available \(quality\)/);
+	assert.match(rendered, /Description omitted \(quality\)/);
 	assert.doesNotMatch(rendered, /contains 4 lines/);
 
 	// Sweeps, unrelated settings, generator changes, and replay do not retry omissions.
@@ -92,7 +92,7 @@ test("failed descriptions render retry errors, stay silent, and recover via code
 	await host.emit("agent_settled", {});
 	await settle();
 	assert.equal(calls.length, 3);
-	assert.match(host.render(text), /No semantic description available/);
+	assert.match(host.render(text), /Description omitted/);
 
 	// Recovery through the command after the provider improves.
 	providerHealthy = true;
@@ -113,7 +113,7 @@ test("failed descriptions render retry errors, stay silent, and recover via code
 	assert.equal(calls.length, before + 1, "one retry per complete cache key, not per occurrence");
 	const recovered = host.render(text);
 	assert.match(recovered, /toggle shortcuts/);
-	assert.doesNotMatch(recovered, /No semantic description available/);
+	assert.doesNotMatch(recovered, /Description omitted/);
 	assert.equal(pauses.at(-1), true, "regeneration completion must not resume");
 	assert.equal(spoken, spokenBefore);
 	await host.shortcut("f8");

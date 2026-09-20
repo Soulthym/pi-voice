@@ -188,7 +188,7 @@ test("backfill budget caps historical work while live descriptions stay free", a
 	const skipped = serialized.includes("codeA") ? "codeB" : "codeA";
 	assert.doesNotMatch(serialized, new RegExp(skipped));
 	assert.ok(
-		host.notices.some(notice => notice.message.includes("backfill stopped at its budget")),
+		host.notices.some(notice => notice.message.includes("Descriptions blocked · budget")),
 		`exhaustion should be reported; got ${JSON.stringify(host.notices)}`,
 	);
 

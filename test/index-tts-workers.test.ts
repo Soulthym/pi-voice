@@ -58,9 +58,10 @@ test("real tts-workers command persists and reaches the worker protocol without 
 			for (const spelling of [command, ` ${command.toUpperCase()}  `]) {
 				await host.command(spelling);
 				assert.equal(host.notices.at(-1)?.level, "info", spelling);
-				assert.match(host.notices.at(-1)!.message, output, spelling);
+				assert.ok(host.notices.at(-1)!.message.startsWith("Voice · "));
+				assert.match(host.notices.at(-1)!.message.slice("Voice · ".length), output, spelling);
 				if (command.startsWith("tts-worker")) {
-					assert.equal(host.notices.at(-1)!.message, `tts-workers concurrency: ${expected}`);
+					assert.equal(host.notices.at(-1)!.message, `Voice · tts-workers concurrency: ${expected}`);
 				}
 			}
 		}
@@ -78,7 +79,7 @@ test("real tts-workers command persists and reaches the worker protocol without 
 	assert.equal(spawned, 0, "idle setting must not spawn models");
 	assert.equal(JSON.parse(await fs.readFile(env.PI_VOICE_CONFIG, "utf8")).ttsWorkers, 2);
 	const command = host.commands.get("voice") as any;
-	const actionsAndReports = ["on", "off", "toggle", "status", "stop", "setup", "test", "talk", "attention", "reconnect", "scroll-to", "bottom", "timing", "code-retry"];
+	const actionsAndReports = ["on", "off", "toggle", "status", "stop", "setup", "test", "talk", "attention", "reconnect", "scroll-to", "bottom", "timing", "help", "code-retry"];
 	assert.deepEqual(
 		command.getArgumentCompletions("").map((item: any) => item.value).sort(),
 		[...voiceQueryCases.map(([name]) => name).filter(name => name !== "tts-worker"), ...actionsAndReports].sort(),
@@ -115,7 +116,7 @@ test("real tts-workers command persists and reaches the worker protocol without 
 	assert.equal(JSON.stringify(host.entries), entries, "no asset metadata invalidation");
 	assert.equal(JSON.parse(await fs.readFile(leasePath, "utf8")).instanceId, owner, "speech ownership retained");
 	await host.command("status");
-	assert.match(host.notices.at(-1)!.message, /ttsWorkers=1/);
+	assert.match(host.notices.at(-1)!.message, /tts-workers: 1/);
 	assert.equal(JSON.parse(await fs.readFile(env.PI_VOICE_CONFIG, "utf8")).ttsWorkers, 1);
 	assert.equal(host.modelRequests.length, 0);
 });

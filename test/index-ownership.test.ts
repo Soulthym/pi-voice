@@ -48,7 +48,7 @@ test("sticky pause queues new responses; settings preserve ownership and dirty a
 	await streamCompletedResponse(host, "second", "first", "Queued response.");
 	assert.equal(segments.length, before, "incoming response stays silent while paused");
 	assert.equal(worker.pauses.at(-1), true);
-	assert.match(host.widgetLines()?.join(" ") ?? "", /⏸.*message 1\/2/);
+	assert.match(host.widgetLines()?.join(" ") ?? "", /⏯ Paused.*message 1\/2/);
 	assert.equal(observer.speechOwner()?.instanceId, ownerId);
 	await host.shortcut("f8");
 	assert.equal(worker.pauses.at(-1), false);

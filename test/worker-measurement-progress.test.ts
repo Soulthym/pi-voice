@@ -1,0 +1,36 @@
+import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
+import { mock, test } from "node:test";
+import { DEFAULT_VOICE_CONFIG } from "../src/config.js";
+
+test("measurement phases are request-scoped and ignore completed/cancelled requests", async t => {
+	const packets: any[] = [];
+	const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), exitCode: null });
+	child.stdin.on("data", chunk => packets.push(JSON.parse(String(chunk))));
+	const lines = new EventEmitter();
+	mock.module("node:child_process", { namedExports: { spawn: () => child } });
+	mock.module("node:readline", { namedExports: { createInterface: () => lines } });
+	t.after(() => { child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy(); mock.reset(); });
+	const { VoiceWorkerClient } = await import("../src/worker-client.js");
+	const forwarded: unknown[] = [], phases: string[] = [];
+	const client = new VoiceWorkerClient(event => forwarded.push(event));
+	const first = client.measureSegment("Synthetic.", DEFAULT_VOICE_CONFIG, phase => phases.push(phase));
+	const id = packets.at(-1).requestId;
+	const send = (event: unknown) => lines.emit("line", JSON.stringify(event));
+	send({ type: "measurement-progress", requestId: "other", phase: "synthesis" });
+	send({ type: "measurement-progress", requestId: id, phase: "cache-decode" });
+	send({ type: "measurement-progress", requestId: id, phase: "unknown" });
+	send({ type: "measurement", requestId: id, duration: 1 });
+	assert.equal(await first, 1);
+	send({ type: "measurement-progress", requestId: id, phase: "synthesis" });
+	assert.deepEqual(phases, ["cache-decode"]);
+	assert.ok(!forwarded.some((event: any) => event.type === "measurement-progress"), "background phases do not change foreground playback state");
+	const second = client.measureSegment("Cancelled.", DEFAULT_VOICE_CONFIG, phase => phases.push(phase));
+	const secondId = packets.at(-1).requestId;
+	const rejected = assert.rejects(second, /interrupted/);
+	client.cancel();
+	await rejected;
+	send({ type: "measurement-progress", requestId: secondId, phase: "synthesis" });
+	assert.deepEqual(phases, ["cache-decode"]);
+});

@@ -45,7 +45,7 @@ test("setter queries reflect live settings, automatic routing and reload-only sh
 		const widgets = host.widgetOperations.length;
 		const claims = claim.mock.callCount();
 		await host.command(command);
-		assert.deepEqual(host.notices.at(-1), { message: expected, level: "info" });
+		assert.deepEqual(host.notices.at(-1), { message: `Voice · ${expected}`, level: "info" });
 		assert.equal(await fs.readFile(env.PI_VOICE_CONFIG, "utf8"), before);
 		assert.equal((await fs.stat(env.PI_VOICE_CONFIG)).mtimeMs, stat.mtimeMs);
 		assert.equal(JSON.stringify(host.entries), entries);
@@ -66,8 +66,8 @@ test("setter queries reflect live settings, automatic routing and reload-only sh
 		["highlight", "off", "off"], ["autoscroll", "off", "off"], ["code-narration", "summary", "summary"],
 		["code-preprocess", "2", "2"], ["timing-preprocess", "2", "2 → 2"],
 		["audio-cache", "off", "off"], ["audio-bitrate", "64", "64 kbps"],
-		["output", "tcp://example.invalid:1234", "tcp://example.invalid:1234 → tcp://example.invalid:1234"],
-		["input", "disabled", "disabled → disabled"],
+		["output", "tcp://example.invalid:1234", "tcp://example.invalid:1234 (explicit)"],
+		["input", "disabled", "disabled (explicit)"],
 		["shortcut", "disabled", "alt+m (also f5); configured=disabled (run /reload to apply)"],
 		["submit", "auto", "auto"], ["edit", "append", "append"],
 		["device", "local", "local → local"],
@@ -77,6 +77,35 @@ test("setter queries reflect live settings, automatic routing and reload-only sh
 		assert.equal(host.notices.at(-1)?.level, "info", `${command} setter`);
 		await query(command, `${command}: ${expected}`);
 	}
+	const unchanged = await fs.readFile(env.PI_VOICE_CONFIG, "utf8");
+	const widgetsBeforeReports = host.widgetOperations.length;
+	for (const command of ["help", "status", "timing"]) {
+		await host.command(command);
+		const notice = host.notices.at(-1)!;
+		assert.equal(notice.level, "info");
+		assert.ok(notice.message.startsWith("Voice · "));
+		assert.ok(!notice.message.includes("\x1b"), "reports remain plain text without a theme");
+		if (command === "help") {
+			assert.match(notice.message, /↺ F11 replay this project/);
+			assert.match(notice.message, /⏯ F8 pause\/resume/);
+			assert.match(notice.message, /⏮\/⏭ F6\/F10 previous\/next message/);
+			assert.match(notice.message, /alt\+v: follow narrated position/);
+			assert.match(notice.message, /alt\+t: transcript tail/);
+		}
+		if (command === "status") assert.match(notice.message, /measures audio; new word timing is estimated/);
+	}
+	assert.equal(await fs.readFile(env.PI_VOICE_CONFIG, "utf8"), unchanged);
+	assert.equal(host.widgetOperations.length, widgetsBeforeReports);
+	assert.equal(host.modelRequests.length, 0);
+	await host.command("speed invalid");
+	assert.equal(host.notices.at(-1)?.level, "error");
+	assert.equal(host.notices.at(-1)?.message, "Voice · Usage: /voice speed <0.5..2>");
+	const footer: Array<string | undefined> = [];
+	mock.method(host.ctx.ui, "setStatus", (_key: string, text: string | undefined) => { footer.push(text); });
+	await host.command("on");
+	assert.match(footer.at(-1)!, /Voice · ready/);
+	await host.command("off");
+	assert.equal(footer.at(-1), undefined);
 	await host.command("code-budget 7");
 	for (let i = 0; i < 2; i++) {
 		await query("code-budget", "code-budget: scope=since-compaction; budget=7; used=0; set /voice code-budget <0..n|unlimited> for this session");
@@ -103,14 +132,14 @@ test("setter queries reflect live settings, automatic routing and reload-only sh
 				await collisionHost.start();
 				// Inspect the final host map, not merely the configured registration requests.
 				assert.deepEqual([...collisionHost.shortcuts].filter(([, shortcut]) =>
-					(shortcut as { description?: string }).description === "Start or stop a prompt with the phone microphone",
+					(shortcut as { description?: string }).description === "🎙 Start or stop dictation",
 				).map(([key]) => key), microphoneKeys);
 				await collisionHost.command("shortcut");
-				assert.deepEqual(collisionHost.notices.at(-1), { message: `shortcut: ${expected}`, level: "info" });
+				assert.deepEqual(collisionHost.notices.at(-1), { message: `Voice · shortcut: ${expected}`, level: "info" });
 				await collisionHost.command("shortcut alt+x");
 				await collisionHost.command("shortcut");
 				assert.deepEqual(collisionHost.notices.at(-1), {
-					message: `shortcut: ${expected}; configured=alt+x (run /reload to apply)`, level: "info",
+					message: `Voice · shortcut: ${expected}; configured=alt+x (run /reload to apply)`, level: "info",
 				});
 			} finally {
 				await collisionHost.shutdown();

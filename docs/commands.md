@@ -8,13 +8,14 @@ Every value-setting command below accepts an omitted value to report its **curre
 
 Automatic input/output and device queries show the resolved route (including an active device pin); `edit-model current` shows Pi's current model or `unavailable`. `timing-preprocess` shows the currently resolved limit and, when running, the active batch limit. `shortcut` shows the loaded binding (and F5 alias), plus any configured change awaiting `/reload`. `code-budget` retains its scope/allowance/usage report.
 
-Action commands (`on`, `off`, `toggle`, `stop`, `setup`, `test`, `talk`, `attention`, `reconnect`, `scroll-to`, `bottom`, and `code-retry`) retain their intentional behavior; they are not setting queries. `status` and `timing` remain reports.
+Action commands (`on`, `off`, `toggle`, `stop`, `setup`, `test`, `talk`, `attention`, `reconnect`, `scroll-to`, `bottom`, and `code-retry`) retain their intentional behavior; they are not setting queries. `status`, `timing` and `help` are read-only reports.
 
 ## Runtime and input
 
 | Command | Effect |
 | --- | --- |
-| `/voice status` | Shows active mode, models, device, cache, preprocessing, talk/scroll shortcuts, and editing settings. |
+| `/voice status` | Groups mode, playback, models, device, cache, preprocessing and editing settings. |
+| `/voice help` | Lists controls and commands, including the Termux action symbols. |
 | `/voice on` | Enables spoken output. |
 | `/voice off` | Disables and stops spoken output; dictation remains available. |
 | `/voice toggle` | Toggles spoken output. |
@@ -23,7 +24,7 @@ Action commands (`on`, `off`, `toggle`, `stop`, `setup`, `test`, `talk`, `attent
 | `/voice test [text]` | Speaks test text or a default readiness phrase. |
 | `/voice talk` | Starts/stops microphone dictation. |
 | `/voice attention` | Explicitly attend the oldest eligible waiting session using the origin terminal's fresh device pin; replay this project if current/none waiting. Requires enabled voice. F11 remains own-project replay. |
-| `/voice timing` | Reports recent audio-to-highlight and highlight-to-render diagnostic latency. |
+| `/voice timing` | Shows selected timing quality and recent audio-to-highlight/highlight-to-render diagnostic latency. |
 
 ## Speech and narration
 
@@ -44,7 +45,7 @@ Action commands (`on`, `off`, `toggle`, `stop`, `setup`, `test`, `talk`, `attent
 
 `tts-workers` without an argument reports the effective current concurrency without changing config or runtime state. `tts-worker` is an alias for both querying and setting it.
 
-`tts-workers` with an argument persists playback synthesis concurrency (default 3) and applies immediately without restarting Pi. Lowering it bounds new lookahead immediately; already-started sentences finish and play in order, and excess model workers retire when idle. Increasing it fills the larger lookahead lazily. It does not stop/resume audio, release ownership, invalidate assets, or change separate timing/description preprocessing limits. `/voice status` shows `ttsWorkers`.
+`tts-workers` with an argument persists playback synthesis concurrency (default 3) and applies immediately without restarting Pi. Lowering it bounds new lookahead immediately; already-started sentences finish and play in order, and excess model workers retire when idle. Increasing it fills the larger lookahead lazily. It does not stop/resume audio, release ownership, invalidate assets, or change separate timing/description preprocessing limits. `/voice status` shows `tts-workers`.
 
 ## Models
 

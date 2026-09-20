@@ -84,9 +84,10 @@ test("worker events drive speaking styling, idle completion, and error notices",
 	// another session cannot be blocked behind a player that no longer exists.
 	await host.shortcut("f11");
 	const failed = instance!.sent.at(-1) as { utterance: number };
-	const errorCountBefore = host.notices.filter(notice => notice.message.startsWith("Voice mode:")).length;
+	const errorCountBefore = host.notices.filter(notice => notice.level === "error").length;
 	instance!.emit({ type: "error", message: "synthesis exploded", utterance: failed.utterance } as never);
-	assert.equal(host.notices.filter(notice => notice.message.startsWith("Voice mode:")).length, errorCountBefore + 1);
+	assert.equal(host.notices.filter(notice => notice.level === "error").length, errorCountBefore + 1);
+	assert.ok(host.notices.at(-1)?.message.startsWith("Voice · "));
 	// Cancellation acknowledgement releases the lease asynchronously.
 	await new Promise(resolve => setImmediate(resolve));
 	await assert.rejects(fs.stat(path.join(root, "coordinator", "speech.lock", "lease.json")));
