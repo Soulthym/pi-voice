@@ -273,8 +273,10 @@ function excludedMarkdownRanges(markdown: string, atoms: NarrationSourceRange[])
 	const normalize = (source: string, positions: number[], table = false): { source: string; positions: number[] } => {
 		let text = "";
 		const mapped: number[] = [];
+		let slashes = 0;
 		for (let i = 0; i < source.length; i++) {
-			if (table && source[i] === "\\" && source[i + 1] === "|") continue;
+			slashes = source[i] === "\\" ? slashes + 1 : 0;
+			if (table && slashes % 2 === 1 && source[i + 1] === "|") continue;
 			const char = source[i] === "\r" ? "\n" : source[i] === "\t" ? "    " : source[i];
 			text += char;
 			for (let j = 0; j < char.length; j++) mapped.push(positions[i]);
@@ -285,7 +287,7 @@ function excludedMarkdownRanges(markdown: string, atoms: NarrationSourceRange[])
 	const parser = new Marked();
 	// Walk each actual occurrence once, relative to its parent. Blockquotes and
 	// lists strip line prefixes, so retain a UTF-16 source map across those lines.
-	const walk = (tokens: Token[], source: string, positions: number[]): void => {
+	const walk = (tokens: Token[], source: string, positions: number[], cells = false): void => {
 		let cursor = 0;
 		for (const token of tokens) {
 			const raw = token.raw.replace(/\t/g, "    ");
@@ -293,18 +295,17 @@ function excludedMarkdownRanges(markdown: string, atoms: NarrationSourceRange[])
 			for (const line of raw.split(/(?<=\n)/)) {
 				const at = source.indexOf(line, cursor);
 				if (at < 0) break;
+				// Cell separators split source paint before native wrapping interleaves columns.
+				if (cells) protect(positions, cursor, at);
 				for (let i = at; i < at + line.length; i++) mapped.push(positions[i]);
 				cursor = at + line.length;
 			}
 			if (mapped.length !== raw.length) continue;
 			if (token.type === "def" || token.type === "escape") protect(mapped);
 			if (token.type === "html") {
-				// Block HTML includes visible body text; only tag syntax is structural.
-				let at = 0;
-				for (const inline of parser.Lexer.lexInline(raw)) {
-					if (inline.type === "html") protect(mapped, at, at + inline.raw.length);
-					at += inline.raw.length;
-				}
+				// Block bodies may nest closing tags inside strong/emphasis groups.
+				if (token.block) walk(parser.Lexer.lexInline(raw), raw, mapped);
+				else protect(mapped);
 			}
 			if (token.type === "image") { protect(mapped, 0, mapped.length, true); continue; }
 			if (token.type === "link") {
@@ -323,11 +324,12 @@ function excludedMarkdownRanges(markdown: string, atoms: NarrationSourceRange[])
 				for (const [index, line] of table.source.split(/(?<=\n)/).entries()) {
 					walk((rows[index] ?? []).map(cell => ({
 						type: "text", raw: cell.text, tokens: cell.tokens,
-					})), line, table.positions.slice(offset, offset + line.length));
+					})), line, table.positions.slice(offset, offset + line.length), true);
 					offset += line.length;
 				}
 			} else if ("tokens" in token && token.tokens) walk(token.tokens, raw, mapped);
 		}
+		if (cells) protect(positions, cursor);
 	};
 	const normalized = normalize(markdown, Array.from({ length: markdown.length }, (_, i) => i));
 	walk(parser.lexer(markdown), normalized.source, normalized.positions);

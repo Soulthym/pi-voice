@@ -341,6 +341,69 @@ for (const [head, tail] of [["1", "️⃣"], ["👨", "‍👩‍👧‍👦"]])
 	});
 }
 
+for (const width of [18, 100]) for (const wrapped of [false, true]) for (const both of [false, true]) {
+	test(`table sentence membership survives cell wrapping: ${width}/${wrapped}/${both}`, () => {
+		const alpha = wrapped ? "Alpha charlie delta echo foxtrot" : "Alpha";
+		const source = `| A | B |\n| - | - |\n| ${alpha} | bravo |`;
+		checkSourcePaint(source, width, source.indexOf("Alpha"),
+			both ? source.indexOf("bravo") + 5 : source.indexOf("Alpha") + alpha.length,
+			both ? `${alpha} bravo` : alpha, both ? "bravo" : "Alpha");
+	});
+}
+
+for (const slashes of [0, 1, 2, 3]) for (const width of [18, 100]) for (const target of ["Diagram", "bravo"]) {
+	test(`table pipe parity preserves source atoms: ${slashes}/${width}/${target}`, () => {
+		const columns = slashes % 2 === 0 ? 3 : 2;
+		const source = `| ${Array(columns).fill("H").join(" | ")} |\n| ${Array(columns).fill("-").join(" | ")} |\n`
+			+ `| 😀 x${"\\".repeat(slashes)}|![Diagram][figure] | bravo |\n\n[figure]: diagram.svg`;
+		const start = source.indexOf(target);
+		checkSourcePaint(source, width, start, start + target.length, target, target);
+	});
+}
+
+for (const body of ["**Alpha</textarea>**", "*Alpha</textarea>*", "**_Alpha</textarea>_**"]) {
+	for (const width of [18, 100]) for (const target of ["Alpha", "bravo"]) {
+		test(`nested HTML syntax leaves visible body paintable: ${body}/${width}/${target}`, () => {
+			const source = `<textarea>${body}\n\nTail **bravo**.`;
+			const start = source.indexOf(target);
+			checkSourcePaint(source, width, start, start + target.length, target, target);
+		});
+	}
+}
+
+function checkSourcePaint(source: string, width: number, start: number, end: number, spoken: string, selected: string): void {
+	const progress = new NarrationProgress();
+	progress.setCompletedText(source);
+	progress.registerSegment({ id: 1, utterance: 1, text: spoken, source: { start, end } });
+	progress.setSegmentAudio(1, 0, 10);
+	const timings = progress.sourceWordTimings(1);
+	const selectedStart = source.indexOf(selected, start);
+	const timing = timings.find(word => word.sourceOffset === selectedStart);
+	assert.ok(timing, "timings retain actual UTF-16 source offsets");
+	progress.setPlayback(1, timing.time);
+	assert.equal(progress.activeWordStart, selectedStart);
+	const painted: string[] = [];
+	const clean = (text: string) => native.stripTerminalSequences(text.replaceAll(progress.activeMarker, ""));
+	const leaf = withNarrationLayout(new native.Markdown(source, 1, 1, theme, undefined, {
+		transform: text => progress.transform(text, "assistant", plain, text => {
+			painted.push(clean(text));
+			return `\x1b[48;5;236m${text}\x1b[49m`;
+		}, undefined, true, undefined, progress.activeMarker),
+	}));
+	const lines = leaf.render(width);
+	assert.deepEqual(lines.map(clean), new native.Markdown(source, 1, 1, theme).render(width).map(clean));
+	// Wrapped tables interleave columns; compare glyph membership, not render order.
+	const glyphs = (text: string) => [...text.replace(/\s/g, "")].sort().join("");
+	assert.equal(glyphs(painted.join("")), glyphs(spoken), "all and only the source sentence is painted, no fallback");
+	assert.ok(painted.every(text => text === text.trim()), "no cell borders or outer padding painted");
+	assert.equal(lines.join("\n").split(progress.activeMarker).length - 1, 1);
+	const marked = lines.find(line => line.includes(progress.activeMarker))!;
+	assert.ok(clean(marked.slice(marked.indexOf(progress.activeMarker) + progress.activeMarker.length)).startsWith(selected[0]),
+		"marker starts on the selected source word, including cell B");
+	assert.deepEqual(leaf.render(width), lines, "cached paint and anchor remain intact");
+	assert.equal(progress.sourceTexts[0], source);
+}
+
 for (const body of [
 	"Alpha https://example.com https://example.com/path bravo",
 	"Alpha <https://example.com> https://example.com bravo",
