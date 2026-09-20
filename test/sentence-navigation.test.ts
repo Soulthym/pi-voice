@@ -1,6 +1,54 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { PlaybackHistory } from "../src/playback-history.js";
+import { chunkCodeNarration } from "../src/code-narration.js";
+import { NARRATION_ACTIVE_MARKER } from "../src/narration-progress.js";
+
+test("formatted report sentence navigation agrees with prose and code synthesis boundaries", () => {
+	const first = `${NARRATION_ACTIVE_MARKER}**494 tests passed; native-TUI checks 10/10.**${NARRATION_ACTIVE_MARKER}`;
+	const second = "Run /reload, then test paused navigation after manually scrolling away and watch the timing row for flicker.";
+	const text = `${first} ${second}`;
+	const history = new PlaybackHistory();
+	history.sync([{ id: "m", text, renderKey: "key" }]);
+	assert.equal(history.sentenceTarget(1)?.sourceOffset, text.indexOf("Run"));
+	assert.equal(history.resumeTarget()?.sourceOffset, text.indexOf("Run"));
+	assert.equal(history.sentenceTarget(-1)?.sourceOffset, 0);
+
+	const operation = { kind: "line-add" as const, id: "line", range: { startLine: 1, endLine: 1 } };
+	const chunks = chunkCodeNarration({ guided: true, records: [
+		{ speech: first, operations: [] }, { speech: second, operations: [operation] },
+	] });
+	assert.deepEqual(chunks.map(chunk => chunk.text), [first, second]);
+	assert.deepEqual(chunks[1]!.cues, [
+		{ offset: 0, operations: [operation] },
+		{ offset: second.length, operations: [{ kind: "reset" }] },
+	]);
+	const code = "```ts\nrun();\n```";
+	history.sync([{ id: "code", text: code, renderKey: "key" }]);
+	const units = chunks.map((_, skipUnits) => ({ sourceOffset: 0, skipUnits }));
+	assert.equal(history.sentenceTarget(1, units)?.skipUnits, 1);
+	assert.equal(history.resumeTarget()?.skipUnits, 1);
+	assert.equal(history.sentenceTarget(-1, units)?.skipUnits, 0);
+});
+
+test("prose navigation preserves list prefixes and numeric tokens with plain and formatted endings", () => {
+	for (const first of [
+		"1. First option.", "Use 3.14 and version 1.2.3.", "🦊 Done.",
+		"494 tests passed; native-TUI checks 10/10.", "10/10.",
+	]) {
+		for (const formatted of [false, true]) {
+			const head = formatted ? `${NARRATION_ACTIVE_MARKER}**${first}**${NARRATION_ACTIVE_MARKER}` : first;
+			const second = "2. second option.";
+			const text = `${head} ${second}\nfinal line`;
+			const history = new PlaybackHistory();
+			history.sync([{ id: "m", text, renderKey: "key" }]);
+			assert.equal(history.sentenceTarget(1)?.sourceOffset, text.indexOf(second), text);
+			assert.equal(history.sentenceTarget(1)?.sourceOffset, text.indexOf("final"), text);
+			assert.equal(history.sentenceTarget(-1)?.sourceOffset, text.indexOf(second), text);
+			assert.equal(history.sentenceTarget(-1)?.sourceOffset, 0, text);
+		}
+	}
+});
 
 test("sentence/newline stepping works without timings, at boundaries, and from transcript tail", () => {
 	const history = new PlaybackHistory();

@@ -1,10 +1,60 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { SpeakableStream, type SpeakableItem } from "../src/speakable.js";
+import { NARRATION_ACTIVE_MARKER } from "../src/narration-progress.js";
+import { findSentenceCut, SpeakableStream, type SpeakableItem } from "../src/speakable.js";
 
 function speech(items: SpeakableItem[]): string[] {
 	return items.filter((item): item is Extract<SpeakableItem, { kind: "speech" }> => item.kind === "speech").map(item => item.text);
 }
+
+test("raw sentence cuts preserve ordered prefixes without hiding numeric sentence endings", () => {
+	for (const prefix of ["1. ", "  12.\t", "intro\n123. ", `${NARRATION_ACTIVE_MARKER}**1.** `]) {
+		assert.equal(findSentenceCut(`${prefix}First option`), -1, prefix);
+		assert.equal(findSentenceCut(`${prefix}First option. next`), `${prefix}First option. `.length);
+	}
+	for (const first of [
+		"494 tests passed; native-TUI checks 10/10.",
+		"10/10.", "Use 3.14 and version 1.2.3.", "🦊 Done.",
+	]) {
+		for (const formatted of [false, true]) {
+			const head = formatted ? `${NARRATION_ACTIVE_MARKER}**${first}**${NARRATION_ACTIVE_MARKER} ` : `${first} `;
+			assert.equal(findSentenceCut(`${head}next sentence.`), head.length);
+			assert.equal(findSentenceCut(`${head}next sentence. tail`, head.length + 1), `${head}next sentence. `.length);
+		}
+	}
+});
+
+test("formatted test report retains its two sentences across every delta split", () => {
+	const first = "494 tests passed; native-TUI checks 10/10.";
+	const second = "Run /reload, then test paused navigation after manually scrolling away and watch the timing row for flicker.";
+	const text = `${NARRATION_ACTIVE_MARKER}**${first}**${NARRATION_ACTIVE_MARKER} ${second}`;
+	for (let split = 0; split <= text.length; split++) {
+		const stream = new SpeakableStream();
+		const items = [...stream.push(text.slice(0, split)), ...stream.push(text.slice(split)), ...stream.flush()];
+		assert.deepEqual(speech(items), [`${NARRATION_ACTIVE_MARKER}${first}${NARRATION_ACTIVE_MARKER}`, second], `split ${split}`);
+		assert.equal(items[0]!.source.end, text.indexOf("Run"));
+		assert.equal(items[1]!.source.start, text.indexOf("Run"));
+	}
+});
+
+test("formatted boundaries preserve list markers, abbreviations, numeric tokens and inline code", () => {
+	for (const [text, expected] of [
+		["1. First option. Second option.", ["1, First option.", "Second option."]],
+		["**Dr.** Smith uses e.g. version 1.2.3 and 3.14 units. Next.", ["Dr. Smith uses e.g. version 1.2.3 and 3.14 units.", "Next."]],
+		["🦊 **Done.** Next.", ["🦊 Done.", "Next."]],
+		["Use `one. two.` Next.", ["Use one. two.", "Next."]],
+		["Read *this.* Next.", ["Read this.", "Next."]],
+		["Read __this.__ Next.", ["Read this.", "Next."]],
+		["Read ~~this.~~ Next.", ["Read this.", "Next."]],
+		["Read [the guide](https://example.com/v1.2). Next.", ["Read the guide.", "Next."]],
+	] as const) {
+		const stream = new SpeakableStream();
+		const items = [...text.split("").flatMap(delta => stream.push(delta)), ...stream.flush()];
+		assert.deepEqual(speech(items), expected, text);
+		assert.equal(items[1]!.source.start, text.indexOf(text.includes("Second") ? "Second" : "Next"));
+		assert.equal(items[1]!.source.end, text.length);
+	}
+});
 
 test("emits fenced code for description while preserving its spoken position", () => {
 	const stream = new SpeakableStream();

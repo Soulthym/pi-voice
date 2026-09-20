@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { chunkCodeNarration, parseCodeNarration } from "../src/code-narration.js";
+import { chunkCodeNarration, parseCodeNarration, plainCodeNarration } from "../src/code-narration.js";
 import { buildCodeTargetCatalog } from "../src/code-targets.js";
-import { NarrationProgress } from "../src/narration-progress.js";
+import { NarrationProgress, NARRATION_ACTIVE_MARKER } from "../src/narration-progress.js";
 
 const code = "const total = price + tax;\nreturn total;";
 
@@ -29,6 +29,32 @@ test("parses compact control-and-speech records", () => {
 	const chunks = chunkCodeNarration(plan!);
 	assert.equal(chunks.map(chunk => chunk.text).join(" "), "We first calculate the total then return it");
 	assert.ok(chunks.at(-1)?.cues.some(cue => cue.operations.some(operation => operation.kind === "reset")));
+});
+
+test("code sentence cuts preserve lists, numeric tokens, formatting and UTF-16 cue offsets", () => {
+	for (const [first, second] of [
+		["1. First option.", "2. Second option."],
+		["Use 3.14 and version 1.2.3.", "next option."],
+		["494 tests passed; native-TUI checks 10/10.", "Run /reload, then test paused navigation after manually scrolling away and watch the timing row for flicker."],
+		["10/10.", "next option."],
+		["🦊 Done.", "next option."],
+	]) {
+		for (const formatted of [false, true]) {
+			const head = formatted ? `${NARRATION_ACTIVE_MARKER}**${first}**${NARRATION_ACTIVE_MARKER}` : first;
+			for (const separator of [" ", "\n"]) {
+				assert.deepEqual(chunkCodeNarration(plainCodeNarration(`${head}${separator}${second}`)).map(chunk => chunk.text), [head, second]);
+			}
+			const operation = { kind: "line-add" as const, id: "line", range: { startLine: 1, endLine: 1 } };
+			const chunks = chunkCodeNarration({ guided: true, records: [
+				{ speech: head, operations: [] }, { speech: second, operations: [operation] },
+			] });
+			assert.deepEqual(chunks.map(chunk => chunk.text), [head, second]);
+			assert.deepEqual(chunks[1]!.cues, [
+				{ offset: 0, operations: [operation] },
+				{ offset: second.length, operations: [{ kind: "reset" }] },
+			]);
+		}
+	}
 });
 
 test("code narration splits whole sentences while retaining cue offsets and final reset", () => {

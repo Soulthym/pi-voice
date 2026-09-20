@@ -28,8 +28,8 @@
  * session lifecycle, so this class stays trivially unit-testable.
  */
 
-/** Sentence-ending punctuation, optional closers, then whitespace. */
-const SENTENCE_BOUNDARY_RE = /[.!?…]+[)\]"'»”’]*\s/g;
+/** Sentence-ending punctuation, optional Markdown/quote closers and narration markers, then whitespace. */
+const SENTENCE_BOUNDARY_RE = /[.!?…]+[)\]"'»”’*_~`\u200b\u200c\u2063]*\s/g;
 /** Abbreviations whose trailing dot is not a sentence boundary. */
 const ABBREVIATION_RE = /(?:^|\s)(?:e\.g|i\.e|etc|vs|Mr|Mrs|Ms|Dr|St|No)\.$/i;
 
@@ -115,7 +115,9 @@ export function findSentenceCut(text: string, min = 0): number {
 		const cut = match.index + match[0].length;
 		if (cut < min) continue;
 		const head = text.slice(0, cut);
-		if (ABBREVIATION_RE.test(head.trimEnd())) continue;
+		const plainHead = head.replace(/[*_~`\u200b\u200c\u2063]/g, "");
+		if (/(?:^|\n)[ \t]*\d{1,3}\.[ \t]$/.test(plainHead)) continue;
+		if (ABBREVIATION_RE.test(plainHead.trimEnd())) continue;
 		if ((head.match(/`/g)?.length ?? 0) % 2 !== 0) continue;
 		return cut;
 	}
