@@ -117,6 +117,53 @@ function mockWorker(): () => void {
 	};
 }
 
+test("timing batch replaces its visible row without holes between fast adjacent jobs", async t => {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-stable-progress-"));
+	const restoreEnvironment = await configure(root, path.join(root, "unused.sock"));
+	const restoreWorker = mockWorker();
+	const host = new FakeVoiceHost(root, "stable-progress");
+	// Exercise Pi's actual widget replacement/layout, without starting a session.
+	const { InteractiveMode } = await import("@earendil-works/pi-coding-agent");
+	const { Container } = await import("@earendil-works/pi-tui");
+	const widgetRows: number[] = [];
+	const nativeUI = Object.assign(Object.create(InteractiveMode.prototype), {
+		extensionWidgetsAbove: new Map(), extensionWidgetsBelow: new Map(),
+		widgetContainerAbove: new Container(), widgetContainerBelow: new Container(),
+		ui: { requestRender: () => widgetRows.push(nativeUI.widgetContainerBelow.render(160).length) },
+	});
+	const setWidget = host.ctx.ui.setWidget;
+	host.ctx.ui.setWidget = (name: string, value: any, options: any) => {
+		setWidget(name, value, options);
+		if (name === "pi-voice-progress") nativeUI.setExtensionWidget(name, value, options);
+	};
+	const gates = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+	let jobs = 0;
+	VoiceWorkerClient.prototype.measureSegment = async function (): Promise<number> {
+		jobs++;
+		if (jobs === 1 || jobs === 3) await gates[jobs === 1 ? 0 : 1].promise;
+		return 1;
+	};
+	t.after(async () => { await host.shutdown(); restoreWorker(); await restoreEnvironment(); });
+	for (let i = 0; i < 3; i++) host.addMessage(`m${i}`, i ? `m${i - 1}` : null, assistant(`Sentence ${i}.`));
+	await host.start();
+	await waitForWidgetLines(host, lines => lines.some(line => line.includes("Recovering speech timing")));
+	while (!jobs) await settle();
+	const start = host.widgetOperations.length - 1;
+	const firstRow = widgetRows.length - 1;
+	gates[0].resolve();
+	while (jobs < 3) await settle();
+	await new Promise(resolve => setTimeout(resolve, 120));
+	const operations = host.widgetOperations.slice(start).filter(operation => operation.name === "pi-voice-progress");
+	assert.ok(operations.length > 0);
+	assert.ok(widgetRows.slice(firstRow).every(rows => rows === 2), "native Pi widget layout has no removed/reinserted row between jobs");
+	assert.ok(operations.every(operation => operation.value?.lines?.length === 2), "playback + one stable recovery row, including the fast middle job");
+	gates[1].resolve();
+	await waitForWidgetLines(host, lines => lines.length === 1 && !lines[0].includes("Recovering"));
+	const settled = host.widgetOperations.filter(operation => operation.name === "pi-voice-progress").length;
+	await new Promise(resolve => setTimeout(resolve, 160));
+	assert.equal(host.widgetOperations.filter(operation => operation.name === "pi-voice-progress").length, settled, "settled batch clears once");
+});
+
 test("unified progress widget orders input, playback, and preprocessing and cleans up", async t => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-voice-index-progress-"));
 	const socketPath = path.join(root, "stt.sock");
@@ -142,6 +189,7 @@ test("unified progress widget orders input, playback, and preprocessing and clea
 	assert.ok(removals.includes("pi-voice-input"), "legacy input widget must be removed");
 	assert.ok(removals.includes("pi-voice-playback"), "legacy playback widget must be removed");
 	assert.ok(removals.includes("pi-voice-preprocessing"), "legacy preprocessing widget must be removed");
+	await new Promise(resolve => setTimeout(resolve, 120));
 	assert.equal(host.widgetLines(), undefined);
 
 	const text = "This answer contains several words for precise timing.\n```ts\nrun();\n```";

@@ -510,7 +510,10 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	let progressWidgetKey: string | undefined;
-	const refreshProgressWidget = (): void => {
+	let displayedCodeProgress: PreprocessingProgress | undefined;
+	let displayedTimingProgress: PreprocessingProgress | undefined;
+	let preprocessingPaint: ReturnType<typeof setTimeout> | undefined;
+	const refreshProgressWidget = (paintPreprocessing = false): void => {
 		const ctx = activeContext;
 		if (!ctx) return;
 		try {
@@ -526,7 +529,11 @@ export default async function (pi: ExtensionAPI) {
 					playbackLine = `${icon} · ${playbackBar(playback.position, playback.duration)} ${formatPlaybackTime(playback.position)} / ${formatPlaybackTime(playback.duration)}${messageLabel}${playbackTimingStatus(playback.timingQuality, playbackPositionEstimated)}`;
 				}
 			}
-			const preprocessing = [codePreprocessingProgress, timingPreprocessingProgress].filter(
+			if (paintPreprocessing) {
+				displayedCodeProgress = codePreprocessingProgress ?? (codeDescriptionPreprocessing ? displayedCodeProgress : undefined);
+				displayedTimingProgress = timingPreprocessingProgress ?? (timingPreprocessing ? displayedTimingProgress : undefined);
+			}
+			const preprocessing = [displayedCodeProgress, displayedTimingProgress].filter(
 				(progress): progress is PreprocessingProgress => progress !== undefined,
 			);
 			const lines = voiceProgressLines(inputProgressMessage, playbackLine, preprocessing).map(line =>
@@ -543,7 +550,17 @@ export default async function (pi: ExtensionAPI) {
 		}
 	};
 
-	const refreshPreprocessingProgress = refreshProgressWidget;
+	const refreshPreprocessingProgress = (): void => {
+		// Show the first job immediately; keep its row through preparation gaps
+		// and paint replacements/settlement on the existing 80 ms UI cadence.
+		refreshProgressWidget(!displayedCodeProgress && !displayedTimingProgress && !!(codePreprocessingProgress || timingPreprocessingProgress));
+		if (preprocessingPaint) return;
+		preprocessingPaint = setTimeout(() => {
+			preprocessingPaint = undefined;
+			refreshProgressWidget(true);
+		}, 80);
+		preprocessingPaint.unref?.();
+	};
 
 	const descriptionText = (plan: CodeNarrationPlan): string =>
 		chunkCodeNarration(plan)
@@ -3061,6 +3078,9 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
+		if (preprocessingPaint) clearTimeout(preprocessingPaint);
+		preprocessingPaint = undefined;
+		displayedCodeProgress = displayedTimingProgress = undefined;
 		clearPlaybackTransport();
 		const retiringCoordinator = coordinator;
 		coordinator = null;
