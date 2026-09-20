@@ -1092,6 +1092,8 @@ export default async function (pi: ExtensionAPI) {
 	let lastAutoScrollTop: number | undefined;
 	let autoScrollForceOnce = false;
 	let narrationManuallyFramed = false;
+	// Explicit Voice framing and native End must not be mistaken for manual browsing.
+	let framingIntent = 0;
 	let nativeGestureTracking = false;
 	let pinnedContentHeight = 0;
 	let lastNarrationLayout = "";
@@ -1194,6 +1196,7 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	const armNarrationFollow = (forceCanonicalAnchor = true, explicit = true): void => {
+		if (explicit) framingIntent++;
 		if (!explicit) {
 			if (!nativeGestureTracking && lastAutoScrollTop !== undefined && activeScrollView()?.scrollTop !== lastAutoScrollTop && !transcriptIsFollowingEnd()) {
 				narrationManuallyFramed = true;
@@ -1230,6 +1233,7 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	const recordBottomPin = (): void => {
+		framingIntent++;
 		const scrollView = activeScrollView();
 		if (!scrollView) return;
 		pinnedContentHeight = scrollView.contentHeight ?? 0;
@@ -2164,7 +2168,7 @@ export default async function (pi: ExtensionAPI) {
 			const contextual = entry ? completedEntryMessages(activeContext, entry, config.mode, true)
 				.find(message => message.id === target.id) : undefined;
 			const completed = contextual && completedCodeItems(contextual).find(candidate => candidate.sourceEnd === item.source.end);
-			const source = pendingReplay && (pendingReplay.target.id === target.id ||
+			const source = pendingReplay?.source && (pendingReplay.target.id === target.id ||
 				[...pendingReplay.blockIds.values()].includes(target.id)) ? pendingReplay.source : liveSource;
 			const messages = config.codeDescriptionContext === "conversation" && !completed && source
 				? assistantCodeContext(source.before, source.assistant, target.contentIndex ?? 0, item.source.end, source.final) : [];
@@ -3186,7 +3190,6 @@ export default async function (pi: ExtensionAPI) {
 					selectionAnchor?: { scrollView?: ReturnType<typeof activeScrollView> };
 				} &
 					Partial<Record<"handleViewportInput" | "refreshSearch" | "autoScrollSelection", (...args: unknown[]) => unknown>>;
-				let bottomIntent = 0;
 				// Search reveals during render and selection autoscroll runs on a timer.
 				// Observe those accepted moves, not arbitrary render/layout scroll changes.
 				const restoreGestures = (["handleViewportInput", "refreshSearch", "autoScrollSelection"] as const).map(method => {
@@ -3195,12 +3198,12 @@ export default async function (pi: ExtensionAPI) {
 					const observed = (...args: unknown[]) => {
 						const view = method === "autoScrollSelection" ? native.selectionAnchor?.scrollView : activeScrollView();
 						const before = view?.scrollTop;
-						const intent = bottomIntent;
+						const intent = framingIntent;
 						const result = original.apply(tui, args);
 						// refreshSearch reports the move against its new layout, even
 						// when a forced render has cleared the current primary view.
 						const moved = method === "refreshSearch" ? result === true : view && view.scrollTop !== before;
-						if (moved && intent === bottomIntent) {
+						if (moved && intent === framingIntent) {
 							narrationManuallyFramed = true;
 							autoScrollForceOnce = false;
 							restoreBottomAfterSpeech = false;
@@ -3214,7 +3217,6 @@ export default async function (pi: ExtensionAPI) {
 				nativeGestureTracking = !!native.handleViewportInput;
 				const originalBottom = native.scrollToBottom;
 				const onBottom = () => {
-					bottomIntent++;
 					originalBottom!.call(tui);
 					recordBottomPin();
 				};

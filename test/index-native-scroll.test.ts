@@ -83,8 +83,8 @@ for (const messageType of ["assistant", "assistant-thinking"] as const) test(`mo
 	assert.equal(host.modelRequests.length, 0);
 });
 
-for (const action of ["paused anchor", "button", "End", "banner", "controls", "search", "search forced render", "drag", "PageDown bottom", "wheel bottom", "scrollbar bottom", "narrow cached", "wide cached", "current cached"]) test(`native viewport: ${action}`, async t => {
-	if (action === "button" && !native.MouseRegion) {
+for (const action of ["paused anchor", "button", "button playing", "End", "banner", "controls", "search", "search forced render", "drag", "PageDown bottom", "wheel bottom", "scrollbar bottom", "narrow cached", "wide cached", "current cached"]) test(`native viewport: ${action}`, async t => {
+	if (action.startsWith("button") && !native.MouseRegion) {
 		t.skip("older Pi has no MouseRegion; Alt+V remains available");
 		return;
 	}
@@ -350,6 +350,37 @@ for (const action of ["paused anchor", "button", "End", "banner", "controls", "s
 		return;
 	}
 
+	const clickVoiceButton = () => {
+		const button = host.widgetComponents.get("pi-voice-jump") as any;
+		assert.ok(button instanceof native.MouseRegion);
+		tui.setLayoutRoot(new native.VStack([
+			{ component: transcript, basis: 0, grow: 1 },
+			{ component: button, shrink: 0 },
+		]));
+		tui.doRender();
+		tui.handleTerminalInput(`\x1b[<0;4;${terminal.rows}M`);
+		tui.handleTerminalInput(`\x1b[<0;4;${terminal.rows}m`);
+	};
+	if (action === "button playing") {
+		tui.handleTerminalInput("\x1b[<64;1;1M");
+		const pauses = [...worker.pauses];
+		const sent = worker.sent.length;
+		clickVoiceButton();
+		assert.equal(view.scrollTop, 93, "native click frames voice immediately");
+		assert.deepEqual(worker.pauses, pauses, "jump does not alter audio");
+		assert.equal(worker.sent.length, sent, "jump does not request audio");
+		marker = 180;
+		await tick();
+		assert.ok(view.scrollTop > 140, "later word tick continues following after native click");
+		tui.doRender();
+		tui.handleTerminalInput("\x1b[<64;1;1M");
+		const manualTop = view.scrollTop;
+		marker = 240;
+		await tick();
+		assert.equal(view.scrollTop, manualTop, "manual wheel still suspends follow after jump");
+		return;
+	}
+
 	if (action === "paused anchor" || action === "button") {
 		await host.shortcut("f11"); // Restore the preview after the synthetic tick (no worker segments).
 		await settle();
@@ -376,11 +407,13 @@ for (const action of ["paused anchor", "button", "End", "banner", "controls", "s
 			const notices = host.notices.length;
 			assert.equal(button.handleMouse({ ...event, type: "move" }), undefined);
 			assert.equal(button.handleMouse({ ...event, x: 19 }), undefined);
-			assert.equal(button.handleMouse(event)?.handled, true);
+			clickVoiceButton();
 			assert.equal(host.notices.length, notices, "jump does not spam banners/notices");
 			assert.deepEqual(worker.pauses, pauses, "location click does not resume paused audio");
 			await tick();
-			assert.equal(view.scrollTop, 260, "autoscroll-off playback cannot undo the explicit jump");
+			assert.equal(view.scrollTop, 261, "autoscroll-off playback cannot undo the explicit jump");
+			tui.setLayoutRoot(transcript);
+			tui.doRender();
 		} else await host.command("scroll-to");
 		assert.equal(view.scrollTop, 260);
 		assert.equal(view.isFollowingEnd, false, "paused Alt+V must not pin the tail");
