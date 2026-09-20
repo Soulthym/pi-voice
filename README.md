@@ -74,7 +74,7 @@ pi
 /voice on
 ```
 
-**Current protocol upgrade:** these changes are not yet pushed. Copy the complete client script set from the **host's local checkout**, updating all client copies together; a client-side `git pull` is insufficient. Confirm old captures stopped before exiting wrappers or migrating state. See [safe upgrades](docs/installation.md#upgrading) and [stop recovery](docs/troubleshooting.md#unconfirmed-stop).
+**This batch (after `ade0670`, through `d4ce9c9`):** host update and `/reload` only; `client/` and `termux/` scripts are unchanged, so no client recopy or SSH restart is needed. If you have not completed the earlier protocol migration, its [safe upgrade steps](docs/installation.md#upgrading) still apply. Never discard outstanding [stop-recovery proof](docs/troubleshooting.md#unconfirmed-stop).
 
 See [Installation](docs/installation.md) for permissions, dependencies, SSH server settings, and local-only setups.
 
@@ -129,14 +129,14 @@ See [Configuration](docs/configuration.md) for valid values and setting behavior
 | `F6` | Previous assistant message |
 | `F7` | Previous sentence or literal-newline unit |
 | `F8` | Pause/resume audio and highlighting |
-| `F9` | Next sentence/newline unit; at message end advance, or pause and follow the latest tail |
-| `F10` | Next assistant message; from the latest message, pause and follow the transcript tail |
+| `F9` | Next sentence/newline unit; cross messages, then enter playback Tail |
+| `F10` | Next assistant message; after the latest, enter playback Tail |
 | `F11` (↺) | Replay this project's selected/waiting response; never switch projects |
 | `Alt+V` | Re-anchor the current narrated position |
 | `Alt+T` | Pin to and follow the transcript tail |
 | `Ctrl+Shift+V` | Toggle spoken output |
 
-Playback/navigation controls re-arm follow after manual browsing and immediately frame the selected text, even while paused; paused navigation is silent. Alt+V only reframes, without resuming. Later manual scrolling wins again.
+Live and completed content share one playback cursor. Navigation preserves playing/paused intent, including at Tail; from Tail, F6 selects the last message and F7 its last available unit. Alt+T moves only the viewport, not this cursor. Playback/navigation re-arm follow and frame immediately; paused navigation stays silent. Alt+V or **Jump to voice location** re-arms follow without resuming. Later manual scrolling wins again.
 
 “Word timing quality” describes the selected message's saved/current estimates or alignment, not ongoing work. Listening alone does not guarantee CTC refinement.
 

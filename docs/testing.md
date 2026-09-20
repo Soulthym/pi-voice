@@ -15,9 +15,26 @@ and stable background rows. Sentence tests cover the reported `10/10. Run /reloa
 Markdown/invisible markers, every formatted delta split, shared code/prose navigation,
 ordered prefixes, decimals/versions, lowercase continuations and UTF-16 offsets.
 
-Validation for this change: 506 passed, one dependency-native-banner compatibility skip;
-installed Pi TUI viewport tests 10/10 passed against an inert terminal. This is not live
-phone evidence. The user separately confirmed working paused/unpaused navigation and no flicker.
+Final docs reconciliation against source `d4ce9c9`: typecheck passed; **858 passed,
+3 skipped, 0 failed (861 total)**. The older project TUI skips two MouseRegion button
+cases and the native banner. Installed Pi TUI checks: **300 passed, no skips/failures**
+against an inert terminal, including actual click dispatch, glyph-stable post-wrap
+highlighting, tables/graphemes and baseline-preserving unmappable probes. Navigation
+checks cover one live/completed cursor, Tail, pause intent and asynchronous source
+finalization. Worker/provider mocks cover nonblocking preload, first prose before
+message end, foreground priority, last-consumer abort and scoped cleanup episodes.
+These are not live phone, real inference or end-to-end latency measurements. Earlier
+user confirmations cover windowed follow, ASR, fast UI and no flicker; the newest batch
+is not live-tested.
+
+Installed-native rerun (adjust the global installation path on other hosts):
+
+```sh
+env -u SSH_CONNECTION -u SSH_CLIENT -u SSH_TTY -u TMUX -u TMUX_PANE \
+  PI_VOICE_TEST_TUI_MODULE=/home/curiosithy/.nvm/versions/node/v26.7.0/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui/dist/index.js \
+  node --import tsx --test --experimental-test-module-mocks --test-concurrency=4 \
+  test/index-native-scroll.test.ts test/narration-marker-native.test.ts
+```
 
 Node test options are forwarded before the test glob, for example:
 

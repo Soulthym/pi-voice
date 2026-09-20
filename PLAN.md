@@ -1,6 +1,20 @@
 # Pi Voice — implemented agreements and live-validation handoff
 
-## Current-session evidence follow-up — still ready for user reload
+## Final documentation reconciliation — source `d4ce9c9`
+
+This checkpoint supersedes older current-status/reload headings below; historical agreements and evidence remain preserved. Documentation only: no source, test, client, Termux or settings changes. `ISSUES.md` remains untouched.
+
+- **User LIVE evidence already positive:** windowed follow, paused/unpaused navigation, intuitive ASR alternatives, fast UI and fixed flicker. Earlier failures below are historical reports, not evidence these confirmations were withdrawn. **The newest batch after `ade0670` has NOT been live-tested.**
+- **One chronological cursor:** F6/F10 move messages; F7/F9 move source sentences/literal newlines, including active streaming targets and enabled thinking in actual transcript order. Tail is after the latest eligible target; back selects the last message/unit, not the penultimate. Navigation and Tail preserve paused/playing intent; active Tail retains unfinished text/future deltas and source closure through asynchronous waits. Alt+T/native bottom is viewport-only, distinct from playback Tail. Immediate previews retain the selected source's context; later ticks/finalization must not steal them.
+- **Native rendering:** highlight after wrapping against a stable baseline; clip per line including tables, preserve glyph positions, syntax colors, graphemes, original source offsets and table-cell membership. Bounded two-leaf caches survive native rebuilds/ticks. Real native Jump-to-voice mouse dispatch re-arms follow without resume or focus changes. Unmappable probes preserve the exact baseline; narrow-table reference-link URL mapping remains limited, not falsely painted/proven universal.
+- **Start path:** mocked first prose reaches the worker before message end. Code conversation context still deliberately waits for next-fence/message-end boundaries and retains speech order. Pool preload no longer blocks foreground playback or resets speaking UI; background descriptions yield foreground priority; last-consumer cancellation aborts abandoned provider work. No real start-latency measurement or inference claim.
+- **Stop safety:** original EPIPE cause remains UNOBSERVED. Retained original opaque endpoint/stream handles and exact receipts permit cleanup retry after helper/worker loss; no EOF/kill/timeout substitutes for stop proof. Per-resource error episodes deduplicate notices independently and reset only on matching confirmed cleanup; older proof cannot clear newer failure.
+- **Validation rerun:** `npm run check` passed; `npm test`: **858 passed, 3 skipped, 0 failed (861 total)**. Installed global Pi native TUI: **300 passed, 0 skipped/failed**, inert terminal. Earlier source checkpoints reported 822 then 858 passing; these current counts are freshly rerun, not copied. Three default skips are two MouseRegion button cases and the native banner on the older project TUI. No LSP configured. Logs: `/tmp/pi-voice-finaldocs-{check,test,native}.log`; native module path/command in `docs/testing.md`.
+- **Operator handoff:** update host checkout and run `/reload` when ready. `git diff ade0670 d4ce9c9 -- client termux` is empty: no client recopy, wrapper/SSH restart or `/voice reconnect` required for this batch. Earlier protocol migrations below still apply only if outstanding; unconfirmed cleanup still requires recovery, not bypass. Then validate live streaming/Tail in both pause states, native click/re-follow, wrapping and perceived speech startup when authorized.
+
+## Historical checkpoints (superseded where noted)
+
+### Current-session evidence follow-up — still ready for user reload
 
 - Authorized read-only inspection positively identified the interactive parent using process ancestry, fresh coordinator PID/session/cwd metadata and matching JSONL header (not the delegated agent's session ID). Saved user entry 18042 contains one legacy invisible marker in a four-line quoted-message structure; original anchor at 17996 is marker-free. Intervening entries are one assistant, 42 timing records and two device-selection records. Only structural aggregates/codepoint signatures are recorded in `FINDINGS.md`.
 - Parent PTY currently reports **120×50**. JSONL does **not** establish incident-time or in-memory viewport geometry, selected playback target, or live causality. Saved timing schemas/hex-key aggregates are evidence of persistence only, not current compatibility or a new cache defect.
@@ -66,7 +80,9 @@ Final parent-run validation:
 
 **Still required:** update the phone/client scripts to this host checkout, then perform live phone/SSH/listening/typing checks. No live client, SSH session or personal configuration was restarted/modified by implementation tools. No paid application-provider calls, real-model inference or private transcript exports were used in this batch.
 
-## Deployment and safety
+## Earlier protocol deployment and safety — only if migration is outstanding
+
+These are the earlier migration requirements, not additional deployment work for the host-only `ade0670`→`d4ce9c9` batch.
 
 The transport/recorder protocol changed for real stop confirmation. Old clients are deliberately rejected, not silently trusted. The user saw `Audio client closed without v2 readiness/completion proof`; that means a client update or forward repair is required, not an automatic replay.
 
@@ -78,7 +94,7 @@ scp 'curiosithy@zero:/home/curiosithy/code/pi/pi-voice/client/pi-voice-*' "$HOME
 chmod 755 "$HOME"/.local/bin/pi-voice-*
 ```
 
-These commits have not been pushed; fetching GitHub is not equivalent. The client protocol evolved further after earlier update instructions, so recopy the final versions. Close all voice SSH wrappers on that device and reconnect; the remote tmux session can remain running. Then `/reload` and `/voice reconnect` in Pi.
+At this earlier checkpoint the protocol commits had not been pushed; fetching GitHub was not equivalent. If that migration is still outstanding, copy the final compatible versions from the host checkout. Close all voice SSH wrappers on that device and reconnect; the remote tmux session can remain running. Then `/reload` and `/voice reconnect` in Pi.
 
 Read `docs/installation.md` and `docs/endpoint-protocol.md` for migration/recovery:
 - Audio proof uses random opaque stream IDs, not reusable PIDs. Readiness, completion and stop receipts are scoped to that stream.
