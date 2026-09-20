@@ -268,11 +268,18 @@ for (const action of ["paused anchor", "button", "End", "banner", "controls", "s
 			assert.equal(button.render(18).length, 1, "narrow button stays one row below the editor");
 			const event = { type: "click", button: "left", x: 3, y: 0, screenX: 3, screenY: 0,
 				width: 18, height: 1, shift: false, alt: false, ctrl: false };
+			tui.doRender();
+			tui.handleTerminalInput("\x1b[<64;1;1M");
+			assert.ok(view.scrollTop < 260, "manual wheel moves away from paused voice before clicking");
+			const pauses = [...worker.pauses];
 			const notices = host.notices.length;
 			assert.equal(button.handleMouse({ ...event, type: "move" }), undefined);
 			assert.equal(button.handleMouse({ ...event, x: 19 }), undefined);
 			assert.equal(button.handleMouse(event)?.handled, true);
 			assert.equal(host.notices.length, notices, "jump does not spam banners/notices");
+			assert.deepEqual(worker.pauses, pauses, "location click does not resume paused audio");
+			await tick();
+			assert.equal(view.scrollTop, 260, "autoscroll-off playback cannot undo the explicit jump");
 		} else await host.command("scroll-to");
 		assert.equal(view.scrollTop, 260);
 		assert.equal(view.isFollowingEnd, false, "paused Alt+V must not pin the tail");

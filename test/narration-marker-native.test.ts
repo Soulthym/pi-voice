@@ -78,7 +78,35 @@ for (const width of [18, 24, 28, 40]) test(`guided code keeps ANSI and UTF-16 sp
 	assert.deepEqual(render(transformed), render(source));
 });
 
-for (const width of [18, 24, 28, 40]) test(`highlight never moves native glyphs at width ${width}`, () => {
+test("each wrapped active row closes its zone before Markdown padding", {
+	todo: "Pi carries background through wrap and appends padding before TUI's end-of-row reset",
+}, () => {
+	const source = "Alpha bravo charlie delta echo foxtrot golf hotel.";
+	const progress = new NarrationProgress();
+	progress.setCompletedText(source);
+	progress.registerSegment({ id: 1, utterance: 1, text: source, source: { start: 0, end: source.length } });
+	progress.setSegmentAudio(1, 0, 10);
+	progress.setPlayback(1, 0);
+	const transformed = progress.transform(source, "assistant", plain,
+		text => `\x1b[48;5;236m${text}\x1b[49m`);
+	const lines: string[] = new native.Markdown(transformed, 1, 0, theme).render(18);
+	assert.ok(lines.length > 1);
+	assert.equal(lines.filter(line => line.includes("\x1b[48;5;236m")).length, lines.length,
+		"n wrapped rows have n active zones");
+	for (const line of lines.slice(0, -1)) assert.match(line, /\x1b\[49m +$/,
+		"zone must end before right padding, not merely at TUI's terminal-row reset");
+});
+
+test("upstream wrapping must ignore ANSI-only state before a long token", {
+	todo: "Pi wrapSingleLine tests currentLine truthiness instead of visible content before breakLongWord",
+}, () => {
+	// No Voice transform, marker, Markdown parser, or source offsets involved.
+	const text = "Alpha supercalifragilisticexpialidocious";
+	const glyphs = (text: string) => native.wrapTextWithAnsi(text, 5).map(native.stripTerminalSequences);
+	assert.deepEqual(glyphs(`\x1b[48;5;236m${text}\x1b[49m`), glyphs(text));
+});
+
+for (const width of [10, 18, 24, 28, 40]) test(`highlight never moves native glyphs at width ${width}`, async t => {
 	const styledTheme: MarkdownTheme = {
 		...theme,
 		heading: text => `\x1b[35m${text}\x1b[39m`,
@@ -87,11 +115,21 @@ for (const width of [18, 24, 28, 40]) test(`highlight never moves native glyphs 
 	};
 	for (const source of [
 		"Alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima.",
+		"Alpha supercalifragilisticexpialidocious omega.",
+		"1. Alpha **supercalifragilisticexpialidocious** omega.",
+		"1. Alpha **😀 𐐀mega 界面** bravo charlie.",
 		"## Alpha **bravo** charlie delta echo foxtrot golf hotel india juliet kilo lima.",
 		"1. Alpha **bravo** charlie delta echo foxtrot golf hotel india juliet kilo lima.",
 		"Alpha 😀 𐐀mega 界面 bravo charlie delta echo foxtrot golf hotel india.",
 		"Alpha bravo charlie delta echo foxtrot golf hotel.\n\n```ts\nconst face = '😀';\n```",
-	]) {
+	]) await t.test(source, {
+		// Native wrapSingleLine pushes ANSI-only currentLine before an oversized
+		// token. List indentation leaves five content columns here; even the
+		// untransformed bold baseline can contain a spurious blank row.
+		todo: width === 10 && source.startsWith("1.")
+			? "upstream ANSI-only row before long token; needs renderer-level fix, not source rewriting"
+			: false,
+	}, () => {
 		const progress = new NarrationProgress();
 		progress.setCompletedText(source);
 		const end = source.indexOf("\n\n") < 0 ? source.length : source.indexOf("\n\n");
@@ -108,6 +146,9 @@ for (const width of [18, 24, 28, 40]) test(`highlight never moves native glyphs 
 				text => `\x1b[48;5;236m${text}\x1b[49m`,
 				undefined, true, undefined, progress.activeMarker);
 			const lines = render(transformed);
+			const markerOnly = render(progress.transform(source, "assistant", plain, plain,
+				undefined, false, undefined, progress.activeMarker));
+			assert.deepEqual(glyphs(markerOnly), glyphs(baseline), `marker only: ${source}: position ${position}`);
 			assert.deepEqual(glyphs(lines), glyphs(baseline), `${source}: position ${position}`);
 			assert.equal(lines.filter(line => line.includes(progress.activeMarker)).length, 1);
 			if (source.startsWith("Alpha bravo") && !source.includes("```")) {
@@ -123,5 +164,5 @@ for (const width of [18, 24, 28, 40]) test(`highlight never moves native glyphs 
 			progress.previewSourceOffset(source.indexOf("𐐀mega"));
 			assert.equal(progress.activeWordStart, source.indexOf("𐐀mega"), "source offsets stay UTF-16, not terminal columns");
 		}
-	}
+	});
 });
