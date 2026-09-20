@@ -2047,6 +2047,7 @@ export default async function (pi: ExtensionAPI) {
 			const skip = Math.min(target.skipUnits ?? 0, Math.max(0, chunks.length - 1));
 			const chunk = chunks[skip];
 			if (chunk) {
+		playbackPositionEstimated = false;
 				const inherited = chunks.slice(0, skip).flatMap(chunk => chunk.cues.flatMap(cue => cue.operations));
 				narration.registerSegment({ id: -1, utterance: -1, text: chunk.text,
 					source: { start: item.source.start, end: item.source.start }, revealAtEnd: true,

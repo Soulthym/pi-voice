@@ -35,10 +35,10 @@ test("worker quality reaches the widget independently of clock estimates and pre
 	worker.emit({ type: "segment-audio", segmentId, utterance, start: 0, duration: 6, timingQuality: "estimated" });
 	worker.emit({ type: "playback", utterance, position: 1, estimated: false });
 	await settle();
-	assert.match(widget(), /word timing: estimated/);
+	assert.match(widget(), /word timing quality: estimated/);
 	assert.doesNotMatch(widget(), /playback clock: estimated/);
 	worker.emit({ type: "alignment-error", segmentId, quality: "estimated", message: "Alignment superseded by upcoming speech" });
-	assert.match(widget(), /word timing: estimated/);
+	assert.match(widget(), /word timing quality: estimated/);
 	worker.emit({ type: "playback", utterance, position: 1, estimated: true });
 	await settle();
 	assert.match(widget(), /playback clock: estimated/);
@@ -55,11 +55,11 @@ test("worker quality reaches the widget independently of clock estimates and pre
 		{ text: "beta", start: 3, end: 4, quality: "estimated" },
 		{ text: "gamma", start: 5, end: 6, quality: "ctc-refined" },
 	] });
-	assert.match(widget(), /word timing: mixed \(includes estimates\)/);
+	assert.match(widget(), /word timing quality: mixed \(includes estimates\)/);
 	assert.equal(host.render(text), frozen);
 	assert.equal(host.scrollView.scrollTop, top);
 	worker.emit({ type: "alignment", segmentId, quality: "ctc-refined", words: ["Alpha", "beta", "gamma"].map((text, i) => ({ text, start: i * 2, end: i * 2 + 1, quality: "ctc-refined" })) });
-	assert.match(widget(), /word timing: CTC-refined/);
+	assert.match(widget(), /word timing quality: CTC-refined/);
 	assert.equal(host.render(text), frozen);
 	assert.equal(snapshots().length, 3, "idle snapshot must not suppress late alignment revisions");
 	assert.deepEqual(snapshots()[0], estimated, "later refinements must not mutate persisted entries");
@@ -74,11 +74,11 @@ test("worker quality reaches the widget independently of clock estimates and pre
 	assert.equal(reloaded.seekTarget(2)?.time, 2);
 	await host.command("stop");
 	worker.emit({ type: "alignment-error", segmentId: segmentId + 999, message: "obsolete" });
-	assert.match(widget(), /word timing: CTC-refined/);
+	assert.match(widget(), /word timing quality: CTC-refined/);
 	await host.shutdown();
 	const restoredHost = new FakeVoiceHost(root, "quality-reloaded");
 	t.after(() => restoredHost.shutdown());
 	restoredHost.entries.push(...JSON.parse(JSON.stringify(host.entries)));
 	await restoredHost.start();
-	assert.match(restoredHost.widgetLines()?.join("\n") ?? "", /word timing: CTC-refined/);
+	assert.match(restoredHost.widgetLines()?.join("\n") ?? "", /word timing quality: CTC-refined/);
 });

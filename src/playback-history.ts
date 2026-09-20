@@ -337,7 +337,10 @@ export class PlaybackHistory {
 		const unit = record.units?.get(`${tracked.sourceOffset}:${tracked.skipUnits}`);
 		if (unit?.[0]) unit[0].quality = quality;
 		const time = tracked.capture.baseTime + tracked.audioStart;
-		const point = record.checkpoints.find(point => point.duration > 0 && point.time === time && point.sourceOffset === tracked.sourceOffset);
+		// A replay's regenerated clock can differ from the saved timeline.
+		const point = record.timingsComplete
+			? record.checkpoints.filter(point => point.duration > 0 && point.sourceOffset === tracked.sourceOffset)[tracked.skipUnits]
+			: record.checkpoints.find(point => point.duration > 0 && point.time === time && point.sourceOffset === tracked.sourceOffset);
 		if (point) point.quality = quality;
 	}
 

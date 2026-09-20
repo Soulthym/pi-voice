@@ -71,9 +71,30 @@ test("code-description quality is retained without inserting description offsets
 		[{ time: 0, duration: 3, sourceOffset: 0, quality: "ctc-refined" }]);
 });
 
+test("replay quality updates saved unit identity, not the regenerated audio clock", () => {
+	const history = new PlaybackHistory();
+	const text = "First. Second.";
+	history.sync([{ id: "m", text, renderKey: "A" }]);
+	history.restore([{ version: 3, messageId: "m", renderKey: "A", duration: 10, checkpoints: [
+		{ time: 0, duration: 5, sourceOffset: 0, quality: "ctc-refined" },
+		{ time: 5, duration: 5, sourceOffset: 7, quality: "estimated" },
+	] }]);
+	history.beginCapture("m", text, 0, false);
+	history.registerSegment({ id: 9, utterance: 9, text: "Second.", source: { start: 7, end: text.length } });
+	history.setSegmentAudio(9, 4.8, 5);
+	assert.equal(history.status()?.timingQuality, "mixed", "listening alone does not refine estimates");
+	history.setTimingQuality(9, "ctc-refined");
+	assert.equal(history.status()?.timingQuality, "ctc-refined");
+	const snapshot = history.snapshotForUtterance(9)!;
+	const restored = new PlaybackHistory();
+	restored.sync([{ id: "m", text, renderKey: "A" }]);
+	restored.restore([snapshot]);
+	assert.equal(restored.status()?.timingQuality, "ctc-refined");
+});
+
 test("word timing and estimated transport clocks have independent labels", () => {
-	assert.equal(playbackTimingStatus("estimated", false), " · word timing: estimated");
-	assert.equal(playbackTimingStatus("mixed", false), " · word timing: mixed (includes estimates)");
-	assert.equal(playbackTimingStatus("ctc-refined", true), " · word timing: CTC-refined · playback clock: estimated");
-	assert.equal(playbackTimingStatus(undefined, false), " · word timing: quality unknown");
+	assert.equal(playbackTimingStatus("estimated", false), " · word timing quality: estimated");
+	assert.equal(playbackTimingStatus("mixed", false), " · word timing quality: mixed (includes estimates)");
+	assert.equal(playbackTimingStatus("ctc-refined", true), " · word timing quality: CTC-refined · playback clock: estimated");
+	assert.equal(playbackTimingStatus(undefined, false), " · word timing quality: quality unknown");
 });

@@ -74,7 +74,7 @@ test("605 targets restore in a fresh host without provider, measurement, synthes
 	assert.ok(!lines(restarted).some(line => /Recovering speech timing|generating speech|decoding cached audio/.test(line)));
 	assert.equal(snapshots(restarted).length, 605, "no duplicate persistence on compatible restart");
 	await restarted.command("timing");
-	assert.match(restarted.notices.at(-1)!.message, /word timing: CTC-refined/);
+	assert.match(restarted.notices.at(-1)!.message, /word timing quality: CTC-refined/);
 
 	// A genuine synthesis-setting mismatch must still recover, never masquerade as a check.
 	phase = "synthesis";

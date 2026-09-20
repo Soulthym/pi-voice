@@ -11,7 +11,7 @@ export function playbackTimingStatus(quality: TimingQuality | undefined, clockEs
 	const words = quality === "ctc-refined" ? "CTC-refined"
 		: quality === "mixed" ? "mixed (includes estimates)"
 		: quality === "estimated" ? "estimated" : "quality unknown";
-	return ` · word timing: ${words}${clockEstimated ? " · playback clock: estimated" : ""}`;
+	return ` · word timing quality: ${words}${clockEstimated ? " · playback clock: estimated" : ""}`;
 }
 
 export interface ReadyProgress {
