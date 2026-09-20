@@ -136,6 +136,10 @@ See [Configuration](docs/configuration.md) for valid values and setting behavior
 | `Alt+T` | Pin to and follow the transcript tail |
 | `Ctrl+Shift+V` | Toggle spoken output |
 
+Playback/navigation controls re-arm follow after manual browsing and immediately frame the selected text, even while paused; paused navigation is silent. Alt+V only reframes, without resuming. Later manual scrolling wins again.
+
+“Word timing quality” describes the selected message's saved/current estimates or alignment, not ongoing work. Listening alone does not guarantee CTC refinement.
+
 Speak after pressing the microphone key. Recording normally stops after about 1.35 seconds of silence. In the default review mode, edit the resulting prompt and press Enter yourself.
 
 ### Useful commands
@@ -151,6 +155,8 @@ Speak after pressing the microphone key. Recording normally stops after about 1.
 /voice reconnect  # adopt current attachment for this session; no playback
 /voice setup
 ```
+
+`/voice stop` must start the editor input to be recognized as a command. Nonempty-draft access remains a usability gap; no Escape/Stop shortcut discards your draft. Explicit playback finalizes microphone capture and preserves manual edits.
 
 ### Termux extended keyboard
 

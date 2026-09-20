@@ -1,6 +1,20 @@
 # Pi Voice — implemented agreements and live-validation handoff
 
-## Current UX follow-up — fast restart counter
+## Latest authorized live-UX follow-up
+
+Implemented: `aa0aa40` (quality provenance), `b588661` (native follow), `8e4638f` (stable batch progress).
+
+- **LIVE user evidence:** ASR second-pass display works intuitively; UI is much faster; restart cache checks appear instant. The Stop/draft cancellation bug is no longer reproducible. `/voice attention` explicit play is confirmed and retained without further attention changes. The accidental Escape was user input, not a product crash.
+- Native follow: avoid Pi's forced-render layout reset, which temporarily replaced the primary transcript viewport with its implicit fallback. Explicit ⏮/⏭, ↶/↷, ⏯ and ↺ reframe before asynchronous preparation; paused navigation stays silent. Native accepted scrolling, not programmatic layout motion, disables follow. Initial 20% / ongoing 20–80%, final-next tail and replay-from-tail remain covered.
+- Progress: retain the previous background row through pending batch preparation; coalesce replacements and final clearing on the existing 80 ms cadence. First status remains immediate; foreground input/playback stays immediate and retains precedence. Native Pi widget-layout regression checks that adjacent timing jobs do not remove/reinsert rows.
+- Quality: label **word timing quality** belongs to the selected message, not active recovery work. Fixed a reproducible stale saved-unit quality update when regenerated playback time differs from saved time; identify the saved sentence by source offset/ordinal. Listening alone does not guarantee CTC refinement; legitimate estimated/mixed checkpoints survive restart.
+- `/voice stop` must be entered as a command at the beginning of editor input. A nonempty draft is an acknowledged usability gap, not permission to discard it or invent a shortcut/Escape binding. Existing/manual drafts remain protected; explicit play still finalizes microphone capture.
+
+Validation: no configured LSP; `npm run check` and `npm test` passed (**488 passed, 1 known dependency-banner skip, 0 failed; 489 total**). Installed native Pi TUI inert-terminal tests: **4/4 passed**, including banner and explicit controls after manual unfollow. Logs: `/tmp/pi-voice-final-ux.log`, `/tmp/pi-voice-final-native-ux.log`. No live settings/clients/SSH/session restarts, inference, application-provider calls or private exports. `ISSUES.md` remains untouched.
+
+Remaining LIVE checks: user confirmation of rearming after manual browse while playing/paused and during cold ownership waits; visual comfort/no row flashing during real adjacent recovery batches; selected-message quality after actual late alignment/restart. Synthetic provenance tests do not establish the cause of the user's particular persisted mixed label.
+
+## Previous UX follow-up — fast restart counter
 
 New user clarification: the `0/605` speech-timing counter advanced **quickly**, and alignment looked good. This is not evidence of cache loss or full regeneration. The authorized follow-up traces restoration and labels actual work; it does not reopen the completed playback/ownership batch.
 

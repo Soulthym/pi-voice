@@ -2,6 +2,24 @@
 
 Updated incrementally. Companion: `PLAN.md`. Reorganize freely while preserving evidence and disposition.
 
+## Live UX follow-up — native follow, stable progress and quality provenance
+
+Implemented in `aa0aa40` (quality), `b588661` (follow), `8e4638f` (progress).
+
+**LIVE evidence supplied by the user:** second-pass ASR is intuitive; UI is much faster; restart cache checks are instant; Stop/draft cancellation is not currently reproducible. Keep confirmed explicit `/voice attention` play. The accidental Escape is not crash evidence. No new cross-project attention behavior was implemented.
+
+### Root causes established by source and regressions
+
+- **Follow:** `flushNarrationRender()` called `requestRender(true)`. Native `TUI.requestRender` invokes `TuiAltScreen.resetRenderState`, which clears `currentLayout`; `getPrimaryScrollView()` then returns the implicit fallback instead of Pi's real primary transcript view. The immediate auto-scroll request observes that wrong geometry as manual movement and cancels freshly armed follow. A fake requestRender no-op could not reproduce this. Use ordinary requested rendering after targeted Markdown invalidation. Native input observation reuses existing manual-follow state, so programmatic layout movement cannot cancel it. ⏯ now frames on pause as well as resume, before asynchronous microphone/device work; later browsing still wins. Regression uses an actual explicit primary ScrollView and unmodified native requestRender, plus real wheel/End/banner dispatch. Existing final-next/tail restoration regressions remain passing.
+- **Blinking:** background phase/finally callbacks synchronously rebuilt the unified widget, and job/batch settlement cleared its rows before adjacent preparation produced replacement content. Retain the last displayed description/timing values while their batch promises remain active, replace background content on the existing 80 ms cadence, and clear once settled. First status and input/playback are immediate; ordering, cancellation and teardown stay intact. The integration test invokes actual `InteractiveMode.setExtensionWidget`/widget-container rendering with inert UI, checking constant row count through three adjacent jobs (including a fast middle job), then a single settled clear. Transient sub-frame phases are coalesced, not separately flashed.
+- **Quality, not work:** background recovery explicitly generates duration-weighted word estimates; bounded/partial playback alignment can legitimately remain mixed. `PlaybackHistory.status()` aggregates the selected record, including saved units, not all session messages. Found a distinct stale-metadata defect: `setTimingQuality()` located complete saved checkpoints by regenerated playback time, unlike word-checkpoint refinement's source/ordinal lookup. A saved second sentence at 5.0 s replayed at 4.8 s left the old estimated checkpoint alongside the refined unit, producing mixed quality even after successful alignment. Use saved source offset/sentence ordinal for complete records; regression verifies mixed before the alignment event, refined only afterward, and the corrected snapshot after restart. UI now says **word timing quality**; new previews also reset the previous transport-clock estimate. This proves a possible stale-label cause, not that it caused the user's particular live label or that every played message should become CTC-refined.
+
+### Boundaries and verification
+
+`/voice stop` requires a command at the beginning of the editor; nonempty-draft ergonomics remain an acknowledged gap. No invented shortcut, Escape binding or draft discard; explicit playback still finishes microphone capture. No live clients/settings/SSH/session restarts, provider/inference calls or private exports. Untracked `ISSUES.md` preserved.
+
+No LSP server configured. `npm run check` passed; `npm test`: **488 passed, 1 known native-banner compatibility skip, 0 failures (489 total)**. Installed Pi native TUI: **4/4 passed, no skips**, using an inert terminal, no live session. Whitespace check passed. Logs: `/tmp/pi-voice-final-ux.log`, `/tmp/pi-voice-final-native-ux.log`. Still require user LIVE validation of cold/manual/paused follow and batch visual comfort; physical device and real-model alignment accuracy are not established by these tests.
+
 ## UX follow-up — fast `0/605` restart counter (`5b11e76`; source + synthetic evidence)
 
 **User correction:** the counter is fast and alignment looks good. Do not treat restart or a reset counter as evidence of cache loss/regeneration. This is a newly authorized UX task; prior playback, draft ownership, stop-proof and manual-scroll agreements remain in force.
