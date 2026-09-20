@@ -221,13 +221,20 @@ function completedAssistantMessages(ctx: ExtensionContext, mode: VoiceMode, incl
 	return messages;
 }
 
-function playbackTimingSnapshots(ctx: ExtensionContext): PlaybackTimingSnapshot[] {
-	const snapshots: PlaybackTimingSnapshot[] = [];
-	for (const entry of ctx.sessionManager.getBranch()) {
+function playbackTimingSnapshots(ctx: ExtensionContext, currentIds: Set<string>): Map<string, Map<string, PlaybackTimingSnapshot>> {
+	// References to session-owned entries, not another unbounded decoded timing pool.
+	const snapshots = new Map<string, Map<string, PlaybackTimingSnapshot>>();
+	for (const entry of ctx.sessionManager.getEntries?.() ?? ctx.sessionManager.getBranch()) {
 		if (entry.type !== "custom" || entry.customType !== PLAYBACK_TIMING_ENTRY) continue;
 		const data = entry.data;
 		if (!data || typeof data !== "object" || !("version" in data) || data.version !== 3) continue;
-		snapshots.push(data as PlaybackTimingSnapshot);
+		const snapshot = data as PlaybackTimingSnapshot;
+		if (!currentIds.has(snapshot.messageId) || typeof snapshot.renderKey !== "string" || !snapshot.renderKey ||
+			!Number.isFinite(snapshot.duration) || snapshot.duration < 0 ||
+			!Array.isArray(snapshot.checkpoints) || snapshot.checkpoints.length > 100_000) continue;
+		let versions = snapshots.get(snapshot.messageId);
+		if (!versions) snapshots.set(snapshot.messageId, versions = new Map());
+		versions.set(snapshot.renderKey, snapshot);
 	}
 	return snapshots;
 }
@@ -410,6 +417,7 @@ export default async function (pi: ExtensionAPI) {
 	let codePreprocessingProgress: PreprocessingProgress | undefined;
 	let timingPreprocessingProgress: PreprocessingProgress | undefined;
 	const playbackHistory = new PlaybackHistory();
+	let persistedTimingSnapshots = new Map<string, Map<string, PlaybackTimingSnapshot>>();
 	const codeDescriptionCache = new CodeDescriptionCache();
 	const codeDescriptionText = new Map<string, string>();
 	const pendingCodeDescriptions = new Map<string, CodeDescriptionCacheSnapshot>();
@@ -2525,6 +2533,19 @@ export default async function (pi: ExtensionAPI) {
 						if (epoch !== contextEpoch || workEpoch !== timingWorkEpoch || !isCurrentContext(ctx)) return;
 						measuredRenderKey = narrationRenderKey(message.text, measurementConfig, prepared.codeDependencies);
 						if (renderKeyFor(ctx, contextual) !== measuredRenderKey) return;
+						// Description resolution can return to a persisted fallback identity that
+						// was unresolved at startup (and evicted from the bounded variant pool).
+						playbackHistory.syncMessage({ ...message, renderKey: measuredRenderKey });
+						if (!playbackHistory.hasCompleteTimingFor(message.id)) {
+							const saved = persistedTimingSnapshots.get(message.id)?.get(measuredRenderKey);
+							if (saved) playbackHistory.restore([saved]);
+						}
+						if (playbackHistory.hasCompleteTimingFor(message.id)) {
+							processedMessages += 1;
+							updateTimingProgress();
+							requestPlaybackTimeline();
+							return;
+						}
 						let previousSource = -1;
 						let skipUnits = 0;
 						for (const item of prepared.items) {
@@ -3023,9 +3044,14 @@ export default async function (pi: ExtensionAPI) {
 			refreshPreprocessingProgress();
 			return;
 		}
-		syncPlaybackMessages(ctx, true);
-		// Presence-only description keys cannot prove which wording was measured.
-		playbackHistory.restore(playbackTimingSnapshots(ctx));
+		const messages = syncPlaybackMessages(ctx, true);
+		persistedTimingSnapshots = playbackTimingSnapshots(ctx, new Set(messages.map(message => message.id)));
+		// Restore only exact current identities; unresolved assets remain lazily addressable
+		// in the entry index even when the bounded historical variant pool evicts them.
+		for (const message of messages) {
+			const saved = message.renderKey && persistedTimingSnapshots.get(message.id)?.get(message.renderKey);
+			if (saved) playbackHistory.restore([saved]);
+		}
 		timingPreprocessingProgress = undefined;
 		scheduleMissingCodeDescriptions(ctx);
 		refreshPlaybackTimeline();

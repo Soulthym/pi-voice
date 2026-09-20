@@ -111,40 +111,43 @@ export class PlaybackHistory {
 
 	sync(messages: PlaybackMessage[], selectLatest = false): void {
 		this.#order = messages.map(message => message.id);
-		for (const message of messages) {
-			let existing = this.#records.get(message.id);
-			if (existing) {
-				if (existing.text !== message.text || existing.renderKey !== message.renderKey) {
-					this.invalidateCaptures(message.id);
-					if (existing.renderKey) {
-						let versions = this.#versions.get(message.id);
-						if (!versions) this.#versions.set(message.id, versions = new Map());
-						versions.set(existing.renderKey, existing);
-						// ponytail: four variants for 256 targets; evicted variants are remeasured.
-						if (versions.size > 4) versions.delete(versions.keys().next().value!);
-						this.#trimVersions();
-					}
-					const version = message.renderKey ? this.#versions.get(message.id)?.get(message.renderKey) : undefined;
-					const compatible = version?.text === message.text ? version : undefined;
-					existing = { ...message, checkpoints: [], duration: 0, position: existing.position,
-						cursor: existing.text === message.text ? existing.cursor : undefined, timingsComplete: false,
-						...(compatible ? { checkpoints: compatible.checkpoints.map(point => ({ ...point })),
-							duration: compatible.duration, timingsComplete: compatible.timingsComplete, units: compatible.units,
-							wordTimingCoverage: compatible.wordTimingCoverage && new Map(compatible.wordTimingCoverage) } : {}) };
-					this.#records.set(message.id, existing);
-				}
-				existing.messageType = message.messageType;
-				existing.contentIndex = message.contentIndex;
-				existing.displayOffset = message.displayOffset;
-				existing.text = message.text;
-				existing.renderKey = message.renderKey;
-			} else this.#records.set(message.id, { ...message, checkpoints: [], duration: 0, position: 0, timingsComplete: false });
-			const saved = message.renderKey ? this.#snapshots.get(message.id)?.get(message.renderKey) : undefined;
-			if (saved && !this.hasCompleteTimingFor(message.id)) this.restore([saved]);
-		}
+		for (const message of messages) this.syncMessage(message);
 		if (selectLatest || !this.#selectedId || !this.#order.includes(this.#selectedId)) {
 			this.#selectedId = this.#order.at(-1);
 		}
+	}
+
+	/** Update one resolved identity without rebuilding order or disturbing selection. */
+	syncMessage(message: PlaybackMessage): void {
+		let existing = this.#records.get(message.id);
+		if (existing) {
+			if (existing.text !== message.text || existing.renderKey !== message.renderKey) {
+				this.invalidateCaptures(message.id);
+				if (existing.renderKey) {
+					let versions = this.#versions.get(message.id);
+					if (!versions) this.#versions.set(message.id, versions = new Map());
+					versions.set(existing.renderKey, existing);
+					// ponytail: four variants for 256 targets; evicted variants are remeasured.
+					if (versions.size > 4) versions.delete(versions.keys().next().value!);
+					this.#trimVersions();
+				}
+				const version = message.renderKey ? this.#versions.get(message.id)?.get(message.renderKey) : undefined;
+				const compatible = version?.text === message.text ? version : undefined;
+				existing = { ...message, checkpoints: [], duration: 0, position: existing.position,
+					cursor: existing.text === message.text ? existing.cursor : undefined, timingsComplete: false,
+					...(compatible ? { checkpoints: compatible.checkpoints.map(point => ({ ...point })),
+						duration: compatible.duration, timingsComplete: compatible.timingsComplete, units: compatible.units,
+						wordTimingCoverage: compatible.wordTimingCoverage && new Map(compatible.wordTimingCoverage) } : {}) };
+				this.#records.set(message.id, existing);
+			}
+			existing.messageType = message.messageType;
+			existing.contentIndex = message.contentIndex;
+			existing.displayOffset = message.displayOffset;
+			existing.text = message.text;
+			existing.renderKey = message.renderKey;
+		} else this.#records.set(message.id, { ...message, checkpoints: [], duration: 0, position: 0, timingsComplete: false });
+		const saved = message.renderKey ? this.#snapshots.get(message.id)?.get(message.renderKey) : undefined;
+		if (saved && !this.hasCompleteTimingFor(message.id)) this.restore([saved]);
 	}
 
 	restore(snapshots: readonly PlaybackTimingSnapshot[]): void {

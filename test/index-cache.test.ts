@@ -3,6 +3,8 @@ import * as fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { mock, test, type TestContext } from "node:test";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { PlaybackHistory } from "../src/playback-history.js";
 import { FakeVoiceHost, MockedVoiceWorkerClient, assistant, streamCompletedResponse } from "./helpers/fake-voice-host.js";
 
 mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: MockedVoiceWorkerClient } });
@@ -75,6 +77,91 @@ test("local context-overflow fallback has a stable identity and retains prose ti
 	assert.equal(host.modelRequests.length, 0);
 	assert.equal(host.notices.filter(notice => notice.message.includes("insufficient context")).length, 1);
 	assert.equal(snapshots().length, 1);
+});
+
+test("617 unresolved fallback identities restore from SDK sibling branches after JSON restarts", async t => {
+	let measurements = 0;
+	const completed = new Set<string>();
+	const restoredDurations = new Set<number>();
+	const restore = PlaybackHistory.prototype.restore;
+	PlaybackHistory.prototype.restore = function (snapshots) {
+		restore.call(this, snapshots);
+		for (const snapshot of snapshots) if (this.hasCompleteTimingFor(snapshot.messageId)) {
+			completed.add(snapshot.messageId);
+			restoredDurations.add(snapshot.duration);
+		}
+	};
+	t.after(() => { PlaybackHistory.prototype.restore = restore; });
+	const original = MockedVoiceWorkerClient.prototype.measureSegment;
+	MockedVoiceWorkerClient.prototype.measureSegment = async () => { measurements++; return 100; };
+	t.after(() => { MockedVoiceWorkerClient.prototype.measureSegment = original; });
+	const host = await setup(t, 1);
+	host.model.contextWindow = 1;
+	const text = `${"Ordinary prose words ".repeat(60)}.\n\`\`\`ts\nrun();\n\`\`\`\nAfter.`;
+	host.addMessage("seed", null, assistant(text));
+	const timingType = "pi-voice.playback-timing";
+	const waitFor = async (done: () => boolean) => {
+		const deadline = Date.now() + 30_000;
+		while (!done() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+		assert.ok(done(), "timing recovery finished");
+	};
+	await host.start();
+	await waitFor(() => host.entries.some(entry => entry.customType === timingType));
+	const seed = host.entries.find(entry => entry.customType === timingType)!.data;
+	assert.ok(seed.checkpoints.length * 617 > 50_000, "exceeds both historical pool bounds");
+	await host.shutdown();
+
+	const session = SessionManager.inMemory(host.cwd);
+	const ids = Array.from({ length: 617 }, () => session.appendMessage(assistant(text)));
+	// Timings hang off the old branch, while the shared transcript remains current.
+	for (const messageId of ids) {
+		session.appendCustomEntry(timingType, { ...seed, messageId, duration: 999 });
+		session.appendCustomEntry(timingType, { ...seed, messageId }); // Latest exact match wins.
+		session.appendCustomEntry(timingType, { ...seed, messageId, renderKey: "stale-render-key", duration: 998 });
+		session.appendCustomEntry(timingType, { ...seed, messageId, version: 2, duration: 997 });
+	}
+	const siblingId = session.appendMessage(assistant(text));
+	session.appendCustomEntry(timingType, { ...seed, messageId: siblingId });
+	session.branch(ids.at(-1)!);
+	session.appendCustomEntry("test-current-branch", {});
+	assert.equal(session.getBranch().filter(entry => entry.type === "custom" && entry.customType === timingType).length, 0);
+	assert.equal(host.modelRequests.length, 0);
+	const file = path.join(path.dirname(process.env.PI_VOICE_CONFIG!), "roundtrip.jsonl");
+	await fs.writeFile(file, [session.getHeader(), ...session.getEntries()].map(entry => JSON.stringify(entry)).join("\n") + "\n");
+	measurements = 0;
+	for (let restart = 0; restart < 2; restart++) {
+		completed.clear();
+		restoredDurations.clear();
+		const restored = SessionManager.open(file);
+		const next = new FakeVoiceHost(host.cwd, `restart-${restart}`);
+		next.model.contextWindow = 1;
+		next.ctx.sessionManager = restored;
+		next.api.appendEntry = (type: string, data: unknown) => {
+			next.entries.push({ customType: type, data });
+			restored.appendCustomEntry(type, data);
+		};
+		t.after(() => next.shutdown());
+		await next.start();
+		await waitFor(() => completed.size === 617);
+		assert.deepEqual(completed, new Set(ids));
+		assert.deepEqual(restoredDurations, new Set([seed.duration]));
+		await settle();
+		assert.equal(measurements, 0, `restart ${restart}: exact resolved assets never measured`);
+		assert.equal(next.modelRequests.length, 0);
+		assert.equal(next.entries.filter(entry => entry.customType === timingType).length, 0);
+		await next.shutdown();
+	}
+	// A branch-only export really omits the sibling assets; it must still recover.
+	await fs.writeFile(file, [session.getHeader(), ...session.getBranch(ids[0])]
+		.map(entry => JSON.stringify(entry)).join("\n") + "\n");
+	const exported = new FakeVoiceHost(host.cwd, "branch-export");
+	exported.model.contextWindow = 1;
+	exported.ctx.sessionManager = SessionManager.open(file);
+	t.after(() => exported.shutdown());
+	await exported.start();
+	await waitFor(() => exported.entries.some(entry => entry.customType === timingType));
+	assert.ok(measurements > 0, "missing exported assets still require measurement");
+	assert.equal(exported.modelRequests.length, 0);
 });
 
 for (const joiner of ["replay", "live"] as const) {
