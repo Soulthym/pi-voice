@@ -83,7 +83,7 @@ for (const messageType of ["assistant", "assistant-thinking"] as const) test(`mo
 	assert.equal(host.modelRequests.length, 0);
 });
 
-for (const action of ["paused anchor", "button", "button playing", "End", "banner", "controls", "search", "search forced render", "drag", "PageDown bottom", "wheel bottom", "scrollbar bottom", "narrow cached", "wide cached", "current cached"]) test(`native viewport: ${action}`, async t => {
+for (const action of ["auto tail start", "auto tail small", "auto tail long", "auto tail in band", "auto tail navigation", "paused anchor", "button", "button playing", "End", "banner", "controls", "search", "search forced render", "drag", "PageDown bottom", "wheel bottom", "scrollbar bottom", "narrow cached", "wide cached", "current cached"]) test(`native viewport: ${action}`, async t => {
 	if (action.startsWith("button") && !native.MouseRegion) {
 		t.skip("older Pi has no MouseRegion; Alt+V remains available");
 		return;
@@ -102,7 +102,7 @@ for (const action of ["paused anchor", "button", "button playing", "End", "banne
 	// The renderer stays stopped; doRender below paints into an inert terminal.
 	tui.altScreenActive = true;
 	let count = 300;
-	let marker = 100;
+	let marker = action === "auto tail start" ? count - 1 : 100;
 	const text = Array.from({ length: 60 }, (_, i) => `Sentence ${i} contains several narrated words.`).join(" ");
 	let renderText = () => text;
 	let transform = (source: string) => source;
@@ -273,6 +273,16 @@ for (const action of ["paused anchor", "button", "button playing", "End", "banne
 		assert.equal(view.scrollTop, Math.max(0, view.contentHeight - view.viewportHeight));
 		return;
 	}
+	if (action === "auto tail start") {
+		assert.equal(view.scrollTop, count - view.viewportHeight, "initial Voice anchor clamps to actual bottom");
+		assert.equal(view.isFollowingEnd, true);
+		tui.doRender();
+		assert.equal(tui.scrollToEndIndicatorRect, undefined);
+		count += 2;
+		tui.doRender();
+		assert.equal(view.scrollTop, count - view.viewportHeight, "native follow carries subsequent output");
+		return;
+	}
 	assert.equal(view.scrollTop, 92);
 	assert.equal(tui.getPrimaryScrollView(), transcript, "explicit preview must not reset native primary layout");
 	if (action === "controls") {
@@ -305,6 +315,56 @@ for (const action of ["paused anchor", "button", "button playing", "End", "banne
 	const tick = async () => { worker.emit({ type: "playback", utterance: last.utterance, position: 0 }); await settle(); };
 	await tick();
 	assert.equal(view.scrollTop, 92, "programmatic motion does not cancel the ongoing 20–80% follow band");
+
+	if (action.startsWith("auto tail")) {
+		terminal.rows = action === "auto tail small" ? 12 : 60;
+		tui.doRender();
+		const pauses = [...worker.pauses];
+		const sent = worker.sent.length;
+		assert.equal(view.isFollowingEnd, false);
+		if (tui.handleScrollToEndIndicatorMouseEvent) assert.ok(tui.scrollToEndIndicatorRect, "native banner starts visible");
+		marker = count - 1;
+		if (action === "auto tail in band") {
+			view.scrollTo(count - view.viewportHeight - 1);
+			marker = view.scrollTop + Math.floor(view.viewportHeight / 2);
+			await tick();
+			assert.equal(view.scrollTop, count - view.viewportHeight - 1, "in-window proximity must not jump to bottom");
+			assert.equal(view.isFollowingEnd, false);
+			// A paused/clamped layout can leave the native suppression latch set at maxScroll.
+			view.scrollTo(count - view.viewportHeight, { disableFollow: true });
+			marker = view.scrollTop + Math.floor(view.viewportHeight / 2);
+		}
+		await tick(); // Natural word follow, not Alt+V/End or a forced anchor.
+		assert.equal(view.scrollTop, count - view.viewportHeight);
+		assert.equal(view.isFollowingEnd, true, "automatic actual-bottom arrival adopts native follow-end");
+		tui.doRender();
+		assert.equal(tui.scrollToEndIndicatorRect, undefined, "native state removes its own banner");
+		assert.deepEqual(worker.pauses, pauses, "viewport handoff does not change pause/play intent");
+		assert.equal(worker.sent.length, sent, "viewport handoff does not move playback or regenerate audio");
+		if (action === "auto tail navigation") {
+			await host.shortcut("f8");
+			assert.equal(worker.pauses.at(-1), true, "pause at automatic viewport tail pauses, not replays");
+			await host.shortcut("f7");
+			await settle();
+			assert.ok(host.render("First sentence. Second sentence.").includes(`${NARRATION_ACTIVE_MARKER}First`),
+				"back from the first sentence clamps, not back-from-chronological-Tail to the last sentence");
+			assert.equal(worker.pauses.at(-1), true);
+			return;
+		}
+		count += 2;
+		tui.doRender();
+		await tick();
+		assert.equal(view.scrollTop, count - view.viewportHeight, "small growth can retain native follow at the actual bottom");
+		count += 100;
+		tui.doRender();
+		await tick();
+		assert.equal(view.scrollTop, marker - Math.floor(view.viewportHeight * 0.2), "large growth restores the speech window");
+		assert.equal(view.isFollowingEnd, false);
+		worker.emit({ type: "idle", utterance: last.utterance });
+		await settle();
+		assert.equal(view.scrollTop, count - view.viewportHeight, "automatic handoff remembers return-to-tail");
+		return;
+	}
 
 	if (["search", "search forced render", "drag", "PageDown bottom", "wheel bottom", "scrollbar bottom"].includes(action)) {
 		tui.doRender();
@@ -417,6 +477,16 @@ for (const action of ["paused anchor", "button", "button playing", "End", "banne
 		} else await host.command("scroll-to");
 		assert.equal(view.scrollTop, 260);
 		assert.equal(view.isFollowingEnd, false, "paused Alt+V must not pin the tail");
+		const frozen = host.render("First sentence. Second sentence.");
+		const segment = worker.sent.at(-1) as { segmentId: number };
+		worker.emit({ type: "alignment", segmentId: segment.segmentId, quality: "ctc-refined", words: [
+			{ text: "Second", start: 0, end: 1, quality: "ctc-refined" },
+			{ text: "sentence.", start: 1, end: 2, quality: "ctc-refined" },
+		] });
+		await tick();
+		assert.equal(host.render("First sentence. Second sentence."), frozen, "background refinement cannot move paused highlight");
+		assert.equal(view.scrollTop, 260, "background refinement cannot move paused viewport");
+		assert.equal(view.isFollowingEnd, false, "paused ticks cannot adopt native end-follow");
 		count = 320;
 		tui.doRender();
 		assert.equal(view.scrollTop, 260, "incoming output cannot move a paused narration anchor");

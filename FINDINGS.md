@@ -2,6 +2,14 @@
 
 Updated incrementally. Companion: `PLAN.md`. Reorganize freely while preserving evidence and disposition.
 
+## Native automatic-bottom handoff — interrupted fix completed
+
+- **User LIVE positive/new defect:** Voice follow reaches the actual bottom, but native “Jump to latest” can remain visible/end-follow inactive. Earlier positive windowed-follow, navigation, Jump-to-voice and flicker feedback remains valid; no live confirmation of this new fix is claimed.
+- Read and retained the interrupted production/test changes. The shared auto-scroll path previously returned immediately for an in-band word, even at exact maximum scroll with native follow suppressed. It now reconciles that arrival through the existing `frameNarrationViewport` / native `scrollTo` state transition, which clears suppression and lets Pi hide its own banner. Automatic actual-bottom arrival also records the existing pin height/final-tail intent, so growth is not mistaken for manual scrolling and can restore the 20–80% speech window. No proximity-based jump, native banner patch, chronological Tail action, audio regeneration or pause-state toggle.
+- Native regressions cover initial clamped framing, ongoing arrival at short/tall viewport heights, an in-band word one row before bottom (no jump), suppressed follow at exact bottom, subsequent small/large output growth, completion restoration, and unchanged pause/back cursor behavior. Existing wheel/PageDown/scrollbar manual-bottom tests still prevent Voice reclamation; paused native tests now inject background alignment/ticks and assert frozen highlight, position and end-follow state. Existing F6/F10/F7/F9 and real Jump-to-voice dispatch remain covered.
+- `npm run check`: passed. `npm test`: **863 passed, 3 skipped, 0 failed (866 total)**, 61.29 s. Skips are the older project TUI's two MouseRegion cases and native banner. Installed-native command from `docs/testing.md` (both native test files): **305 passed, 0 skipped/failed**, 49.54 s. Logs: `/tmp/pi-voice-tail-check.log`, `/tmp/pi-voice-tail-full.log`, `/tmp/pi-voice-tail-native.log`. LSP status/diagnostics report no configured server; typecheck is the static validation.
+- **Ready for user `/reload`**, no client recopy or SSH restart/reconnect needed. No live session changes, application-provider calls, real inference, settings changes or transcript reads/exports. `ISSUES.md` preserved and excluded from staging. Live banner/follow behavior remains for the user to confirm after reload.
+
 ## Final reconciliation against `d4ce9c9` — newest batch offline only
 
 This entry supersedes older current-status claims without deleting discussion or incident evidence. User LIVE confirmations already include working windowed follow, paused/unpaused navigation, intuitive ASR alternatives, much faster UI and fixed flicker. The newest implementation batch has **not** been live-tested; do not extend those earlier confirmations to it.

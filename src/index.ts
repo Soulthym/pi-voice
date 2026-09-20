@@ -1381,17 +1381,24 @@ export default async function (pi: ExtensionAPI) {
 		}
 
 		const target = computeAutoScrollTop(scrollViewport, anchor, autoScrollForceOnce);
-		if (target === null && !autoScrollForceOnce) {
+		const maxScrollTop = Math.max(0, resolvedContentHeight - scrollView.viewportHeight);
+		if (target === null && !autoScrollForceOnce && (playbackPaused || scrollView.scrollTop !== maxScrollTop)) {
 			lastAutoScrollTop = scrollView.scrollTop;
 			return;
 		}
 
 		hideFollowHint();
-		const maxScrollTop = Math.max(0, resolvedContentHeight - scrollView.viewportHeight);
 		const topBand = Math.floor(scrollView.viewportHeight * 0.2);
-		const desired = Math.max(0, Math.min(maxScrollTop, target ?? anchor - topBand));
+		const desired = Math.max(0, Math.min(maxScrollTop, target ?? (autoScrollForceOnce ? anchor - topBand : scrollView.scrollTop)));
 		autoScrollForceOnce = false;
 		frameNarrationViewport(scrollView, desired, !playbackPaused);
+		// Only the actual clamp hands off to native follow, never proximity inside
+		// the speech band. Do not turn viewport arrival into a playback Tail action.
+		if (!playbackPaused && scrollView.scrollTop === maxScrollTop) {
+			pinnedContentHeight = resolvedContentHeight;
+			bottomPinned = ownsSpeech;
+			restoreBottomAfterSpeech = ownsSpeech;
+		}
 		lastAutoScrollTop = scrollView.scrollTop;
 	};
 

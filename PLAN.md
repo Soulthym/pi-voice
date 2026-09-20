@@ -1,5 +1,12 @@
 # Pi Voice — implemented agreements and live-validation handoff
 
+## Native automatic-bottom handoff — ready for reload
+
+- User LIVE feedback: Voice following now lands at the actual bottom; remaining bug is Pi's native “Jump to latest” banner/end-follow state. Preserve the earlier positive navigation, Jump-to-voice, windowed-follow and flicker feedback; this fix itself is offline-validated only.
+- Completed the interrupted `src/index.ts` / native-test diff. Unpaused automatic arrival at exact maximum scroll now reconciles native end-follow even when the word stays in the 20–80% band, and remembers final-tail restoration. No playback Tail/cursor or pause-state action; manual bottom gestures and paused anchors retain ownership. Subsequent growth still restores the speech window when needed.
+- Validation: `npm run check` passed; full suite **863 passed, 3 compatibility skips, 0 failed (866 total)**; installed-native suite **305 passed, no skips/failures**. Includes clamped start, ongoing arrival, in-band suppression, future output, navigation, manual bottom and paused background refinement. No LSP configured.
+- Host `/reload` ready; no client copy, SSH restart, reconnect or settings change required. No live/provider/inference calls or transcript inspection; `ISSUES.md` untouched. Evidence and logs in `FINDINGS.md` below.
+
 ## Final documentation reconciliation — source `d4ce9c9`
 
 This checkpoint supersedes older current-status/reload headings below; historical agreements and evidence remain preserved. Documentation only: no source, test, client, Termux or settings changes. `ISSUES.md` remains untouched.
