@@ -340,3 +340,50 @@ for (const [head, tail] of [["1", "️⃣"], ["👨", "‍👩‍👧‍👦"]])
 			new native.Markdown(source, 1, 0, styled).render(width).map(native.stripTerminalSequences));
 	});
 }
+
+for (const body of [
+	"Alpha https://example.com https://example.com/path bravo",
+	"Alpha <https://example.com> https://example.com bravo",
+	"Alpha https://example.com <https://example.com> bravo",
+	"Alpha ![Diagram] ![Diagram][figure] ![Diagram][] bravo",
+	"Alpha ![Diagram][figure] ![Diagram] bravo",
+	"Alpha `https://example.com ![Diagram]` https://example.com ![Diagram] bravo",
+	"Alpha [label](https://example.com) https://example.com bravo",
+	String.raw`Alpha \![Diagram] ![Diagram] bravo`,
+	"> Alpha https://example.com\n> https://example.com/path bravo",
+	"- Alpha https://example.com\n  https://example.com/path bravo",
+]) for (const width of [18, 100]) {
+	for (const target of ["bravo", body.includes("![Diagram]") ? "Diagram" : "https://example.com"]) {
+		test(`nonoverlapping source atoms paint ${target}: ${JSON.stringify(body)}/${width}`, () => {
+			const source = `${body}\n\n[figure]: diagram.svg\n[Diagram]: diagram.svg`;
+			const start = body.lastIndexOf(target);
+			const progress = new NarrationProgress();
+			progress.setCompletedText(source);
+			progress.registerSegment({ id: 1, utterance: 1, text: target,
+				source: { start, end: start + target.length } });
+			progress.setSegmentAudio(1, 0, 10);
+			progress.setPlayback(1, 0);
+			assert.equal(progress.activeWordStart, start);
+			assert.equal(progress.sourceWordTimings(1)[0].sourceOffset, start);
+			const painted: string[] = [];
+			const leaf = withNarrationLayout(new native.Markdown(source, 1, 0, theme, undefined, {
+				transform: text => progress.transform(text, "assistant", plain, text => {
+					painted.push(native.stripTerminalSequences(text.replaceAll(progress.activeMarker, "")));
+					return `\x1b[48;5;236m${text}\x1b[49m`;
+				}, undefined, false, undefined, progress.activeMarker),
+			}));
+			const lines = leaf.render(width);
+			const baseline = new native.Markdown(source, 1, 0, theme).render(width);
+			assert.deepEqual(lines.map(line => native.stripTerminalSequences(line.replaceAll(progress.activeMarker, ""))),
+				baseline.map(native.stripTerminalSequences));
+			const expected = target.startsWith("https") && body.slice(start).startsWith(`${target}/path`) ? `${target}/path` : target;
+			assert.equal(painted.join(""), expected);
+			assert.equal(lines.join("\n").split(progress.activeMarker).length - 1, 1);
+			const anchored = lines.map(line => native.stripTerminalSequences(line.replace(progress.activeMarker, "ANCHOR")).trim().replace(/^│ /, "")).join("");
+			assert.equal(anchored.indexOf("ANCHOR"), anchored.replace("ANCHOR", "").lastIndexOf(expected),
+				"marker anchors the selected final occurrence, not an earlier lookalike");
+			assert.deepEqual(leaf.render(width), lines, "cached projection retains paint and scoped anchor");
+			assert.equal(progress.sourceTexts[0], source);
+		});
+	}
+}

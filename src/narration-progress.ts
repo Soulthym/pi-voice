@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { extractAnsiCode, getGraphemeSegmenter } from "@earendil-works/pi-tui/dist/utils.js";
-import { Marked, Tokenizer } from "marked";
+import { Marked, type Token } from "marked";
 import { narrationLayoutCapture, narrationLayoutPlan } from "./narration-render.js";
 import type {
 	CodeLineRange,
@@ -261,43 +261,45 @@ function alignedStarts(spoken: DisplayWord[], recognized: AlignmentWord[], durat
 
 function excludedMarkdownRanges(markdown: string, atoms: NarrationSourceRange[]): NarrationSourceRange[] {
 	const excluded: NarrationSourceRange[] = [];
-	// Use the installed Markdown lexer for reference grammar (including hidden
-	// definitions), escapes and automatic links, rather than guessing brackets.
-	const protectedTokens = new Map<string, Map<number, number>>();
-	const atomicTokens = new Set<string>();
-	const protect = (raw: string, start = 0, end = raw.length): void => {
-		if (!raw || end <= start) return;
-		let spans = protectedTokens.get(raw);
-		if (!spans) protectedTokens.set(raw, spans = new Map());
-		spans.set(start, Math.max(end, spans.get(start) ?? end));
+	const structural: NarrationSourceRange[] = [];
+	const protect = (positions: number[], start = 0, end = positions.length, atom = false): void => {
+		if (end <= start) return;
+		const range = { start: positions[start], end: positions[end - 1] + 1 };
+		excluded.push(range);
+		(atom ? atoms : structural).push(range);
 	};
-	const parser = new Marked({ tokenizer: {
-		def(src) {
-			const token = Tokenizer.prototype.def.call(this, src);
-			if (token) protect(token.raw);
-			return token;
-		},
-	} });
-	parser.walkTokens(parser.lexer(markdown), token => {
-		if (token.type === "escape" || token.type === "image") protect(token.raw);
-		if (token.type === "image") atomicTokens.add(token.raw);
-		if (token.type === "link") {
-			// Explicit links may paint their label, never their destination or
-			// reference identifier. Autolinks must remain a single lexer atom.
-			const label = token.raw.startsWith("[") ? token.raw.indexOf(token.text, 1) : -1;
-			if (label < 0) { protect(token.raw); atomicTokens.add(token.raw); }
-			else {
-				protect(token.raw, 0, label);
-				protect(token.raw, label + token.text.length);
+	// Walk each actual occurrence once, relative to its parent. Blockquotes and
+	// lists strip line prefixes, so retain a UTF-16 source map across those lines.
+	const walk = (tokens: Token[], source: string, positions: number[]): void => {
+		let cursor = 0;
+		for (const token of tokens) {
+			const mapped: number[] = [];
+			for (const line of token.raw.split(/(?<=\n)/)) {
+				const at = source.indexOf(line, cursor);
+				if (at < 0) break;
+				for (let i = at; i < at + line.length; i++) mapped.push(positions[i]);
+				cursor = at + line.length;
 			}
+			if (mapped.length !== token.raw.length) continue;
+			if (token.type === "def" || token.type === "escape" || token.type === "html") protect(mapped);
+			if (token.type === "image") { protect(mapped, 0, mapped.length, true); continue; }
+			if (token.type === "link") {
+				// Only explicit labels have children eligible for separate paint.
+				const label = token.raw.startsWith("[") ? token.raw.indexOf(token.text, 1) : -1;
+				if (label < 0) { protect(mapped, 0, mapped.length, true); continue; }
+				protect(mapped, 0, label);
+				protect(mapped, label + token.text.length);
+				walk(token.tokens ?? [], token.text, mapped.slice(label, label + token.text.length));
+			} else if (token.type === "list") walk(token.items, token.raw, mapped);
+			else if (token.type === "table") {
+				walk([...token.header, ...token.rows.flat()].map(cell => ({
+					type: "text", raw: cell.text, tokens: cell.tokens,
+				})), token.raw, mapped);
+			} else if ("tokens" in token && token.tokens) walk(token.tokens, token.raw, mapped);
 		}
-	});
-	for (const [raw, spans] of protectedTokens) {
-		for (let at = markdown.indexOf(raw); at >= 0; at = markdown.indexOf(raw, at + raw.length)) {
-			for (const [start, end] of spans) excluded.push({ start: at + start, end: at + end });
-			if (atomicTokens.has(raw)) atoms.push({ start: at, end: at + raw.length });
-		}
-	}
+	};
+	walk(new Marked().lexer(markdown), markdown, Array.from({ length: markdown.length }, (_, i) => i));
+	const syntaxStart = excluded.length;
 	// Copied transcript metadata is source text, not a new narration target.
 	// Keep its bytes/UTF-16 offsets, but never insert tags inside an ANSI/APC.
 	for (let at = markdown.indexOf("\x1b"); at >= 0; at = markdown.indexOf("\x1b", at + 1)) {
@@ -329,11 +331,6 @@ function excludedMarkdownRanges(markdown: string, atoms: NarrationSourceRange[])
 		}
 		offset += line.length;
 	}
-	for (const pattern of [/\]\((?:\\.|[^)])*\)/g, /<[^>]+>/g]) {
-		for (let match = pattern.exec(markdown); match; match = pattern.exec(markdown)) {
-			excluded.push({ start: match.index, end: match.index + match[0].length });
-		}
-	}
 	// ANSI styling inside structural markers changes how the Markdown lexer
 	// recognizes them. In particular, styling the number in a nested `1.` list
 	// marker turns it into paragraph text and loses continuation indentation.
@@ -349,9 +346,9 @@ function excludedMarkdownRanges(markdown: string, atoms: NarrationSourceRange[])
 	}
 	// Adjacent atoms may merge into one protected interval; keep their individual
 	// identities, excluding occurrences inside larger hidden/structural spans.
-	const structural = atoms.length ? mergeSpans(excluded.filter(range => !atomicTokens.has(markdown.slice(range.start, range.end)))) : [];
+	const hidden = mergeSpans([...structural, ...excluded.slice(syntaxStart)]);
 	const visibleAtoms = atoms.filter(atom => {
-		const range = excludedRangeAt(structural, atom.start);
+		const range = excludedRangeAt(hidden, atom.start);
 		return !range || range.start > atom.start || range.end < atom.end;
 	});
 	atoms.splice(0, atoms.length, ...visibleAtoms);

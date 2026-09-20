@@ -7,7 +7,7 @@ import { Markdown, type MarkdownTheme } from "@earendil-works/pi-tui";
 const dim = (text: string): string => `<dim>${text}</dim>`;
 const link = "[label](https://example.test/destination)";
 
-test("duplicate Markdown tokens scan once per raw value and current source is cached", t => {
+test("Markdown tokens walk each occurrence once and current source is cached", t => {
 	const progress = new NarrationProgress();
 	const original = String.prototype.indexOf;
 	let source = "";
@@ -22,7 +22,7 @@ test("duplicate Markdown tokens scan once per raw value and current source is ca
 		scans = 0;
 		const expected = Array(count).fill("<dim>before</dim> [<dim>label</dim>](https://example.test/destination) <dim>after</dim>").join("\n");
 		assert.equal(progress.transform(source, "assistant", dim), expected);
-		assert.equal(scans, count + 1, "both link syntax spans share one occurrence scan");
+		assert.equal(scans, count, "each actual link occurrence is located once");
 		scans = 0;
 		assert.equal(progress.transform(source, "assistant", dim), expected);
 		assert.equal(scans, 0, "unchanged Markdown does not rescan tokens");
@@ -35,7 +35,7 @@ test("duplicate Markdown tokens scan once per raw value and current source is ca
 		progress.transform("Replacement source", "assistant", dim);
 		progress.setCompletedText(source);
 		progress.transform(source, "assistant", dim);
-		assert.equal(scans, count + 1);
+		assert.equal(scans, count);
 	}
 });
 
