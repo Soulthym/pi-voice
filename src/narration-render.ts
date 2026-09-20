@@ -27,7 +27,7 @@ export function narrationLayoutPlan(
 	}) };
 }
 
-type Glyph = { text: string; start: number; end: number; paints: number[]; prefix: boolean; controls: string[] };
+type Glyph = { text: string; start: number; end: number; paints: number[]; prefix: boolean; inherited: string };
 
 /** Native ANSI/grapheme parsing; source offsets remain UTF-16, never columns. */
 function layoutGlyphs(lines: string[], layout: Layout, probe: boolean): Glyph[][] {
@@ -37,8 +37,12 @@ function layoutGlyphs(lines: string[], layout: Layout, probe: boolean): Glyph[][
 		const prefixWidth = nativeTui.visibleWidth(nativeTui.stripTerminalSequences(line).match(/^[ \t]*(?:│[ \t]+)*/u)?.[0] ?? "");
 		let column = 0;
 		let text = "";
-		const states: Array<{ at: number; paints: number[]; controls: string[] }> = [];
-		let controls: string[] = [];
+		const states: Array<{ at: number; paints: number[] }> = [];
+		const positions: number[] = [];
+		const inherited: string[] = [];
+		let styles = "";
+		let boundary = 0;
+		let boundaryStyles = "";
 		for (let at = 0; at < line.length;) {
 			const ansi = extractAnsiCode(line, at);
 			if (ansi) {
@@ -48,34 +52,35 @@ function layoutGlyphs(lines: string[], layout: Layout, probe: boolean): Glyph[][
 					if (tag.endsWith("+")) active.add(id);
 					else active.delete(id);
 				}
-				if (!probe && ansi.code[1] !== "[" && !ansi.code.startsWith("\x1b]8;")) controls.push(ansi.code);
+				if (/^\x1b\[[\d;:]*m$/.test(ansi.code) || ansi.code.startsWith("\x1b]8;")) styles += ansi.code;
 				at += ansi.length;
 				continue;
 			}
 			const end = line.indexOf("\x1b", at);
 			const part = line.slice(at, end < 0 ? line.length : end);
-			states.push({ at: text.length, paints: [...active], controls });
-			controls = [];
+			states.push({ at: text.length, paints: [...active] });
+			for (let i = 0; i < part.length; i++) {
+				positions.push(i === 0 ? boundary : at + i);
+				inherited.push(i === 0 ? boundaryStyles : styles);
+			}
 			text += part;
 			at += part.length || 1;
+			boundary = at;
+			boundaryStyles = styles;
 		}
 		// Segment the complete visible row: ANSI/tag boundaries are not grapheme
 		// boundaries (notably for Indic conjuncts, combining marks and emoji ZWJ).
 		let state = 0;
-		let controlState = 0;
-		controls = [];
 		for (const { segment, index } of getGraphemeSegmenter().segment(text)) {
 			while (state + 1 < states.length && states[state + 1].at <= index) state++;
-			while (controlState < states.length && states[controlState].at < index + segment.length) {
-				controls.push(...states[controlState++].controls);
-			}
 			const width = nativeTui.visibleWidth(segment);
 			const prefix = column < prefixWidth;
-			if (width) {
-				glyphs.push({ text: segment, start: column, end: column + width, prefix, controls,
-					paints: probe && !prefix ? states[state].paints : [] });
-				controls = [];
+			const paints = new Set(states[state].paints);
+			for (let next = state + 1; next < states.length && states[next].at < index + segment.length; next++) {
+				for (const id of states[next].paints) paints.add(id);
 			}
+			glyphs.push({ text: segment, start: positions[index], end: positions[index + segment.length] ?? line.length,
+				prefix, inherited: inherited[index], paints: probe && !prefix ? [...paints] : [] });
 			column += width;
 		}
 		return glyphs;
@@ -118,8 +123,6 @@ function paintLayout(lines: string[], rows: Glyph[][], layout: Layout): string[]
 	return rows.map((row, lineIndex) => {
 		const markerIndex = marked || markerId < 0 ? -1 : row.findIndex(glyph => glyph.paints.includes(markerId));
 		if (markerIndex >= 0) marked = true;
-		const inheritedControls: string[] = [];
-		let scannedGlyph = 0;
 		const renderRange = (start: number, end: number, depth: number): string => {
 			let output = "";
 			for (let i = start; i < end;) {
@@ -129,12 +132,9 @@ function paintLayout(lines: string[], rows: Glyph[][], layout: Layout): string[]
 				if (id !== undefined) output += layout.paints[id](renderRange(i, next, depth + 1));
 				else {
 					const first = row[i];
-					const length = row[next - 1].end - first.start;
-					let text = nativeTui.sliceByColumn(lines[lineIndex], first.start, length);
-					// Native slices inherit all earlier escapes. Inherit styles/links,
-					// not copied APCs or other one-shot controls from previous glyphs.
-					while (scannedGlyph < i) inheritedControls.push(...row[scannedGlyph++].controls);
-					for (const code of inheritedControls) text = text.replace(code, "");
+					// Slice original UTF-16 bytes at whole-grapheme boundaries. Native
+					// column slicing measures ANSI-delimited runs, which can split emoji.
+					const text = first.inherited + lines[lineIndex].slice(first.start, row[next - 1].end);
 					output += (i === markerIndex ? layout.marker : "") + text;
 				}
 				i = next;

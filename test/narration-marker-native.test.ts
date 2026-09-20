@@ -269,3 +269,74 @@ test("unmappable native probe keeps exact styled/padded baseline and does not cr
 		assert.deepEqual(leaf.render(width), baseline);
 	}
 });
+
+for (const width of [14, 28, 100]) for (const emoji of ["**1**️⃣", "\x1b[1m👨\x1b[22m‍👩‍👧‍👦"]) {
+	test(`ANSI-split grapheme keeps exact following paint and native clipping: ${emoji}/${width}`, () => {
+		const source = `Alpha ${emoji} bravo.`;
+		const progress = new NarrationProgress();
+		progress.setCompletedText(source);
+		const start = source.indexOf("bravo");
+		progress.registerSegment({ id: 1, utterance: 1, text: "bravo.", source: { start, end: source.length } });
+		progress.setSegmentAudio(1, 0, 10);
+		progress.setPlayback(1, 0);
+		const styled = { ...theme, bold: (text: string) => `\x1b[1m${text}\x1b[22m` };
+		const painted: string[] = [];
+		const lines = withNarrationLayout(new native.Markdown(source, 1, 0, styled, undefined, {
+			transform: text => progress.transform(text, "assistant", plain, text => {
+				painted.push(native.stripTerminalSequences(text.replaceAll(progress.activeMarker, "")));
+				return `\x1b[48;5;236m${text}\x1b[49m`;
+			}, undefined, false, undefined, progress.activeMarker),
+		})).render(width);
+		assert.equal(painted.join(""), "bravo.");
+		const baseline = new native.Markdown(source, 1, 0, styled).render(width);
+		assert.deepEqual(lines.map(line => native.stripTerminalSequences(line.replaceAll(progress.activeMarker, ""))), baseline.map(native.stripTerminalSequences));
+		assert.equal(lines.filter(line => line.includes(progress.activeMarker)).length, 1);
+	});
+}
+
+for (const atom of ["![Diagram](diagram.svg)", "![Diagram][figure]", "![Diagram][]", "![Diagram]",
+	"https://example.com", "<https://example.com>", "[Diagram][figure]", "[Diagram][]", "[Diagram]"]) {
+	for (const width of [18, 100]) test(`native repeated atom retains caption paint and anchor: ${atom}/${width}`, () => {
+		const source = `${atom}${width === 18 && atom.startsWith("![") ? "" : " then "}${atom} after.\n\n[figure]: diagram.svg\n[Diagram]: diagram.svg`;
+		const progress = new NarrationProgress();
+		progress.setCompletedText(source);
+		const start = source.indexOf(atom, atom.length);
+		const word = atom.includes("Diagram") ? "Diagram" : "https://example.com";
+		const wordStart = source.indexOf(word, start);
+		progress.registerSegment({ id: 1, utterance: 1, text: word,
+			source: { start: wordStart, end: wordStart + word.length } });
+		progress.setSegmentAudio(1, 0, 10);
+		progress.setPlayback(1, 0);
+		const painted: string[] = [];
+		const lines = withNarrationLayout(new native.Markdown(source, 1, 0, theme, undefined, {
+			transform: text => progress.transform(text, "assistant", plain, text => {
+				painted.push(native.stripTerminalSequences(text.replaceAll(progress.activeMarker, "")));
+				return `\x1b[48;5;236m${text}\x1b[49m`;
+			}, undefined, false, undefined, progress.activeMarker),
+		})).render(width);
+		const baseline = new native.Markdown(source, 1, 0, theme).render(width);
+		assert.deepEqual(lines.map(line => native.stripTerminalSequences(line.replaceAll(progress.activeMarker, ""))), baseline.map(native.stripTerminalSequences));
+		assert.equal(painted.join(""), word, "only the selected repeated atom's visible caption/URL is painted");
+		assert.equal(lines.filter(line => line.includes(progress.activeMarker)).length, 1);
+		assert.equal(progress.sourceTexts[0], source);
+	});
+}
+
+for (const [head, tail] of [["1", "️⃣"], ["👨", "‍👩‍👧‍👦"]]) for (const width of [14, 100]) {
+	test(`paint inside ANSI-split grapheme projects the whole glyph: ${head}/${width}`, () => {
+		const source = `Alpha \x1b[1m${head}\x1b[22m${tail} bravo.`;
+		const styled = { ...theme, bold: (text: string) => `\x1b[1m${text}\x1b[22m` };
+		const painted: string[] = [];
+		const leaf = withNarrationLayout(new native.Markdown(source, 1, 0, styled, undefined, {
+			transform: text => {
+				narrationLayoutCapture()?.(narrationLayoutPlan("", tag =>
+					`Alpha \x1b[1m${head}\x1b[22m${tag(text => { painted.push(native.stripTerminalSequences(text)); return text; }, tail)} bravo.`));
+				return text;
+			},
+		}));
+		const lines = leaf.render(width);
+		assert.equal(painted.join(""), head + tail);
+		assert.deepEqual(lines.map(native.stripTerminalSequences),
+			new native.Markdown(source, 1, 0, styled).render(width).map(native.stripTerminalSequences));
+	});
+}

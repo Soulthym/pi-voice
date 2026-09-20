@@ -259,14 +259,17 @@ function alignedStarts(spoken: DisplayWord[], recognized: AlignmentWord[], durat
 	});
 }
 
-function excludedMarkdownRanges(markdown: string): NarrationSourceRange[] {
+function excludedMarkdownRanges(markdown: string, atoms: NarrationSourceRange[]): NarrationSourceRange[] {
 	const excluded: NarrationSourceRange[] = [];
 	// Use the installed Markdown lexer for reference grammar (including hidden
 	// definitions), escapes and automatic links, rather than guessing brackets.
+	const protectedTokens = new Map<string, Map<number, number>>();
+	const atomicTokens = new Set<string>();
 	const protect = (raw: string, start = 0, end = raw.length): void => {
-		for (let at = markdown.indexOf(raw); raw && at >= 0; at = markdown.indexOf(raw, at + raw.length)) {
-			if (end > start) excluded.push({ start: at + start, end: at + end });
-		}
+		if (!raw || end <= start) return;
+		let spans = protectedTokens.get(raw);
+		if (!spans) protectedTokens.set(raw, spans = new Map());
+		spans.set(start, Math.max(end, spans.get(start) ?? end));
 	};
 	const parser = new Marked({ tokenizer: {
 		def(src) {
@@ -277,17 +280,24 @@ function excludedMarkdownRanges(markdown: string): NarrationSourceRange[] {
 	} });
 	parser.walkTokens(parser.lexer(markdown), token => {
 		if (token.type === "escape" || token.type === "image") protect(token.raw);
+		if (token.type === "image") atomicTokens.add(token.raw);
 		if (token.type === "link") {
 			// Explicit links may paint their label, never their destination or
 			// reference identifier. Autolinks must remain a single lexer atom.
 			const label = token.raw.startsWith("[") ? token.raw.indexOf(token.text, 1) : -1;
-			if (label < 0) protect(token.raw);
+			if (label < 0) { protect(token.raw); atomicTokens.add(token.raw); }
 			else {
 				protect(token.raw, 0, label);
 				protect(token.raw, label + token.text.length);
 			}
 		}
 	});
+	for (const [raw, spans] of protectedTokens) {
+		for (let at = markdown.indexOf(raw); at >= 0; at = markdown.indexOf(raw, at + raw.length)) {
+			for (const [start, end] of spans) excluded.push({ start: at + start, end: at + end });
+			if (atomicTokens.has(raw)) atoms.push({ start: at, end: at + raw.length });
+		}
+	}
 	// Copied transcript metadata is source text, not a new narration target.
 	// Keep its bytes/UTF-16 offsets, but never insert tags inside an ANSI/APC.
 	for (let at = markdown.indexOf("\x1b"); at >= 0; at = markdown.indexOf("\x1b", at + 1)) {
@@ -337,7 +347,35 @@ function excludedMarkdownRanges(markdown: string): NarrationSourceRange[] {
 		const start = match.index + match[0].lastIndexOf(marker);
 		excluded.push({ start, end: start + marker.length });
 	}
-	return excluded;
+	// Adjacent atoms may merge into one protected interval; keep their individual
+	// identities, excluding occurrences inside larger hidden/structural spans.
+	const structural = atoms.length ? mergeSpans(excluded.filter(range => !atomicTokens.has(markdown.slice(range.start, range.end)))) : [];
+	const visibleAtoms = atoms.filter(atom => {
+		const range = excludedRangeAt(structural, atom.start);
+		return !range || range.start > atom.start || range.end < atom.end;
+	});
+	atoms.splice(0, atoms.length, ...visibleAtoms);
+	return mergeSpans(excluded);
+}
+
+// Only retain the latest source, never an accumulating history of streaming deltas.
+let currentMarkdown: {
+	text: string;
+	excluded: NarrationSourceRange[];
+	words: ReturnType<typeof tokenize>;
+	atoms: NarrationSourceRange[];
+} | undefined;
+
+// First interval whose end is past start; merged intervals have ordered ends too.
+function excludedRangeAt(ranges: readonly NarrationSourceRange[], start: number): NarrationSourceRange | undefined {
+	let low = 0;
+	let high = ranges.length;
+	while (low < high) {
+		const middle = (low + high) >>> 1;
+		if (ranges[middle].end <= start) low = middle + 1;
+		else high = middle;
+	}
+	return ranges[low];
 }
 
 // Pi's wrapper classifies whitespace with token.trim(), not ANSI-stripped
@@ -359,22 +397,38 @@ function styleNarrationMarkdown(
 	shifts?: Array<{ at: number; length: number }>,
 	layoutPaint?: (style: (text: string) => string, text: string) => string,
 ): string {
-	const excluded = [...excludedMarkdownRanges(markdown), ...extraExcluded];
-	const ranges = tokenize(markdown).filter(word => {
+	if (currentMarkdown?.text !== markdown) {
+		const atoms: NarrationSourceRange[] = [];
+		currentMarkdown = { text: markdown, excluded: excludedMarkdownRanges(markdown, atoms), words: tokenize(markdown), atoms };
+	}
+	const excluded = extraExcluded.length ? mergeSpans([...currentMarkdown.excluded, ...extraExcluded]) : currentMarkdown.excluded;
+	const crossesExcludedSyntax = (start: number, end: number): boolean =>
+		(excludedRangeAt(excluded, start)?.start ?? Infinity) < end;
+	const ranges = currentMarkdown.words.filter(word => {
 		const unread = word.end > cursor;
 		const speaking = active ? word.end > active.start && word.start < active.end : false;
-		return (unread || speaking || layoutPaint) && !excluded.some(range => word.start < range.end && word.end > range.start);
+		return (unread || speaking || layoutPaint) && !crossesExcludedSyntax(word.start, word.end);
 	});
+	// Wrap native atoms outside their syntax, never insert tags in a URL or
+	// reference identity. The probe renders the unchanged image/link token.
+	if (layoutPaint && currentMarkdown.atoms.length) {
+		for (const atom of currentMarkdown.atoms) {
+			if (!extraExcluded.some(range => range.start < atom.end && range.end > atom.start)) {
+				ranges.push({ ...atom, text: markdown.slice(atom.start, atom.end) });
+			}
+		}
+		ranges.sort((a, b) => a.start - b.start);
+	}
 	if (ranges.length === 0) return markdown;
 	// A timed ordered-list number is structural, not a paintable glyph. Anchor
 	// its next content word without inserting metadata into the list marker.
-	if (activeWord && excluded.some(range => activeWord!.start >= range.start && activeWord!.end <= range.end)) {
+	const activeExcluded = activeWord && excludedRangeAt(excluded, activeWord.start);
+	if (activeWord && activeExcluded && activeWord.start >= activeExcluded.start && activeWord.end <= activeExcluded.end &&
+		!ranges.some(range => range.start <= activeWord!.start && range.end >= activeWord!.end)) {
 		activeWord = ranges.find(range => range.start >= activeWord!.end);
 	}
 	const isActiveRange = (range: NarrationSourceRange): boolean =>
 		active ? range.end > active.start && range.start < active.end : false;
-	const crossesExcludedSyntax = (start: number, end: number): boolean =>
-		excluded.some(range => range.start < end && range.end > start);
 	let output = "";
 	let offset = 0;
 	for (let index = 0; index < ranges.length; index += 1) {
