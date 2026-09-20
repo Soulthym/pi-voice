@@ -462,3 +462,52 @@ test("remote failure arriving during Stop coalesces its input/turn cleanup casca
  assert.equal(host.notices.filter(notice => /independent output failure/.test(notice.message)).length, 1);
  t.mock.timers.reset();
 });
+
+for (const first of ["input", "output"] as const) test(`independent Stop failures notify as each settles (${first} first)`, async t => {
+ const { host, worker, lease } = await setup(t);
+ await host.command("test Old audio.");
+ const input = Promise.withResolvers<void>();
+ const output = Promise.withResolvers<void>();
+ t.mock.method(PhoneInputClient.prototype, "cancel", () => input.promise);
+ t.mock.method(worker, "terminate", () => output.promise);
+ await host.command("stop"); await settle();
+ await host.command("stop"); await settle(); // Join the same in-flight microphone proof.
+ const stops = { input, output };
+ stops[first].reject(new Error(`${first} root failure`)); await settle();
+ assert.equal(host.notices.filter(notice => /root failure/.test(notice.message)).length, 1);
+ stops[first === "input" ? "output" : "input"].reject(new Error(`${first === "input" ? "output" : "input"} root failure`)); await settle();
+ assert.equal(host.notices.filter(notice => /input root failure/.test(notice.message)).length, 1);
+ assert.equal(host.notices.filter(notice => /output root failure/.test(notice.message)).length, 1);
+ assert.ok(await fs.stat(lease));
+});
+
+for (const first of ["input", "output"] as const) test(`late first remote notice clears only output after successful proof (${first} first)`, async t => {
+ const { host, worker, lease } = await setup(t);
+ await host.command("test Old audio.");
+ const input = Promise.withResolvers<void>();
+ const output = Promise.withResolvers<void>();
+ const cancel = t.mock.method(PhoneInputClient.prototype, "cancel", () => input.promise);
+ const terminate = t.mock.method(worker, "terminate", () => output.promise);
+ await host.command("stop"); await settle();
+ await host.command("stop"); await settle();
+ worker.emit({ type: "error", code: "REMOTE_PLAYBACK_UNCONFIRMED", message: "late remote failure" });
+ if (first === "input") input.reject(new Error("unresolved microphone"));
+ else output.resolve();
+ await settle();
+ if (first === "output") input.reject(new Error("unresolved microphone"));
+ else output.resolve();
+ await settle();
+ assert.ok(await fs.stat(lease), "output proof cannot release the unresolved microphone lease");
+ worker.emit({ type: "error", code: "REMOTE_PLAYBACK_UNCONFIRMED", message: "new unscoped failure" });
+ assert.equal(host.notices.filter(notice => /new unscoped failure/.test(notice.message)).length, 1);
+ cancel.mock.mockImplementation(async () => { throw new Error("unresolved microphone"); });
+ terminate.mock.mockImplementation(async () => {});
+ await host.command("stop"); await settle();
+ assert.equal(host.notices.filter(notice => /unresolved microphone/.test(notice.message)).length, 1, "output success must not reset the input episode");
+ cancel.mock.mockImplementation(async () => {});
+ await host.command("stop"); await settle();
+ await assert.rejects(fs.stat(lease), { code: "ENOENT" });
+ cancel.mock.mockImplementation(async () => { throw new Error("unresolved microphone"); });
+ await host.command("stop"); await settle();
+ assert.equal(host.notices.filter(notice => /unresolved microphone/.test(notice.message)).length, 2, "input proof resets only the resolved input episode");
+});

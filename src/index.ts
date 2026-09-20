@@ -380,13 +380,47 @@ export default async function (pi: ExtensionAPI) {
 	const transportCancelWaiters = new Map<number, () => void>();
 	let state: VoiceState = "idle";
 	let lastError = "";
-	let remoteStopDiagnostic: { notified: boolean; utterance?: number } | undefined;
+	type StopEpisode = { notified: boolean; cause: string; utterance?: number; remote?: boolean };
+	type StopCleanup = { promise: Promise<void>; episode?: StopEpisode };
+	const stopResources: Record<"input" | "output", { episode?: StopEpisode; cleanup?: StopCleanup }> = { input: {}, output: {} };
+	const reportedStopErrors = new WeakSet<object>();
 	let stopDiagnostic = { cause: "", notified: false };
 	const notifyStopFailure = (error: unknown, diagnostic?: { notified: boolean }): void => {
+		if (error && typeof error === "object") {
+			if (reportedStopErrors.has(error)) {
+				if (diagnostic) diagnostic.notified = true;
+				return;
+			}
+			reportedStopErrors.add(error);
+		}
 		const cause = error instanceof Error ? error.message : String(error);
 		if (stopDiagnostic.cause !== cause) stopDiagnostic = { cause, notified: false };
 		notifyVoice(activeContext, `Stop unconfirmed; ownership retained: ${cause} · restore the original device connection; /voice reconnect to retry cleanup`, "error", diagnostic ?? stopDiagnostic);
 		stopDiagnostic.notified = true;
+	};
+	// Observe each resource, not Promise.all's first rejection. Only its latest
+	// cleanup can prove its own episode resolved; a first late notice joins it.
+	const trackStop = (resource: "input" | "output", promise: Promise<void>): Promise<void> => {
+		const state = stopResources[resource];
+		if (state.cleanup?.promise === promise) return promise;
+		const cleanup: StopCleanup = { promise, episode: state.episode };
+		state.cleanup = cleanup;
+		void promise.then(() => {
+			if (state.cleanup !== cleanup) return;
+			if (state.episode === cleanup.episode) state.episode = undefined;
+			state.cleanup = undefined;
+		}, error => {
+			const cause = error instanceof Error ? error.message : String(error);
+			const existing = cleanup.episode ?? state.episode;
+			const episode = existing?.remote || existing?.cause === cause
+				? existing : { cause, notified: false };
+			if (state.cleanup === cleanup) {
+				if (state.episode === cleanup.episode) state.episode = episode;
+				state.cleanup = undefined;
+			}
+			notifyStopFailure(error, episode);
+		});
+		return promise;
 	};
 	let inputInProgress = false;
 	let inputEpoch = 0;
@@ -1541,11 +1575,13 @@ export default async function (pi: ExtensionAPI) {
 			case "error":
 				if (event.preview) break;
 				if (event.code === "REMOTE_PLAYBACK_UNCONFIRMED") {
-					if (!remoteStopDiagnostic || (event.utterance !== undefined && remoteStopDiagnostic.utterance !== event.utterance)) {
-						remoteStopDiagnostic = { notified: false, utterance: event.utterance };
+					const output = stopResources.output;
+					if (!output.episode?.remote || (event.utterance !== undefined && output.episode.utterance !== event.utterance)) {
+						output.episode = { cause: event.message, notified: false, utterance: event.utterance, remote: true };
+						if (output.cleanup && !output.cleanup.episode) output.cleanup.episode = output.episode;
 					}
 					deviceRetryRequired = true;
-					notifyStopFailure(event.message, remoteStopDiagnostic);
+					notifyStopFailure(event.message, output.episode);
 				}
 				if (
 					event.utterance !== undefined &&
@@ -1661,8 +1697,6 @@ export default async function (pi: ExtensionAPI) {
 		if (existing) return existing;
 		transportStopPending = true;
 		const previous = transportStopBarrier;
-		const diagnostic = remoteStopDiagnostic;
-		const previousDiagnostic = stopDiagnostic;
 		const stopped = cancelId === undefined ? vocalizer.shutdown() : new Promise<void>((resolve, reject) => {
 			const timer = setTimeout(() => {
 				transportCancelWaiters.delete(cancelId);
@@ -1675,17 +1709,15 @@ export default async function (pi: ExtensionAPI) {
 			});
 		});
 		// A fresh acknowledgement/termination can supersede a failed stop, not a pending one.
-		transportStopBarrier = Promise.all([previous.catch(() => {}), stopped]).then(() => {});
+		transportStopBarrier = Promise.all([previous.catch(() => {}), trackStop("output", stopped)]).then(() => {});
 		const barrier = transportStopBarrier;
 		if (cancelId !== undefined) transportStops.set(cancelId, barrier);
 		void barrier.then(() => {
 			if (cancelId !== undefined) transportStops.delete(cancelId);
 			if (transportStopBarrier === barrier) {
 				transportStopPending = false;
-				if (remoteStopDiagnostic === diagnostic) remoteStopDiagnostic = undefined;
-				if (stopDiagnostic === previousDiagnostic) stopDiagnostic = { cause: "", notified: false };
 			}
-		}, error => notifyStopFailure(error, diagnostic ?? remoteStopDiagnostic));
+		}, notifyStopFailure);
 		return barrier;
 	};
 
@@ -1719,7 +1751,7 @@ export default async function (pi: ExtensionAPI) {
 		cancelPendingDictation = undefined;
 		finishPendingDictation = undefined;
 		inputStopPending = true;
-		const cancelled = phoneInput.cancel();
+		const cancelled = trackStop("input", phoneInput.cancel());
 		inputStopBarrier = cancelled;
 		void cancelled.then(() => { if (inputStopBarrier === cancelled) inputStopPending = false; }, () => {});
 		if (speechReservedForInput) {
@@ -2067,10 +2099,7 @@ export default async function (pi: ExtensionAPI) {
 				if (previous || transportStopPending || (force && deviceRetryRequired) || (changed && (ownsSpeech || inputInProgress))) {
 					// Termination, not a TCP accept or a cancellation timeout, proves the old sink is gone.
 					stopUnconfirmed = true;
-					const diagnostic = remoteStopDiagnostic;
-					await Promise.all([vocalizer.shutdown(), cancelActiveInput()]);
-					if (remoteStopDiagnostic === diagnostic) remoteStopDiagnostic = undefined;
-					stopDiagnostic = { cause: "", notified: false };
+					await Promise.all([trackStop("output", vocalizer.shutdown()), cancelActiveInput()]);
 					stopUnconfirmed = false;
 					for (const resolve of transportCancelWaiters.values()) resolve();
 					transportCancelWaiters.clear();
@@ -3049,7 +3078,7 @@ export default async function (pi: ExtensionAPI) {
 		const inputCancelled = cancelActiveInput();
 		clearPlaybackTransport();
 		try {
-			await Promise.all([inputCancelled, deviceRebind?.catch(() => {}), vocalizer.shutdown()]);
+			await Promise.all([inputCancelled, deviceRebind?.catch(() => {}), trackStop("output", vocalizer.shutdown())]);
 			deviceRebind = undefined;
 			for (const resolve of transportCancelWaiters.values()) resolve();
 			transportCancelWaiters.clear();
@@ -3256,8 +3285,8 @@ export default async function (pi: ExtensionAPI) {
 		const retiringRebind = deviceRebind;
 		let stopping: Promise<void> | undefined;
 		const cleanup = (): Promise<void> => stopping ??= Promise.all([
-			phoneInput.cancel(), retiringRebind?.catch(() => {}),
-			...workers.map(worker => worker.terminate()), vocalizer.shutdown(),
+			trackStop("input", phoneInput.cancel()), retiringRebind?.catch(() => {}),
+			...workers.map(worker => worker.terminate()), trackStop("output", vocalizer.shutdown()),
 		]).then(() => {
 			retiringCoordinator?.shutdown();
 			retiredStops.delete(cleanup);
