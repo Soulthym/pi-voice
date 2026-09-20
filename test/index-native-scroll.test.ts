@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { mock, test } from "node:test";
-import { getMarkdownTheme, initTheme } from "@earendil-works/pi-coding-agent";
+import { AssistantMessageComponent, getMarkdownTheme, initTheme } from "@earendil-works/pi-coding-agent";
 import { FakeVoiceHost, MockedVoiceWorkerClient, assistant } from "./helpers/fake-voice-host.js";
 import * as describer from "../src/code-describer.js";
 import { plainCodeNarration } from "../src/code-narration.js";
@@ -29,14 +29,18 @@ for (const messageType of ["assistant", "assistant-thinking"] as const) test(`mo
 	await fs.writeFile(process.env.PI_VOICE_CONFIG, JSON.stringify({ enabled: true, mode: "all", input: "disabled", output: "local",
 		codeDescriptionPreprocessConcurrency: 0, timingPreprocessConcurrency: 0 }));
 	const host = new FakeVoiceHost(root, messageType);
-	const source = "First sentence.\n\n```js\nconst veryLongConstantName = 'a long literal value that must wrap predictably';\n```\n\nLast sentence.";
-	const theme = getMarkdownTheme();
-	let leaf = new native.Markdown(source, 1, 0, theme, undefined, { transform: (text: string) => host.render(text, messageType) });
-	Object.assign(host.tui, { getMountedRoots: () => [leaf], invalidate: () => leaf.invalidate() });
+	const source = `First ${"longtoken".repeat(12)} sentence.\n\n\`\`\`js\nconst veryLongConstantName = 'a long literal value that must wrap predictably';\n\`\`\`\n\nLast sentence.`;
+	const message = messageType === "assistant" ? assistant(source)
+		: { ...assistant(""), content: [{ type: "thinking", thinking: source }] };
+	const component = new AssistantMessageComponent(message, false, getMarkdownTheme(), "Thinking...", 1,
+		[(text, context) => host.render(text, context.messageType)]);
+	let rebuilds = 0;
+	let mounted = true;
+	Object.assign(host.tui, { getMountedRoots: () => mounted ? [component] : undefined,
+		invalidate: () => { rebuilds++; component.invalidate(); mounted = true; } });
 	host.ctx.ui.theme.fg = (_name: string, text: string) => `\x1b[2m${text}\x1b[22m`;
 	host.ctx.ui.theme.bg = (_name: string, text: string) => `\x1b[44m${text}\x1b[49m`;
-	host.addMessage("answer", null, messageType === "assistant" ? assistant(source)
-		: { ...assistant(""), content: [{ type: "thinking", thinking: source }] });
+	host.addMessage("answer", null, message);
 	t.after(async () => {
 		await host.shutdown();
 		names.forEach((name, i) => { if (previous[i] === undefined) delete process.env[name]; else process.env[name] = previous[i]; });
@@ -44,20 +48,39 @@ for (const messageType of ["assistant", "assistant-thinking"] as const) test(`mo
 	});
 	await host.start(); await host.shortcut("f11"); await settle();
 	await host.shortcut("f8");
-	// Replace the mounted leaf, so only the full-invalidation path can attach it.
-	leaf = new native.Markdown(source, 1, 0, theme, undefined, { transform: (text: string) => host.render(text, messageType) });
 	await host.command("highlight off"); await settle();
 	const clean = (lines: string[]) => lines.map(line => native.stripTerminalSequences(line).replaceAll(NARRATION_ACTIVE_MARKER, ""));
-	const baselines = new Map([28, 100, 120].map(width => [width, clean(leaf.render(width))]));
-	await host.command("highlight on"); await settle();
-	for (const action of ["f9", "f7", "f9"]) {
-		await host.shortcut(action); await settle();
+	const baselines = new Map([28, 100, 120].map(width => [width, clean(component.render(width))]));
+	const assertLayout = (label: string) => {
 		for (const width of [28, 100, 120]) {
-			const lines = leaf.render(width);
-			assert.deepEqual(clean(lines), baselines.get(width), `${messageType}, ${action}, width ${width}`);
-			assert.equal(lines.filter((line: string) => line.includes(NARRATION_ACTIVE_MARKER)).length, 1);
+			const lines = component.render(width);
+			assert.deepEqual(clean(lines), baselines.get(width), `${messageType}, ${label}, width ${width}`);
+			assert.equal(lines.filter(line => line.includes(NARRATION_ACTIVE_MARKER)).length, 1);
+			const painted = lines.flatMap(line => [...line.matchAll(/\x1b\[44m([\s\S]*?)\x1b\[49m/g)]
+				.map(match => native.stripTerminalSequences(match[1]).replaceAll(NARRATION_ACTIVE_MARKER, "")));
+			assert.ok(painted.length, "active source has visible background paint");
+			assert.ok(painted.every(text => text.length > 0 && text === text.trim()),
+				"wrapped long tokens/code must not paint indentation or trailing padding");
+		}
+	};
+	// Both settings force Assistant.invalidate(), which replaces its Markdown children.
+	for (const command of ["highlight on", "autoscroll off", "autoscroll on"]) {
+		const before = rebuilds;
+		await host.command(command); await settle();
+		assert.ok(rebuilds > before, `${command} exercises the full rebuild path`);
+		assertLayout(command); // Before another navigation tick can reattach replacement leaves.
+		for (const action of ["f9", "f7", "f9", "f7"]) {
+			await host.shortcut(action); await settle();
+			assertLayout(`${command}, ${action}`);
 		}
 	}
+	// Compatibility fallback: roots only become discoverable after the full rebuild.
+	mounted = false;
+	const before = rebuilds;
+	await host.shortcut("f9");
+	assert.ok(rebuilds > before, "missing roots exercise the fallback rebuild");
+	assertLayout("fallback rebuild");
+	assert.equal(host.modelRequests.length, 0);
 });
 
 for (const action of ["paused anchor", "button", "End", "banner", "controls", "search", "search forced render", "drag", "PageDown bottom", "wheel bottom", "scrollbar bottom", "narrow cached", "wide cached", "current cached"]) test(`native viewport: ${action}`, async t => {
@@ -86,6 +109,18 @@ for (const action of ["paused anchor", "button", "End", "banner", "controls", "s
 	const narrationLeaf = new native.Markdown(text, 1, 0, getMarkdownTheme(), undefined, {
 		transform: (source: string) => transform(source),
 	});
+	// Count actual native baseline renders, not elapsed time. Probe Markdown has no transform.
+	const offscreenLeaves = new Set<object>();
+	let offscreenBaselines = 0;
+	const nativeRender = native.Markdown.prototype.render;
+	const renderSpy = mock.method(native.Markdown.prototype, "render", function(this: any, width: number) {
+		if (this !== narrationLeaf && this.text === text && this.options?.transform) {
+			offscreenLeaves.add(this);
+			offscreenBaselines++;
+		}
+		return nativeRender.call(this, width);
+	});
+	t.after(() => renderSpy.mock.restore());
 	let quotedHistory = () => "";
 	let historyHeight = 1500;
 	let tailHeight = 100;
@@ -170,6 +205,7 @@ for (const action of ["paused anchor", "button", "End", "banner", "controls", "s
 		const sent = worker.sent as Array<{ utterance: number; segmentId: number }>;
 		const segments = sent.filter(segment => segment.utterance === sent.at(-1)!.utterance);
 		segments.forEach((segment, i) => worker.emit({ type: "segment-audio", utterance: segment.utterance, segmentId: segment.segmentId, start: i * 2, duration: 2 }));
+		let warmOffscreenBaselines = 0;
 		for (let i = 0; i < 45; i++) {
 			if (i === 12) { terminal.rows = 24; progressHeight = 4; editorHeight = 3; footerHeight = 2; }
 			if (i === 24) { terminal.rows = 52; progressHeight = 1; editorHeight = 10; footerHeight = 3; }
@@ -182,7 +218,18 @@ for (const action of ["paused anchor", "button", "End", "banner", "controls", "s
 				await host.command("scroll-to");
 				assertFramed(`height ${terminal.rows}, editor ${editorHeight}, progress ${progressHeight}, footer ${footerHeight}`);
 			}
+			assert.equal(offscreenLeaves.size, 1, "replay and word ticks reuse one offscreen Markdown instance");
+			if (i === 0) {
+				assert.ok(offscreenBaselines > 0, "exercise the actual offscreen baseline renderer");
+				warmOffscreenBaselines = offscreenBaselines;
+			} else assert.equal(offscreenBaselines, warmOffscreenBaselines,
+				"word ticks and height-only resizes must not reparse the offscreen baseline");
 			const target = markerLine();
+			const lookup = [...offscreenLeaves][0] as { cachedLines: string[] };
+			const currentMarker = activeMarker();
+			assert.equal(lookup.cachedLines.findIndex(line => line.includes(currentMarker)),
+				narrationLeaf.render(width).findIndex((line: string) => line.includes(currentMarker)),
+				"offscreen invalidation refreshes the current marker and word row, not just the baseline");
 			assert.deepEqual(narrationLeaf.render(width).map((line: string) => native.stripTerminalSequences(line).replaceAll(NARRATION_ACTIVE_MARKER, "")),
 				new native.Markdown(text, 1, 0, getMarkdownTheme()).render(width).map(native.stripTerminalSequences),
 				"mounted post-wrap highlighting must preserve native layout");

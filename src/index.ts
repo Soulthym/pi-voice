@@ -476,7 +476,10 @@ export default async function (pi: ExtensionAPI) {
 		const attached = invalidateNarrationMarkdown(narrationTui, affected, changedDescriptionCode);
 		if (invalidateAllNarration || !attached) {
 			narrationTui?.invalidate();
+			// Assistant.invalidate rebuilds Markdown children; wrap the replacements.
+			invalidateNarrationMarkdown(narrationTui, affected, changedDescriptionCode);
 		}
+		if (offscreenNarration) invalidateNarrationMarkdown({ children: [offscreenNarration.component] }, affected, changedDescriptionCode);
 		renderedNarrationSources = sources;
 		changedDescriptionCode.clear();
 		invalidateAllNarration = false;
@@ -1124,13 +1127,16 @@ export default async function (pi: ExtensionAPI) {
 		return lines;
 	};
 
+	let offscreenNarration: { text: string; component: Markdown } | undefined;
 	const renderedNarrationMarkerLine = (text: string, width: number): number => {
 		if (!text) return -1;
 		try {
-			const component = withNarrationLayout(new Markdown(text, 1, 0, getMarkdownTheme(), undefined, {
-				transform: source => transformNarrationMarkdown(source, "assistant"),
-			}));
-			return component.render(width).findIndex(line => line.includes(narration.activeMarker));
+			if (offscreenNarration?.text !== text) {
+				offscreenNarration = { text, component: withNarrationLayout(new Markdown(text, 1, 0, getMarkdownTheme(), undefined, {
+					transform: source => transformNarrationMarkdown(source, "assistant"),
+				})) };
+			}
+			return offscreenNarration.component.render(width).findIndex(line => line.includes(narration.activeMarker));
 		} catch {
 			return -1;
 		}
