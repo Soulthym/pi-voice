@@ -4,7 +4,6 @@ import os from "node:os";
 import path from "node:path";
 import { mock, test } from "node:test";
 import { getMarkdownTheme, initTheme } from "@earendil-works/pi-coding-agent";
-import { NARRATION_ACTIVE_MARKER } from "../src/narration-progress.js";
 import { FakeVoiceHost, MockedVoiceWorkerClient, assistant } from "./helpers/fake-voice-host.js";
 import * as describer from "../src/code-describer.js";
 import { plainCodeNarration } from "../src/code-narration.js";
@@ -16,6 +15,7 @@ mock.module("../src/code-describer.js", { namedExports: { ...describer,
 // Optional installed Pi runtime exercises newer native mouse/banner code without changing dependencies.
 const native = await import(process.env.PI_VOICE_TEST_TUI_MODULE ?? "@earendil-works/pi-tui");
 if (process.env.PI_VOICE_TEST_TUI_MODULE) mock.module("@earendil-works/pi-tui", { namedExports: { ...native } });
+const { NARRATION_ACTIVE_MARKER } = await import("../src/narration-progress.js");
 const settle = () => new Promise(resolve => setTimeout(resolve, 120));
 initTheme("dark");
 
@@ -55,7 +55,7 @@ for (const messageType of ["assistant", "assistant-thinking"] as const) test(`mo
 		for (const width of [28, 100, 120]) {
 			const lines = leaf.render(width);
 			assert.deepEqual(clean(lines), baselines.get(width), `${messageType}, ${action}, width ${width}`);
-			assert.equal(lines.filter(line => line.includes(NARRATION_ACTIVE_MARKER)).length, 1);
+			assert.equal(lines.filter((line: string) => line.includes(NARRATION_ACTIVE_MARKER)).length, 1);
 		}
 	}
 });
