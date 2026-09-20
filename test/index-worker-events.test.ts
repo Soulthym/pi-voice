@@ -63,6 +63,10 @@ test("worker events drive speaking styling, idle completion, and error notices",
 		`speaking state must be styled accent; calls: ${JSON.stringify(host.styleCalls.slice(-6))}`,
 	);
 	assert.ok((host.widgetLines()?.length ?? 0) > 0);
+	const speaking = host.widgetLines();
+	instance!.emit({ type: "preload-ready", requestId: "background-warmup" });
+	assert.deepEqual(host.widgetLines(), speaking, "preload completion must not reset active playback UI");
+	assert.ok(host.styleCalls.at(-1)?.text.includes("speaking"));
 
 	// Idle reverts the status away from accent-speaking.
 	const accentWhileSpeaking = host.styleCalls.filter(call => call.style === "accent").length;
