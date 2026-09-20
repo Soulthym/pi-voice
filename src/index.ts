@@ -60,7 +60,7 @@ import {
 import { PhoneInputClient } from "./phone-input.js";
 import { prioritizeFromCurrent, processConcurrently, resolveTimingConcurrency } from "./preprocessing.js";
 import { SpeakableStream, type FencedCodeBlock, type SpeakableSourceRange } from "./speakable.js";
-import { notifyVoice, pendingPlaybackTiming, playbackTimingStatus, voiceProgressLines, type ReadyProgress } from "./status-text.js";
+import { notifyVoice, pendingPlaybackTiming, playbackStateLabel, playbackTimingStatus, voiceProgressLines, type ReadyProgress } from "./status-text.js";
 import { anchorLineForMessage, computeAutoScrollTop, isManualScrollAway } from "./auto-scroll.js";
 import { applySpokenEdit, parseEditModelSelector, resolveDictationCandidates } from "./prompt-editor.js";
 import { formatAsrDisplay } from "./asr-display.js";
@@ -406,7 +406,6 @@ export default async function (pi: ExtensionAPI) {
 				blockIds: Map<number, string>;
 			}
 		| undefined;
-	let playbackPositionEstimated = false;
 	let playbackTimelineTimer: NodeJS.Timeout | null = null;
 	let codePreprocessingProgress: PreprocessingProgress | undefined;
 	let timingPreprocessingProgress: PreprocessingProgress | undefined;
@@ -520,13 +519,13 @@ export default async function (pi: ExtensionAPI) {
 			const playback = config.enabled ? playbackHistory.status() : undefined;
 			let playbackLine: string | undefined;
 			if (playback) {
+				const icon = playbackStateLabel(playbackPaused, state, !!pendingReplay?.waiting);
 				if (!playback.hasTimings || playback.duration <= 0) {
-					playbackLine = `${playbackPaused ? "⏯ Paused · " : "○ "}${pendingPlaybackTiming(playback.messageIndex, playback.messageCount)}`;
+					playbackLine = `${icon} · ${pendingPlaybackTiming(playback.messageIndex, playback.messageCount)}`;
 				} else {
 					const messageLabel =
 						playback.messageIndex >= 0 ? ` · message ${playback.messageIndex + 1}/${playback.messageCount}` : " · current response";
-					const icon = playbackPaused ? "⏯ Paused" : state === "speaking" ? "▶ Playing" : "Playback";
-					playbackLine = `${icon} · ${playbackBar(playback.position, playback.duration)} ${formatPlaybackTime(playback.position)} / ${formatPlaybackTime(playback.duration)}${messageLabel}${playbackTimingStatus(playback.timingQuality, playbackPositionEstimated)}`;
+					playbackLine = `${icon} · ${playbackBar(playback.position, playback.duration)} ${formatPlaybackTime(playback.position)} / ${formatPlaybackTime(playback.duration)}${messageLabel}`;
 				}
 			}
 			if (paintPreprocessing) {
@@ -536,7 +535,8 @@ export default async function (pi: ExtensionAPI) {
 			const preprocessing = [displayedCodeProgress, displayedTimingProgress].filter(
 				(progress): progress is PreprocessingProgress => progress !== undefined,
 			);
-			const lines = voiceProgressLines(inputProgressMessage, playbackLine, preprocessing).map(line =>
+			const lines = voiceProgressLines(inputProgressMessage, playbackLine, preprocessing,
+				playback ? playbackTimingStatus(playback.wordTimingCoverage) : undefined).map(line =>
 				line.kind === "input"
 					? line.text
 					: ctx.ui.theme.fg(line.kind === "playback" && state === "speaking" ? "accent" : "dim", line.text),
@@ -1441,7 +1441,6 @@ export default async function (pi: ExtensionAPI) {
 				const narratedIdle = event.utterance !== undefined && playbackUtterances.delete(event.utterance);
 				if (!inputInProgress) state = "idle";
 				playbackHistory.finishUtterance(event.utterance, !playbackPaused);
-				playbackPositionEstimated = false;
 				if (event.utterance !== undefined) {
 					const snapshot = playbackHistory.snapshotForUtterance(event.utterance);
 					if (snapshot) pi.appendEntry(PLAYBACK_TIMING_ENTRY, snapshot);
@@ -1477,7 +1476,6 @@ export default async function (pi: ExtensionAPI) {
 				lastPlaybackTick = event;
 				narration.setPlayback(event.utterance, event.position);
 				playbackHistory.setPlayback(event.utterance, event.position);
-				playbackPositionEstimated = event.estimated === true;
 				requestPlaybackTimeline();
 				return;
 			case "alignment-error":
@@ -1587,7 +1585,6 @@ export default async function (pi: ExtensionAPI) {
 		lastOwnerUtterance = undefined;
 		completedOwnerUtterance = undefined;
 		ownerContentExpected = false;
-		playbackPositionEstimated = false;
 		return cancelId;
 	};
 
@@ -2047,7 +2044,6 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	const previewPlaybackTarget = (target: PlaybackTarget, explicit = true): void => {
-		playbackPositionEstimated = false;
 		playbackUtterances.clear();
 		lastPlaybackTick = undefined;
 		narration.setCompletedText(target.text, target.messageType, target.contentIndex, target.displayOffset);
@@ -2309,7 +2305,6 @@ export default async function (pi: ExtensionAPI) {
 		playbackPaused = request.paused;
 		narration.setPaused(playbackPaused);
 		pausedOwnerUtterance = undefined;
-		playbackPositionEstimated = false;
 		refreshPlaybackTimeline();
 		ownerContentExpected = hasSpeakableAudio(suffix);
 		if (ownerContentExpected) announceProjectForSpeech();
@@ -4660,7 +4655,7 @@ export default async function (pi: ExtensionAPI) {
 					return;
 				}
 				case "timing":
-					notifyVoice(ctx, `Timing${playbackTimingStatus(playbackHistory.status()?.timingQuality, playbackPositionEstimated)}\n${narration.timingSummary()}`, "info");
+					notifyVoice(ctx, `${playbackTimingStatus(playbackHistory.status()?.wordTimingCoverage)}\n${narration.timingSummary()}`, "info");
 					return;
 				case "status":
 				case "":

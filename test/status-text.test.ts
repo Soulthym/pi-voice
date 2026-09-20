@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Text, visibleWidth } from "@earendil-works/pi-tui";
-import { notifyVoice, pendingPlaybackTiming, preprocessingStatus, voiceProgressLines } from "../src/status-text.js";
+import { notifyVoice, pendingPlaybackTiming, playbackStateLabel, playbackTimingStatus, preprocessingStatus, voiceProgressLines } from "../src/status-text.js";
 
 test("check, recovery and processing counters describe targets, not forced alignment or percent", () => {
 	assert.equal(preprocessingStatus({ label: "Checking saved timing", processed: 109, total: 605, unit: "checked" }),
@@ -10,8 +10,8 @@ test("check, recovery and processing counters describe targets, not forced align
 		"↺ Recovering speech timing · 109/605 targets ready · decoding cached audio: 2");
 	assert.equal(preprocessingStatus({ label: "Preparing code descriptions", processed: 2, total: 5, unit: "processed" }),
 		"↺ Preparing code descriptions · 2/5 targets processed");
-	assert.equal(pendingPlaybackTiming(279, 605), "Playback · message 280/605 · timing pending");
-	assert.equal(pendingPlaybackTiming(-1, 605), "Playback · current response · timing pending");
+	assert.equal(pendingPlaybackTiming(279, 605), "message 280/605 · timing pending");
+	assert.equal(pendingPlaybackTiming(-1, 605), "current response · timing pending");
 });
 
 test("input, playback, descriptions, timing retain their display precedence", () => {
@@ -30,6 +30,24 @@ test("input, playback, descriptions, timing retain their display precedence", ()
 	assert.match(plain, /waiting for speech/);
 	assert.match(plain, /Paused/);
 	assert.match(plain, /Recovering speech timing.*3\/8 targets ready/);
+});
+
+test("native word timing rows keep their height as four-digit counts refine", () => {
+	for (const [width, expectedRows, pendingRows] of [[20, 3, 2], [32, 2, 1], [40, 1, 1]]) {
+		for (const total of [1000, 9999]) {
+			for (const estimated of [total, 999, 10, 1, 0]) {
+				const text = playbackTimingStatus({ estimated, total });
+				assert.equal(text.replace(/\u00a0/g, ""), `Word timing: ${estimated}/${total} estimated`);
+				const rendered = new Text(text, 1, 0).render(width);
+				assert.equal(rendered.length, expectedRows, `${estimated}/${total} at ${width} columns`);
+				assert.ok(rendered.every(line => visibleWidth(line) <= width));
+				assert.ok(rendered.join("\n").includes(`${estimated}/${total}`), "exact counts remain readable");
+			}
+		}
+		const pending = playbackTimingStatus(undefined);
+		assert.equal(pending, "Word timing: unknown/pending");
+		assert.equal(new Text(pending, 1, 0).render(width).length, pendingRows);
+	}
 });
 
 test("notices use one Voice label and native Pi severity, without ANSI or duplicate severity icons", () => {

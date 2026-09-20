@@ -92,9 +92,9 @@ test("replay quality updates saved unit identity, not the regenerated audio cloc
 	assert.equal(restored.status()?.timingQuality, "ctc-refined");
 });
 
-test("word timing and estimated transport clocks have independent labels", () => {
-	assert.equal(playbackTimingStatus("estimated", false), " · word timing quality: estimated");
-	assert.equal(playbackTimingStatus("mixed", false), " · word timing quality: mixed (includes estimates)");
-	assert.equal(playbackTimingStatus("ctc-refined", true), " · word timing quality: CTC-refined · playback clock: estimated");
-	assert.equal(playbackTimingStatus(undefined, false), " · word timing quality: quality unknown");
+test("word timing labels require word coverage, never aggregate or clock quality", () => {
+	assert.equal(playbackTimingStatus({ estimated: 3, total: 3 }), "Word timing: 3/3 estimated");
+	assert.equal(playbackTimingStatus({ estimated: 1, total: 3 }), "Word timing: 1/3 estimated");
+	assert.equal(playbackTimingStatus({ estimated: 0, total: 3 }), "Word timing: 0/3 estimated");
+	assert.equal(playbackTimingStatus(undefined), "Word timing: unknown/pending");
 });

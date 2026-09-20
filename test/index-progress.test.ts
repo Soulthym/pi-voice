@@ -126,10 +126,15 @@ test("timing batch replaces its visible row without holes between fast adjacent 
 	const { InteractiveMode } = await import("@earendil-works/pi-coding-agent");
 	const { Container } = await import("@earendil-works/pi-tui");
 	const widgetRows: number[] = [];
+	const mobileWordRows: number[] = [];
 	const nativeUI = Object.assign(Object.create(InteractiveMode.prototype), {
 		extensionWidgetsAbove: new Map(), extensionWidgetsBelow: new Map(),
 		widgetContainerAbove: new Container(), widgetContainerBelow: new Container(),
-		ui: { requestRender: () => widgetRows.push(nativeUI.widgetContainerBelow.render(160).length) },
+		ui: { requestRender: () => {
+			widgetRows.push(nativeUI.widgetContainerBelow.render(160).length);
+			const wordRow = nativeUI.extensionWidgetsBelow.get("pi-voice-progress")?.children.at(-1);
+			if (wordRow && host.widgetLines()?.at(-1)?.startsWith("Word timing:")) mobileWordRows.push(wordRow.render(32).length);
+		} },
 	});
 	const setWidget = host.ctx.ui.setWidget;
 	host.ctx.ui.setWidget = (name: string, value: any, options: any) => {
@@ -146,7 +151,9 @@ test("timing batch replaces its visible row without holes between fast adjacent 
 	t.after(async () => { await host.shutdown(); restoreWorker(); await restoreEnvironment(); });
 	for (let i = 0; i < 3; i++) host.addMessage(`m${i}`, i ? `m${i - 1}` : null, assistant(`Sentence ${i}.`));
 	await host.start();
-	await waitForWidgetLines(host, lines => lines.some(line => line.includes("Recovering speech timing")));
+	const startup = await waitForWidgetLines(host, lines => lines.some(line => line.includes("Recovering speech timing")));
+	assert.match(startup[0], /^○ Idle · message 3\/3 · timing pending$/);
+	assert.equal(startup.at(-1), "Word timing: unknown/pending");
 	while (!jobs) await settle();
 	const start = host.widgetOperations.length - 1;
 	const firstRow = widgetRows.length - 1;
@@ -155,10 +162,15 @@ test("timing batch replaces its visible row without holes between fast adjacent 
 	await new Promise(resolve => setTimeout(resolve, 120));
 	const operations = host.widgetOperations.slice(start).filter(operation => operation.name === "pi-voice-progress");
 	assert.ok(operations.length > 0);
-	assert.ok(widgetRows.slice(firstRow).every(rows => rows === 2), "native Pi widget layout has no removed/reinserted row between jobs");
-	assert.ok(operations.every(operation => operation.value?.lines?.length === 2), "playback + one stable recovery row, including the fast middle job");
+	assert.ok(widgetRows.slice(firstRow).every(rows => rows === 3), "native Pi widget layout has no removed/reinserted row between jobs");
+	assert.ok(operations.every(operation => operation.value?.lines?.length === 3), "playback + stable recovery + word timing rows, including the fast middle job");
+	assert.ok(operations.every(operation => operation.value?.lines?.at(-1) === "Word timing: unknown/pending"));
 	gates[1].resolve();
-	await waitForWidgetLines(host, lines => lines.length === 1 && !lines[0].includes("Recovering"));
+	const idle = await waitForWidgetLines(host, lines => lines.length === 2 && !lines.some(line => line.includes("Recovering")));
+	assert.match(idle[0], /^○ Idle ·/);
+	assert.equal(idle[1], "Word timing: unknown/pending");
+	assert.ok(mobileWordRows.length > 1);
+	assert.ok(mobileWordRows.every(rows => rows === 1), "32-column word row keeps one native row across updates");
 	const settled = host.widgetOperations.filter(operation => operation.name === "pi-voice-progress").length;
 	await new Promise(resolve => setTimeout(resolve, 160));
 	assert.equal(host.widgetOperations.filter(operation => operation.name === "pi-voice-progress").length, settled, "settled batch clears once");
@@ -204,8 +216,9 @@ test("unified progress widget orders input, playback, and preprocessing and clea
 	await settle();
 
 	let lines = await waitForWidgetLines(host, candidate => candidate.length >= 2);
-	assert.match(lines[0], /Playback · message 1\/1 · timing pending/);
+	assert.match(lines[0], /^○ Idle · message 1\/1 · timing pending$/);
 	assert.match(lines[1], /Preparing code descriptions · 0\/1 targets processed/);
+	assert.equal(lines[2], "Word timing: unknown/pending");
 	assert.equal(
 		lines.some(line => line.includes("Recovering speech timing")),
 		false,
@@ -216,7 +229,9 @@ test("unified progress widget orders input, playback, and preprocessing and clea
 	await new Promise(resolve => setTimeout(resolve, 150));
 	lines = host.widgetLines() ?? lines;
 	assert.match(lines[0], /🎙 Input · (connecting|listening) · [01]s/);
+	assert.match(lines[1], /^○ Idle ·/);
 	assert.equal(lines.some(line => line.includes("Preparing code descriptions")), true);
+	assert.equal(lines.at(-1), "Word timing: unknown/pending");
 
 	// Stop the recording; once its lease is released, timing preprocessing joins
 	// the still-pending code work in deterministic playback/code/timing order.
@@ -227,9 +242,10 @@ test("unified progress widget orders input, playback, and preprocessing and clea
 			candidate.every(line => !line.includes("🎙")) &&
 			candidate.some(line => line.includes("Recovering speech timing")),
 	);
-	assert.match(lines[0], /Playback · message 1\/1/);
+	assert.match(lines[0], /^○ Idle · message 1\/1/);
 	assert.match(lines[1], /Preparing code descriptions/);
 	assert.match(lines[2], /Recovering speech timing/);
+	assert.equal(lines[3], "Word timing: unknown/pending");
 
 	deferredDescription.resolve({
 		role: "assistant",
@@ -240,7 +256,10 @@ test("unified progress widget orders input, playback, and preprocessing and clea
 		host,
 		candidate => candidate.length > 0 && candidate.every(line => !/Preparing code|Recovering speech/.test(line)),
 	);
-	assert.match(lines[0], /message 1\/1/);
+	assert.match(lines[0], /^○ Idle ·.*message 1\/1/);
+	assert.equal(lines[1], "Word timing: unknown/pending");
+	assert.equal(lines.length, 2);
+	assert.ok(host.widgetOperations.every(operation => !operation.value?.lines?.some(line => /clock/i.test(line))));
 	const timingEntry = host.entries.findLast(
 		entry => entry.type === "custom" && entry.customType === "pi-voice.playback-timing",
 	);

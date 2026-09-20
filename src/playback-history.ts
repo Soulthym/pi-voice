@@ -30,6 +30,7 @@ export interface PlaybackStatus {
 	hasTimings: boolean;
 	timingsComplete: boolean;
 	timingQuality?: TimingQuality;
+	wordTimingCoverage?: { estimated: number; total: number };
 }
 
 export interface PlaybackTimingSnapshot {
@@ -55,6 +56,8 @@ type MessageRecord = PlaybackMessage & {
 	cursor?: PlaybackUnit;
 	/** Relative checkpoints for compatible units, including suffixes without a known absolute start. */
 	units?: Map<string, TimingCheckpoint[]>;
+	/** Full source-array counts, never reconstructed from sparse navigation checkpoints. */
+	wordTimingCoverage?: Map<string, { estimated: number; total: number } | undefined>;
 };
 
 type Capture = {
@@ -121,11 +124,13 @@ export class PlaybackHistory {
 						if (versions.size > 4) versions.delete(versions.keys().next().value!);
 						this.#trimVersions();
 					}
-					const compatible = message.renderKey ? this.#versions.get(message.id)?.get(message.renderKey) : undefined;
+					const version = message.renderKey ? this.#versions.get(message.id)?.get(message.renderKey) : undefined;
+					const compatible = version?.text === message.text ? version : undefined;
 					existing = { ...message, checkpoints: [], duration: 0, position: existing.position,
 						cursor: existing.text === message.text ? existing.cursor : undefined, timingsComplete: false,
 						...(compatible ? { checkpoints: compatible.checkpoints.map(point => ({ ...point })),
-							duration: compatible.duration, timingsComplete: compatible.timingsComplete, units: compatible.units } : {}) };
+							duration: compatible.duration, timingsComplete: compatible.timingsComplete, units: compatible.units,
+							wordTimingCoverage: compatible.wordTimingCoverage && new Map(compatible.wordTimingCoverage) } : {}) };
 					this.#records.set(message.id, existing);
 				}
 				existing.messageType = message.messageType;
@@ -221,6 +226,7 @@ export class PlaybackHistory {
 			if (record.text !== text) {
 				record.checkpoints = [];
 				record.units = undefined;
+				record.wordTimingCoverage = undefined;
 				record.duration = 0;
 				record.timingsComplete = false;
 			}
@@ -242,7 +248,10 @@ export class PlaybackHistory {
 	updateText(id: string, text: string, source?: Pick<PlaybackMessage, "messageType" | "contentIndex" | "displayOffset">): void {
 		const record = this.#records.get(id);
 		if (!record) return;
-		if (!text.startsWith(record.text)) this.invalidateCaptures(id);
+		if (!text.startsWith(record.text)) {
+			this.invalidateCaptures(id);
+			record.wordTimingCoverage = undefined;
+		}
 		record.text = text;
 		if (source) {
 			record.messageType = source.messageType;
@@ -255,6 +264,9 @@ export class PlaybackHistory {
 		const record = this.#records.get(fromId);
 		if (!record) return;
 		if (record.text !== message.text) this.invalidateCaptures(fromId);
+		if (record.text !== message.text || (record.renderKey && record.renderKey !== message.renderKey)) {
+			record.wordTimingCoverage = undefined;
+		}
 		this.#records.delete(fromId);
 		record.messageType = message.messageType;
 		record.contentIndex = message.contentIndex;
@@ -295,6 +307,8 @@ export class PlaybackHistory {
 			sourceBase: segment.sourceBase ?? 0, code: Boolean(segment.code || segment.codeDescription),
 		};
 		this.#segments.set(segment.id, tracked);
+		capture.record.wordTimingCoverage ??= new Map();
+		capture.record.wordTimingCoverage.set(`${sourceOffset}:${skipUnits}`, undefined);
 		capture.segments.push(tracked);
 		this.#utterances.set(segment.utterance, capture);
 	}
@@ -324,6 +338,7 @@ export class PlaybackHistory {
 		}
 		record.units ??= new Map();
 		const key = `${tracked.sourceOffset}:${tracked.skipUnits}`;
+		record.wordTimingCoverage?.delete(key);
 		const words = record.units.get(key)?.slice(1) ?? [];
 		record.units.set(key, [{ time: 0, duration, sourceOffset: tracked.sourceOffset, quality }, ...words]);
 		this.setTimingQuality(segmentId, quality);
@@ -346,8 +361,21 @@ export class PlaybackHistory {
 
 	setWordTimings(segmentId: number, words: Array<{ time: number; sourceOffset: number; quality?: TimingQuality }>): void {
 		const tracked = this.#segments.get(segmentId);
-		if (!tracked?.capture.valid || tracked.code || tracked.audioStart === undefined || words.length === 0) return;
+		if (!tracked?.capture.valid || tracked.audioStart === undefined) return;
 		const record = tracked.capture.record;
+		const key = `${tracked.sourceOffset}:${tracked.skipUnits}`;
+		record.wordTimingCoverage ??= new Map();
+		// Code narration offsets address descriptions, not the message's source words.
+		const applicable = tracked.code ? [] : words;
+		const known = applicable.every(word => Number.isFinite(word.time) && word.time >= 0 &&
+			Number.isInteger(word.sourceOffset) &&
+			word.sourceOffset - tracked.sourceBase + tracked.capture.origin.sourceOffset >= 0 &&
+			word.sourceOffset - tracked.sourceBase + tracked.capture.origin.sourceOffset < record.text.length &&
+			(word.quality === "estimated" || word.quality === "ctc-refined"));
+		record.wordTimingCoverage.set(key, known && (tracked.code || words.length > 0)
+			? { estimated: applicable.filter(word => word.quality === "estimated").length, total: applicable.length }
+			: undefined);
+		if (tracked.code || words.length === 0) return;
 		const relative: TimingCheckpoint[] = [];
 		// Replays refine the saved unit's absolute timeline, not the regenerated audio clock.
 		const anchor = record.timingsComplete
@@ -484,6 +512,22 @@ export class PlaybackHistory {
 		const known = qualities.filter(quality => quality === "estimated" || quality === "mixed" || quality === "ctc-refined");
 		const timingQuality = known.length === 0 ? undefined
 			: known.length === qualities.length && known.every(quality => quality === known[0]) ? known[0] : "mixed";
+		// Include restored/recovered units: their sparse checkpoints cannot supply counts.
+		const keys = new Set([...record.units?.keys() ?? [], ...record.wordTimingCoverage?.keys() ?? []]);
+		const ordinals = new Map<number, number>();
+		for (const point of record.checkpoints) if (point.duration > 0) {
+			const ordinal = ordinals.get(point.sourceOffset) ?? 0;
+			keys.add(`${point.sourceOffset}:${ordinal}`);
+			ordinals.set(point.sourceOffset, ordinal + 1);
+		}
+		let wordTimingCoverage: PlaybackStatus["wordTimingCoverage"] = { estimated: 0, total: 0 };
+		for (const key of keys) {
+			const coverage = record.wordTimingCoverage?.get(key);
+			if (!coverage) { wordTimingCoverage = undefined; break; }
+			wordTimingCoverage.estimated += coverage.estimated;
+			wordTimingCoverage.total += coverage.total;
+		}
+		if (!wordTimingCoverage?.total) wordTimingCoverage = undefined;
 		return {
 			messageId: record.id,
 			position: Math.max(0, Math.min(record.duration || record.position, record.position)),
@@ -493,6 +537,7 @@ export class PlaybackHistory {
 			hasTimings: record.checkpoints.length > 0,
 			timingsComplete: record.timingsComplete,
 			timingQuality,
+			...(wordTimingCoverage ? { wordTimingCoverage } : {}),
 		};
 	}
 
