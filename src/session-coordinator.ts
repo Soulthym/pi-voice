@@ -285,6 +285,8 @@ export class SessionCoordinator {
 	}
 
 	nextUnannouncedWaiting(): WaitingSession | undefined {
+		const outgoing = this.#outgoingAttention && readJson<AttentionRequest>(this.#outgoingAttention);
+		if (outgoing && Date.now() - outgoing.requestedAt < STALE_MS) return;
 		return this.waitingSessions().find(waiting => waiting.instanceId !== this.instanceId && !waiting.announced);
 	}
 

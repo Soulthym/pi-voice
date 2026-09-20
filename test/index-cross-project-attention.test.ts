@@ -249,6 +249,51 @@ test("taking attention cannot unlink a replacement published during the read", a
 	assert.equal(waiting.takeAttentionRequest()?.connection?.kind, "device");
 });
 
+test("published attention does not reacquire an announcement and cancel itself", async t => {
+	const { host, waiting } = await setup(t);
+	waiting.clearWaiting(); waiting.markWaiting();
+	t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", async () => ({ kind: "intentional_local" as const }));
+	await host.command("attention");
+	await new Promise(resolve => setTimeout(resolve, 350)); await settle();
+	assert.equal(waiting.speechOwner(), undefined, "origin must not announce while handoff is pending");
+	const request = waiting.takeAttentionRequest()!;
+	assert.ok(request);
+	assert.equal(await waiting.forceAcquireSpeech(), true);
+	await new Promise(resolve => setTimeout(resolve, 350)); await settle();
+	assert.equal(waiting.attentionRequestIsCurrent(request), true);
+});
+
+test("failed attention lookup completes an origin that became idle behind the guard", async t => {
+	const { host, waiting } = await setup(t);
+	await host.shortcut("f11"); await settle();
+	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
+	const gate = Promise.withResolvers<never>();
+	t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", () => gate.promise);
+	const pending = host.command("attention"); await settle();
+	worker.emit({ type: "idle", utterance: (worker.sent.at(-1) as { utterance: number }).utterance }); await settle();
+	assert.ok(waiting.speechOwner(), "guard retains the lease until lookup finishes");
+	gate.reject(new Error("Attachment disappeared")); await pending; await settle();
+	assert.equal(waiting.speechOwner(), undefined);
+	assert.equal(waiting.hasAttentionRequest(), false);
+});
+
+test("handing off a streaming origin preserves its subsequent waiting response", async t => {
+	const { host, waiting } = await setup(t);
+	t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", async () => ({ kind: "intentional_local" as const }));
+	await host.emit("before_agent_start", {});
+	const partial = assistant("Heard prefix. ", "pending");
+	await host.emit("message_start", { message: partial });
+	await host.emit("message_update", { message: partial, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Heard prefix. " } }); await settle();
+	await host.command("attention");
+	assert.ok(waiting.takeAttentionRequest());
+	const complete = assistant("Heard prefix. Unheard continuation.");
+	await host.emit("message_update", { message: complete, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Unheard continuation." } });
+	host.addMessage("streamed", "answer", complete);
+	await host.emit("message_end", { message: complete });
+	await host.emit("turn_end", { message: complete });
+	assert.ok(waiting.waitingSessions().some(session => session.sessionId === "origin"));
+});
+
 test("disabled attention does not request another project", async t => {
 	const { host, waiting } = await setup(t);
 	await host.command("off"); await host.command("attention");

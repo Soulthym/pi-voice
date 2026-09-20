@@ -1847,11 +1847,7 @@ export default async function (pi: ExtensionAPI) {
 		return true;
 	};
 
-	finishSpeechPreemption = (): void => {
-		const interrupted = pendingSpeechPreemption;
-		if (!interrupted) return;
-		pendingSpeechPreemption = undefined;
-		relinquishSpeech();
+	const preserveDisplacedSpeech = (interrupted: { purpose: typeof speechPurpose; wasComplete: boolean; spokenText: string }): void => {
 		if (interrupted.purpose === "turn" || interrupted.purpose === "replay") {
 			pausedForAttention = true;
 			if (interrupted.purpose === "turn" && !interrupted.wasComplete) {
@@ -1864,6 +1860,14 @@ export default async function (pi: ExtensionAPI) {
 			}
 			refreshStatus();
 		}
+	};
+
+	finishSpeechPreemption = (): void => {
+		const interrupted = pendingSpeechPreemption;
+		if (!interrupted) return;
+		pendingSpeechPreemption = undefined;
+		relinquishSpeech();
+		preserveDisplacedSpeech(interrupted);
 	};
 
 	const handleSpeechPreemption = (): void => {
@@ -3526,12 +3530,16 @@ export default async function (pi: ExtensionAPI) {
 			preparation.epoch = epoch;
 			await waitForTransportCancellation(cancelId);
 			if (!current()) return;
+			if (ownsSpeech) preserveDisplacedSpeech({ purpose: speechPurpose, wasComplete: ownerTurnEnded, spokenText: ownedSpeechText });
 			releaseSpeechOwnership(false);
 			owner.requestAttention(waiting.instanceId, connection);
 		} catch (error) {
 			if (current()) ctx.ui.notify(`Voice attention failed: ${String(error)}`, "error");
 		} finally {
-			if (outgoingAttentionPreparation === preparation) outgoingAttentionPreparation = undefined;
+			if (outgoingAttentionPreparation === preparation) {
+				outgoingAttentionPreparation = undefined;
+				completeOwnerSpeech();
+			}
 		}
 	};
 
