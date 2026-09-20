@@ -264,7 +264,7 @@ test("TUI follows exact words, respects manual browsing, and explicit controls r
 	assert.equal(host.render(text), soughtPreview, "retired ticks cannot clear a replacement preview");
 	assert.equal(host.scrollView.scrollTop, 185);
 
-	// Pausing preserves manual framing; explicit resume re-anchors at 20%.
+	// Both explicit pause and resume re-anchor at 20% after manual browsing.
 	await host.shortcut("f8");
 	assert.equal(worker!.pauses.at(-1), false);
 	worker!.emit({ type: "segment-audio", segmentId: pausedSeek.segmentId, start: 0, duration: 20 } as never);
@@ -272,7 +272,7 @@ test("TUI follows exact words, respects manual browsing, and explicit controls r
 	assert.equal(host.scrollView.scrollTop, 185);
 	host.scrollView.manualScrollTo(180); // active line 193 is safely in-band
 	await host.shortcut("f8");
-	assert.equal(host.scrollView.scrollTop, 180);
+	assert.equal(host.scrollView.scrollTop, 185);
 	await host.shortcut("f8");
 	worker!.emit({ type: "playback", utterance: pausedSeek.utterance, position: 1.5 } as never);
 	await new Promise(resolve => setTimeout(resolve, 120));

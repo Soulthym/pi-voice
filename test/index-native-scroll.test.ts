@@ -11,7 +11,7 @@ mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: Mock
 const native = await import(process.env.PI_VOICE_TEST_TUI_MODULE ?? "@earendil-works/pi-tui");
 const settle = () => new Promise(resolve => setTimeout(resolve, 120));
 
-for (const action of ["paused anchor", "End", "banner"]) test(`native viewport: ${action}`, async t => {
+for (const action of ["paused anchor", "End", "banner", "controls"]) test(`native viewport: ${action}`, async t => {
 	const tui: any = new native.TuiAltScreen({ columns: 100, rows: 40, write() {}, hideCursor() {} }, false, undefined,
 		{ scrollToEndIndicator: () => "↓ Jump to latest message (End)" });
 	if (action === "banner" && !tui.handleScrollToEndIndicatorMouseEvent) {
@@ -19,12 +19,14 @@ for (const action of ["paused anchor", "End", "banner"]) test(`native viewport: 
 		return;
 	}
 	// Render only into the inert terminal: never start a terminal or a live Pi session.
-	tui.requestRender = () => {};
+	// Keep native requestRender: force=true clears currentLayout synchronously.
+	// The renderer stays stopped; doRender below paints into an inert terminal.
 	tui.altScreenActive = true;
 	let count = 300;
 	let marker = 100;
-	tui.addChild({ invalidate() {}, render: () => Array.from({ length: count }, (_, i) =>
-		i === marker ? `${NARRATION_ACTIVE_MARKER}First` : `line ${i}`) });
+	const transcript = new native.ScrollView({ invalidate() {}, render: () => Array.from({ length: count }, (_, i) =>
+		i === marker ? `${NARRATION_ACTIVE_MARKER}First` : `line ${i}`) }, { primary: true, follow: "end" });
+	tui.setLayoutRoot(transcript);
 	tui.doRender();
 	const view = tui.getPrimaryScrollView();
 	view.piVoiceCacheNarrationLayout = false;
@@ -45,16 +47,43 @@ for (const action of ["paused anchor", "End", "banner"]) test(`native viewport: 
 		keys.forEach((key, i) => { if (previous[i] === undefined) delete process.env[key]; else process.env[key] = previous[i]; });
 		await fs.rm(root, { recursive: true, force: true });
 	});
+	if (action === "controls") host.addMessage("previous", null, assistant("Older sentence. Another sentence."));
 	host.addMessage("answer", null, assistant("First sentence. Second sentence."));
 	await host.start();
 	await host.shortcut("f11");
 	await settle();
 	assert.equal(view.scrollTop, 92);
+	assert.equal(tui.getPrimaryScrollView(), transcript, "explicit preview must not reset native primary layout");
+	if (action === "controls") {
+		await host.shortcut("f8");
+		for (const key of ["f6", "f7", "f9", "f10", "f8", "f11"]) {
+			tui.handleTerminalInput("\x1b[<64;1;1M");
+			assert.notEqual(view.scrollTop, 92);
+			const action = host.shortcut(key);
+			assert.equal(view.scrollTop, 92, `${key} frames synchronously after manual unfollow`);
+			await action;
+			await settle();
+			if (["f6", "f7", "f9", "f10"].includes(key)) {
+				assert.equal(MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!.pauses.at(-1), true, "paused navigation remains silent");
+			}
+		}
+		return;
+	}
+	// Genuine input cancels follow; programmatic layout/framing does not.
+	tui.handleTerminalInput("\x1b[<64;1;1M");
+	await host.shortcut("f11");
+	assert.equal(view.scrollTop, 92, "replay immediately rearms after manual browsing");
+	view.scrollTo(30);
+	await settle();
 	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
 	const last = worker.sent.at(-1) as { utterance: number };
 	const tick = async () => { worker.emit({ type: "playback", utterance: last.utterance, position: 0 }); await settle(); };
+	await tick();
+	assert.equal(view.scrollTop, 92, "programmatic motion does not cancel the ongoing 20–80% follow band");
 
 	if (action === "paused anchor") {
+		await host.shortcut("f11"); // Restore the preview after the synthetic tick (no worker segments).
+		await settle();
 		marker = 299;
 		await host.command("scroll-to");
 		assert.equal(view.isFollowingEnd, true, "ordinary playing tail framing retains native banner suppression");

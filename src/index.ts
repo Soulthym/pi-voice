@@ -482,7 +482,9 @@ export default async function (pi: ExtensionAPI) {
 		if (narrationRenderTimer) clearTimeout(narrationRenderTimer);
 		narrationRenderTimer = null;
 		invalidateNarration();
-		narrationTui?.requestRender(true);
+		// Forced rendering resets Pi's currentLayout and temporarily selects its
+		// implicit fallback viewport instead of the real transcript ScrollView.
+		narrationTui?.requestRender();
 	};
 	const narration = new NarrationProgress(requestNarrationRender);
 
@@ -999,6 +1001,7 @@ export default async function (pi: ExtensionAPI) {
 	let lastAutoScrollTop: number | undefined;
 	let autoScrollForceOnce = false;
 	let narrationManuallyFramed = false;
+	let nativeGestureTracking = false;
 	let pinnedContentHeight = 0;
 	let lastNarrationLayout = "";
 	let restoreBottomAfterSpeech = false;
@@ -1094,7 +1097,7 @@ export default async function (pi: ExtensionAPI) {
 
 	const armNarrationFollow = (forceCanonicalAnchor = true, explicit = true): void => {
 		if (!explicit) {
-			if (lastAutoScrollTop !== undefined && activeScrollView()?.scrollTop !== lastAutoScrollTop && !transcriptIsFollowingEnd()) {
+			if (!nativeGestureTracking && lastAutoScrollTop !== undefined && activeScrollView()?.scrollTop !== lastAutoScrollTop && !transcriptIsFollowingEnd()) {
 				narrationManuallyFramed = true;
 				restoreBottomAfterSpeech = false;
 			}
@@ -1153,7 +1156,7 @@ export default async function (pi: ExtensionAPI) {
 			bottomPinned = false;
 			atTranscriptTail = false;
 			lastAutoScrollTop = scrollView.scrollTop;
-		} else if (lastAutoScrollTop !== undefined &&
+		} else if (!nativeGestureTracking && lastAutoScrollTop !== undefined &&
 			(!layoutChanged || (!transcriptIsFollowingEnd() && scrollView.scrollTop !== Math.min(lastAutoScrollTop,
 				Math.max(0, (scrollView.contentHeight ?? Infinity) - scrollView.viewportHeight)))) &&
 			isManualScrollAway({ scrollTop: scrollView.scrollTop, viewportHeight: scrollView.viewportHeight,
@@ -1292,7 +1295,7 @@ export default async function (pi: ExtensionAPI) {
 		hideFollowHint();
 		autoScrollForceOnce = false;
 		const manuallyMoved =
-			lastAutoScrollTop !== undefined &&
+			!nativeGestureTracking && lastAutoScrollTop !== undefined &&
 			(activeScrollView()?.scrollTop ?? lastAutoScrollTop) !== lastAutoScrollTop;
 		const restoreBottom = restoreBottomAfterSpeech && !manuallyMoved && !narrationManuallyFramed;
 		restoreBottomAfterSpeech = false;
@@ -2027,6 +2030,7 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	const previewPlaybackTarget = (target: PlaybackTarget, explicit = true): void => {
+		playbackPositionEstimated = false;
 		playbackUtterances.clear();
 		lastPlaybackTick = undefined;
 		narration.setCompletedText(target.text, target.messageType, target.contentIndex, target.displayOffset);
@@ -2047,7 +2051,6 @@ export default async function (pi: ExtensionAPI) {
 			const skip = Math.min(target.skipUnits ?? 0, Math.max(0, chunks.length - 1));
 			const chunk = chunks[skip];
 			if (chunk) {
-		playbackPositionEstimated = false;
 				const inherited = chunks.slice(0, skip).flatMap(chunk => chunk.cues.flatMap(cue => cue.operations));
 				narration.registerSegment({ id: -1, utterance: -1, text: chunk.text,
 					source: { start: item.source.start, end: item.source.start }, revealAtEnd: true,
@@ -3021,7 +3024,21 @@ export default async function (pi: ExtensionAPI) {
 				// Native End (including remapped keys) and the mouse banner both route
 				// through this method, after Pi has handled overlays/key releases/hit tests.
 				// Observing the accepted action avoids mistaking wheel/search/layout motion for a pin.
-				const native = tui as typeof tui & { scrollToBottom?: () => void };
+				const native = tui as typeof tui & { scrollToBottom?: () => void; handleViewportInput?: (data: string) => unknown };
+				const originalInput = native.handleViewportInput;
+				const onInput = (data: string) => {
+					const view = activeScrollView();
+					const before = view?.scrollTop;
+					const result = originalInput!.call(tui, data);
+					if (view && view.scrollTop !== before && !transcriptIsFollowingEnd()) {
+						narrationManuallyFramed = true;
+						autoScrollForceOnce = false;
+						restoreBottomAfterSpeech = false;
+						bottomPinned = false;
+					}
+					return result;
+				};
+				if (originalInput) { native.handleViewportInput = onInput; nativeGestureTracking = true; }
 				const originalBottom = native.scrollToBottom;
 				const onBottom = () => {
 					originalBottom!.call(tui);
@@ -3033,6 +3050,8 @@ export default async function (pi: ExtensionAPI) {
 					invalidate: () => {},
 					dispose: () => {
 						if (native.scrollToBottom === onBottom) native.scrollToBottom = originalBottom;
+						if (native.handleViewportInput === onInput) native.handleViewportInput = originalInput;
+						nativeGestureTracking = false;
 						if (narrationTui === tui) narrationTui = null;
 					},
 				};
@@ -3707,12 +3726,23 @@ export default async function (pi: ExtensionAPI) {
 	pi.registerShortcut("f8", {
 		description: "⏯ Pause or resume playback",
 		handler: async ctx => {
+			if (!requireEnabledVoice(ctx)) return;
+			if (atTranscriptTail && !attentionSuppressed && (pausedOwnerUtterance === undefined || !ownsSpeech) && !pendingReplay) {
+				await replaySelected(ctx);
+				return;
+			}
+			const retainTail = !narrationManuallyFramed && (nativeGestureTracking || lastAutoScrollTop === undefined || activeScrollView()?.scrollTop === lastAutoScrollTop);
+			if (pendingReplay) pendingReplay.restoreTail &&= retainTail;
+			const restoreTail = (atTranscriptTail && transcriptIsFollowingEnd()) || (restoreBottomAfterSpeech && retainTail);
+			armNarrationFollow();
+			flushNarrationRender();
+			requestNarrationAutoScroll(true, true);
 			const requestEpoch = await preparePlaybackAction(ctx, true);
 			if (requestEpoch === undefined || requestEpoch !== playbackRequestEpoch) return;
 			if (pendingReplay) {
 				const request = pendingReplay;
 				request.restoreTail &&= !narrationManuallyFramed &&
-					(lastAutoScrollTop === undefined || activeScrollView()?.scrollTop === lastAutoScrollTop);
+					(nativeGestureTracking || lastAutoScrollTop === undefined || activeScrollView()?.scrollTop === lastAutoScrollTop);
 				if (request.paused && !request.waiting) {
 					playbackPaused = false;
 					narration.setPaused(playbackPaused);
@@ -3734,19 +3764,10 @@ export default async function (pi: ExtensionAPI) {
 				notifyVoice(ctx, "Handoff waiting · stopping the previous device", "warning");
 				return;
 			}
-			if (atTranscriptTail && !attentionSuppressed && (pausedOwnerUtterance === undefined || !ownsSpeech)) {
-				await replaySelected(ctx);
-				return;
-			}
-			restoreBottomAfterSpeech = (atTranscriptTail && transcriptIsFollowingEnd()) ||
-				(restoreBottomAfterSpeech && !narrationManuallyFramed &&
-					(lastAutoScrollTop === undefined || activeScrollView()?.scrollTop === lastAutoScrollTop));
+			restoreBottomAfterSpeech = restoreTail && !narrationManuallyFramed;
 			bottomPinned = false;
 			if (playbackPaused) {
 				if (lastPlaybackTick) narration.setPlayback(lastPlaybackTick.utterance, lastPlaybackTick.position, true);
-				armNarrationFollow();
-				flushNarrationRender();
-				requestNarrationAutoScroll(true, true);
 				if (!await adoptCurrentConnection(requestEpoch) || requestEpoch !== playbackRequestEpoch) return;
 				playbackPaused = false;
 				narration.setPaused(playbackPaused);
