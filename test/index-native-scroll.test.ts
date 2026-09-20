@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { mock, test } from "node:test";
+import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { NARRATION_ACTIVE_MARKER } from "../src/narration-progress.js";
 import { FakeVoiceHost, MockedVoiceWorkerClient, assistant } from "./helpers/fake-voice-host.js";
 
@@ -11,8 +12,9 @@ mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: Mock
 const native = await import(process.env.PI_VOICE_TEST_TUI_MODULE ?? "@earendil-works/pi-tui");
 const settle = () => new Promise(resolve => setTimeout(resolve, 120));
 
-for (const action of ["paused anchor", "End", "banner", "controls", "search", "search forced render", "drag", "PageDown bottom", "wheel bottom", "scrollbar bottom"]) test(`native viewport: ${action}`, async t => {
-	const tui: any = new native.TuiAltScreen({ columns: 100, rows: 40, write() {}, hideCursor() {} }, false, undefined,
+for (const action of ["paused anchor", "End", "banner", "controls", "search", "search forced render", "drag", "PageDown bottom", "wheel bottom", "scrollbar bottom", "narrow cached"]) test(`native viewport: ${action}`, async t => {
+	const narrow = action === "narrow cached";
+	const tui: any = new native.TuiAltScreen({ columns: narrow ? 28 : 100, rows: 40, write() {}, hideCursor() {} }, false, undefined,
 		{ scrollToEndIndicator: () => "↓ Jump to latest message (End)" });
 	if (action === "banner" && !tui.handleScrollToEndIndicatorMouseEvent) {
 		t.skip("installed dependency predates the native banner; set PI_VOICE_TEST_TUI_MODULE to a newer Pi TUI");
@@ -24,12 +26,21 @@ for (const action of ["paused anchor", "End", "banner", "controls", "search", "s
 	tui.altScreenActive = true;
 	let count = 300;
 	let marker = 100;
-	const transcript = new native.ScrollView({ invalidate() {}, render: () => Array.from({ length: count }, (_, i) =>
-		i === marker ? `${NARRATION_ACTIVE_MARKER}First` : `line ${i}`) }, { primary: true, follow: "end", scrollbar: action === "scrollbar bottom" ? "always" : "hidden" });
-	tui.setLayoutRoot(transcript);
+	const text = Array.from({ length: 60 }, (_, i) => `Sentence ${i} contains several narrated words.`).join(" ");
+	let renderText = () => text;
+	let footerHeight = 8;
+	const transcript = new native.ScrollView({ invalidate() {}, render: (width: number) => narrow
+		? [...Array.from({ length: 1500 }, (_, i) => `history ${i}`),
+			...new native.Markdown(renderText(), 1, 0, getMarkdownTheme()).render(width), ...Array(100).fill("later")]
+		: Array.from({ length: count }, (_, i) => i === marker ? `${NARRATION_ACTIVE_MARKER}First` : `line ${i}`)
+	}, { primary: true, follow: "end", scrollbar: action === "scrollbar bottom" ? "always" : "hidden" });
+	tui.setLayoutRoot(narrow ? new native.VStack([
+		{ component: transcript, basis: 0, grow: 1 },
+		{ component: { invalidate() {}, render: () => Array(footerHeight).fill("editor / Voice / footer") }, shrink: 0 },
+	]) : transcript);
 	tui.doRender();
 	const view = tui.getPrimaryScrollView();
-	view.piVoiceCacheNarrationLayout = false;
+	view.piVoiceCacheNarrationLayout = narrow;
 	const originalBottom = tui.scrollToBottom;
 	const originalGestures = [tui.handleViewportInput, tui.refreshSearch, tui.autoScrollSelection];
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-native-scroll-"));
@@ -51,10 +62,42 @@ for (const action of ["paused anchor", "End", "banner", "controls", "search", "s
 		await fs.rm(root, { recursive: true, force: true });
 	});
 	if (action === "controls") host.addMessage("previous", null, assistant("Older sentence. Another sentence."));
-	host.addMessage("answer", null, assistant("First sentence. Second sentence."));
+	host.addMessage("answer", null, assistant(narrow ? text : "First sentence. Second sentence."));
 	await host.start();
+	renderText = () => host.render(text);
 	await host.shortcut("f11");
 	await settle();
+	if (narrow) {
+		const markerLine = () => transcript.render(28).findIndex((line: string) => line.includes(NARRATION_ACTIVE_MARKER));
+		assert.equal(view.scrollTop, markerLine() - Math.floor(view.viewportHeight * 0.2), "offscreen start at 20%");
+		const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
+		const sent = worker.sent as Array<{ utterance: number; segmentId: number }>;
+		const segments = sent.filter(segment => segment.utterance === sent.at(-1)!.utterance);
+		segments.forEach((segment, i) => worker.emit({ type: "segment-audio", utterance: segment.utterance, segmentId: segment.segmentId, start: i * 2, duration: 2 }));
+		for (let i = 0; i < 45; i++) {
+			if (i === 12) footerHeight++; // extra Word timing row
+			if (i === 24) footerHeight += 5; // multiline editor
+			tui.doRender();
+			worker.emit({ type: "playback", utterance: segments.at(-1)!.utterance, position: i * 2 });
+			await settle();
+			const relative = markerLine() - view.scrollTop;
+			assert.ok(relative >= Math.floor(view.viewportHeight * 0.2) && relative <= Math.ceil(view.viewportHeight * 0.8),
+				`word ${i}: marker ${markerLine()}, top ${view.scrollTop}, height ${view.viewportHeight}`);
+		}
+		tui.handleTerminalInput("\x1b[<64;1;1M");
+		const manualTop = view.scrollTop;
+		footerHeight++;
+		tui.doRender();
+		worker.emit({ type: "playback", utterance: segments.at(-1)!.utterance, position: 92 });
+		await settle();
+		assert.equal(view.scrollTop, manualTop, "layout changes cannot reclaim manual framing");
+		await host.shortcut("f8");
+		const navigation = host.shortcut("f9");
+		assert.equal(view.scrollTop, markerLine() - Math.floor(view.viewportHeight * 0.2), "paused navigation frames synchronously");
+		await navigation;
+		assert.equal(worker.pauses.at(-1), true, "paused navigation stays silent");
+		return;
+	}
 	assert.equal(view.scrollTop, 92);
 	assert.equal(tui.getPrimaryScrollView(), transcript, "explicit preview must not reset native primary layout");
 	if (action === "controls") {

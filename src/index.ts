@@ -1207,7 +1207,7 @@ export default async function (pi: ExtensionAPI) {
 		}
 		const outerWidth = narrationViewportWidth();
 		const innerWidth = Math.max(
-			40,
+			1,
 			Math.min(outerWidth, scrollView.getContentWidth?.(outerWidth) ?? outerWidth - 2),
 		);
 		const selected = playbackHistory.selected();

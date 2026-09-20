@@ -1,5 +1,14 @@
 # Pi Voice — implemented agreements and live-validation handoff
 
+## Viewport follow-up — narrow native cached coordinates
+
+User still observes LIVE playback pinning narrated text out of view **after timing recovery finished and Pi restarted**. This remains valid unresolved live evidence, not a preprocessing explanation.
+
+- Reproduced a narrower, deterministic cause offline: native 28-column Markdown wrapped at 28 while Voice's cached local marker wrapped at a minimum of 40. On checkpoint 35 the real marker was row 1570, outside viewport rows 1543–1568. Removed only the artificial 40-column minimum; no adapter/API or gesture changes.
+- Added a cache-enabled native regression with 1,500 history rows, an initially offscreen target, actual Markdown, and a VStack footer/editor simulation growing by one timing row and five editor rows. Checks initial 20%, continuing 20–80%, manual override across layout changes, and synchronous silent paused navigation. Existing tail, banner, forced-render/search/drag and controls tests remain intact.
+- Validation: `npm run check`; full `npm test` **507 passed, 1 dependency-banner skip, 0 failed (508 total)**; installed native TUI **11/11 passed**. No LSP configured. No live sessions/settings/SSH, provider/inference calls, or private exports; `ISSUES.md` untouched.
+- **Still unknown:** whether the user's terminal content width was below 40, and whether this explains that live failure. Wider terminals, duplicate source text, thinking/code targets and nondefault output padding are not established fixed by this regression. Need a nonprivate fixture plus terminal dimensions, target kind and exact control/manual sequence if it persists; do not claim recovery/restart resolved it. See `FINDINGS.md` for coordinate/source limits.
+
 ## Latest authorized live-UX follow-up
 
 Implemented: `aa0aa40` (quality provenance), `b588661` (native follow), `8e4638f` (stable batch progress).
