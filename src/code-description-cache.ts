@@ -67,7 +67,7 @@ export function parseCodeDescriptionCacheSnapshot(value: unknown): CodeDescripti
 export class CodeDescriptionCache {
 	#plans = new Map<string, CodeNarrationPlan>();
 	#identities = new Map<string, string>();
-	#pending = new Map<string, Promise<CodeNarrationPlan>>();
+	#pending = new Map<string, { promise: Promise<CodeNarrationPlan>; controller: AbortController; consumers: number }>();
 	#restoredKeys = new Set<string>();
 	#generation = 0;
 
@@ -75,6 +75,7 @@ export class CodeDescriptionCache {
 		this.#generation += 1;
 		this.#plans.clear();
 		this.#identities.clear();
+		for (const pending of this.#pending.values()) pending.controller.abort();
 		this.#pending.clear();
 		this.#restoredKeys.clear();
 		for (const value of values) {
@@ -122,41 +123,63 @@ export class CodeDescriptionCache {
 	invalidate(key: string): void {
 		this.#plans.delete(key);
 		this.#restoredKeys.delete(key);
+		this.#pending.get(key)?.controller.abort();
 		this.#pending.delete(key);
 	}
 
 	getOrCreate(
 		key: string,
-		create: () => Promise<CodeNarrationPlan>,
+		create: (signal: AbortSignal) => Promise<CodeNarrationPlan>,
 		onStore?: (snapshot: CodeDescriptionCacheSnapshot) => void,
 		/** Let a joining caller retry a rejection specific to the original caller's policy. */
 		retryRejected?: (error: unknown) => boolean,
+		signal?: AbortSignal,
 	): Promise<CodeNarrationPlan> {
+		if (signal?.aborted) return Promise.reject(signal.reason);
 		const cached = this.#plans.get(key);
 		if (cached) return Promise.resolve(cached);
 		const generation = this.#generation;
-		const active = this.#pending.get(key);
-		if (active) return retryRejected ? active.catch(error => {
-			if (!retryRejected(error) || generation !== this.#generation) throw error;
-			return this.getOrCreate(key, create, onStore, retryRejected);
-		}) : active;
-
-		const pending = Promise.resolve()
-			.then(create)
-			.then(plan => {
-				if (generation !== this.#generation) return plan;
-				this.#plans.set(key, plan);
-				try {
-					onStore?.({ version: 1, key, plan });
-				} catch {
-					// Session persistence is best-effort; narration should still play.
-				}
-				return plan;
-			})
-			.finally(() => {
-				if (this.#pending.get(key) === pending) this.#pending.delete(key);
-			});
-		this.#pending.set(key, pending);
-		return pending;
+		let active = this.#pending.get(key);
+		const joining = !!active;
+		if (!active) {
+			const controller = new AbortController();
+			const entry = { controller, consumers: 0, promise: undefined! as Promise<CodeNarrationPlan> };
+			const pending = Promise.resolve()
+				.then(() => { controller.signal.throwIfAborted(); return create(controller.signal); })
+				.then(plan => {
+					controller.signal.throwIfAborted();
+					if (generation !== this.#generation) return plan;
+					this.#plans.set(key, plan);
+					try {
+						onStore?.({ version: 1, key, plan });
+					} catch {
+						// Session persistence is best-effort; narration should still play.
+					}
+					return plan;
+				})
+				.finally(() => {
+					if (this.#pending.get(key) === entry) this.#pending.delete(key);
+				});
+			entry.promise = pending;
+			this.#pending.set(key, entry);
+			active = entry;
+		}
+		const entry = active;
+		entry.consumers += 1;
+		const result = new Promise<CodeNarrationPlan>((resolve, reject) => {
+			const abort = () => reject(signal!.reason);
+			signal?.addEventListener("abort", abort, { once: true });
+			entry.promise.then(resolve, reject).finally(() => signal?.removeEventListener("abort", abort));
+		}).finally(() => {
+			entry.consumers -= 1;
+			if (entry.consumers === 0) {
+				if (this.#pending.get(key) === entry) this.#pending.delete(key);
+				entry.controller.abort();
+			}
+		});
+		return joining && retryRejected ? result.catch(error => {
+			if (signal?.aborted || !retryRejected(error) || generation !== this.#generation) throw error;
+			return this.getOrCreate(key, create, onStore, retryRejected, signal);
+		}) : result;
 	}
 }

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import type { ConnectionDevice } from "./connection-device.js";
 
 export interface SessionPresence {
@@ -363,9 +364,10 @@ export class SessionCoordinator {
 		return true;
 	}
 
-	async withResource<T>(kind: "code" | "timing", limit: number, operation: () => Promise<T>): Promise<T> {
+	async withResource<T>(kind: "code" | "timing", limit: number, operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
 		let lease: string | undefined;
 		while (!lease) {
+			signal?.throwIfAborted();
 			if (this.#stopped) return operation();
 			for (let index = 0; index < Math.max(1, limit); index += 1) {
 				const candidate = path.join(this.#resourceDir(), `${kind}-${index}.lock`);
@@ -375,7 +377,7 @@ export class SessionCoordinator {
 					break;
 				}
 			}
-			if (!lease) await new Promise(resolve => setTimeout(resolve, 100));
+			if (!lease) await delay(100, undefined, { signal });
 		}
 		try {
 			return await operation();

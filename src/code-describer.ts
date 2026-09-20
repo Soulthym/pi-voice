@@ -443,8 +443,10 @@ export async function describeCodeBlock(
 
 	for (let attempt = 1; ; attempt += 1) {
 		try {
+			signal?.throwIfAborted();
 			return await attemptOnce(priorRejection);
 		} catch (error) {
+			signal?.throwIfAborted();
 			if (error instanceof CodeDescriptionContextOverflowError && conversation && !useCompaction) {
 				// Retry once against the isolated compacted context before failing.
 				useCompaction = true;

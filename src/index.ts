@@ -644,7 +644,7 @@ export default async function (pi: ExtensionAPI) {
 		block: FencedCodeBlock,
 		identityContext: IdentityContext,
 		providerMessagesThroughBlock: readonly Message[],
-		options?: { chargeBackfill?: () => boolean },
+		options?: { chargeBackfill?: () => boolean; signal?: AbortSignal },
 ): Promise<CodeNarrationPlan> => {
 		const fallback = plainCodeNarration(fallbackCodeDescription(block));
 		const requestEpoch = contextEpoch;
@@ -682,7 +682,7 @@ export default async function (pi: ExtensionAPI) {
 			return await codeDescriptionCache
 				.getOrCreate(
 					key,
-					() => {
+					(signal) => {
 						// Every provider attempt is metered; cache hits and coalesced
 						// duplicates never reach describeCodeBlock at all.
 						const generate = () =>
@@ -692,7 +692,7 @@ export default async function (pi: ExtensionAPI) {
 								editModel,
 								narrationMode,
 								conversation,
-								undefined,
+								signal,
 								{
 									onAttempt: () => {
 										if (requestEpoch !== contextEpoch || !isCurrentContext(ctx)) throw new Error("Code description aborted");
@@ -706,7 +706,7 @@ export default async function (pi: ExtensionAPI) {
 								throw error;
 							});
 						return coordinator
-							? coordinator.withResource("code", config.codeDescriptionPreprocessConcurrency, generate)
+							? coordinator.withResource("code", config.codeDescriptionPreprocessConcurrency, generate, signal)
 							: generate();
 					},
 					snapshot => {
@@ -722,6 +722,7 @@ export default async function (pi: ExtensionAPI) {
 					options?.chargeBackfill ? undefined : error =>
 						requestEpoch === contextEpoch && isCurrentContext(ctx) &&
 						(error === BACKFILL_EXHAUSTED || error instanceof CodeDescriptionBudgetExhaustedError),
+					options?.signal,
 				)
 				.then(plan => {
 					if (requestEpoch === contextEpoch && isCurrentContext(ctx) && !plan.omitted) {
@@ -731,6 +732,7 @@ export default async function (pi: ExtensionAPI) {
 					return requestEpoch === contextEpoch && isCurrentContext(ctx) ? resolveDescriptionDependency(key, plan) : plan;
 				});
 		} catch (outerError) {
+			if (options?.signal?.aborted) throw outerError;
 			if (requestEpoch !== contextEpoch || !isCurrentContext(ctx)) return fallback;
 			if (outerError === BACKFILL_EXHAUSTED || outerError instanceof CodeDescriptionBudgetExhaustedError) throw BACKFILL_EXHAUSTED;
 			if (!resolvedKey) return fallback;
@@ -950,6 +952,7 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	const scheduleCodeDescriptionsInText = (ctx: ExtensionContext, text: string): void => {
+		if (ownsSpeech || (attentionSuppressed && !deviceRetryRequired)) return;
 		const message = completedAssistantMessages(ctx, config.mode, config.codeDescriptionContext === "conversation").findLast(candidate => candidate.text === text);
 		if (!message) return; // agent_settled retries after the session entry is committed
 		for (const item of completedCodeItems(message)) {
@@ -1547,7 +1550,7 @@ export default async function (pi: ExtensionAPI) {
 			const providerMessages = [...await (typeof sourceContext.providerMessages === "function"
 				? sourceContext.providerMessages(signal) : sourceContext.providerMessages ?? [])];
 			if (signal.aborted) return { records: [], guided: false, omitted: true };
-			return requestCodeDescription(ctx, block, structuredContextIdentity(providerMessages), providerMessages);
+			return requestCodeDescription(ctx, block, structuredContextIdentity(providerMessages), providerMessages, { signal });
 		},
 		segment => {
 			if (ownsSpeech) {

@@ -84,6 +84,7 @@ test("joiners do not retry unrelated failures or requests from a restored sessio
 		let requests = 0;
 		const first = cache.getOrCreate(KEY, () => deferred.promise);
 		const joined = cache.getOrCreate(KEY, async () => { requests++; return PLAN; }, undefined, () => restore);
+		await Promise.resolve(); // Let the provider start before replacing its session.
 		if (restore) cache.restore([]);
 		deferred.reject(failure);
 		await assert.rejects(first, error => error === failure);
