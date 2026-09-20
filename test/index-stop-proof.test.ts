@@ -400,3 +400,65 @@ test("voice test rechecks cancellation after ownership activation before any pre
  await host.command("test Obsolete speech."); await settle();
  assert.equal(worker.sent.length, 0);
 });
+
+for (const scoped of [false, true]) test(`confirmed Stop resets the matching remote diagnostic (utterance scoped: ${scoped})`, async t => {
+ const { host, worker } = await setup(t);
+ await host.command("test Old audio.");
+ const utterance = scoped ? (worker.sent.at(-1) as { utterance: number }).utterance : undefined;
+ const stopped = Promise.withResolvers<void>();
+ t.mock.method(worker, "terminate", () => stopped.promise);
+ worker.emit({ type: "error", code: "REMOTE_PLAYBACK_UNCONFIRMED", message: "remote failure", utterance });
+ await host.command("stop"); await settle();
+ stopped.resolve(); await settle();
+ const errors = host.notices.filter(notice => notice.level === "error").length;
+ worker.emit({ type: "error", code: "REMOTE_PLAYBACK_UNCONFIRMED", message: "new remote failure", utterance });
+ assert.equal(host.notices.filter(notice => notice.level === "error").length, errors + 1);
+});
+
+test("a remote diagnostic does not hide an independent input stop failure", async t => {
+ const { host, worker } = await setup(t);
+ await host.command("test Old audio.");
+ const stopped = Promise.withResolvers<void>();
+ t.mock.method(worker, "terminate", () => stopped.promise);
+ worker.emit({ type: "error", code: "REMOTE_PLAYBACK_UNCONFIRMED", message: "remote failure" });
+ t.mock.method(PhoneInputClient.prototype, "cancel", async () => { throw new Error("independent input failure"); });
+ await host.command("stop"); await settle();
+ assert.equal(host.notices.filter(notice => /independent input failure/.test(notice.message)).length, 1);
+ stopped.resolve(); await settle();
+});
+
+test("older cleanup cannot reset a newer remote diagnostic", async t => {
+ const { host, worker } = await setup(t);
+ await host.command("test Old audio.");
+ const stopped = Promise.withResolvers<void>();
+ t.mock.method(worker, "terminate", () => stopped.promise);
+ worker.emit({ type: "error", code: "REMOTE_PLAYBACK_UNCONFIRMED", message: "old remote failure", utterance: 101 });
+ await host.command("stop"); await settle();
+ worker.emit({ type: "error", code: "REMOTE_PLAYBACK_UNCONFIRMED", message: "new remote failure", utterance: 102 });
+ stopped.resolve(); await settle();
+ const errors = host.notices.filter(notice => notice.level === "error").length;
+ worker.emit({ type: "error", code: "REMOTE_PLAYBACK_UNCONFIRMED", message: "same new cascade", utterance: 102 });
+ assert.equal(host.notices.filter(notice => notice.level === "error").length, errors);
+});
+
+test("remote failure arriving during Stop coalesces its input/turn cleanup cascade", async t => {
+ const { host, worker } = await setup(t);
+ await host.command("test Old audio.");
+ const stopped = Promise.withResolvers<void>();
+ const terminate = t.mock.method(worker, "terminate", () => stopped.promise);
+ await host.command("stop"); await settle();
+ worker.emit({ type: "error", code: "REMOTE_PLAYBACK_UNCONFIRMED", message: "late remote failure" });
+ await host.emit("input", {});
+ await host.emit("before_agent_start", {});
+ stopped.reject(new Error("same transport failure")); await settle();
+ assert.equal(host.notices.filter(notice => notice.level === "error").length, 1);
+ terminate.mock.mockImplementation(async () => {});
+ await host.command("stop"); await settle();
+ terminate.mock.mockImplementation(async () => { throw new Error("independent output failure"); });
+ t.mock.method(worker, "cancel", () => 301 as never);
+ t.mock.timers.enable({ apis: ["setTimeout"] });
+ await host.command("stop");
+ t.mock.timers.tick(1000); await settle();
+ assert.equal(host.notices.filter(notice => /independent output failure/.test(notice.message)).length, 1);
+ t.mock.timers.reset();
+});

@@ -382,10 +382,11 @@ export default async function (pi: ExtensionAPI) {
 	let lastError = "";
 	let remoteStopDiagnostic: { notified: boolean; utterance?: number } | undefined;
 	let stopDiagnostic = { cause: "", notified: false };
-	const notifyStopFailure = (error: unknown): void => {
+	const notifyStopFailure = (error: unknown, diagnostic?: { notified: boolean }): void => {
 		const cause = error instanceof Error ? error.message : String(error);
 		if (stopDiagnostic.cause !== cause) stopDiagnostic = { cause, notified: false };
-		notifyVoice(activeContext, `Stop unconfirmed; ownership retained: ${cause} · restore the original device connection; /voice reconnect to retry cleanup`, "error", remoteStopDiagnostic ?? stopDiagnostic);
+		notifyVoice(activeContext, `Stop unconfirmed; ownership retained: ${cause} · restore the original device connection; /voice reconnect to retry cleanup`, "error", diagnostic ?? stopDiagnostic);
+		stopDiagnostic.notified = true;
 	};
 	let inputInProgress = false;
 	let inputEpoch = 0;
@@ -1543,7 +1544,7 @@ export default async function (pi: ExtensionAPI) {
 						remoteStopDiagnostic = { notified: false, utterance: event.utterance };
 					}
 					deviceRetryRequired = true;
-					notifyStopFailure(event.message);
+					notifyStopFailure(event.message, remoteStopDiagnostic);
 				}
 				if (
 					event.utterance !== undefined &&
@@ -1652,6 +1653,8 @@ export default async function (pi: ExtensionAPI) {
 		if (existing) return existing;
 		transportStopPending = true;
 		const previous = transportStopBarrier;
+		const diagnostic = remoteStopDiagnostic;
+		const previousDiagnostic = stopDiagnostic;
 		const stopped = cancelId === undefined ? vocalizer.shutdown() : new Promise<void>((resolve, reject) => {
 			const timer = setTimeout(() => {
 				transportCancelWaiters.delete(cancelId);
@@ -1669,8 +1672,12 @@ export default async function (pi: ExtensionAPI) {
 		if (cancelId !== undefined) transportStops.set(cancelId, barrier);
 		void barrier.then(() => {
 			if (cancelId !== undefined) transportStops.delete(cancelId);
-			if (transportStopBarrier === barrier) transportStopPending = false;
-		}, notifyStopFailure);
+			if (transportStopBarrier === barrier) {
+				transportStopPending = false;
+				if (remoteStopDiagnostic === diagnostic) remoteStopDiagnostic = undefined;
+				if (stopDiagnostic === previousDiagnostic) stopDiagnostic = { cause: "", notified: false };
+			}
+		}, error => notifyStopFailure(error, diagnostic ?? remoteStopDiagnostic));
 		return barrier;
 	};
 
@@ -2023,10 +2030,6 @@ export default async function (pi: ExtensionAPI) {
 				// Explicit reconnect retries stop proof; ordinary playback still waits on the failure.
 				if (previous) await previous.catch(() => { stopUnconfirmed = unconfirmedDeviceStops.has(previous); });
 				if (epoch !== playbackRequestEpoch || ctx !== activeContext || !interactiveVoiceSession) return false;
-				if (force) {
-					remoteStopDiagnostic = undefined;
-					stopDiagnostic = { cause: "", notified: false };
-				}
 				if (force && retiredStops.size) {
 					const previousStopUnconfirmed = stopUnconfirmed;
 					stopUnconfirmed = true;
@@ -2056,7 +2059,10 @@ export default async function (pi: ExtensionAPI) {
 				if (previous || transportStopPending || (force && deviceRetryRequired) || (changed && (ownsSpeech || inputInProgress))) {
 					// Termination, not a TCP accept or a cancellation timeout, proves the old sink is gone.
 					stopUnconfirmed = true;
+					const diagnostic = remoteStopDiagnostic;
 					await Promise.all([vocalizer.shutdown(), cancelActiveInput()]);
+					if (remoteStopDiagnostic === diagnostic) remoteStopDiagnostic = undefined;
+					stopDiagnostic = { cause: "", notified: false };
 					stopUnconfirmed = false;
 					for (const resolve of transportCancelWaiters.values()) resolve();
 					transportCancelWaiters.clear();
