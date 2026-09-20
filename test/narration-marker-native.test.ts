@@ -11,9 +11,11 @@ const theme: MarkdownTheme = {
 	listBullet: plain, bold: plain, italic: plain, strikethrough: plain, underline: plain,
 };
 
-for (const width of [28, 100]) test(`native source marker ignores copied history at width ${width}`, () => {
+for (const width of [28, 100, 120]) test(`native source marker ignores copied history at width ${width}`, () => {
 	const progress = new NarrationProgress();
-	const quote = `> 494 tests passed; native-TUI checks ${NARRATION_ACTIVE_MARKER}10/10${NARRATION_ACTIVE_MARKER}. Run /reload...`;
+	// Synthetic substitute for the saved four-line user message: one legacy token
+	// in a quoted first line, unquoted continuation, blank line, then prose.
+	const quote = `> Earlier synthetic ${NARRATION_ACTIVE_MARKER}report is quoted here.\nContinuation of copied report.\n\nA separate follow-up request.`;
 	// Raw markers inside the selected source also must not become its local anchor.
 	const source = `${quote}\n\nLater active assistant has several words to narrate. Another sentence follows.`;
 	const start = source.indexOf("Later active");
@@ -24,7 +26,7 @@ for (const width of [28, 100]) test(`native source marker ignores copied history
 	const copiedMarker = progress.activeMarker;
 	const copiedAssistant = transform();
 	const quotedUser = `> ${copiedAssistant.replace(/\n/g, "\n> ")}`;
-	const history = [quote, 'mixed is poorly named maybe just say "include estimates"? Ill restart now and test it, fix this after if still needed.', quotedUser];
+	const history = ["Please rename the synthetic status label.", quote, quotedUser];
 
 	for (let replay = 0; replay < 3; replay++) {
 		const previousMarker = progress.activeMarker;

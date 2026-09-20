@@ -13,10 +13,10 @@ const native = await import(process.env.PI_VOICE_TEST_TUI_MODULE ?? "@earendil-w
 const settle = () => new Promise(resolve => setTimeout(resolve, 120));
 initTheme("dark");
 
-for (const action of ["paused anchor", "End", "banner", "controls", "search", "search forced render", "drag", "PageDown bottom", "wheel bottom", "scrollbar bottom", "narrow cached", "wide cached"]) test(`native viewport: ${action}`, async t => {
+for (const action of ["paused anchor", "End", "banner", "controls", "search", "search forced render", "drag", "PageDown bottom", "wheel bottom", "scrollbar bottom", "narrow cached", "wide cached", "current cached"]) test(`native viewport: ${action}`, async t => {
 	const cached = action.endsWith("cached");
-	const width = action === "narrow cached" ? 28 : 100;
-	const terminal = { columns: width, rows: 40, write() {}, hideCursor() {} };
+	const width = action === "narrow cached" ? 28 : action === "current cached" ? 120 : 100;
+	const terminal = { columns: width, rows: action === "current cached" ? 50 : 40, write() {}, hideCursor() {} };
 	const tui: any = new native.TuiAltScreen(terminal, false, undefined,
 		{ scrollToEndIndicator: () => "↓ Jump to latest message (End)" });
 	if (action === "banner" && !tui.handleScrollToEndIndicatorMouseEvent) {

@@ -1,5 +1,12 @@
 # Pi Voice — implemented agreements and live-validation handoff
 
+## Current-session evidence follow-up — still ready for user reload
+
+- Authorized read-only inspection positively identified the interactive parent using process ancestry, fresh coordinator PID/session/cwd metadata and matching JSONL header (not the delegated agent's session ID). Saved user entry 18042 contains one legacy invisible marker in a four-line quoted-message structure; original anchor at 17996 is marker-free. Intervening entries are one assistant, 42 timing records and two device-selection records. Only structural aggregates/codepoint signatures are recorded in `FINDINGS.md`.
+- Parent PTY currently reports **120×50**. JSONL does **not** establish incident-time or in-memory viewport geometry, selected playback target, or live causality. Saved timing schemas/hex-key aggregates are evidence of persistence only, not current compatibility or a new cache defect.
+- Added only missing synthetic four-line/single-marker and 120-column/50-row coverage; existing source-change, dynamic-height, replay and manual-follow checks remain. No production/cache changes. Typecheck passed; full suite **514 passed, 1 known banner skip, 0 failures**; installed native TUI **16/16 passed**. No LSP configured. No live writes/reloads/restarts, hardware/provider/inference calls or transcript exports; `ISSUES.md` untouched.
+- **`ec68eb4` remains ready for user `/reload`, without SSH restart.** The saved contamination is proven; whether it caused the reported live failure still needs user confirmation after reload.
+
 ## Atomic marker integration — ready for user reload
 
 - **Version clarification:** the user’s reported viewport failure was on a version **before `5882cff`**, not evidence that its narrow-width fix had already been loaded and failed. Earlier restart observations below remain historical evidence; do not infer the running code version from a restart alone. User was told to wait; this handoff now permits their reload after validation. No live session was restarted here.
