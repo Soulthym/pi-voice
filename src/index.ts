@@ -644,7 +644,7 @@ export default async function (pi: ExtensionAPI) {
 		block: FencedCodeBlock,
 		identityContext: IdentityContext,
 		providerMessagesThroughBlock: readonly Message[],
-		options?: { chargeBackfill?: () => boolean; signal?: AbortSignal },
+		options?: { chargeBackfill?: () => boolean; signal?: AbortSignal; background?: boolean; allowPaused?: boolean },
 ): Promise<CodeNarrationPlan> => {
 		const fallback = plainCodeNarration(fallbackCodeDescription(block));
 		const requestEpoch = contextEpoch;
@@ -685,8 +685,9 @@ export default async function (pi: ExtensionAPI) {
 					(signal) => {
 						// Every provider attempt is metered; cache hits and coalesced
 						// duplicates never reach describeCodeBlock at all.
-						const generate = () =>
-							describeCodeBlock(
+						const generate = () => {
+							if (options?.background && ((ownsSpeech && !(options.allowPaused && playbackPaused)) || (attentionSuppressed && !deviceRetryRequired))) throw BACKGROUND_DEFERRED;
+							return describeCodeBlock(
 								ctx,
 								block,
 								editModel,
@@ -705,6 +706,7 @@ export default async function (pi: ExtensionAPI) {
 								if (error instanceof CodeDescriptionBudgetExhaustedError) throw BACKFILL_EXHAUSTED;
 								throw error;
 							});
+						};
 						return coordinator
 							? coordinator.withResource("code", config.codeDescriptionPreprocessConcurrency, generate, signal)
 							: generate();
@@ -721,7 +723,7 @@ export default async function (pi: ExtensionAPI) {
 					// Live/replay callers must not inherit a historical caller's budget rejection.
 					options?.chargeBackfill ? undefined : error =>
 						requestEpoch === contextEpoch && isCurrentContext(ctx) &&
-						(error === BACKFILL_EXHAUSTED || error instanceof CodeDescriptionBudgetExhaustedError),
+						(error === BACKGROUND_DEFERRED || error === BACKFILL_EXHAUSTED || error instanceof CodeDescriptionBudgetExhaustedError),
 					options?.signal,
 				)
 				.then(plan => {
@@ -732,7 +734,7 @@ export default async function (pi: ExtensionAPI) {
 					return requestEpoch === contextEpoch && isCurrentContext(ctx) ? resolveDescriptionDependency(key, plan) : plan;
 				});
 		} catch (outerError) {
-			if (options?.signal?.aborted) throw outerError;
+			if (options?.signal?.aborted || outerError === BACKGROUND_DEFERRED) throw outerError;
 			if (requestEpoch !== contextEpoch || !isCurrentContext(ctx)) return fallback;
 			if (outerError === BACKFILL_EXHAUSTED || outerError instanceof CodeDescriptionBudgetExhaustedError) throw BACKFILL_EXHAUSTED;
 			if (!resolvedKey) return fallback;
@@ -785,7 +787,7 @@ export default async function (pi: ExtensionAPI) {
 				completed.block,
 				completed.identityContext,
 				completed.providerMessagesThroughBlock,
-				{ chargeBackfill: chargeBackfillUnit },
+				{ chargeBackfill: chargeBackfillUnit, background: true, allowPaused: true },
 			);
 			codeDependencies.push(JSON.stringify([key, plan.omitted ? "omitted" : plan]));
 			if (plan.omitted) continue;
@@ -804,6 +806,7 @@ export default async function (pi: ExtensionAPI) {
 	let backfillExhaustionReported = false;
 	/** Sentinel that stops a backfill batch without caching filler. */
 	const BACKFILL_EXHAUSTED = Symbol("pi-voice.backfill-exhausted");
+	const BACKGROUND_DEFERRED = new Error("Code description cancelled for foreground speech");
 
 	/** Reserves one historical-backfill unit; live and replay requests never call this. */
 	const chargeBackfillUnit = (): boolean => {
@@ -856,7 +859,7 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	const scheduleMissingCodeDescriptions = (ctx: ExtensionContext): void => {
-		if (codeDescriptionPreprocessing) return;
+		if (codeDescriptionPreprocessing || ownsSpeech || (attentionSuppressed && !deviceRetryRequired)) return;
 		const epoch = contextEpoch;
 		const workEpoch = codeWorkEpoch;
 		const queuedMessages: Array<
@@ -910,9 +913,9 @@ export default async function (pi: ExtensionAPI) {
 				}
 				if (epoch !== contextEpoch || workEpoch !== codeWorkEpoch || !isCurrentContext(ctx)) return;
 				for (const item of items) {
-					if (epoch !== contextEpoch || workEpoch !== codeWorkEpoch || !isCurrentContext(ctx)) return;
+					if (epoch !== contextEpoch || workEpoch !== codeWorkEpoch || !isCurrentContext(ctx) || ownsSpeech || (attentionSuppressed && !deviceRetryRequired)) return;
 					try {
-						await requestCodeDescription(ctx, item.block, item.identityContext, item.providerMessagesThroughBlock, { chargeBackfill: chargeBackfillUnit });
+						await requestCodeDescription(ctx, item.block, item.identityContext, item.providerMessagesThroughBlock, { chargeBackfill: chargeBackfillUnit, background: true });
 					} catch (error) {
 						if (error === BACKFILL_EXHAUSTED || error instanceof CodeDescriptionBudgetExhaustedError) {
 							if (!backfillExhaustionReported) {
@@ -1710,6 +1713,7 @@ export default async function (pi: ExtensionAPI) {
 	const relinquishSpeech = (): void => {
 		coordinator?.releaseSpeech();
 		ownsSpeech = false;
+		codeWorkEpoch += 1;
 		speechLeaseEpoch += 1;
 		liveTurnNarrationActive = false;
 		speechPurpose = undefined;
@@ -1725,6 +1729,7 @@ export default async function (pi: ExtensionAPI) {
 		if (!inputInProgress) state = "idle";
 		refreshStatus();
 		scheduleVoiceWorkerIdleStop();
+		if (activeContext) scheduleMissingCodeDescriptions(activeContext);
 	};
 
 	const speakAttentionNotification = (waiting: WaitingSession): void => {

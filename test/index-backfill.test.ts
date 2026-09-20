@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import test from "node:test";
-import { VoiceWorkerClient } from "../src/worker-client.js";
-import { FakeVoiceHost, streamCompletedResponse, type ModelRequest } from "./helpers/fake-voice-host.js";
+import test, { mock } from "node:test";
+import { FakeVoiceHost, MockedVoiceWorkerClient, streamCompletedResponse, type ModelRequest } from "./helpers/fake-voice-host.js";
+
+mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: MockedVoiceWorkerClient } });
 import { voiceQueryCases } from "./helpers/voice-query-cases.js";
 
 async function settle(): Promise<void> {
@@ -30,6 +31,7 @@ async function setup(root: string, options: ScenarioOptions = {}) {
 			enabled: true,
 			mode: "assistant",
 			input: "disabled",
+			output: "local",
 			audioCache: false,
 			codeNarration: "summary",
 			codeDescriptionContext: "block-only",
@@ -42,14 +44,6 @@ async function setup(root: string, options: ScenarioOptions = {}) {
 	process.env.PI_VOICE_COORDINATOR_DIR = path.join(root, "coordinator");
 	process.env.PI_VOICE_DEVICE_DIR = path.join(root, "devices");
 
-	const original = VoiceWorkerClient.prototype.measureSegment;
-	VoiceWorkerClient.prototype.measureSegment = async function (): Promise<number> {
-		return 1;
-	};
-	const restoreWorker = (): void => {
-		VoiceWorkerClient.prototype.measureSegment = original;
-	};
-
 	const host = new FakeVoiceHost(path.join(root, "project"), "budget", async (_request: ModelRequest) => ({
 		role: "assistant",
 		content: [{ type: "text", text: options.respond ?? "A contextual description." }],
@@ -58,7 +52,6 @@ async function setup(root: string, options: ScenarioOptions = {}) {
 
 	const restoreEnvironment = async () => {
 		await host.shutdown().catch(() => {});
-		restoreWorker();
 		if (previous.config === undefined) delete process.env.PI_VOICE_CONFIG;
 		else process.env.PI_VOICE_CONFIG = previous.config;
 		if (previous.coordinator === undefined) delete process.env.PI_VOICE_COORDINATOR_DIR;
@@ -187,10 +180,10 @@ test("backfill budget caps historical work while live descriptions stay free", a
 	// The skipped block must be B or A consistently; whichever lost the race stays absent.
 	const skipped = serialized.includes("codeA") ? "codeB" : "codeA";
 	assert.doesNotMatch(serialized, new RegExp(skipped));
-	assert.ok(
-		host.notices.some(notice => notice.message.includes("Descriptions blocked · budget")),
-		`exhaustion should be reported; got ${JSON.stringify(host.notices)}`,
-	);
+	// Foreground ownership defers new historical attempts (including budget rejection).
+	await host.command("off");
+	await settle();
+	assert.ok(host.notices.some(notice => notice.message.includes("Descriptions blocked · budget")));
 
 	// Every setting query must retain the exhausted allowance and usage.
 	const requestsBeforeQueries = host.modelRequests.length;
@@ -217,12 +210,14 @@ test("backfill budget caps historical work while live descriptions stay free", a
 	assert.match(host.notices.at(-1)!.message, /budget=0; used=0;/);
 	assert.equal(host.modelRequests.length, requestsBeforeQueries);
 
-	// Topping up resumes the skipped historical block.
+	// Topping up resumes the skipped historical block after foreground release.
+	await host.command("off");
 	await host.command("code-budget unlimited");
 	await settle();
 	assert.match(JSON.stringify(host.modelRequests), new RegExp(skipped));
 
 	// And a further live message still works normally afterwards.
+	await host.command("on");
 	await streamCompletedResponse(host, "second-live", "live-answer", "Again.\n```ts\ncodeSecond();\n```");
 	assert.match(JSON.stringify(host.modelRequests), /codeSecond/);
 });
