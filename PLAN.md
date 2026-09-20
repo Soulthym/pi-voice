@@ -1,6 +1,19 @@
 # Pi Voice — implemented agreements and live-validation handoff
 
-## Current status
+## Current UX follow-up — fast restart counter
+
+New user clarification: the `0/605` speech-timing counter advanced **quickly**, and alignment looked good. This is not evidence of cache loss or full regeneration. The authorized follow-up traces restoration and labels actual work; it does not reopen the completed playback/ownership batch.
+
+Implemented in **`5b11e76`**:
+- Separate startup **Checking saved timing** from **Recovering speech timing**. Recovery reports waiting/preparation, timing-unit reuse, cached-audio decoding, synthesis and word-timing estimates. Counts name eligible targets, use the configured recovery scope, and never claim alignment accuracy or a percentage.
+- Unified `Voice · …` notices with native Pi severity; readable input/playback/footer states, grouped status/help, effective microphone shortcuts, omission/retry and stop-recovery guidance. Input → playback → descriptions → timing order is unchanged. No competing widgets or hardcoded ANSI.
+- Fresh-host JSON-round-trip regression: 605 targets (including 7 conversation-context code blocks), a changed editing model, and a synthetic refined snapshot restore without provider/measure/synthesis/alignment calls. Genuine speed changes still invalidate timing. Worker fixtures separately count cache decoding versus synthesis; cancelled progress cannot update foreground state.
+
+No cache defect was demonstrated, so persistence identities and compatibility guards are unchanged. The old counter counted completed missing-timing recovery targets, **not snapshot checks**. Fast cached-audio measurement is possible; which path the user's live run took, and why those maps were considered missing, remain unknown without live aggregate evidence. See the new `FINDINGS.md` entry rather than reviving an earlier cache-loss claim.
+
+Validation: `npm run check`, `npm test` (**485 passed, 1 known native-TUI compatibility skip, 0 failed**, 486 total), and `git diff --check`. No LSP server is configured. Final suite log: `/tmp/voice-ux-final.log`. Only source and synthetic fixtures were used; no live configuration/session/client restart, real inference, paid provider call, hardware playback or private transcript export. Preserve untracked `ISSUES.md`.
+
+## Previous batch checkpoint
 
 The discuss-first phase is finished and the agreed implementation batch is committed on `main`, through **`a62a11d`** before this documentation checkpoint. Do not restart the old discussion or redo completed implementation. User-requested interruptions/reboots were not evidence of product crashes.
 
