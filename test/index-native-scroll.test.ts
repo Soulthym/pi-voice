@@ -83,7 +83,7 @@ for (const messageType of ["assistant", "assistant-thinking"] as const) test(`mo
 	assert.equal(host.modelRequests.length, 0);
 });
 
-for (const action of ["auto tail start", "auto tail small", "auto tail long", "auto tail in band", "auto tail navigation", "paused anchor", "button", "button playing", "End", "banner", "controls", "search", "search forced render", "drag", "PageDown bottom", "wheel bottom", "scrollbar bottom", "narrow cached", "wide cached", "current cached"]) test(`native viewport: ${action}`, async t => {
+for (const action of ["auto tail start", "auto tail small", "auto tail resize", "auto tail long", "auto tail in band", "auto tail navigation", "paused anchor", "button", "button playing", "End", "banner", "controls", "search", "search forced render", "drag", "PageDown bottom", "wheel bottom", "scrollbar bottom", "narrow cached", "wide cached", "current cached"]) test(`native viewport: ${action}`, async t => {
 	if (action.startsWith("button") && !native.MouseRegion) {
 		t.skip("older Pi has no MouseRegion; Alt+V remains available");
 		return;
@@ -351,10 +351,18 @@ for (const action of ["auto tail start", "auto tail small", "auto tail long", "a
 			assert.equal(worker.pauses.at(-1), true);
 			return;
 		}
-		count += 2;
+		count += action === "auto tail resize" ? 14 : 2;
 		tui.doRender();
 		await tick();
 		assert.equal(view.scrollTop, count - view.viewportHeight, "small growth can retain native follow at the actual bottom");
+		if (action === "auto tail resize") {
+			terminal.rows = 10;
+			tui.doRender();
+			assert.equal(view.scrollTop, 304, "native shrink initially puts word 299 offscreen");
+			await tick();
+			assert.equal(view.scrollTop, 297, "automatic tail adoption must reframe after viewport shrink");
+			assert.equal(view.isFollowingEnd, false);
+		}
 		count += 100;
 		tui.doRender();
 		await tick();
@@ -522,6 +530,12 @@ for (const action of ["auto tail start", "auto tail small", "auto tail long", "a
 	jump();
 	await tick();
 	assert.equal(view.scrollTop, 260, "explicit native end remains pinned until output grows");
+	terminal.rows = 12;
+	tui.doRender();
+	await tick();
+	assert.equal(view.scrollTop, 288, "explicit End keeps native tail intent on resize");
+	terminal.rows = 40;
+	tui.doRender();
 	count = 320;
 	tui.doRender();
 	await tick();

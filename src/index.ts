@@ -1240,7 +1240,7 @@ export default async function (pi: ExtensionAPI) {
 		narrationManuallyFramed = false;
 		atTranscriptTail = true;
 		bottomPinned = ownsSpeech;
-		restoreBottomAfterSpeech = ownsSpeech;
+		restoreBottomAfterSpeech ||= ownsSpeech;
 		lastAutoScrollTop = scrollView.scrollTop;
 		autoScrollForceOnce = false;
 		hideFollowHint();
@@ -1254,7 +1254,8 @@ export default async function (pi: ExtensionAPI) {
 		lastNarrationLayout = layout;
 		if (layoutChanged) narrationMessageAnchor = undefined;
 		if (bottomPinned && transcriptIsFollowingEnd()) {
-			if (playbackPaused || (scrollView.contentHeight ?? 0) <= pinnedContentHeight) return;
+			// Explicit End waits for output growth; automatic arrival rechecks every layout change.
+			if (playbackPaused || ((atTranscriptTail || !layoutChanged) && (scrollView.contentHeight ?? 0) <= pinnedContentHeight)) return;
 			bottomPinned = false;
 			atTranscriptTail = false;
 			lastAutoScrollTop = scrollView.scrollTop;
@@ -1397,7 +1398,7 @@ export default async function (pi: ExtensionAPI) {
 		if (!playbackPaused && scrollView.scrollTop === maxScrollTop) {
 			pinnedContentHeight = resolvedContentHeight;
 			bottomPinned = ownsSpeech;
-			restoreBottomAfterSpeech = ownsSpeech;
+			restoreBottomAfterSpeech ||= ownsSpeech;
 		}
 		lastAutoScrollTop = scrollView.scrollTop;
 	};

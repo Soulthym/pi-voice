@@ -2,6 +2,13 @@
 
 Updated incrementally. Companion: `PLAN.md`. Reorganize freely while preserving evidence and disposition.
 
+## Pre-reload review corrections to `b4ee633`
+
+- Automatic native-tail adoption now rechecks the 20–80% speech window on layout changes, using existing `lastNarrationLayout` and explicit `atTranscriptTail` intent rather than another flag. Explicit End still waits for document growth; paused/manual framing guards remain intact. Native arrival → small growth → viewport shrink reproduced word 299 above top 304 before the fix; the regression now requires top 297. Explicit End/banner resize retention is also tested.
+- Bottom adoption no longer overwrites an already-true replay return-tail intent while speech ownership is pending. A gated coordinator acquisition test covers pending bottom framing → output growth → acquired playback → completion, including manual override. Before the fix completion stayed at 291 instead of restoring 360. Both new regressions failed against `b4ee633` (`/tmp/voice-review-before.log`) and pass with the correction.
+- `npm run check` passed; `npm test`: **865 passed, 3 skipped, 0 failed (868 total)**, 60.01 s. The three skips remain the older project TUI's MouseRegion/banner cases. Installed-native command in `docs/testing.md`: **306 passed, no skips/failures**, 51.83 s. Logs: `/tmp/voice-review-check.log`, `/tmp/voice-review-full.log`, `/tmp/voice-review-native.log`. LSP unavailable; TypeScript and whitespace checks provide static validation.
+- **Ready for user `/reload`**; actual live confirmation remains outstanding. No live/model/provider calls, session/client restarts or runtime settings changes. `ISSUES.md` untouched and excluded from the atomic commit; no client recopy or SSH reconnect required.
+
 ## Native automatic-bottom handoff — interrupted fix completed
 
 - **User LIVE positive/new defect:** Voice follow reaches the actual bottom, but native “Jump to latest” can remain visible/end-follow inactive. Earlier positive windowed-follow, navigation, Jump-to-voice and flicker feedback remains valid; no live confirmation of this new fix is claimed.
