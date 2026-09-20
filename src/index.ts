@@ -388,7 +388,7 @@ export default async function (pi: ExtensionAPI) {
 	let nextLivePlaybackId = 0;
 	let playbackPaused = false;
 	let queueIncomingWhilePaused = false;
-	const queuedPausedMessages: PlaybackTarget[] = [];
+	const queuedPausedMessages: Array<PlaybackTarget & { source: typeof liveSource }> = [];
 	let pausedOwnerUtterance: number | undefined;
 	let playbackRequestEpoch = 0;
 	let pendingReplay:
@@ -2052,7 +2052,7 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	const playTarget = async (
-		target: PlaybackTarget,
+		target: PlaybackTarget & { source?: typeof liveSource },
 		recordTimings: boolean,
 		previewTarget = false,
 		queued = false,
@@ -2066,6 +2066,8 @@ export default async function (pi: ExtensionAPI) {
 		let suffix = target.text.slice(sourceOffset);
 		const retry = pendingReplay?.target.id === target.id ? pendingReplay : undefined;
 		const replayBlockIds = retry?.blockIds ?? liveBlockIds;
+		const requestedLiveSource = retry?.source ?? target.source ?? liveSource;
+		const displacedLiveTurn = ownsSpeech && speechPurpose === "turn" && !ownerTurnEnded;
 		let liveTargetIndex = [...replayBlockIds].find(([, id]) => id === target.id)?.[0];
 		const replaySource = retry?.source ?? (liveSource && !liveSource.final &&
 			(livePlaybackId === target.id || liveTargetIndex !== undefined) ? liveSource : undefined);
@@ -2076,7 +2078,7 @@ export default async function (pi: ExtensionAPI) {
 			return;
 		}
 
-		if (!queued) {
+		if (!queued && !retry) {
 			queuedPausedMessages.length = 0;
 			queueIncomingWhilePaused = false;
 		}
@@ -2126,8 +2128,6 @@ export default async function (pi: ExtensionAPI) {
 			refreshPlaybackTimeline();
 		}
 
-		const displacedLiveTurn = ownsSpeech && speechPurpose === "turn" && !ownerTurnEnded;
-		const displacedLiveText = displacedLiveTurn ? ownedSpeechText : "";
 		try {
 			if (inputInProgress) await finishInputForPlayback();
 			if (pendingReplay !== request || request.epoch !== playbackRequestEpoch) return;
@@ -2224,7 +2224,10 @@ export default async function (pi: ExtensionAPI) {
 		}
 		if (!queued) {
 			queueIncomingWhilePaused = false;
-			queuedPausedMessages.length = 0;
+			// Only discard this request's source; later tool responses must drain normally.
+			for (let i = queuedPausedMessages.length - 1; i >= 0; i--) {
+				if (queuedPausedMessages[i].source === requestedLiveSource) queuedPausedMessages.splice(i, 1);
+			}
 		}
 		const currentLiveSource = replaySource === liveSource;
 		speechPurpose = continueLiveTurn && currentLiveSource && !replaySource?.final ? "turn" : "replay";
@@ -2239,12 +2242,13 @@ export default async function (pi: ExtensionAPI) {
 			if (liveTargetIndex !== undefined) liveBlockIds.set(liveTargetIndex, target.id);
 			ownedSpeechText = target.text;
 		}
-		if (displacedLiveTurn && (!continueLiveTurn || !currentLiveSource)) {
+		if (liveSource && !liveSource.final && (displacedLiveTurn || liveSource !== requestedLiveSource) &&
+			(!continueLiveTurn || !currentLiveSource)) {
 			// Keep the streaming response independent from this completed snapshot.
 			// Later deltas are collected for attention instead of joining replay audio.
 			speechBlocked = true;
-			blockedSpeechText = displacedLiveText;
-			blockedMessageHasSpeech = hasSpeakableAudio(displacedLiveText);
+			blockedSpeechText = eligibleAssistantBlocks(liveSource.assistant, config.mode).map(block => block.text).join("\n");
+			blockedMessageHasSpeech = hasSpeakableAudio(blockedSpeechText);
 		}
 		codeWorkEpoch += 1;
 		if (activeContext) scheduleMissingCodeDescriptions(activeContext);
@@ -3248,7 +3252,7 @@ export default async function (pi: ExtensionAPI) {
 				const targets = eligible.map(block => {
 					const id = liveBlockIds.get(block.contentIndex);
 					if (id) return { ...block, id };
-					const queued = { ...block, id: `live:${++nextLivePlaybackId}`, time: 0, sourceOffset: 0 };
+					const queued = { ...block, id: `live:${++nextLivePlaybackId}`, time: 0, sourceOffset: 0, source: liveSource };
 					queuedPausedMessages.push(queued);
 					return queued;
 				});

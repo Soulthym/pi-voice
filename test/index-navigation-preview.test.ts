@@ -598,6 +598,109 @@ test("pending live replay keeps its source IDs across the next tool turn", async
 	assert.equal(host.render("New prefix completed.").includes(NARRATION_ACTIVE_MARKER), false, "new finalization must not inherit the old replay capture");
 });
 
+for (const wait of ["device", "history"]) for (const scenario of ["partial", "completed", "retry", "third", "stop", "navigate"]) test(`live replay preserves newer responses during ${wait} wait (${scenario})`, async t => {
+	const completed = scenario !== "partial";
+	const host = await setup(t, wait === "device" ? "auto" : "local");
+	await host.start();
+	host.addMessage("history", null, assistant("History."));
+	await host.emit("before_agent_start", {});
+	const partial = assistant("Old prefix", "pending");
+	await host.emit("message_start", { message: partial });
+	await host.emit("message_update", { message: partial, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Old prefix" } }); await settle();
+	const worker = MockedVoiceWorkerClient.instances.at(-1)!;
+	const before = worker.sent.length;
+	const gate = Promise.withResolvers<void>();
+	let entered = false;
+	if (wait === "device") {
+		t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", async () => {
+			entered = true;
+			await gate.promise;
+			return { kind: "intentional_local" } as ConnectionDevice;
+		});
+	} else {
+		let clock = 0;
+		t.mock.method(performance, "now", () => clock += 9);
+		const immediate = globalThis.setImmediate;
+		t.mock.method(globalThis, "setImmediate", ((callback: () => void) => {
+			if (entered) return immediate(callback);
+			entered = true;
+			void gate.promise.then(callback);
+			return undefined;
+		}) as typeof setImmediate);
+	}
+	await host.shortcut("f11"); await settle();
+	assert.ok(entered, "replay must be held at the async gate");
+	const old = { ...partial, stopReason: "toolUse", content: [...partial.content, { type: "text", text: "Old final." }] };
+	await host.emit("message_update", { message: old, assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: "Old final." } });
+	host.addMessage("old", "history", old);
+	await host.emit("message_end", { message: old });
+	await host.emit("turn_end", { message: old });
+	const next = assistant("New prefix", "pending");
+	await host.emit("message_start", { message: next });
+	await host.emit("message_update", { message: next, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "New prefix" } });
+	const finish = async () => {
+		const done = assistant("New prefix completed.");
+		await host.emit("message_update", { message: done, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: " completed." } });
+		host.addMessage("new", "old", done);
+		await host.emit("message_end", { message: done });
+		await host.emit("turn_end", { message: done });
+	};
+	if (completed) await finish();
+	if (scenario === "third") {
+		const third = assistant("Third prefix", "pending");
+		await host.emit("message_start", { message: third });
+		await host.emit("message_update", { message: third, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Third prefix" } });
+	}
+	if (scenario === "stop") await host.command("stop");
+	if (scenario === "navigate") await host.shortcut("f6");
+	const acquisition = scenario === "retry" ? [
+		t.mock.method(SessionCoordinator.prototype, "ownsSpeech", () => false),
+		t.mock.method(SessionCoordinator.prototype, "tryAcquireSpeech", () => false),
+		t.mock.method(SessionCoordinator.prototype, "forceAcquireSpeech", async () => false),
+	] : [];
+	assert.equal(worker.sent.length, before, "neither source may bypass the gate");
+	gate.resolve(); await settle();
+	if (scenario === "retry") {
+		assert.ok(host.notices.some(notice => /replay remains paused/.test(notice.message)));
+		for (const method of acquisition) method.mock.restore();
+		await host.shortcut("f8"); await settle();
+	}
+	if (!completed) await finish();
+	await settle();
+	const spoken = () => (worker.sent.slice(before) as Array<{ text: string }>).map(segment => segment.text).filter(text => !text.startsWith("Project "));
+	if (scenario === "stop" || scenario === "navigate") {
+		const last = worker.sent.at(-1) as { utterance: number } | undefined;
+		if (last) worker.emit({ type: "idle", utterance: last.utterance });
+		await settle();
+		assert.deepEqual(spoken(), scenario === "stop" ? [] : ["History."], "newer user intent must fence both replay and queued responses");
+		return;
+	}
+	assert.deepEqual(spoken(), ["Old prefix", "Old final."], "new response must not interrupt replay");
+	const idle = async () => {
+		worker.emit({ type: "idle", utterance: (worker.sent.at(-1) as { utterance: number }).utterance });
+		await settle();
+	};
+	await idle();
+	if (!completed) {
+		assert.ok(host.notices.some(notice => /response paused/.test(notice.message)), "displaced partial response must retain completion attention");
+		await host.shortcut("f11"); await settle();
+	}
+	assert.deepEqual(spoken(), ["Old prefix", "Old final.", "New prefix completed."]);
+	await idle();
+	assert.deepEqual(spoken(), ["Old prefix", "Old final.", "New prefix completed."], "neither source may replay twice");
+	if (scenario === "third") {
+		const third = assistant("Third prefix completed.");
+		await host.emit("message_update", { message: third, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: " completed." } });
+		host.addMessage("third", "new", third);
+		await host.emit("message_end", { message: third });
+		await host.emit("turn_end", { message: third });
+		assert.ok(host.notices.some(notice => /response paused/.test(notice.message)), "queued playback must preserve the latest partial source's attention");
+		await host.shortcut("f11"); await settle();
+		await idle();
+		assert.deepEqual(spoken(), ["Old prefix", "Old final.", "New prefix completed.", "Third prefix completed."]);
+	}
+});
+
 for (const stopReason of ["aborted", "error"]) test(`pending live replay is retired by terminal ${stopReason}`, async t => {
 	const host = await setup(t, "auto");
 	await host.start(); await host.emit("before_agent_start", {});
