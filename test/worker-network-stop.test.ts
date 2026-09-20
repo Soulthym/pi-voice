@@ -22,6 +22,7 @@ test("network padding cancellation waits for confirmed helper exit", { timeout: 
 	} });
 	mock.module("kokoro-js", { namedExports: { KokoroTTS: {} } });
 	const players: any[] = [];
+	let rejectHandshake = false;
 	mock.module("node:child_process", { namedExports: { ...(await import("node:child_process")),
 		fork: () => {
 			const child = Object.assign(new EventEmitter(), {
@@ -48,7 +49,7 @@ test("network padding cancellation waits for confirmed helper exit", { timeout: 
 				kill: () => { throw Error("Test must explicitly confirm helper exit"); },
 			});
 			players.push(child);
-			queueMicrotask(() => control.write("ready\n"));
+			queueMicrotask(() => control.write(rejectHandshake ? "no-audio\nerror Upgrade the audio client\n" : "ready\n"));
 			return child;
 		},
 	} });
@@ -68,6 +69,7 @@ test("network padding cancellation waits for confirmed helper exit", { timeout: 
 	});
 
 	for (const [name, code, signal] of [
+		["rejected handshake", 2, null],
 		["confirmed stop", 0, null],
 		["nonzero exit", 1, null],
 		["signal exit", null, "SIGTERM"],
@@ -76,6 +78,7 @@ test("network padding cancellation waits for confirmed helper exit", { timeout: 
 			lines = new EventEmitter();
 			events.length = 0;
 			players.length = 0;
+			rejectHandshake = name === "rejected handshake";
 			st.after(async () => {
 				for (const child of players) {
 					if (child.exitCode === null && child.signalCode === null) {
@@ -93,9 +96,22 @@ test("network padding cancellation waits for confirmed helper exit", { timeout: 
 			send({ type: "segment", utterance: 1, segmentId: 1, text: "Stop test.",
 				voice: "af_heart", speed: 1, output: "tcp://127.0.0.1:12345" });
 			send({ type: "end", utterance: 1 });
-			for (let attempt = 0; attempt < 100 && players[0]?.writes.length !== 2; attempt++) await wait(5);
+			for (let attempt = 0; attempt < 100 && (rejectHandshake ? !players[0] : players[0]?.writes.length !== 2); attempt++) await wait(5);
 			const child = players[0];
 			assert.ok(child, "network helper was spawned");
+			if (rejectHandshake) {
+				await wait(20);
+				assert.deepEqual(child.writes, [], "failed handshake sent no PCM or padding");
+				assert.ok(events.some(e => e.type === "error" && /Upgrade/.test(e.message)));
+				assert.ok(!events.some(e => e.type === "idle"), "handshake failure is not completion");
+				child.exitCode = 2;
+				child.emit("exit", 2, null);
+				await wait(20);
+				send({ type: "cancel", cancelId: 42 });
+				await wait(20);
+				assert.deepEqual(events.filter(e => e.type === "idle"), [{ type: "idle" }, { type: "idle", cancelId: 42 }], "nothing was admitted; cancellation needs no invented remote stop receipt");
+				return;
+			}
 			assert.deepEqual(child.writes.map((chunk: Buffer) => chunk.length), [4, 96000]);
 			assert.ok(child.writes[1].equals(Buffer.alloc(96000)), "final write is silence padding");
 			assert.equal(child.stdin.writableNeedDrain, true);

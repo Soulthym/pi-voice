@@ -28,7 +28,7 @@ for (const script of ["client/pi-voice-audio-session", "termux/pi-voice-audio-se
 		fake("mpv", `
 const fs = require('fs'), net = require('net');
 const ipc = process.argv.find(a => a.startsWith('--input-ipc-server=')).split('=')[1];
-const id = /mpv-(\\d+)/.exec(ipc)[1], base = process.env.TMPDIR + '/fake-' + id;
+const id = /mpv-([0-9a-f-]+)\\.sock/.exec(ipc)[1], base = process.env.TMPDIR + '/fake-' + id;
 fs.writeFileSync(base + '.pid', String(process.pid));
 let eof = false, paused = false, quitting = false;
 const server = net.createServer(s => s.on('data', b => {
@@ -60,8 +60,10 @@ socket.pipe(process.stdout);
 setTimeout(() => process.exit(0), 150);
 `);
 		const env = { ...process.env, TMPDIR: root, XDG_RUNTIME_DIR: root, PATH: `${bin}:${process.env.PATH}` };
-		function start(scriptPath = script) {
-			const child = spawn("bash", [path.resolve(scriptPath)], { env, detached: true });
+		function start(scriptPath = script, reusePid = false) {
+			// Simulate PID reuse without touching any real process namespace.
+			const args = reusePid ? ["-c", 'unset BASHPID; BASHPID=424242; source "$1"', "bash", path.resolve(scriptPath)] : [path.resolve(scriptPath)];
+			const child = spawn("bash", args, { env, detached: true });
 			children.push(child);
 			let output = "";
 			child.stdout.on("data", b => output += b);
@@ -77,7 +79,7 @@ setTimeout(() => process.exit(0), 150);
 			return session.output();
 		}
 		async function audio() {
-			const session = start();
+			const session = start(script, true);
 			session.child.stdin.write("PI_VOICE_CONTROLhello\n");
 			await until(() => session.output().includes('"type":"protocol"'));
 			assert.deepEqual(JSON.parse(session.output().trim()), { type: "protocol", version: 2 });
@@ -86,8 +88,8 @@ setTimeout(() => process.exit(0), 150);
 			await until(() => session.output().includes('"type":"session"'));
 			const event = session.output().trim().split("\n").map(l => JSON.parse(l)).find(e => e.type === "session");
 			assert.equal(event.version, 2);
-			assert.equal(typeof event.id, "number");
-			return { ...session, id: event.id as number, base: path.join(root, `fake-${event.id}`) };
+			assert.match(event.id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+			return { ...session, id: event.id as string, base: path.join(root, `fake-${event.id}`) };
 		}
 		try {
 			// Frozen pre-v2 script: the safe hello must close without launching mpv.
@@ -123,7 +125,7 @@ setTimeout(() => process.exit(0), 150);
 					helper.stdin.end(Buffer.alloc(64));
 					if (scriptPath === script) {
 						await until(() => !!connected?.output().includes('"type":"session"'));
-						const id = connected!.child.pid;
+						const id = connected!.output().split("\n").filter(Boolean).map(l => JSON.parse(l)).find(e => e.type === "session").id;
 						await until(() => fs.existsSync(path.join(root, `fake-${id}.eof`)));
 						assert.equal(fs.readFileSync(path.join(root, `fake-${id}.pause`), "utf8"), "true\n", "startup pause must precede PCM admission");
 						fs.writeFileSync(path.join(root, `fake-${id}.release`), "");
@@ -131,7 +133,7 @@ setTimeout(() => process.exit(0), 150);
 						assert.equal(helper.exitCode, null, "paused sink cannot complete");
 						(helper.stdio[3] as net.Socket).write("resume\n");
 					}
-					assert.equal((await exit)[0], scriptPath === script ? 0 : 1);
+					assert.equal((await exit)[0], scriptPath === script ? 0 : 2);
 				} finally {
 					helper.kill("SIGKILL");
 					for (const socket of sockets) socket.destroy();
@@ -156,7 +158,7 @@ setTimeout(() => process.exit(0), 150);
 				assert.equal(probe.output(), request ? '{"type":"protocol","version":2}\n' : "");
 				assert.equal(fs.existsSync(path.join(root, `fake-${probe.child.pid}.pid`)), false, "probe must not spawn a player");
 				assert.equal(fs.readFileSync(playerFile, "utf8"), playingPid);
-				process.kill(Number(playingPid), 0);
+				process.kill(Number(playingPid.trim().split(" ")[1]), 0);
 				assert.equal(natural.child.exitCode, null, "probe must not stop existing playback");
 			}
 			natural.child.stdin.end(Buffer.alloc(128));
@@ -165,10 +167,22 @@ setTimeout(() => process.exit(0), 150);
 			assert.equal(natural.output().includes('"complete"'), false);
 			fs.writeFileSync(natural.base + ".release", "");
 			await until(() => natural.child.exitCode !== null);
-			assert.ok(natural.output().includes(`{"type":"complete","id":${natural.id}}`));
-			assert.equal(await control(`stop ${natural.id}`), `{"type":"stopped","id":${natural.id}}\n`);
+			assert.ok(natural.output().includes(`{"type":"complete","id":"${natural.id}"}`));
+			assert.equal(await control(`stop ${natural.id}`), `{"type":"stopped","id":"${natural.id}"}\n`);
 
 			const orphan = await audio();
+			assert.notEqual(orphan.id, natural.id);
+			// A persisted numeric receipt (even the current owner's PID) is never proof.
+			const numericState = path.join(root, `pi-voice-session-424242`);
+			fs.mkdirSync(numericState);
+			fs.writeFileSync(path.join(numericState, "exited"), "");
+			for (const id of ["424242", "../" + path.basename(numericState), orphan.id + "/../" + natural.id, orphan.id.toUpperCase()]) {
+				for (const command of ["pause", "resume", "stop"]) assert.equal(await control(`${command} ${id}`), "");
+			}
+			assert.equal(fs.existsSync(orphan.base + ".pause"), false);
+			assert.equal(fs.existsSync(orphan.base + ".exit"), false);
+			assert.equal(await control(`stop ${natural.id}`), `{"type":"stopped","id":"${natural.id}"}\n`);
+			assert.equal(fs.existsSync(orphan.base + ".exit"), false, "old opaque receipt cannot control new stream");
 			// A real, owned host producer dies while the player still has buffered audio.
 			const host = spawn(process.execPath, ["-e", "process.stdout.write(Buffer.alloc(256)); setInterval(()=>{},1000)"], { detached: true });
 			children.push(host);
@@ -186,8 +200,23 @@ setTimeout(() => process.exit(0), 150);
 			assert.equal(fs.existsSync(orphan.base + ".exit"), false, "stop must be scoped");
 			await control(`stop ${orphan.id}`, true);
 			assert.ok(fs.existsSync(orphan.base + ".exit"));
-			assert.equal(await control(`stop ${orphan.id}`), `{"type":"stopped","id":${orphan.id}}\n`);
+			assert.equal(await control(`stop ${orphan.id}`), `{"type":"stopped","id":"${orphan.id}"}\n`);
 			await until(() => orphan.child.exitCode !== null);
+
+			const interrupted = await audio();
+			interrupted.child.kill("SIGTERM");
+			await until(() => interrupted.child.exitCode !== null);
+			assert.equal(await control(`stop ${interrupted.id}`), `{"type":"stopped","id":"${interrupted.id}"}\n`);
+			assert.equal(interrupted.output().includes('"complete"'), false);
+			assert.equal(fs.existsSync(playerFile), false, "unexpected owner exit cleans up its active identity");
+			const aliased = await audio();
+			const aliasedPid = fs.readFileSync(playerFile, "utf8").trim().split(" ")[1];
+			const otherOwner = `${natural.id} ${aliasedPid}\n`;
+			fs.writeFileSync(playerFile, otherOwner);
+			aliased.child.kill("SIGTERM");
+			await until(() => aliased.child.exitCode !== null);
+			assert.equal(fs.readFileSync(playerFile, "utf8"), otherOwner, "same PID with another stream ID is not owned cleanup");
+			fs.unlinkSync(playerFile);
 
 			for (const mode of ["fail", "early"]) {
 				const failed = await audio();
@@ -195,6 +224,7 @@ setTimeout(() => process.exit(0), 150);
 				fs.writeFileSync(failed.base + `.${mode}`, "");
 				await until(() => failed.child.exitCode !== null);
 				assert.equal(failed.output().includes('"complete"'), false, `${mode} is not natural completion`);
+				assert.equal(await control(`stop ${failed.id}`), `{"type":"stopped","id":"${failed.id}"}\n`);
 			}
 		} finally {
 			for (const child of children) {

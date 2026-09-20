@@ -2,7 +2,11 @@
 set -u
 
 runtime_dir=${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}
-session_id=${BASHPID:-$$}
+# Secure per-stream identity, never a reusable process identifier.
+random=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+[[ $random =~ ^[0-9a-f]{32}$ ]] || exit 1
+printf -v variant '%x' "$(( (16#${random:16:1} & 3) | 8 ))"
+session_id="${random:0:8}-${random:8:4}-4${random:13:3}-$variant${random:17:3}-${random:20:12}"
 ipc_socket="$runtime_dir/pi-voice-mpv-$session_id.sock"
 header_file="$runtime_dir/pi-voice-header-$session_id.bin"
 audio_fifo="$runtime_dir/pi-voice-mpv-$session_id.pcm"
@@ -24,7 +28,7 @@ cleanup() {
     # Only the owning shell can certify that its actual child has exited.
     touch "$state_dir/exited"
   fi
-  if [[ -n "$mpv_pid" ]] && [[ $(cat "$active_player_file" 2>/dev/null || true) == "$mpv_pid" ]]; then
+  if [[ -n "$mpv_pid" ]] && [[ $(cat "$active_player_file" 2>/dev/null || true) == "$session_id $mpv_pid" ]]; then
     rm -f "$active_player_file"
   fi
   [[ $lock_held == true ]] && rm -rf "$player_lock" 2>/dev/null || true
@@ -52,7 +56,7 @@ if cmp -s "$header_file" <(printf 'PI_VOICE_CONTROL'); then
     IFS= read -r audio_header <&3 || exit 1
     [[ $audio_header == PI_VOICE_AUDIO ]] || exit 1
   else
-    [[ $target_id =~ ^[0-9]+$ ]] || exit 0
+    [[ $target_id =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || exit 0
     target_socket="$runtime_dir/pi-voice-mpv-$target_id.sock"
     target_state="$runtime_dir/pi-voice-session-$target_id"
     if [[ $command == pause || $command == resume ]] && [[ -S $target_socket ]]; then
@@ -70,7 +74,7 @@ if cmp -s "$header_file" <(printf 'PI_VOICE_CONTROL'); then
       # for retries when a stop ACK (or natural completion) was lost.
       for _ in {1..100}; do
         if [[ -f $target_state/exited ]]; then
-          printf '{"type":"stopped","id":%s}\n' "$target_id" || true
+          printf '{"type":"stopped","id":"%s"}\n' "$target_id" || true
           break
         fi
         [[ -d $target_state ]] || break
@@ -100,9 +104,10 @@ for _ in {1..100}; do
   sleep 0.01
 done
 [[ $lock_held == true ]] || exit 1
-old_player=$(cat "$active_player_file" 2>/dev/null || true)
+old_id= old_player=
+read -r old_id old_player <"$active_player_file" 2>/dev/null || true
 old_player_command=$(tr '\0' ' ' <"/proc/$old_player/cmdline" 2>/dev/null || true)
-if [[ $old_player =~ ^[0-9]+$ ]] && [[ $old_player_command == *mpv* && $old_player_command == *pi-voice-mpv-* ]] && kill -0 "$old_player" 2>/dev/null; then
+if [[ $old_player =~ ^[0-9]+$ ]] && [[ $old_id =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] && [[ $old_player_command == *"--input-ipc-server=$runtime_dir/pi-voice-mpv-$old_id.sock "* ]] && kill -0 "$old_player" 2>/dev/null; then
   kill "$old_player" 2>/dev/null || true
   for _ in {1..50}; do
     kill -0 "$old_player" 2>/dev/null || break
@@ -112,7 +117,6 @@ if [[ $old_player =~ ^[0-9]+$ ]] && [[ $old_player_command == *mpv* && $old_play
 fi
 
 # ponytail: receipts last until runtime cleanup; add expiry if session volume warrants it.
-rm -rf "$state_dir"
 mkdir -m 700 "$state_dir" || exit 1
 rm -f "$ipc_socket" "$audio_fifo"
 mkfifo "$audio_fifo"
@@ -125,7 +129,7 @@ mpv --really-quiet --no-video --cache=no \
   --demuxer-rawaudio-channels=mono \
   "$audio_fifo" > /dev/null 2>/dev/null &
 mpv_pid=$!
-printf '%s\n' "$mpv_pid" >"$active_player_file"
+printf '%s %s\n' "$session_id" "$mpv_pid" >"$active_player_file"
 rm -rf "$player_lock" 2>/dev/null || true
 lock_held=false
 
@@ -146,7 +150,7 @@ for _ in {1..50}; do
 done
 [[ -S "$ipc_socket" ]] || exit 1
 if [[ $protocol == 2 ]]; then
-  printf '{"type":"session","version":2,"id":%s}\n' "$session_id" || true
+  printf '{"type":"session","version":2,"id":"%s"}\n' "$session_id" || true
 else
   printf '{"type":"session","id":"%s"}\n' "$session_id" || true
 fi
@@ -174,11 +178,11 @@ wait "$feeder_pid" 2>/dev/null || feeder_status=$?
 feeder_pid=
 player_status=0
 wait "$mpv_pid" 2>/dev/null || player_status=$?
-if [[ $(cat "$active_player_file" 2>/dev/null || true) == "$mpv_pid" ]]; then
+if [[ $(cat "$active_player_file" 2>/dev/null || true) == "$session_id $mpv_pid" ]]; then
   rm -f "$active_player_file"
 fi
 mpv_pid=
 touch "$state_dir/exited"
 if [[ $protocol == 2 && $player_status == 0 && $feeder_status == 0 && ! -f $state_dir/stopped ]]; then
-  printf '{"type":"complete","id":%s}\n' "$session_id" || true
+  printf '{"type":"complete","id":"%s"}\n' "$session_id" || true
 fi

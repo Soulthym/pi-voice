@@ -10,6 +10,8 @@ const control = new net.Socket({ fd: 3, readable: true, writable: true });
 const input = control;
 control.on("error", fail);
 let session;
+let audioAdmitted = false;
+const validId = id => typeof id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id);
 let negotiated = false;
 let complete = false;
 let stopping = false;
@@ -35,8 +37,10 @@ function fail(error) {
 	if (finished || failing) return;
 	failing = true;
 	const message = error instanceof Error ? error.message : String(error);
+	// No-audio admission evidence is not a remote player-exit receipt.
+	if (!audioAdmitted) control.write("no-audio\n");
 	control.write(`error ${message}\n`);
-	process.stdout.write(`${JSON.stringify({ type: "error", message, utterance })}\n`, () => finish(1));
+	process.stdout.write(`${JSON.stringify({ type: "error", message, utterance })}\n`, () => finish(audioAdmitted ? 1 : 2));
 }
 function command(command) {
 	if (!session) {
@@ -57,7 +61,7 @@ function command(command) {
 				if (end < 0) break;
 				try {
 					const event = JSON.parse(reply.slice(0, end));
-					if (event.type === "stopped" && String(event.id) === session) ack = true;
+					if (event.type === "stopped" && event.id === session) ack = true;
 				} catch {}
 				reply = reply.slice(end + 1);
 			}
@@ -100,23 +104,25 @@ socket.on("data", chunk => {
 		if (!negotiated && event.type === "protocol" && event.version === 2) {
 			negotiated = true;
 			socket.write("PI_VOICE_AUDIO\n");
-		} else if (negotiated && event.type === "session" && event.version === 2 && /^\d+$/.test(String(event.id))) {
-			session = String(event.id);
+		} else if (negotiated && event.type === "session") {
+			if (session || event.version !== 2 || !validId(event.id)) return fail(new Error("Audio client requires opaque v2 stream IDs; upgrade the client and host"));
+			session = event.id;
 			clearTimeout(deadline);
 			if (stopping) command("stop");
 			else {
 				const start = () => {
 					if (stopping || finished || failing) return;
+					audioAdmitted = true;
 					control.write("ready\n");
 					process.stdin.pipe(socket);
 				};
 				if (pendingPause) void command("pause").then(start);
 				else start();
 			}
-		} else if (session && event.type === "complete" && String(event.id) === session) {
+		} else if (session && event.type === "complete" && event.id === session) {
 			complete = true;
 		} else if (session && event.type === "playback" && Number.isFinite(event.position) && event.position >= 0) {
-			process.stdout.write(`${JSON.stringify({ ...event, utterance })}\n`);
+			process.stdout.write(`${JSON.stringify({ type: "playback", position: event.position, utterance })}\n`);
 		}
 	}
 });

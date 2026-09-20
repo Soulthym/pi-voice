@@ -13,26 +13,26 @@ Audio protocol v2 requires a handshake on the actual output connection (never an
 1. Host sends `PI_VOICE_CONTROLhello\n` (the existing 16-byte control prefix).
 2. Client replies `{"type":"protocol","version":2}\n`.
 3. Host sends `PI_VOICE_AUDIO\n`.
-4. After player startup, client replies `{"type":"session","version":2,"id":12345}\n`.
+4. After player startup, client replies `{"type":"session","version":2,"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}\n` (example ID).
 5. Only then does the host send mono little-endian Float32 PCM at 24 kHz.
 
-The client keeps the reverse direction open for newline-delimited JSON `{"type":"playback","position":1.234}`. Position is the actual player position in seconds. The client-generated session ID scopes control to this player.
+The client keeps the reverse direction open for newline-delimited JSON `{"type":"playback","position":1.234}`. Position is the actual player position in seconds. The client-generated session ID scopes control to this player. Generate a secure random lowercase UUID v4 once per stream, independent of its PID; preserve it as an opaque string. All scoped commands and completion/stop receipts must match that exact ID. Numeric IDs (including numeric strings), malformed IDs and path components are rejected.
 
-The host appends approximately one second of silence before clean EOF. After feeder EOF and successful player exit, the client sends `{"type":"complete","id":12345}` and closes. TCP acceptance, EOF, helper exit by signal, and elapsed duration are not completion proof. Premature close fails without automatic replay.
+The host appends approximately one second of silence before clean EOF. After feeder EOF and successful player exit, the client sends `{"type":"complete","id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}` and closes. TCP acceptance, EOF, helper exit by signal, and elapsed duration are not completion proof. Premature close fails without automatic replay.
 
-**Migration:** upgrade both host and client audio scripts. A v1 bundled client safely ignores the existing control command `hello`; the new host fails clearly without sending PCM or unknown raw headers. Custom clients must implement this safe control negotiation before use. New bundled clients retain legacy raw-input support for older hosts, but new hosts never accept legacy non-proof feedback.
+**Migration:** upgrade to the latest host and all client audio-script copies together. Earlier v2 clients using PID/numeric IDs are incompatible: the host rejects readiness before sending PCM and requests an upgrade. A failed pre-audio handshake is not a playback completion or remote stop proof; cancellation can release ownership only because no audio was admitted. Old numeric receipts cannot confirm modern streams. A v1 bundled client safely ignores the existing control command `hello`; the new host fails clearly without sending PCM or unknown raw headers. Custom clients must implement this safe control negotiation before use. New bundled clients retain legacy raw-input support for older hosts, but new hosts never accept legacy non-proof feedback.
 
 ## Pause/resume control connection
 
 A second short connection to the same output endpoint starts with exactly 16 ASCII bytes followed by a command and player ID:
 
 ```text
-PI_VOICE_CONTROLpause 12345\n
-PI_VOICE_CONTROLresume 12345\n
-PI_VOICE_CONTROLstop 12345\n
+PI_VOICE_CONTROLpause aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\n
+PI_VOICE_CONTROLresume aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\n
+PI_VOICE_CONTROLstop aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\n
 ```
 
-The bundled client maps pause/resume to mpv's `pause` property and stop to mpv's `quit` command. Stop replies `{"type":"stopped","id":12345}` only after the owning session has waited for actual player exit. Missing socket/PID alone is not proof. Exit receipts remain in the runtime directory so a scoped retry can recover a lost ACK. Control connections carry no PCM. Starting a new stream also replaces the previous endpoint player.
+The bundled client maps pause/resume to mpv's `pause` property and stop to mpv's `quit` command. Stop replies `{"type":"stopped","id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}` only after the owning session has waited for actual player exit. Missing socket/PID alone is not proof. Exit receipts remain in the runtime directory so a scoped retry can recover a lost ACK. Control connections carry no PCM. Starting a new stream also replaces the previous endpoint player.
 
 ### Host cancellation API and limitations
 

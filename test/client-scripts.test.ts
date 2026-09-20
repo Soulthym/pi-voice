@@ -483,7 +483,7 @@ wait $!`,
 			poll();
 		});
 
-		assert.match(stdout, /"type":"session","id":"\d+"/);
+		assert.match(stdout, /"type":"session","id":"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"/);
 		assert.match(stdout, /"type":"playback","position":1\.25/);
 		const socatLog = fs.readFileSync(path.join(root, "socat.log"), "utf8");
 		assert.match(socatLog, /get_property.*time-pos/);
@@ -506,7 +506,7 @@ test("control connections forward pause, resume, and stop to the targeted player
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-voice-audio-control-"));
 	const runtime = path.join(root, "runtime");
 	fs.mkdirSync(runtime);
-	const targetPath = path.join(runtime, "pi-voice-mpv-4242.sock");
+	const targetPath = path.join(runtime, "pi-voice-mpv-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.sock");
 	const received: string[] = [];
 	let targetServer: net.Server | undefined;
 	try {
@@ -519,7 +519,7 @@ test("control connections forward pause, resume, and stop to the targeted player
 		const result = await runScript(
 			path.join(CLIENT_DIR, "pi-voice-audio-session"),
 			[],
-			"PI_VOICE_CONTROLpause 4242\n",
+			"PI_VOICE_CONTROLpause aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\n",
 			baseEnv({ XDG_RUNTIME_DIR: runtime, PATH: bin }),
 			8_000,
 			root,
@@ -532,7 +532,7 @@ test("control connections forward pause, resume, and stop to the targeted player
 		const stopped = await runScript(
 			path.join(CLIENT_DIR, "pi-voice-audio-session"),
 			[],
-			"PI_VOICE_CONTROLstop 4242\n",
+			"PI_VOICE_CONTROLstop aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\n",
 			baseEnv({ XDG_RUNTIME_DIR: runtime, PATH: bin }),
 			8_000,
 			root,

@@ -582,15 +582,19 @@ function createNetworkSink(output, sampleRate, utterance) {
 	let stderr = "";
 	let readySettled = false;
 	let intentionallyStopped = false;
+	let noAudio = false;
+	let audioAdmitted = false;
 	const exited = new Promise((resolve, reject) => {
 		child.once("error", reject);
-		child.once("exit", (code, signal) => code === 0 ? resolve() : reject(new Error(`Remote playback unconfirmed: helper exited ${code ?? signal}`)));
+		child.once("exit", (code, signal) => code === 0 || code === 2 && noAudio && !audioAdmitted ? resolve() : reject(new Error(`Remote playback unconfirmed: helper exited ${code ?? signal}`)));
 	});
 	void exited.catch(error => { networkStopFailure = error; });
 	const { promise: ready, resolve: resolveReady, reject: rejectReady } = Promise.withResolvers();
 	const control = child.stdio[3];
 	const controlLines = readline.createInterface({ input: control });
 	controlLines.on("line", line => {
+		if (line === "no-audio") { noAudio = true; return; }
+		if (line === "ready") audioAdmitted = true;
 		if (readySettled) return;
 		readySettled = true;
 		if (line === "ready") resolveReady();
@@ -658,7 +662,7 @@ function createNetworkSink(output, sampleRate, utterance) {
 			else rejectReady(new Error(stderr.trim() || `TCP playback helper exited with code ${code ?? "unknown"}`));
 		}
 		// Keep failed remote transports owned: helper death is not sink stop proof.
-		if (code === 0 && playback.currentPlayer === sink) playback.clearCurrentPlayer();
+		if ((code === 0 || code === 2 && noAudio && !audioAdmitted) && playback.currentPlayer === sink) playback.clearCurrentPlayer();
 	});
 	return sink;
 }
