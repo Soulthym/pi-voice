@@ -54,3 +54,74 @@ for (const width of [28, 100, 120]) test(`native source marker ignores copied hi
 		history.push(`> ${transform().replace(/\n/g, "\n> ")}`);
 	}
 });
+
+for (const width of [18, 24, 28, 40]) test(`guided code keeps ANSI and UTF-16 spans at width ${width}`, () => {
+	const code = "const icon = '😀'; const face = icon;\nreturn icon;";
+	const source = `\`\`\`ts\n${code}\n\`\`\``;
+	const progress = new NarrationProgress();
+	progress.setCompletedText(source);
+	progress.registerSegment({ id: 1, utterance: 1, text: "Show the face.", source: { start: 0, end: 0 },
+		code: { blockSource: { start: 0, end: source.length }, code, language: "ts", cues: [{ offset: 0, operations: [
+			{ kind: "line-add", id: "line", range: { startLine: 1, endLine: 1 } },
+			{ kind: "bold-add", id: "name", range: { startLine: 1, endLine: 1,
+				startColumn: code.indexOf("face") + 1, endColumn: code.indexOf("face") + 4 } },
+		] }] } });
+	progress.setSegmentAudio(1, 0, 1);
+	progress.setPlayback(1, 0);
+	const syntax = (code: string, language?: string): string[] => code.split("\n").map(line =>
+		language === "ts" ? `\x1b[32m${line}\x1b[39m` : line);
+	const transformed = progress.transform(source, "assistant", plain, plain, undefined, true, syntax);
+	assert.ok(transformed.includes("\x1b[1mface"), "bold range starts after the full non-BMP character");
+	assert.ok(transformed.includes("\x1b[32m"), "syntax foreground is retained");
+	const render = (text: string): string[] => new native.Markdown(text, 1, 0, { ...theme, highlightCode: syntax }).render(width)
+		.map((line: string) => native.stripTerminalSequences(line).replaceAll("\u200c", ""));
+	assert.deepEqual(render(transformed), render(source));
+});
+
+for (const width of [18, 24, 28, 40]) test(`highlight never moves native glyphs at width ${width}`, () => {
+	const styledTheme: MarkdownTheme = {
+		...theme,
+		heading: text => `\x1b[35m${text}\x1b[39m`,
+		bold: text => `\x1b[1m${text}\x1b[22m`,
+		codeBlock: text => `\x1b[32m${text}\x1b[39m`,
+	};
+	for (const source of [
+		"Alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima.",
+		"## Alpha **bravo** charlie delta echo foxtrot golf hotel india juliet kilo lima.",
+		"1. Alpha **bravo** charlie delta echo foxtrot golf hotel india juliet kilo lima.",
+		"Alpha 😀 𐐀mega 界面 bravo charlie delta echo foxtrot golf hotel india.",
+		"Alpha bravo charlie delta echo foxtrot golf hotel.\n\n```ts\nconst face = '😀';\n```",
+	]) {
+		const progress = new NarrationProgress();
+		progress.setCompletedText(source);
+		const end = source.indexOf("\n\n") < 0 ? source.length : source.indexOf("\n\n");
+		const start = source.indexOf("Alpha");
+		progress.registerSegment({ id: 1, utterance: 1, text: source.slice(start, end), source: { start, end } });
+		progress.setSegmentAudio(1, 0, 10);
+		const render = (text: string): string[] => new native.Markdown(text, 1, 0, styledTheme).render(width);
+		const glyphs = (lines: string[]) => lines.map(line => native.stripTerminalSequences(line.replaceAll(progress.activeMarker, "")));
+		const baseline = render(source);
+		for (let position = 0; position < 10; position++) {
+			progress.setPlayback(1, position);
+			const transformed = progress.transform(source, "assistant",
+				text => `\x1b[38;5;244m${text}\x1b[39m`,
+				text => `\x1b[48;5;236m${text}\x1b[49m`,
+				undefined, true, undefined, progress.activeMarker);
+			const lines = render(transformed);
+			assert.deepEqual(glyphs(lines), glyphs(baseline), `${source}: position ${position}`);
+			assert.equal(lines.filter(line => line.includes(progress.activeMarker)).length, 1);
+			if (source.startsWith("Alpha bravo") && !source.includes("```")) {
+				assert.ok(lines.length > 1);
+				assert.equal(lines.filter(line => /\x1b\[[\d;]*48;5;236m/.test(line)).length, lines.length,
+					"native wrap reapplies one active zone on every visible row; TUI resets each row");
+			}
+			if (source.includes("**")) assert.ok(lines.some(line => line.includes("\x1b[1m")), "native bold survives");
+			if (source.startsWith("##")) assert.ok(lines.some(line => line.includes("\x1b[35m")), "native heading color survives");
+			if (source.includes("```")) assert.ok(lines.some(line => line.includes("\x1b[32m")), "native code color survives");
+		}
+		if (source.includes("𐐀mega")) {
+			progress.previewSourceOffset(source.indexOf("𐐀mega"));
+			assert.equal(progress.activeWordStart, source.indexOf("𐐀mega"), "source offsets stay UTF-16, not terminal columns");
+		}
+	}
+});

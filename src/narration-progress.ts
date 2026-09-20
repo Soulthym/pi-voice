@@ -13,8 +13,10 @@ export type NarrationMessageType = "assistant" | "assistant-thinking";
 export const NARRATION_ACTIVE_MARKER = "\u2063\u200b\u2063\u200c\u2063";
 
 function freshNarrationMarker(): string {
-	return [...randomBytes(12)].map(byte => byte.toString(2).padStart(8, "0")
-		.replace(/0/g, "\u200b").replace(/1/g, "\u200c")).join("") + NARRATION_ACTIVE_MARKER;
+	// APC is zero-width to Pi's ANSI tokenizer, not merely to its width counter.
+	// Unicode format characters can join a separator's grapheme and turn that
+	// separator into a word token while ANSI highlighting is being wrapped.
+	return `\x1b_pi-voice-${randomBytes(12).toString("hex")}\x1b\\${NARRATION_ACTIVE_MARKER}`;
 }
 
 export interface NarrationSourceRange {
@@ -288,6 +290,13 @@ function excludedMarkdownRanges(markdown: string): NarrationSourceRange[] {
 	return excluded;
 }
 
+// Pi's wrapper classifies whitespace with token.trim(), not ANSI-stripped
+// text. A reset before a separator makes it a word token, retained at a wrap
+// boundary. Move SGR across spaces, never glyphs or UTF-16 source offsets.
+function ansiFreeSeparators(text: string): string {
+	return text.replace(/((?:\x1b\[[\d;]*m)+)( +)/g, "$2$1");
+}
+
 function styleNarrationMarkdown(
 	markdown: string,
 	cursor: number,
@@ -351,7 +360,7 @@ function styleNarrationMarkdown(
 		offset = ranges[last].end;
 		index = last;
 	}
-	return output + markdown.slice(offset);
+	return ansiFreeSeparators(output + markdown.slice(offset));
 }
 
 const DIM_ON = "\x1b[2m";
@@ -414,7 +423,7 @@ function styleCodeLine(sourceLine: string, styledLine: string, lineNumber: numbe
 	for (const insertion of insertions.sort((left, right) => right.at - left.at)) {
 		output = output.slice(0, insertion.at) + insertion.text + output.slice(insertion.at);
 	}
-	return lineActive ? output : `${DIM_ON}${output}${INTENSITY_OFF}`;
+	return ansiFreeSeparators(lineActive ? output : `${DIM_ON}${output}${INTENSITY_OFF}`);
 }
 
 function styleCodeBlock(

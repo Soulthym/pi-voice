@@ -372,7 +372,7 @@ test("live marker survives deltas and source finalization, but paused selection 
 	await host.start();
 	await host.shortcut("f11"); await settle();
 	const markerIn = (text: string) => {
-		const marker = host.render(text).match(/[\u200b\u200c]*\u2063\u200b\u2063\u200c\u2063/)?.[0];
+		const marker = host.render(text).match(/\x1b_pi-voice-[a-f0-9]+\x1b\\\u2063\u200b\u2063\u200c\u2063/)?.[0];
 		assert.ok(marker);
 		return marker;
 	};

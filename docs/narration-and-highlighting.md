@@ -52,7 +52,7 @@ JavaScript/TypeScript-family fences use Tree-sitter target IDs so the model sele
 For each spoken segment, Pi Voice retains source ranges, synthesized duration, optional CTC word alignment, and actual player position.
 
 - Unread words are dim.
-- The active sentence/newline unit receives a continuous background, including whitespace.
+- The active sentence/newline unit receives a background on each visible wrapped line, including inter-word whitespace. Pi's native ANSI wrapper carries styling to each row and its renderer resets at each row boundary; Voice does not split raw UTF-16 text into terminal columns.
 - Reached words return to normal.
 - Guided code operations activate against playback time.
 
@@ -66,9 +66,13 @@ With `autoScroll: true` (the default), Pi Voice attaches an invisible location m
 
 After that initial placement, no scrolling occurs while the word remains in the 20–80% visible band. Each time a new spoken word moves past the 80% mark, it is re-anchored at 20%. F6/F7/F9/F10/F11 replay and seek actions, F8 resume, `/voice attention`, and `/voice scroll-to` all re-arm this behavior. The first marker lookup establishes the active message's transcript position; subsequent words reuse that anchor until layout or target changes invalidate it, rather than periodically rendering the whole transcript.
 
-Manual scrolling overrides automatic motion, even outside the band, until an explicit follow/navigation action. A small hint below the editor offers `Alt+V` (or the configured `scrollToShortcut`) to run `/voice scroll-to` and restore the canonical 20% anchor immediately. `/voice bottom` is deliberately separate: it pins the transcript to its end and resumes transcript-end following; the default shortcut is `Alt+T`. This tail-follow state is also the position after the latest message: press F10 from that message or F9 from its final sentence/newline unit to pause active playback and enter it.
+Manual scrolling overrides automatic motion, even outside the band, until an explicit follow/navigation action. While a narrated position exists, the **Jump to voice location** button below the editor runs the same action as `Alt+V` (or the configured `scrollToShortcut`) and `/voice scroll-to`: restore the canonical 20% anchor without resuming paused audio, including with auto-scroll disabled. Clicking does not move keyboard focus or print another notice. Fullscreen Pi versions with native `MouseRegion` support provide clicks; regular terminal mode and older Pi retain the existing shortcut/command fallback. Voice does not add another jump-to-latest banner. `/voice bottom` is deliberately separate: it pins the transcript to its end and resumes transcript-end following; the default shortcut is `Alt+T`. This tail-follow state is also the position after the latest message: press F10 from that message or F9 from its final sentence/newline unit to pause active playback and enter it.
 
 Pi's native End/Bottom follow and `/voice bottom` pin immediately. New output extending a pinned end during ongoing narration restores windowed 20–80% following, remembering the intent to return to the tail on final completion. Manual browsing cancels that intent; explicit replay/navigation establishes its own framing. Queued next-message playback frames that message directly, without bouncing through the tail. Paused navigation previews without resuming, and background timing never moves the paused highlight or viewport.
+
+### Native UI integration
+
+The button uses Pi's documented [`setWidget` placement](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/docs/tui.md#pattern-5-widgets-abovebelow-editor) and [`MouseRegion` click dispatch](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/docs/tui.md#mouse-input), not an overlay or a replacement editor. The installed implementations are `pi-tui/dist/components/mouse-region.js`, `components/markdown.js` (`Markdown.render`), and `utils.js` (`wrapTextWithAnsi`). Selection-scoped APC markers and ANSI-free separator tokens keep narration metadata out of native word-boundary decisions; original source offsets, code colors, and copied historical markers remain intact.
 
 ## Timing diagnostics
 

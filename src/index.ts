@@ -64,7 +64,7 @@ import { anchorLineForMessage, computeAutoScrollTop, isManualScrollAway } from "
 import { applySpokenEdit, parseEditModelSelector, resolveDictationCandidates } from "./prompt-editor.js";
 import { formatAsrDisplay } from "./asr-display.js";
 import { narrationRenderKey } from "./render-identity.js";
-import { frameNarrationViewport, invalidateNarrationMarkdown } from "./narration-render.js";
+import { frameNarrationViewport, invalidateNarrationMarkdown, narrationJumpButton } from "./narration-render.js";
 import { SessionCoordinator, type AttentionRequest, type WaitingSession } from "./session-coordinator.js";
 import { supportsInteractiveVoice } from "./session-mode.js";
 import { Vocalizer } from "./vocalizer.js";
@@ -516,6 +516,7 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	let progressWidgetKey: string | undefined;
+	let jumpWidgetVisible = false;
 	let displayedCodeProgress: PreprocessingProgress | undefined;
 	let displayedTimingProgress: PreprocessingProgress | undefined;
 	let preprocessingPaint: ReturnType<typeof setTimeout> | undefined;
@@ -548,6 +549,13 @@ export default async function (pi: ExtensionAPI) {
 					? line.text
 					: ctx.ui.theme.fg(line.kind === "playback" && state === "speaking" ? "accent" : "dim", line.text),
 			);
+			const canJump = config.enabled && ownsSpeech && narration.activeWordStart !== undefined;
+			if (canJump !== jumpWidgetVisible) {
+				ctx.ui.setWidget("pi-voice-jump", canJump ? (_tui, theme) =>
+					narrationJumpButton(text => theme.fg("accent", text), () => scrollToNarration(ctx)) : undefined,
+					{ placement: "belowEditor" });
+				jumpWidgetVisible = canJump;
+			}
 			const key = JSON.stringify([contextEpoch, lines]);
 			if (key === progressWidgetKey) return;
 			ctx.ui.setWidget("pi-voice-progress", lines.length > 0 ? lines : undefined, { placement: "belowEditor" });
@@ -3146,6 +3154,8 @@ export default async function (pi: ExtensionAPI) {
 		clearInputProgress();
 		ctx.ui.setStatus("pi-voice", undefined);
 		ctx.ui.setWidget("pi-voice-render-driver", undefined);
+		ctx.ui.setWidget("pi-voice-jump", undefined);
+		jumpWidgetVisible = false;
 		ctx.ui.setWidget("pi-voice-progress", undefined);
 		ctx.ui.setWidget("pi-voice-input", undefined);
 		ctx.ui.setWidget("pi-voice-playback", undefined);

@@ -144,7 +144,7 @@ test("dims code, reveals line groups, bolds spans, and restores the block", () =
 	progress.setPlayback(1, 0);
 	const syntax = (source: string): string[] => source.split("\n").map(line => `\x1b[31m${line}\x1b[39m`);
 	const focused = progress.transform(markdown, "assistant", text => text, text => text, () => undefined, true, syntax);
-	assert.match(focused, /\x1b\[31mconst \x1b\[1mtotal\x1b\[22m = price/);
+	assert.match(focused, /\x1b\[31mconst \x1b\[1mtotal \x1b\[22m= price/); // Separator stays ANSI-free for native wrapping.
 	assert.match(focused, /\x1b\[2m\x1b\[31mreturn total;\x1b\[39m\x1b\[22m/);
 
 	progress.setPlayback(1, 2.1);

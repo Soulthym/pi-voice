@@ -1,3 +1,29 @@
+import * as nativeTui from "@earendil-works/pi-tui";
+
+/** Native fullscreen click region; regular/older Pi keeps the existing shortcut. */
+export function narrationJumpButton(style: (text: string) => string, jump: () => void): nativeTui.Component {
+	let columns = 0;
+	const label = "[ Jump to voice location ]";
+	const child: nativeTui.Component = {
+		render(width) {
+			columns = Math.min(width, nativeTui.visibleWidth(label));
+			return [style(nativeTui.truncateToWidth(label, width))];
+		},
+		invalidate() {},
+	};
+	// MouseRegion was added after the minimum supported Pi version. Do not
+	// capture raw terminal input or replace the editor to emulate it there.
+	const MouseRegion = (nativeTui as unknown as { MouseRegion?: new (
+		child: nativeTui.Component,
+		handler: (event: { type: string; button: string; x: number; y: number }) => { handled: boolean } | undefined,
+	) => nativeTui.Component }).MouseRegion;
+	return MouseRegion ? new MouseRegion(child, event => {
+		if (event.type !== "click" || event.button !== "left" || event.y !== 0 || event.x < 0 || event.x >= columns) return;
+		jump();
+		return { handled: true };
+	}) : child;
+}
+
 /** Playing may follow a clamped tail; a paused narration anchor must stay fixed. */
 export function frameNarrationViewport(view: {
 	contentHeight?: number;

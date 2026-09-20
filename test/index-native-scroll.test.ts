@@ -10,10 +10,15 @@ import { FakeVoiceHost, MockedVoiceWorkerClient, assistant } from "./helpers/fak
 mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: MockedVoiceWorkerClient } });
 // Optional installed Pi runtime exercises newer native mouse/banner code without changing dependencies.
 const native = await import(process.env.PI_VOICE_TEST_TUI_MODULE ?? "@earendil-works/pi-tui");
+if (process.env.PI_VOICE_TEST_TUI_MODULE) mock.module("@earendil-works/pi-tui", { namedExports: { ...native } });
 const settle = () => new Promise(resolve => setTimeout(resolve, 120));
 initTheme("dark");
 
-for (const action of ["paused anchor", "End", "banner", "controls", "search", "search forced render", "drag", "PageDown bottom", "wheel bottom", "scrollbar bottom", "narrow cached", "wide cached", "current cached"]) test(`native viewport: ${action}`, async t => {
+for (const action of ["paused anchor", "button", "End", "banner", "controls", "search", "search forced render", "drag", "PageDown bottom", "wheel bottom", "scrollbar bottom", "narrow cached", "wide cached", "current cached"]) test(`native viewport: ${action}`, async t => {
+	if (action === "button" && !native.MouseRegion) {
+		t.skip("older Pi has no MouseRegion; Alt+V remains available");
+		return;
+	}
 	const cached = action.endsWith("cached");
 	const width = action === "narrow cached" ? 28 : action === "current cached" ? 120 : 100;
 	const terminal = { columns: width, rows: action === "current cached" ? 50 : 40, write() {}, hideCursor() {} };
@@ -84,7 +89,7 @@ for (const action of ["paused anchor", "End", "banner", "controls", "search", "s
 	await settle();
 	if (cached) {
 		const activeMarker = () => {
-			const marker = renderText().match(/[\u200b\u200c]*\u2063\u200b\u2063\u200c\u2063/)?.[0];
+			const marker = renderText().match(/\x1b_pi-voice-[a-f0-9]+\x1b\\\u2063\u200b\u2063\u200c\u2063/)?.[0];
 			assert.ok(marker, "the actual host render must contain its active marker");
 			return marker;
 		};
@@ -244,7 +249,7 @@ for (const action of ["paused anchor", "End", "banner", "controls", "search", "s
 		return;
 	}
 
-	if (action === "paused anchor") {
+	if (action === "paused anchor" || action === "button") {
 		await host.shortcut("f11"); // Restore the preview after the synthetic tick (no worker segments).
 		await settle();
 		marker = 299;
@@ -253,7 +258,22 @@ for (const action of ["paused anchor", "End", "banner", "controls", "search", "s
 		tui.doRender();
 		assert.equal(tui.scrollToEndIndicatorRect, undefined);
 		await host.shortcut("f8");
-		await host.command("scroll-to");
+		if (action === "button") {
+			await host.command("autoscroll off");
+			await settle();
+			const button = host.widgetComponents.get("pi-voice-jump") as any;
+			assert.ok(button instanceof native.MouseRegion);
+			assert.equal(button.handleInput, undefined, "no new key handler or focus capture");
+			assert.match(button.render(100)[0], /Jump to voice location/);
+			assert.equal(button.render(18).length, 1, "narrow button stays one row below the editor");
+			const event = { type: "click", button: "left", x: 3, y: 0, screenX: 3, screenY: 0,
+				width: 18, height: 1, shift: false, alt: false, ctrl: false };
+			const notices = host.notices.length;
+			assert.equal(button.handleMouse({ ...event, type: "move" }), undefined);
+			assert.equal(button.handleMouse({ ...event, x: 19 }), undefined);
+			assert.equal(button.handleMouse(event)?.handled, true);
+			assert.equal(host.notices.length, notices, "jump does not spam banners/notices");
+		} else await host.command("scroll-to");
 		assert.equal(view.scrollTop, 260);
 		assert.equal(view.isFollowingEnd, false, "paused Alt+V must not pin the tail");
 		count = 320;
