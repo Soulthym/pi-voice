@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import * as fs from "node:fs/promises";
 import os from "node:os";
+import * as net from "node:net";
 import path from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import { mock, test } from "node:test";
@@ -9,6 +10,12 @@ import { mock, test } from "node:test";
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 test("network padding cancellation waits for confirmed helper exit", { timeout: 5000 }, async t => {
+	const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+	let receipt = false;
+	const server = net.createServer(socket => socket.on("data", () => socket.end(receipt ? JSON.stringify({ type: "stopped", id }) + "\n" : "")));
+	await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+	t.after(() => server.close());
+	const output = `tcp://127.0.0.1:${(server.address() as net.AddressInfo).port}`;
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-network-stop-"));
 	const oldCache = process.env.PI_VOICE_CACHE_DIR;
 	process.env.PI_VOICE_CACHE_DIR = root;
@@ -100,7 +107,7 @@ test("network padding cancellation waits for confirmed helper exit", { timeout: 
 			});
 			await import(new URL(`../src/worker.mjs?network-stop=${encodeURIComponent(name)}`, import.meta.url).href);
 			send({ type: "segment", utterance: 1, segmentId: 1, text: "Stop test.",
-				voice: "af_heart", speed: 1, output: "tcp://127.0.0.1:12345" });
+				voice: "af_heart", speed: 1, output });
 			send({ type: "end", utterance: 1 });
 			for (let attempt = 0; attempt < 100 && (rejectHandshake ? !players[0] : players[0]?.writes.length !== 2); attempt++) await wait(5);
 			const child = players[0];
@@ -133,6 +140,7 @@ test("network padding cancellation waits for confirmed helper exit", { timeout: 
 			assert.equal(child.stdin.writableEnded, false);
 			assert.ok(!events.some(e => e.type === "idle"));
 
+			if (name === "nonzero exit") child.stdio[3].write(`session ${id}\n`);
 			send({ type: "cancel", cancelId: 42 });
 			await wait(20); // Let destroyed-stdin close and the cancelled end operation settle.
 			assert.ok(child.commands.includes("stop\n"));
@@ -160,8 +168,15 @@ test("network padding cancellation waits for confirmed helper exit", { timeout: 
 				assert.ok(!events.some(e => e.type === "error"));
 			} else {
 				assert.deepEqual(idle, [], "failed helper exit must not acknowledge cancellation or utterance completion");
-				assert.ok(events.some(e => e.type === "error" &&
-					e.message.includes(`Remote playback unconfirmed: helper exited ${code ?? signal}`)));
+				assert.ok(events.some(e => e.type === "error" && e.code === "REMOTE_PLAYBACK_UNCONFIRMED"));
+				if (name === "nonzero exit") {
+					receipt = true;
+					send({ type: "cancel", cancelId: 43 });
+					for (let attempt = 0; attempt < 100 && !events.some(e => e.cancelId === 43); attempt++) await wait(5);
+					assert.deepEqual(events.filter(e => e.type === "idle"), [{ type: "idle", cancelId: 43 }], "exact retry receipt clears the failed barrier");
+					assert.ok(events.some(e => e.type === "remote-released" && e.id === id));
+					receipt = false;
+				}
 			}
 		});
 	}

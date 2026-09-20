@@ -21,6 +21,7 @@ export function createPlaybackController({ send }) {
 
 	function startPlayer(sampleRate, utterance, output, createSink) {
 		if (player && playerUtterance === utterance && playerOutput === output) return player;
+		if (player?.requiresStopProof) throw new Error("Remote playback must be confirmed stopped before replacement");
 		stopPlayer();
 		const sink = createSink(output, sampleRate, utterance);
 		playerGeneration += 1;
@@ -54,6 +55,11 @@ export function createPlaybackController({ send }) {
 	function stopPlayer() {
 		const sink = player;
 		if (sink) playerGeneration += 1;
+		if (sink?.requiresStopProof) {
+			return Promise.resolve().then(() => sink.stop()).then(() => {
+				if (player === sink) clearCurrentPlayer();
+			});
+		}
 		clearCurrentPlayer();
 		if (!sink) return Promise.resolve();
 		try {

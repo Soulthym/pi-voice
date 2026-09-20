@@ -29,7 +29,7 @@ test("real tts-workers command persists and reaches the worker protocol without 
 		return Object.assign(child, { stdin: new Writable({ write(chunk, _encoding, done) {
 			const packet = JSON.parse(String(chunk));
 			packets.push(packet);
-			if (packet.type === "shutdown") { child.exitCode = 0; child.emit("exit", 0); }
+			if (packet.type === "shutdown") { child.exitCode = 0; child.emit("exit", 0); child.stdout.end(); child.stderr.end(); child.emit("close", 0); }
 			done();
 		} }) });
 	} } });

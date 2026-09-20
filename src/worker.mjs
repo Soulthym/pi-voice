@@ -7,6 +7,7 @@ import * as readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import { env as transformersEnv, pipeline } from "@huggingface/transformers";
 import { KokoroTTS } from "kokoro-js";
+import { stopRemotePlayback, validStreamId, RemotePlaybackUnconfirmedError } from "./remote-playback.mjs";
 import { createPlaybackController } from "./playback-controller.mjs";
 import { generateSentenceAudio } from "./sentence-audio.mjs";
 import { SentencePool } from "./sentence-pool.mjs";
@@ -50,6 +51,11 @@ function send(message) {
 	if (synthesisChild) {
 		if (process.connected) process.send({ event: message }, () => {});
 	} else process.stdout.write(`${JSON.stringify(message)}\n`);
+}
+
+function sendError(error, fields = {}) {
+	send({ type: "error", message: error instanceof Error ? error.message : String(error),
+		...(error instanceof RemotePlaybackUnconfirmedError ? { code: error.code } : {}), ...fields });
 }
 
 const playback = createPlaybackController({ send });
@@ -575,8 +581,6 @@ function waitForDrainOrClose(writable) {
 	});
 }
 
-// The shared controller is best-effort; network stop proof must not be swallowed.
-let networkStopFailure;
 function createNetworkSink(output, sampleRate, utterance) {
 	validateNetworkEndpoint(output);
 	const helperPath = fileURLToPath(new URL("./tcp-playback.mjs", import.meta.url));
@@ -591,21 +595,23 @@ function createNetworkSink(output, sampleRate, utterance) {
 	let intentionallyStopped = false;
 	let noAudio = false;
 	let audioAdmitted = false;
+	let session;
 	const exited = new Promise((resolve, reject) => {
 		child.once("error", reject);
-		child.once("close", (code, signal) => code === 0 || code === 2 && noAudio && !audioAdmitted ? resolve() : reject(new Error(`Remote playback unconfirmed: helper exited ${code ?? signal}`)));
+		child.once("close", (code, signal) => code === 0 || code === 2 && noAudio && !audioAdmitted ? resolve() : reject(new RemotePlaybackUnconfirmedError(`helper exited ${code ?? signal}${stderr.trim() ? `: ${stderr.trim()}` : ""}`)));
 	});
-	void exited.catch(error => { networkStopFailure = error; });
+	void exited.catch(() => {});
 	const { promise: ready, resolve: resolveReady, reject: rejectReady } = Promise.withResolvers();
 	const control = child.stdio[3];
 	const controlLines = readline.createInterface({ input: control });
 	controlLines.on("line", line => {
+		if (line.startsWith("session ") && validStreamId(line.slice(8))) { session = line.slice(8); return; }
 		if (line === "no-audio") { noAudio = true; return; }
 		if (line === "ready") audioAdmitted = true;
 		if (readySettled) return;
 		readySettled = true;
 		if (line === "ready") resolveReady();
-		else rejectReady(new Error(line.replace(/^error\s*/, "") || "TCP playback helper failed"));
+		else rejectReady(noAudio ? new Error(line.replace(/^error\s*/, "")) : new RemotePlaybackUnconfirmedError(line.replace(/^error\s*/, "") || "TCP playback helper failed"));
 	});
 	child.stderr.on("data", chunk => {
 		stderr = `${stderr}${String(chunk)}`.slice(-2_000);
@@ -617,7 +623,9 @@ function createNetworkSink(output, sampleRate, utterance) {
 			else rejectReady(error);
 		}
 	});
+	control.on("error", error => { stderr = error.message; });
 	const sink = {
+		requiresStopProof: true,
 		writable: child.stdin,
 		ready,
 		stopped: false,
@@ -653,14 +661,18 @@ function createNetworkSink(output, sampleRate, utterance) {
 			child.stdin.destroy();
 			const killTimer = setTimeout(() => child.kill("SIGKILL"), 2_000);
 			killTimer.unref?.();
-			return exited.finally(() => clearTimeout(killTimer));
+			return exited.catch(async error => {
+				if (!session) throw error;
+				await stopRemotePlayback({ output, id: session });
+				send({ type: "remote-released", id: session });
+			}).finally(() => clearTimeout(killTimer));
 		},
 		setPaused(paused) {
 			control.write(`${paused ? "pause" : "resume"}\n`);
 		},
 	};
 	child.stdin.on("error", error => {
-		if (playback.currentPlayer === sink && !shuttingDown) send({ type: "error", message: error.message, utterance });
+		if (playback.currentPlayer === sink && !shuttingDown) sendError(new RemotePlaybackUnconfirmedError(error.message, { cause: error }), { utterance });
 	});
 	child.on("exit", code => {
 		if (!readySettled) {
@@ -695,7 +707,6 @@ function setPlayerPaused(paused) {
 
 async function stopPlayer() {
 	await playback.stopPlayer();
-	if (networkStopFailure) throw networkStopFailure;
 }
 
 async function writeAudio(sink, pcm) {
@@ -751,7 +762,7 @@ async function runOperation(operation) {
 	if (operation.type === "end") {
 		const completed = await closePlayer(operation.utterance);
 		// Empty utterances complete, but cancelled drains must await the stop ACK.
-		if (!completed && operation.epoch === epoch && !networkStopFailure) send({ type: "idle", utterance: operation.utterance });
+		if (!completed && operation.epoch === epoch && !playback.currentPlayer) send({ type: "idle", utterance: operation.utterance });
 		return;
 	}
 	if (operation.type === "measure") {
@@ -817,11 +828,7 @@ async function pump() {
 				await runOperation(operation);
 			} catch (error) {
 				if (operation.epoch !== epoch) continue;
-				send({
-					type: "error",
-					message: error instanceof Error ? error.message : String(error),
-					...(Number.isInteger(operation.utterance) ? { utterance: operation.utterance } : {}),
-				});
+				sendError(error, Number.isInteger(operation.utterance) ? { utterance: operation.utterance } : {});
 				// Terminal synthesis/sink failure invalidates the remaining utterance;
 				// otherwise queued segments can create a second uncontrolled player.
 				await scheduleCancel();
@@ -830,7 +837,7 @@ async function pump() {
 	} finally {
 		activeOperation = undefined;
 		pumping = false;
-		if (queue.length > 0 && !shuttingDown) void cancelBarrier.then(() => pump()).catch(error => send({ type: "error", message: String(error) }));
+		if (queue.length > 0 && !shuttingDown) void cancelBarrier.then(() => pump()).catch(error => sendError(error));
 	}
 }
 
@@ -844,7 +851,7 @@ function enqueue(operation) {
 		else queue.splice(backgroundAt, 0, queued);
 	}
 	primeAudio();
-	void cancelBarrier.then(() => pump()).catch(error => send({ type: "error", message: String(error) }));
+	void cancelBarrier.then(() => pump()).catch(error => sendError(error));
 }
 
 function scheduleCancel(cancelId) {
@@ -860,7 +867,8 @@ function scheduleCancel(cancelId) {
 				operation.type === "preload" || operation.type === "transcribe" || operation.type === "transcribe-pcm",
 		)
 		.map(operation => ({ ...operation, epoch }));
-	cancelBarrier = cancelBarrier.then(async () => {
+	// A rejected stop blocks ordinary work, but an explicit cancel retries the same sink.
+	cancelBarrier = cancelBarrier.catch(() => {}).then(async () => {
 		await stopPlayer();
 		send({ type: "idle", ...(Number.isInteger(cancelId) ? { cancelId } : {}) });
 	});
@@ -876,7 +884,7 @@ function shutdown(cancelId) {
 		stopAlignment();
 		process.exit(0);
 	}, error => {
-		send({ type: "error", message: String(error) });
+		sendError(error);
 		process.exit(1);
 	});
 }
@@ -976,7 +984,7 @@ lines.on("line", line => {
 			setPlayerPaused(message.paused === true);
 			break;
 		case "cancel":
-			void scheduleCancel(message.cancelId).catch(error => send({ type: "error", message: String(error) }));
+			void scheduleCancel(message.cancelId).catch(error => sendError(error));
 			break;
 		case "shutdown":
 			shutdown(message.cancelId);

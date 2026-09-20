@@ -38,6 +38,10 @@ The bundled client maps pause/resume to mpv's `pause` property and stop to mpv's
 
 `VoiceWorkerClient.cancel()` returns a cancel ID; only matching `idle.cancelId` confirms stop. Integration may wait one second, then await `VoiceWorkerClient.terminate()`. Termination cleans up its owned detached local worker group, including descendants after unexpected worker exit. **A rejected termination retains the speech lease in the extension integration.**
 
+Before PCM admission, the helper publishes the original endpoint and opaque stream ID to `VoiceWorkerClient`. This handle survives helper/worker failure. Retry `terminate()` on that **same client instance** after restoring the original connection: it cleans owned local descendants and requests `stop` for the retained stream, never a newly routed endpoint or PID. Only its exact receipt clears the failure latch and permits a replacement worker; disconnected or foreign-session responses retain ownership. Do not discard the failed client during reconnect. Remote failures expose `code: "REMOTE_PLAYBACK_UNCONFIRMED"` on errors/events for episode-level UI handling, rather than relying on error-message matching.
+
+An EPIPE/helper-exit report establishes transport failure, not its underlying network/device cause. The mocked disconnect, broken-pipe and lost-ACK tests demonstrate recovery semantics; they do not identify the cause of an unobserved live failure.
+
 Forced local termination cannot confirm remote buffered audio stopped. This implementation deliberately rejects termination and blocks replacement worker creation when remote completion/stop proof is missing; it does not claim that killing SSH/helper/worker stops the phone. A lost ACK, disconnected endpoint, stuck player, or unconfirmed local cleanup therefore requires recovery rather than lease release. Local cleanup is bounded and retains retiring handles on failure. Process-group cleanup is POSIX-only; Windows lacks descendant group confirmation. Player-exit proof does not measure physical speaker latency or hardware buffers. Runtime receipt cleanup must not occur while stop confirmation is outstanding.
 
 ## Input commands

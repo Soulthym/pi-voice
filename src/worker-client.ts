@@ -1,6 +1,8 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import * as readline from "node:readline";
+import { stopRemotePlayback, validStreamId, RemotePlaybackUnconfirmedError } from "./remote-playback.mjs";
+export { RemotePlaybackUnconfirmedError } from "./remote-playback.mjs";
 import { normalizeWorkerCount, type VoiceConfig } from "./config.js";
 
 import type { AlignmentWord, TimingQuality } from "./narration-progress.js";
@@ -8,6 +10,8 @@ import type { AlignmentWord, TimingQuality } from "./narration-progress.js";
 export type MeasurementPhase = "cache-decode" | "synthesis";
 
 export type WorkerEvent =
+	| { type: "remote-handle"; output: string; id: string; utterance: number }
+	| { type: "remote-released"; id: string }
 	| { type: "loading" }
 	| { type: "progress"; percent?: number; file?: string }
 	| { type: "ready"; requestId?: string }
@@ -23,7 +27,7 @@ export type WorkerEvent =
 	| { type: "transcribing" }
 	| { type: "transcript"; text: string; candidates?: string[]; requestId: string; preview?: boolean }
 	| { type: "idle"; utterance?: number; cancelId?: number }
-	| { type: "error"; message: string; requestId?: string; preview?: boolean; utterance?: number };
+	| { type: "error"; message: string; code?: "REMOTE_PLAYBACK_UNCONFIRMED"; requestId?: string; preview?: boolean; utterance?: number };
 
 type PendingPreload = {
 	resolve: () => void;
@@ -56,6 +60,9 @@ export class VoiceWorkerClient {
 	#retiring = new Set<ChildProcessWithoutNullStreams>();
 	#signalled = new Set<ChildProcessWithoutNullStreams>();
 	#remoteUnconfirmed = false;
+	#remoteHandles = new Map<string, { output: string; id: string; utterance: number }>();
+	#remoteUtterance: number | undefined;
+	#closed = new WeakSet<ChildProcessWithoutNullStreams>();
 	#remoteGeneration = 0;
 	#cancelGenerations = new Map<number, number>();
 	#ttsWorkers: number | undefined;
@@ -86,6 +93,7 @@ export class VoiceWorkerClient {
 		});
 		if (/^(tcp|unix):/.test(config.output)) {
 			this.#remoteUnconfirmed = true;
+			this.#remoteUtterance = utterance;
 			this.#remoteGeneration += 1;
 		}
 	}
@@ -248,7 +256,14 @@ export class VoiceWorkerClient {
 		}
 		this.#pendingMeasurements.clear();
 		for (const owned of this.#retiring) await this.#stopOwned(owned);
-		if (this.#remoteUnconfirmed) throw new Error("Remote playback stop unconfirmed; retain speech lease (host termination cannot stop buffered device audio)");
+		// Retained identities survive worker/helper death and bridge metadata changes.
+		const hadHandles = this.#remoteHandles.size > 0;
+		for (const [id, handle] of this.#remoteHandles) {
+			await stopRemotePlayback(handle);
+			this.#remoteHandles.delete(id);
+		}
+		if (hadHandles) this.#remoteUnconfirmed = false;
+		if (this.#remoteUnconfirmed) throw new RemotePlaybackUnconfirmedError("no scoped remote receipt available");
 	}
 
 	async #stopOwned(child: ChildProcessWithoutNullStreams): Promise<void> {
@@ -279,7 +294,8 @@ export class VoiceWorkerClient {
 				}
 				// A signal request is not termination. Wait for transport pipes to close.
 			};
-			if (alreadyExited) { clearTimeout(closeDeadline); killOwned(); resolve(); return; }
+			if (this.#closed.has(child)) { clearTimeout(closeDeadline); killOwned(); resolve(); return; }
+			if (alreadyExited) killOwned();
 			const timer = setTimeout(killOwned, 2_000);
 			child.once("close", () => {
 				clearTimeout(timer);
@@ -316,6 +332,7 @@ export class VoiceWorkerClient {
 			env: { ...process.env },
 		});
 		this.#child = child;
+		child.once("close", () => this.#closed.add(child));
 		child.stdin.on("error", error => {
 			if (this.#child === child) this.#handleFailure(error);
 		});
@@ -359,7 +376,19 @@ export class VoiceWorkerClient {
 		} catch {
 			return;
 		}
-		if (event.type === "idle") {
+		if (event.type === "remote-handle") {
+			if (validStreamId(event.id) && /^(tcp|unix):/.test(event.output)) {
+				this.#remoteHandles.set(event.id, { output: event.output, id: event.id, utterance: event.utterance });
+				this.#remoteUnconfirmed = true;
+			}
+			return;
+		}
+		if (event.type === "remote-released") {
+			const handle = this.#remoteHandles.get(event.id);
+			if (handle && this.#remoteHandles.delete(event.id) && this.#remoteHandles.size === 0 && handle.utterance === this.#remoteUtterance) this.#remoteUnconfirmed = false;
+			return;
+		}
+		if (event.type === "idle" && this.#remoteHandles.size === 0) {
 			if (event.cancelId !== undefined) {
 				if (this.#cancelGenerations.get(event.cancelId) === this.#remoteGeneration) this.#remoteUnconfirmed = false;
 				this.#cancelGenerations.delete(event.cancelId);
@@ -420,6 +449,9 @@ export class VoiceWorkerClient {
 	}
 
 	#handleFailure(error: Error): void {
+		if (this.#remoteUnconfirmed && !(error instanceof RemotePlaybackUnconfirmedError)) {
+			error = new RemotePlaybackUnconfirmedError(error.message, { cause: error });
+		}
 		for (const pending of this.#pendingPreloads.values()) {
 			clearTimeout(pending.timer);
 			pending.reject(error);
@@ -438,6 +470,7 @@ export class VoiceWorkerClient {
 		this.#onEvent({
 			type: "error",
 			message: error.message,
+			...(error instanceof RemotePlaybackUnconfirmedError ? { code: error.code } : {}),
 			...(this.#activeUtterance !== undefined ? { utterance: this.#activeUtterance } : {}),
 		});
 		this.#activeUtterance = undefined;
