@@ -28,6 +28,8 @@ ls -la ~/.cache/pi-voice/devices
 
 `/voice stop` cancels processing promptly but a timeout/disconnect does not prove remote audio or microphone capture stopped. Ownership stays retained and replacement work is blocked. Restore the **original device connection**, then explicitly retry `/voice stop` for capture cleanup or `/voice reconnect` for retained output cleanup. Input retries use the saved endpoint and full ticket, not a newly selected route; a different server at the same port cannot acknowledge the old epoch. If the original recorder cannot be reached, confirm/stop it on that device out of band before recovery.
 
+`REMOTE_PLAYBACK_UNCONFIRMED` reports one actionable diagnostic for the failed playback episode, including its original cause; cascading helper/Stop/Input/Turn failures do not repeat it. An explicit reconnect retry reports its own result. Output cleanup retains the same worker client and opaque original remote handle, even if the helper has exited or route metadata changed. Reconnect awaits that cleanup before adopting a new pin, including same-route retries and retained cleanup after reload; failure keeps the lease.
+
 Do not remove coordinator leases, ticket state, recorder locks, persistent fences or receipts while confirmation is outstanding. Killing Pi, SSH, a helper or the host worker is not remote stop proof. Do not start a permission-test recording alongside an unconfirmed capture. Successful cleanup permits a later explicit retry; it never automatically restarts playback/capture.
 
 ## “Voice microphone connection closed before returning audio”

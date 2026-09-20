@@ -380,6 +380,13 @@ export default async function (pi: ExtensionAPI) {
 	const transportCancelWaiters = new Map<number, () => void>();
 	let state: VoiceState = "idle";
 	let lastError = "";
+	let remoteStopDiagnostic: { notified: boolean; utterance?: number } | undefined;
+	let stopDiagnostic = { cause: "", notified: false };
+	const notifyStopFailure = (error: unknown): void => {
+		const cause = error instanceof Error ? error.message : String(error);
+		if (stopDiagnostic.cause !== cause) stopDiagnostic = { cause, notified: false };
+		notifyVoice(activeContext, `Stop unconfirmed; ownership retained: ${cause} · restore the original device connection; /voice reconnect to retry cleanup`, "error", remoteStopDiagnostic ?? stopDiagnostic);
+	};
 	let inputInProgress = false;
 	let inputEpoch = 0;
 	let activeInputEndpoint: string | undefined;
@@ -1520,6 +1527,13 @@ export default async function (pi: ExtensionAPI) {
 				return;
 			case "error":
 				if (event.preview) break;
+				if (event.code === "REMOTE_PLAYBACK_UNCONFIRMED") {
+					if (!remoteStopDiagnostic || (event.utterance !== undefined && remoteStopDiagnostic.utterance !== event.utterance)) {
+						remoteStopDiagnostic = { notified: false, utterance: event.utterance };
+					}
+					deviceRetryRequired = true;
+					notifyStopFailure(event.message);
+				}
 				if (
 					event.utterance !== undefined &&
 					(event.utterance === lastOwnerUtterance ||
@@ -1540,7 +1554,7 @@ export default async function (pi: ExtensionAPI) {
 					if (ownsSpeech) releaseAfterTransportCancellation(cancelId, false);
 				}
 				state = "error";
-				if (event.message !== lastError) {
+				if (event.code !== "REMOTE_PLAYBACK_UNCONFIRMED" && event.message !== lastError) {
 					lastError = event.message;
 					notifyVoice(activeContext, event.message, "error");
 				}
@@ -1645,7 +1659,7 @@ export default async function (pi: ExtensionAPI) {
 		void barrier.then(() => {
 			if (cancelId !== undefined) transportStops.delete(cancelId);
 			if (transportStopBarrier === barrier) transportStopPending = false;
-		}, error => notifyVoice(activeContext, `Stop failed; ownership retained: ${String(error)} · restore the device connection; /voice reconnect to retry cleanup`, "error"));
+		}, notifyStopFailure);
 		return barrier;
 	};
 
@@ -1656,7 +1670,7 @@ export default async function (pi: ExtensionAPI) {
 				if (ownsSpeech && speechLeaseEpoch === leaseEpoch) releaseSpeechOwnership(announceNext);
 			});
 			if (ownsSpeech && speechLeaseEpoch === leaseEpoch) releaseSpeechOwnership(announceNext);
-		}).catch(error => notifyVoice(activeContext, `Stop failed; ownership retained: ${error instanceof Error ? error.message : String(error)} · restore the device connection; /voice reconnect to retry cleanup`, "error"));
+		}).catch(notifyStopFailure);
 	};
 
 	const phoneInput = new PhoneInputClient();
@@ -1998,6 +2012,10 @@ export default async function (pi: ExtensionAPI) {
 				// Explicit reconnect retries stop proof; ordinary playback still waits on the failure.
 				if (previous) await previous.catch(() => { stopUnconfirmed = unconfirmedDeviceStops.has(previous); });
 				if (epoch !== playbackRequestEpoch || ctx !== activeContext || !interactiveVoiceSession) return false;
+				if (force) {
+					remoteStopDiagnostic = undefined;
+					stopDiagnostic = { cause: "", notified: false };
+				}
 				if (force && retiredStops.size) {
 					const previousStopUnconfirmed = stopUnconfirmed;
 					stopUnconfirmed = true;
@@ -2024,7 +2042,7 @@ export default async function (pi: ExtensionAPI) {
 					changed ||= inputInProgress && (inputRoute.endpoint !== inputEndpoint ||
 						(inputRoute.kind === "device" ? inputRoute.device.connectedAt : undefined) !== inputGeneration);
 				} catch (error) { if (!identityChanged && inputInProgress) throw error; }
-				if (previous || (changed && (ownsSpeech || inputInProgress))) {
+				if (previous || transportStopPending || (force && deviceRetryRequired) || (changed && (ownsSpeech || inputInProgress))) {
 					// Termination, not a TCP accept or a cancellation timeout, proves the old sink is gone.
 					stopUnconfirmed = true;
 					await Promise.all([vocalizer.shutdown(), cancelActiveInput()]);
@@ -3245,7 +3263,7 @@ export default async function (pi: ExtensionAPI) {
 			if (request !== playbackRequestEpoch || !interactiveVoiceSession || deviceRebind) return;
 			releaseSpeechOwnership(false);
 			if (!attentionSuppressed) await reserveSpeechForInput();
-		}).catch(error => notifyVoice(activeContext, `Input stop failed; ownership retained: ${String(error)} · restore the device connection; /voice reconnect to retry cleanup`, "error"));
+		}).catch(notifyStopFailure);
 	});
 
 	pi.on("before_agent_start", async () => {
@@ -3261,7 +3279,7 @@ export default async function (pi: ExtensionAPI) {
 		void waitForTransportCancellation(cancelId).then(() => {
 			if (request !== playbackRequestEpoch || !interactiveVoiceSession || deviceRebind) return;
 			if (!speechReservedForInput) releaseSpeechOwnership(false);
-		}).catch(error => notifyVoice(activeContext, `Turn stop failed; ownership retained: ${String(error)} · restore the device connection; /voice reconnect to retry cleanup`, "error"));
+		}).catch(notifyStopFailure);
 	});
 
 	pi.on("message_start", event => {

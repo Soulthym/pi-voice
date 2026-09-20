@@ -64,6 +64,42 @@ test("timeout awaits termination proof; failed termination retains lease and blo
  t.mock.timers.reset();
 });
 
+test("canonical remote failure is one episode and same-route reconnect retries the original client before repinning", async t => {
+ const { host, worker, lease } = await setup(t);
+ await host.command("test Old audio.");
+ const utterance = (worker.sent.at(-1) as { utterance: number }).utterance;
+ t.mock.method(worker, "cancel", () => 91 as never);
+ const terminate = t.mock.method(worker, "terminate", async () => { throw new Error("original handle unavailable"); });
+ t.mock.timers.enable({ apis: ["setTimeout"] });
+ worker.emit({ type: "error", code: "REMOTE_PLAYBACK_UNCONFIRMED", message: "Remote playback unconfirmed: write EPIPE", utterance });
+ worker.emit({ type: "error", code: "REMOTE_PLAYBACK_UNCONFIRMED", message: "Remote playback unconfirmed: helper exited", utterance });
+ await host.command("stop");
+ await host.emit("input", {});
+ await host.emit("before_agent_start", {});
+ t.mock.timers.tick(1000); await settle();
+ assert.equal(host.notices.filter(notice => notice.level === "error").length, 1);
+ assert.match(host.notices.find(notice => notice.level === "error")!.message, /EPIPE.*original device.*reconnect/);
+ assert.ok(await fs.stat(lease));
+ const pins = () => host.entries.filter(entry => entry.type === "custom" && entry.customType === "pi-voice.device-selection").length;
+ const before = pins();
+ await host.command("reconnect"); await settle();
+ assert.equal(pins(), before, "failed retry cannot change the pin");
+ assert.ok(host.notices.some(notice => /original handle unavailable/.test(notice.message)), "retry result remains visible");
+ const stopped = Promise.withResolvers<void>();
+ terminate.mock.mockImplementation(() => stopped.promise);
+ const retry = host.command("reconnect"); await settle();
+ assert.equal(pins(), before);
+ assert.ok(await fs.stat(lease));
+ stopped.resolve(); await retry; await settle();
+ assert.equal(pins(), before + 1);
+ assert.ok(terminate.mock.callCount() >= 3, "same worker client survives failures and retries");
+ const errors = host.notices.filter(notice => notice.level === "error").length;
+ worker.emit({ type: "error", code: "REMOTE_PLAYBACK_UNCONFIRMED", message: "Remote playback unconfirmed: new stream failure", utterance: utterance + 1 });
+ assert.equal(host.notices.filter(notice => notice.level === "error").length, errors + 1, "a distinct failure is not suppressed");
+ assert.match(host.notices.at(-1)!.message, /new stream failure/);
+ t.mock.timers.reset();
+});
+
 test("same-ID changed endpoint/generation rebuild waits for proof and gates deltas, turn cleanup and talk", async t => {
  const { host, worker, lease, registration, register } = await setup(t);
  const partial = assistant("First. ", "pending");

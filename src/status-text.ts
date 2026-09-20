@@ -2,8 +2,10 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { PlaybackStatus } from "./playback-history.js";
 
 /** Pi supplies severity icons/colors; the text also stands alone in RPC/plain output. */
-export function notifyVoice(ctx: ExtensionContext | null | undefined, message: string, level: "info" | "warning" | "error"): void {
-	ctx?.ui.notify(`Voice · ${message.replace(/^Voice(?: · |: | )/, "")}`, level);
+export function notifyVoice(ctx: ExtensionContext | null | undefined, message: string, level: "info" | "warning" | "error", episode?: { notified: boolean }): void {
+	if (!ctx || episode?.notified) return;
+	if (episode) episode.notified = true;
+	ctx.ui.notify(`Voice · ${message.replace(/^Voice(?: · |: | )/, "")}`, level);
 }
 
 /** Word alignment provenance is independent of the device playback clock. */
