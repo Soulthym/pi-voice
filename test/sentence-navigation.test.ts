@@ -35,6 +35,9 @@ test("prose navigation preserves list prefixes and numeric tokens with plain and
 	for (const first of [
 		"1. First option.", "Use 3.14 and version 1.2.3.", "🦊 Done.",
 		"494 tests passed; native-TUI checks 10/10.", "10/10.",
+		"Call path.to.module.submodule.function.",
+		"Call path.to.module.submodule.function first.",
+		"Call `path.to.module.submodule.function`.",
 	]) {
 		for (const formatted of [false, true]) {
 			const head = formatted ? `${NARRATION_ACTIVE_MARKER}**${first}**${NARRATION_ACTIVE_MARKER}` : first;

@@ -41,6 +41,9 @@ test("formatted boundaries preserve list markers, abbreviations, numeric tokens 
 	for (const [text, expected] of [
 		["1. First option. Second option.", ["1, First option.", "Second option."]],
 		["**Dr.** Smith uses e.g. version 1.2.3 and 3.14 units. Next.", ["Dr. Smith uses e.g. version 1.2.3 and 3.14 units.", "Next."]],
+		["Call path.to.module.submodule.function. Next.", ["Call path.to.module.submodule.function.", "Next."]],
+		["Call path.to.module.submodule.function first. Next.", ["Call path.to.module.submodule.function first.", "Next."]],
+		["Call `path.to.module.submodule.function`. Next.", ["Call path.to.module.submodule.function.", "Next."]],
 		["🦊 **Done.** Next.", ["🦊 Done.", "Next."]],
 		["Use `one. two.` Next.", ["Use one. two.", "Next."]],
 		["Read *this.* Next.", ["Read this.", "Next."]],
