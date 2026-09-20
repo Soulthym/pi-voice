@@ -598,7 +598,7 @@ test("pending live replay keeps its source IDs across the next tool turn", async
 	assert.equal(host.render("New prefix completed.").includes(NARRATION_ACTIVE_MARKER), false, "new finalization must not inherit the old replay capture");
 });
 
-for (const wait of ["device", "history"]) for (const scenario of ["partial", "completed", "retry", "third", "stop", "navigate"]) test(`live replay preserves newer responses during ${wait} wait (${scenario})`, async t => {
+for (const wait of ["device", "history"]) for (const scenario of ["partial", "completed", "retry", "third", "third-completed", "stop", "navigate"]) test(`live replay preserves newer responses during ${wait} wait (${scenario})`, async t => {
 	const completed = scenario !== "partial";
 	const host = await setup(t, wait === "device" ? "auto" : "local");
 	await host.start();
@@ -646,7 +646,7 @@ for (const wait of ["device", "history"]) for (const scenario of ["partial", "co
 		await host.emit("turn_end", { message: done });
 	};
 	if (completed) await finish();
-	if (scenario === "third") {
+	if (scenario.startsWith("third")) {
 		const third = assistant("Third prefix", "pending");
 		await host.emit("message_start", { message: third });
 		await host.emit("message_update", { message: third, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Third prefix" } });
@@ -680,7 +680,17 @@ for (const wait of ["device", "history"]) for (const scenario of ["partial", "co
 		worker.emit({ type: "idle", utterance: (worker.sent.at(-1) as { utterance: number }).utterance });
 		await settle();
 	};
+	const cleared = t.mock.method(SessionCoordinator.prototype, "clearWaiting");
+	if (scenario === "third-completed") {
+		const third = assistant("New prefix completed."); // Same content, different source identity.
+		await host.emit("message_update", { message: third, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: " completed." } });
+		host.addMessage("third", "new", third);
+		await host.emit("message_end", { message: third });
+		await host.emit("turn_end", { message: third });
+		assert.ok(host.notices.some(notice => /response paused/.test(notice.message)));
+	}
 	await idle();
+	if (scenario === "third-completed") assert.equal(cleared.mock.callCount(), 0, "draining B must not clear completed C's waiting source");
 	if (!completed) {
 		assert.ok(host.notices.some(notice => /response paused/.test(notice.message)), "displaced partial response must retain completion attention");
 		await host.shortcut("f11"); await settle();
@@ -688,6 +698,12 @@ for (const wait of ["device", "history"]) for (const scenario of ["partial", "co
 	assert.deepEqual(spoken(), ["Old prefix", "Old final.", "New prefix completed."]);
 	await idle();
 	assert.deepEqual(spoken(), ["Old prefix", "Old final.", "New prefix completed."], "neither source may replay twice");
+	if (scenario === "third-completed") {
+		await host.shortcut("f11"); await settle();
+		assert.equal(cleared.mock.callCount(), 1, "handling C clears its waiting source");
+		await idle();
+		assert.deepEqual(spoken(), ["Old prefix", "Old final.", "New prefix completed.", "New prefix completed."]);
+	}
 	if (scenario === "third") {
 		const third = assistant("Third prefix completed.");
 		await host.emit("message_update", { message: third, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: " completed." } });

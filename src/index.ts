@@ -335,6 +335,7 @@ export default async function (pi: ExtensionAPI) {
 	let liveSource: { assistant: unknown; final: boolean; before: Message[]; existingEntries: Set<string>; waiters: Set<() => void> } | undefined;
 	let liveBlockIndex: number | undefined;
 	let liveBlockIds = new Map<number, string>();
+	let waitingSource: typeof liveSource;
 	const setDescriptionSource = (contentIndex: number, suffixOffset = 0): void => {
 		const source = liveSource?.assistant === speechAssistantMessage ? liveSource : undefined;
 		const assistant = speechAssistantMessage;
@@ -1750,6 +1751,7 @@ export default async function (pi: ExtensionAPI) {
 		purpose: "turn" | "replay",
 		announceProject: boolean,
 		output = true,
+		handledSource: typeof liveSource | null = liveSource,
 	): boolean => {
 		try { if (output) claimOutputDevice(); } catch (error) {
 			attentionSuppressed = true;
@@ -1778,11 +1780,14 @@ export default async function (pi: ExtensionAPI) {
 		ownedSpeechText = "";
 		pendingNotification = undefined;
 		completingOwnerSpeech = false;
-		pausedForAttention = false;
+		if (!waitingSource || waitingSource === handledSource) {
+			pausedForAttention = false;
+			waitingSource = undefined;
+			coordinator.clearWaiting();
+		}
 		speechBlocked = false;
 		blockedMessageHasSpeech = false;
 		blockedSpeechText = "";
-		coordinator.clearWaiting();
 		refreshStatus();
 		return true;
 	};
@@ -1854,6 +1859,7 @@ export default async function (pi: ExtensionAPI) {
 				blockedSpeechText = interrupted.spokenText;
 				blockedMessageHasSpeech = hasSpeakableAudio(interrupted.spokenText);
 			} else {
+				waitingSource = liveSource;
 				coordinator?.markWaiting();
 			}
 			refreshStatus();
@@ -2189,7 +2195,11 @@ export default async function (pi: ExtensionAPI) {
 			return;
 		}
 
-		if (!activateSpeechOwnership(continueLiveTurn && !replaySource?.final ? "turn" : "replay", true)) {
+		const completedAssistant = waitingSource && !replaySource && !target.source && activeContext && completedAssistantMessages(activeContext, config.mode, false)
+			.find(message => message.id === target.id)?.assistantMessage;
+		const handledSource = replaySource ?? target.source ??
+			(waitingSource && completedAssistant === waitingSource.assistant ? waitingSource : undefined);
+		if (!activateSpeechOwnership(continueLiveTurn && !replaySource?.final ? "turn" : "replay", true, true, handledSource ?? null)) {
 			pendingReplay = undefined;
 			return;
 		}
@@ -2907,6 +2917,7 @@ export default async function (pi: ExtensionAPI) {
 		attentionSuppressed = false;
 		deviceRetryRequired = false;
 		disabledAttentionPending = false;
+		waitingSource = undefined;
 		queueIncomingWhilePaused = false;
 		queuedPausedMessages.length = 0;
 		contextEpoch += 1;
@@ -3071,6 +3082,7 @@ export default async function (pi: ExtensionAPI) {
 		restoreBottomAfterSpeech = false;
 		bottomPinned = false;
 		coordinator?.clearWaiting();
+		waitingSource = undefined;
 		pausedForAttention = false;
 		speechBlocked = false;
 		blockedMessageHasSpeech = false;
@@ -3307,6 +3319,7 @@ export default async function (pi: ExtensionAPI) {
 		const completedTurn = stopReason !== "aborted" && stopReason !== "error" && stopReason !== undefined;
 		if (!config.enabled && !attentionSuppressed && requiresVoiceAttention(eligibleAssistantBlocks(event.message, config.mode).map(block => block.text).join("\n"), config.mode, stopReason)) {
 			disabledAttentionPending = true;
+			waitingSource = liveSource;
 		}
 		if (config.enabled && !attentionSuppressed && config.mode === "yield" && completedTurn) {
 			const text = assistantText(event.message);
@@ -3343,6 +3356,7 @@ export default async function (pi: ExtensionAPI) {
 				ownerTurnEnded = true;
 				completeOwnerSpeech();
 			} else if (blockedMessageHasSpeech) {
+				waitingSource = liveSource;
 				coordinator?.markWaiting();
 				pausedForAttention = true;
 				speechBlocked = false;
