@@ -123,6 +123,13 @@ Read `docs/installation.md` and `docs/endpoint-protocol.md` for migration/recove
 - Long units use overlapping 30-second windows (24-second stride), conservative source-ordered refinement and estimates for uncertain portions. Sentence audio/navigation remains atomic. Limits: 16 MiB PCM and 32,768 text characters per alignment unit. No promise of complete long-unit refinement.
 - Word-timing quality is distinct from transport-clock estimation. Local playhead updates continue through buffered playback drain; helper `close`/feedback drain precedes classification of completion/refusal.
 
+## Latest requested UX and sentence fix
+
+- User LIVE confirmation: paused/unpaused navigation works and flicker is gone; retain those behaviors.
+- Implemented separate actual-source-word `Word timing: n/total estimated` row, honest unknown/pending coverage, explicit idle/waiting/paused/playing states, and fixed-width numeric updates under native wrapping. Sparse saved checkpoints cannot reconstruct word totals; code-description coordinates are excluded. Denominator/unknown-state transitions may resize naturally; fixed-total refinements do not.
+- Fixed formatted/marker-adjacent sentence endings in the shared synthesis/navigation splitter, preserving ordered prefixes, abbreviations, numeric decimals/versions, inline code and UTF-16 offsets. Plain reported text already split correctly. Boundary identity bumped only for affected narration timing compatibility; description/audio-content assets unchanged.
+- Offline validation: typecheck, 506 passing tests (one native-banner compatibility skip), installed native TUI 10/10. See latest `FINDINGS.md` evidence and `docs/testing.md`. No live restart or provider/hardware validation performed.
+
 ## Evidence and outstanding verification
 
 - Initial production-pool concurrency benchmark selected **3**, not the earlier standalone experiment's 4: ~1.76× sequential synthesis throughput at ~1.75× ordered latency; 4 exceeded 2×. This is not a live phone throughput claim.

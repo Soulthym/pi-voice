@@ -2,6 +2,17 @@
 
 Updated incrementally. Companion: `PLAN.md`. Reorganize freely while preserving evidence and disposition.
 
+## Latest UX — explicit word counts, playback state, formatted sentence boundaries
+
+**New LIVE positive evidence from the user:** paused and unpaused navigation work; flicker is gone. Preserve the proven follow/progress behavior. This implementation was tested offline, not reloaded into those live sessions.
+
+- Counts now say `Word timing: 1/3 estimated` on their own row (fully refined: `0/3 estimated`). The denominator is actual applicable source words in the selected record's timed units, including a selected suffix—not messages, sparse navigation checkpoints, or an inferred count from aggregate quality. Count before the 0.4-second navigation thinning and first-word exclusion. Unknown provenance, registered-but-untimed units and sparse-only restored/recovered snapshots show `Word timing: unknown/pending`; code-description coordinates are excluded because they are not Markdown source words. Compatible in-memory variants retain counts. Newly arriving words may change the denominator; no claim of full future streaming coverage.
+- Alignment updates remain metadata-only while paused. A native 32-column probe found `1000/1000` → `0/1000` could remove a wrapped row; non-breaking leading count padding now preserves the count token width for a fixed denominator. Widths 20/32/40 are covered. Unknown→known or growing totals can still legitimately change wrapped height; no background-row clearing/reinsertion or forced render was introduced. Input → playback → descriptions → timing precedence remains intact.
+- Startup and missing-timing branches share explicit `○ Idle`, `◷ Waiting`, `⏯ Paused`, `▶ Playing` labels. Selection alone is not playing. Removed the clock estimate from this compact widget rather than implying that it establishes word refinement.
+- **Reproduced sentence root:** plain `494 tests passed; native-TUI checks 10/10. Run /reload, then test paused navigation after manually scrolling away and watch the timing row for flicker.` already split correctly. The shared regex did not accept Markdown emphasis closers or copied narration markers between punctuation and whitespace. Formatted text therefore merged the sentences, including streamed delta splits. Both prose navigation (`PlaybackHistory` → `SpeakableStream`) and code navigation (`chunkCodeNarration` → `findSentenceCut`) consume the same boundaries; no separate digit-before-dot navigation heuristic exists. Closers/markers are now accepted; line-start ordered prefixes remain attached, abbreviations/backticks remain guarded, decimal/version dots between digits remain unsplit, and lowercase continuations require no capitalization wait. Tests assert UTF-16 source offsets and every split of the formatted report.
+- Spoken unit boundaries genuinely changed, so narration render identity advances v3→v4 to reject stale timing restores. Description identities and independent audio-cache content keys are unchanged.
+- Validation: `npm run check`; full suite **506 passed, 1 native-banner compatibility skip (507 total)**; installed native TUI **10/10 passed**; `git diff --check`. Logs `/tmp/pi-voice-ux-final-tests.log`, `/tmp/pi-voice-ux-native.log`. LSP unavailable. No provider/model/hardware calls, configuration changes, live reloads/restarts, or transcript exports. `ISSUES.md` preserved untracked.
+
 ## Live UX follow-up — native follow, stable progress and quality provenance
 
 Implemented in `aa0aa40` (quality), `b588661` (follow), `8e4638f` (progress).
