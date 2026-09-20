@@ -1369,7 +1369,8 @@ export default async function (pi: ExtensionAPI) {
 		try {
 			activeScrollView()?.scrollToEnd?.();
 			atTranscriptTail = transcriptIsFollowingEnd();
-			navigationAtTail = atTranscriptTail;
+			const latest = activeContext && completedAssistantMessages(activeContext, config.mode, false).at(-1);
+			navigationAtTail = atTranscriptTail && (!liveSource || liveSource.final) && latest?.id === playbackHistory.selected()?.id;
 		} catch {
 			// Follow restoration is cosmetic; ignore missing runtime support.
 		}
@@ -1576,6 +1577,9 @@ export default async function (pi: ExtensionAPI) {
 		requestPlaybackTimeline();
 	};
 
+	// Seeded live streams emit absolute ranges; history adds its capture origin itself.
+	let liveCaptureOrigin = 0;
+	const liveCaptureOrigins = new Map<number, number>();
 	const vocalizer = new Vocalizer(
 		() => routedVoiceConfig(),
 		handleWorkerEvent,
@@ -1592,9 +1596,10 @@ export default async function (pi: ExtensionAPI) {
 				ownerContentExpected = true;
 			}
 			narration.registerSegment(segment);
-			const base = segment.sourceBase ?? 0;
+			const base = (segment.sourceBase ?? 0) + (liveCaptureOrigins.get(segment.utterance) ?? 0);
 			playbackHistory.registerSegment({
 				...segment,
+				sourceBase: base,
 				source: { start: segment.source.start - base, end: segment.source.end - base },
 				code: segment.code
 					? {
@@ -1618,6 +1623,7 @@ export default async function (pi: ExtensionAPI) {
 		},
 		undefined,
 		utterance => {
+			if (liveCaptureOrigin) liveCaptureOrigins.set(utterance, liveCaptureOrigin);
 			playbackUtterances.add(utterance);
 			playbackHistory.bindUtterance(utterance);
 			if (!ownsSpeech) return;
@@ -1635,6 +1641,8 @@ export default async function (pi: ExtensionAPI) {
 		if (!ownsSpeech) coordinator?.releaseSpeech();
 		pendingReplay = undefined;
 		const cancelId = vocalizer.clear();
+		liveCaptureOrigin = 0;
+		liveCaptureOrigins.clear();
 		if (cancelId !== undefined) void waitForTransportCancellation(cancelId);
 		playbackPaused = false;
 		pausedOwnerUtterance = undefined;
@@ -2190,7 +2198,7 @@ export default async function (pi: ExtensionAPI) {
 			recordTimings,
 			previewTarget,
 			restoreTail,
-			paused: playbackPaused,
+			paused: pendingReplay?.paused ?? playbackPaused,
 			waiting: true,
 			continueLiveTurn,
 			source: replaySource,
@@ -2296,6 +2304,7 @@ export default async function (pi: ExtensionAPI) {
 			const cancelId = clearPlaybackTransport();
 			request.epoch = playbackRequestEpoch;
 			pendingReplay = request;
+			playbackPaused = request.paused;
 			try { await waitForTransportCancellation(cancelId); }
 			catch (error) {
 				if (pendingReplay === request) {
@@ -2320,8 +2329,11 @@ export default async function (pi: ExtensionAPI) {
 			suffix = target.text.slice(sourceOffset);
 			speechConversationMessages = replaySource.before;
 			speechAssistantMessage = replaySource.assistant;
-			narration.setCompletedText(target.text, target.messageType, target.contentIndex, target.displayOffset);
-			narration.previewSourceOffset(sourceOffset);
+			if (request.previewTarget) previewPlaybackTarget({ ...target, sourceOffset }, !queued);
+			else {
+				narration.setCompletedText(target.text, target.messageType, target.contentIndex, target.displayOffset);
+				narration.previewSourceOffset(sourceOffset);
+			}
 			queueIncomingWhilePaused = false;
 		}
 		if (!queued) {
@@ -2377,6 +2389,7 @@ export default async function (pi: ExtensionAPI) {
 		ownerContentExpected = hasSpeakableAudio(suffix);
 		if (ownerContentExpected) announceProjectForSpeech();
 		if (continueLiveTurn) {
+			liveCaptureOrigin = sourceOffset;
 			vocalizer.setNarrationSourceOffset(0, target.skipUnits ?? 0);
 			const prefix = request.target.tailPrefix ?? target.text.slice(0, sourceOffset);
 			vocalizer.seedLivePrefix(prefix);
@@ -2391,6 +2404,7 @@ export default async function (pi: ExtensionAPI) {
 					// A new tool turn owns live capture now. Drain the old source as
 					// completed blocks without lending its IDs to the new assistant.
 					vocalizer.flush();
+					liveCaptureOrigin = 0;
 					const offset = narration.startMessage();
 					const id = replayBlockIds.get(block.contentIndex) ?? `live:${++nextLivePlaybackId}`;
 					replayBlockIds.set(block.contentIndex, id);
@@ -3338,6 +3352,8 @@ export default async function (pi: ExtensionAPI) {
 				refreshStatus();
 				return;
 			}
+			navigationAtTail = false;
+			liveCaptureOrigin = 0;
 			ownerTurnEnded = false;
 			completedOwnerUtterance = undefined;
 			ownedSpeechText = "";
@@ -3363,6 +3379,7 @@ export default async function (pi: ExtensionAPI) {
 		if (liveBlockIndex !== contentIndex) {
 			if (liveBlockIndex !== undefined) {
 				vocalizer.flush();
+				liveCaptureOrigin = 0;
 				vocalizer.setNarrationSourceOffset(narration.startMessage());
 				livePlaybackId = liveBlockIds.get(contentIndex) ?? `live:${++nextLivePlaybackId}`;
 				playbackHistory.beginCapture(livePlaybackId, "", 0, true, 0, 0, false);
@@ -3512,6 +3529,7 @@ export default async function (pi: ExtensionAPI) {
 		if (config.enabled && !attentionSuppressed && config.mode === "yield" && completedTurn) {
 			const text = assistantText(event.message);
 			if (text && stopReason !== "toolUse" && acquireSpeech("turn")) {
+				navigationAtTail = false;
 				const messages = syncPlaybackMessages(ctx);
 				narration.begin();
 				let firstBlock = true;
@@ -3598,7 +3616,7 @@ export default async function (pi: ExtensionAPI) {
 	// These IDs belong to the source, not its position in the eligible block list.
 	const liveNavigationMessages = (): PlaybackMessage[] => {
 		if (!liveSource || liveSource.final) return [];
-		return eligibleAssistantBlocks(liveSource.assistant, config.mode).map(block => {
+		return eligibleAssistantBlocks(liveSource.assistant, config.mode).filter(block => hasSpeakableAudio(block.text)).map(block => {
 			let id = liveBlockIds.get(block.contentIndex);
 			if (!id) {
 				id = liveBlockIds.size === 0 && liveBlockIndex === undefined && livePlaybackId ? livePlaybackId : `live:${++nextLivePlaybackId}`;
@@ -3800,7 +3818,9 @@ export default async function (pi: ExtensionAPI) {
 		const stream = new SpeakableStream();
 		const units: Array<{ sourceOffset: number; skipUnits: number }> = [];
 		let complete = true;
-		const streaming = liveMessages.at(-1)?.id === selected.id;
+		const content = (liveSource?.assistant as { content?: unknown[] } | undefined)?.content;
+		const streaming = liveMessages.some(message => message.id === selected.id) &&
+			selected.contentIndex === (content?.length ?? 0) - 1;
 		for (const item of [...stream.push(selected.text), ...(streaming ? [] : stream.flush())]) {
 			let count = 1;
 			if (item.kind === "code") {
@@ -3908,6 +3928,7 @@ export default async function (pi: ExtensionAPI) {
 				request.restoreTail &&= !narrationManuallyFramed &&
 					(nativeGestureTracking || lastAutoScrollTop === undefined || activeScrollView()?.scrollTop === lastAutoScrollTop);
 				if (request.paused && !request.waiting) {
+					request.paused = false;
 					playbackPaused = false;
 					narration.setPaused(playbackPaused);
 					void playTarget(request.target, request.recordTimings, request.previewTarget, false, false, request.restoreTail);
