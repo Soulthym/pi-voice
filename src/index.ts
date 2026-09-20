@@ -527,6 +527,12 @@ export default async function (pi: ExtensionAPI) {
 			const playback = config.enabled ? playbackHistory.status() : undefined;
 			let playbackLine: string | undefined;
 			if (playback) {
+				if (playback.messageIndex < 0 && playback.messageId.startsWith("live:")) {
+					const completed = completedAssistantMessages(ctx, config.mode).length;
+					const liveIds = [...liveBlockIds.values()];
+					playback.messageIndex = completed + Math.max(0, liveIds.indexOf(playback.messageId));
+					playback.messageCount = completed + Math.max(1, liveIds.length);
+				}
 				const icon = playbackStateLabel(playbackPaused, state, !!pendingReplay?.waiting);
 				if (!playback.hasTimings || playback.duration <= 0) {
 					playbackLine = `${icon} · ${pendingPlaybackTiming(playback.messageIndex, playback.messageCount)}`;

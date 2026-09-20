@@ -217,8 +217,9 @@ test("unified progress widget orders input, playback, and preprocessing and clea
 
 	let lines = await waitForWidgetLines(host, candidate => candidate.length >= 2);
 	assert.match(lines[0], /^○ Idle · message 1\/1 · timing pending$/);
-	assert.match(lines[1], /Preparing code descriptions · 0\/1 targets processed/);
-	assert.equal(lines[2], "Word timing: unknown/pending");
+	assert.equal(lines[1], "Word timing: unknown/pending");
+	assert.equal(lines.some(line => line.includes("Preparing code descriptions")), false,
+		"background descriptions must not contend with the deferred foreground utterance");
 	assert.equal(
 		lines.some(line => line.includes("Recovering speech timing")),
 		false,
@@ -230,7 +231,8 @@ test("unified progress widget orders input, playback, and preprocessing and clea
 	lines = host.widgetLines() ?? lines;
 	assert.match(lines[0], /🎙 Input · (connecting|listening) · [01]s/);
 	assert.match(lines[1], /^○ Idle ·/);
-	assert.equal(lines.some(line => line.includes("Preparing code descriptions")), true);
+	assert.equal(lines.some(line => line.includes("Preparing code descriptions")), false,
+		"microphone ownership also defers background descriptions");
 	assert.equal(lines.at(-1), "Word timing: unknown/pending");
 
 	// Stop the recording; once its lease is released, timing preprocessing joins
