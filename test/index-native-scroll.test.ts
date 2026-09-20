@@ -11,7 +11,7 @@ mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: Mock
 const native = await import(process.env.PI_VOICE_TEST_TUI_MODULE ?? "@earendil-works/pi-tui");
 const settle = () => new Promise(resolve => setTimeout(resolve, 120));
 
-for (const action of ["paused anchor", "End", "banner", "controls"]) test(`native viewport: ${action}`, async t => {
+for (const action of ["paused anchor", "End", "banner", "controls", "search", "search forced render", "drag", "PageDown bottom", "wheel bottom", "scrollbar bottom"]) test(`native viewport: ${action}`, async t => {
 	const tui: any = new native.TuiAltScreen({ columns: 100, rows: 40, write() {}, hideCursor() {} }, false, undefined,
 		{ scrollToEndIndicator: () => "↓ Jump to latest message (End)" });
 	if (action === "banner" && !tui.handleScrollToEndIndicatorMouseEvent) {
@@ -25,12 +25,13 @@ for (const action of ["paused anchor", "End", "banner", "controls"]) test(`nativ
 	let count = 300;
 	let marker = 100;
 	const transcript = new native.ScrollView({ invalidate() {}, render: () => Array.from({ length: count }, (_, i) =>
-		i === marker ? `${NARRATION_ACTIVE_MARKER}First` : `line ${i}`) }, { primary: true, follow: "end" });
+		i === marker ? `${NARRATION_ACTIVE_MARKER}First` : `line ${i}`) }, { primary: true, follow: "end", scrollbar: action === "scrollbar bottom" ? "always" : "hidden" });
 	tui.setLayoutRoot(transcript);
 	tui.doRender();
 	const view = tui.getPrimaryScrollView();
 	view.piVoiceCacheNarrationLayout = false;
 	const originalBottom = tui.scrollToBottom;
+	const originalGestures = [tui.handleViewportInput, tui.refreshSearch, tui.autoScrollSelection];
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-native-scroll-"));
 	const keys = ["PI_VOICE_CONFIG", "PI_VOICE_COORDINATOR_DIR", "PI_VOICE_DEVICE_DIR"];
 	const previous = keys.map(key => process.env[key]);
@@ -44,6 +45,8 @@ for (const action of ["paused anchor", "End", "banner", "controls"]) test(`nativ
 	t.after(async () => {
 		await host.shutdown();
 		assert.equal(tui.scrollToBottom, originalBottom, "dispose restores the native adapter");
+		assert.deepEqual([tui.handleViewportInput, tui.refreshSearch, tui.autoScrollSelection], originalGestures);
+		tui.stopSelectionAutoScroll();
 		keys.forEach((key, i) => { if (previous[i] === undefined) delete process.env[key]; else process.env[key] = previous[i]; });
 		await fs.rm(root, { recursive: true, force: true });
 	});
@@ -74,12 +77,58 @@ for (const action of ["paused anchor", "End", "banner", "controls"]) test(`nativ
 	await host.shortcut("f11");
 	assert.equal(view.scrollTop, 92, "replay immediately rearms after manual browsing");
 	view.scrollTo(30);
+	tui.requestRender(true);
+	tui.doRender();
 	await settle();
 	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
 	const last = worker.sent.at(-1) as { utterance: number };
 	const tick = async () => { worker.emit({ type: "playback", utterance: last.utterance, position: 0 }); await settle(); };
 	await tick();
 	assert.equal(view.scrollTop, 92, "programmatic motion does not cancel the ongoing 20–80% follow band");
+
+	if (["search", "search forced render", "drag", "PageDown bottom", "wheel bottom", "scrollbar bottom"].includes(action)) {
+		tui.doRender();
+		if (action.startsWith("search")) {
+			tui.handleTerminalInput("\x1b[102;6u"); // Ctrl+Shift+F
+			tui.handleTerminalInput("line 220");
+			assert.equal(view.scrollTop, 92, "search reveal is deferred until render");
+			if (action === "search forced render") tui.requestRender(true);
+			tui.doRender();
+			assert.ok(view.scrollTop > 180, "native search reveals the offscreen match");
+			tui.handleTerminalInput("\x1b");
+		} else if (action === "drag") {
+			tui.handleTerminalInput("\x1b[<0;5;20M");
+			tui.handleTerminalInput("\x1b[<32;5;1M");
+			assert.equal(view.scrollTop, 92, "selection scroll waits for its native timer");
+			tui.requestRender(true);
+			await settle();
+			assert.ok(view.scrollTop < 92, "native selection timer scrolls upward despite cleared layout");
+			tui.doRender();
+			tui.handleTerminalInput("\x1b[<0;5;1m");
+		} else {
+			view.scrollTo(259, { disableFollow: true });
+			tui.doRender();
+			if (action === "PageDown bottom") tui.handleTerminalInput("\x1b[6~");
+			else if (action === "wheel bottom") tui.handleTerminalInput("\x1b[<65;1;1M");
+			else {
+				tui.handleTerminalInput("\x1b[<0;100;38M");
+				tui.handleTerminalInput("\x1b[<32;100;40M");
+				tui.handleTerminalInput("\x1b[<0;100;40m");
+			}
+			assert.equal(view.scrollTop, 260, "manual gesture lands exactly at bottom");
+			assert.equal(view.isFollowingEnd, true, "native follow-end is not explicit tail intent");
+		}
+		const manualTop = view.scrollTop;
+		marker = 150;
+		await tick();
+		assert.equal(view.scrollTop, manualTop, "playback cannot reclaim manual framing");
+		worker.emit({ type: "idle", utterance: last.utterance });
+		await settle();
+		assert.equal(view.scrollTop, manualTop, "completion cannot reclaim manual framing");
+		await host.shortcut("f11");
+		assert.equal(view.scrollTop, 142, "explicit Voice control immediately rearms follow");
+		return;
+	}
 
 	if (action === "paused anchor") {
 		await host.shortcut("f11"); // Restore the preview after the synthetic tick (no worker segments).

@@ -3041,23 +3041,40 @@ export default async function (pi: ExtensionAPI) {
 				// Native End (including remapped keys) and the mouse banner both route
 				// through this method, after Pi has handled overlays/key releases/hit tests.
 				// Observing the accepted action avoids mistaking wheel/search/layout motion for a pin.
-				const native = tui as typeof tui & { scrollToBottom?: () => void; handleViewportInput?: (data: string) => unknown };
-				const originalInput = native.handleViewportInput;
-				const onInput = (data: string) => {
-					const view = activeScrollView();
-					const before = view?.scrollTop;
-					const result = originalInput!.call(tui, data);
-					if (view && view.scrollTop !== before && !transcriptIsFollowingEnd()) {
-						narrationManuallyFramed = true;
-						autoScrollForceOnce = false;
-						restoreBottomAfterSpeech = false;
-						bottomPinned = false;
-					}
-					return result;
-				};
-				if (originalInput) { native.handleViewportInput = onInput; nativeGestureTracking = true; }
+				const native = tui as typeof tui & {
+					scrollToBottom?: () => void;
+					selectionAnchor?: { scrollView?: ReturnType<typeof activeScrollView> };
+				} &
+					Partial<Record<"handleViewportInput" | "refreshSearch" | "autoScrollSelection", (...args: unknown[]) => unknown>>;
+				let bottomIntent = 0;
+				// Search reveals during render and selection autoscroll runs on a timer.
+				// Observe those accepted moves, not arbitrary render/layout scroll changes.
+				const restoreGestures = (["handleViewportInput", "refreshSearch", "autoScrollSelection"] as const).map(method => {
+					const original = native[method];
+					if (!original) return () => {};
+					const observed = (...args: unknown[]) => {
+						const view = method === "autoScrollSelection" ? native.selectionAnchor?.scrollView : activeScrollView();
+						const before = view?.scrollTop;
+						const intent = bottomIntent;
+						const result = original.apply(tui, args);
+						// refreshSearch reports the move against its new layout, even
+						// when a forced render has cleared the current primary view.
+						const moved = method === "refreshSearch" ? result === true : view && view.scrollTop !== before;
+						if (moved && intent === bottomIntent) {
+							narrationManuallyFramed = true;
+							autoScrollForceOnce = false;
+							restoreBottomAfterSpeech = false;
+							bottomPinned = false;
+						}
+						return result;
+					};
+					native[method] = observed;
+					return () => { if (native[method] === observed) native[method] = original; };
+				});
+				nativeGestureTracking = !!native.handleViewportInput;
 				const originalBottom = native.scrollToBottom;
 				const onBottom = () => {
+					bottomIntent++;
 					originalBottom!.call(tui);
 					recordBottomPin();
 				};
@@ -3067,7 +3084,7 @@ export default async function (pi: ExtensionAPI) {
 					invalidate: () => {},
 					dispose: () => {
 						if (native.scrollToBottom === onBottom) native.scrollToBottom = originalBottom;
-						if (native.handleViewportInput === onInput) native.handleViewportInput = originalInput;
+						restoreGestures.forEach(restore => restore());
 						nativeGestureTracking = false;
 						if (narrationTui === tui) narrationTui = null;
 					},
