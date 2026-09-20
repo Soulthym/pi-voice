@@ -107,6 +107,14 @@ export class Vocalizer {
 		});
 	}
 
+	/** Retain unfinished prose/fence state at live Tail without replaying completed units. */
+	seedLivePrefix(text: string): void {
+		this.#speakable = new SpeakableStream();
+		this.#sourceOffset = this.#nextSourceOffset;
+		this.#sourceText = text;
+		this.#speakable.push(text);
+	}
+
 	flush(): void {
 		this.#clearIdleTimer();
 		const speakable = this.#speakable;

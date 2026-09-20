@@ -38,6 +38,38 @@ test("shifts narration source ranges when regenerating a message suffix", () => 
 	assert.deepEqual(sources, [{ start: 40, end: 61 }]);
 });
 
+test("live Tail seeds unfinished prose and code without flushing or replaying earlier units", async () => {
+	const spoken: string[] = [];
+	const contexts: CodeDescriptionSourceContext[] = [];
+	const worker = {
+		sendSegment(_utterance: number, _segmentId: number, text: string): void { spoken.push(text); },
+		endUtterance(): void {},
+		async measureSegment(): Promise<number> { return 1; },
+		cancel(): void {},
+		async transcribe(): Promise<string[]> { return []; },
+		async transcribePcm(): Promise<string> { return ""; },
+		async preload(): Promise<void> {},
+		async preloadAlignment(): Promise<void> {},
+		async terminate(): Promise<void> {},
+	};
+	const vocalizer = new Vocalizer(() => ({ ...DEFAULT_VOICE_CONFIG, enabled: true }), () => {},
+		async (block, context) => { contexts.push(context); return plainCodeNarration(`Code ${block.code}.`); }, undefined, worker);
+	vocalizer.seedLivePrefix("Already spoken. Partial");
+	assert.deepEqual(spoken, []);
+	vocalizer.pushDelta(" sentence. ");
+	assert.deepEqual(spoken, ["Partial sentence."]);
+	vocalizer.clear();
+	const prefix = "Earlier prose.\n```js\nconst value =";
+	vocalizer.seedLivePrefix(prefix);
+	vocalizer.pushDelta(" 1;\n");
+	assert.equal(contexts.length, 0, "unfinished fence must not be described");
+	vocalizer.pushDelta("```\nAfter code. ");
+	vocalizer.flush(); await immediate();
+	assert.deepEqual(spoken, ["Partial sentence.", "Code const value = 1;.", "After code."]);
+	assert.equal(contexts[0].beforeBlock, "Earlier prose.\n");
+	assert.equal(contexts[0].throughBlock, `${prefix} 1;\n\`\`\`\n`);
+});
+
 test("passes pause and resume through without cancelling queued narration", () => {
 	const pauses: boolean[] = [];
 	let cancellations = 0;

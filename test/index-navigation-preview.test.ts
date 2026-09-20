@@ -380,6 +380,131 @@ for (const [key, live] of [["f11", false], ["f6", false], ["f9", false], ["f11",
 	await fs.stat(path.join(process.env.PI_VOICE_COORDINATOR_DIR!, "speech.lock", "lease.json"));
 });
 
+for (const paused of [false, true]) test(`live Tail shares message/sentence cursor and pause intent (${paused})`, async t => {
+	const host = await setup(t);
+	host.addMessage("old", null, assistant("Historical first. Historical last."));
+	await host.start(); await host.emit("before_agent_start", {});
+	let text = "Live first. Live last. Unfinished";
+	const update = async (delta: string) => {
+		const message = assistant(text, "pending");
+		await host.emit("message_update", { message, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta } });
+		await settle();
+	};
+	await host.emit("message_start", { message: assistant(text, "pending") });
+	await update(text);
+	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
+	if (paused) await host.shortcut("f8");
+	let before = worker.sent.length;
+	await host.shortcut("f10"); await settle();
+	assert.equal(worker.sent.length, before, "Tail does not flush/repeat the prefix");
+	if (!paused) {
+		await host.shortcut("f8"); await settle();
+		assert.equal(worker.pauses.at(-1), true, "waiting live Tail can pause without an utterance");
+		await host.shortcut("f8"); await settle();
+		assert.equal(worker.pauses.at(-1), false);
+		assert.equal(worker.sent.length, before, "resuming waiting Tail does not replay its prefix");
+	}
+	await host.shortcut("f7"); await settle();
+	assert.deepEqual((worker.sent.slice(before) as Array<{ text: string }>).map(segment => segment.text), ["Live last."], JSON.stringify({ notices: host.notices, sent: worker.sent, widget: host.widgetLines() }));
+	assert.equal(worker.pauses.at(-1), paused);
+	before = worker.sent.length;
+	await host.shortcut("f7"); await settle();
+	assert.deepEqual((worker.sent.slice(before) as Array<{ text: string }>).map(segment => segment.text), ["Live first.", "Live last."]);
+	await host.shortcut("f6"); await settle();
+	before = worker.sent.length;
+	await host.shortcut("f10"); await settle();
+	assert.deepEqual((worker.sent.slice(before) as Array<{ text: string }>).map(segment => segment.text), ["Live first.", "Live last."]);
+	await host.shortcut("f9"); await settle();
+	before = worker.sent.length;
+	await host.shortcut("f9"); await settle();
+	assert.equal(worker.sent.length, before, "past the latest complete unit waits at Tail");
+	text += " becomes complete. ";
+	await update(" becomes complete. ");
+	assert.deepEqual((worker.sent.slice(before) as Array<{ text: string }>).map(segment => segment.text), ["Unfinished becomes complete."]);
+	assert.equal(worker.pauses.at(-1), paused);
+	if (paused) {
+		const count = worker.sent.length;
+		await host.shortcut("f8"); await settle();
+		assert.equal(worker.pauses.at(-1), false);
+		assert.equal(worker.sent.length, count, "one resume releases retained audio without replay");
+	}
+});
+
+test("explicit Tail before the first eligible block retains live ownership and pause", async t => {
+	const host = await setup(t);
+	await host.start(); await host.emit("before_agent_start", {});
+	await host.emit("message_start", { message: { ...assistant("", "pending"), content: [] } });
+	await host.shortcut("f10"); await settle();
+	const worker = MockedVoiceWorkerClient.instances.at(-1)!;
+	await host.shortcut("f8"); await settle();
+	assert.equal(worker.pauses.at(-1), true);
+	const message = assistant("First complete unit. ", "pending");
+	await host.emit("message_update", { message, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "First complete unit. " } }); await settle();
+	assert.ok((worker.sent as Array<{ text: string }>).some(segment => segment.text === "First complete unit."));
+	assert.equal(worker.pauses.at(-1), true);
+	const count = worker.sent.length;
+	await host.shortcut("f8"); await settle();
+	assert.equal(worker.pauses.at(-1), false);
+	assert.equal(worker.sent.length, count);
+});
+
+test("live message and sentence navigation use eligible block order, not source indices", async t => {
+	const host = await setup(t);
+	await host.start(); await host.command("mode all"); await host.emit("before_agent_start", {});
+	const message = { ...assistant("", "pending"), content: [
+		{ type: "thinking", thinking: "Thought first. Thought last. " },
+		{ type: "toolCall", id: "tool", name: "read", arguments: {} },
+		{ type: "text", text: "Answer first. Answer last. Partial" },
+	] };
+	await host.emit("message_start", { message });
+	await host.emit("message_update", { message, assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: message.content[0].thinking } });
+	await host.emit("message_update", { message, assistantMessageEvent: { type: "text_delta", contentIndex: 2, delta: message.content[2].text } }); await settle();
+	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
+	await host.shortcut("f10"); await settle();
+	await host.shortcut("f10"); await settle();
+	let before = worker.sent.length;
+	await host.shortcut("f6"); await settle();
+	assert.deepEqual((worker.sent.slice(before) as Array<{ text: string }>).map(segment => segment.text), ["Answer first.", "Answer last."]);
+	before = worker.sent.length;
+	await host.shortcut("f7"); await settle();
+	assert.deepEqual((worker.sent.slice(before) as Array<{ text: string }>).map(segment => segment.text), ["Thought last.", "Answer first.", "Answer last."]);
+	before = worker.sent.length;
+	await host.shortcut("f9"); await settle();
+	assert.deepEqual((worker.sent.slice(before) as Array<{ text: string }>).map(segment => segment.text), ["Answer first.", "Answer last."]);
+});
+
+for (const finalize of [false, true]) test(`live Tail retains partial source through async handoff (${finalize})`, async t => {
+	const host = await setup(t, "auto");
+	host.addMessage("old", null, assistant("History."));
+	await host.start(); await host.emit("before_agent_start", {});
+	const prefix = assistant("First live. Last live. Partial", "pending");
+	await host.emit("message_start", { message: prefix });
+	await host.emit("message_update", { message: prefix, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "First live. Last live. Partial" } });
+	await settle();
+	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
+	const before = worker.sent.length;
+	const gate = Promise.withResolvers<ConnectionDevice>();
+	t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", () => gate.promise);
+	await host.shortcut("f10"); await settle();
+	const back = host.shortcut("f7"); await settle();
+	await host.shortcut("f10"); await settle(); // newest intent is Tail, not the pending backward sentence
+	const completed = assistant("First live. Last live. Partial completed. ", finalize ? "stop" : "pending");
+	await host.emit("message_update", { message: completed, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: " completed. " } });
+	if (finalize) {
+		host.addMessage("canonical", "old", completed);
+		await host.emit("message_end", { message: completed });
+		await host.emit("turn_end", { message: completed });
+		await host.emit("agent_settled", {}); await settle();
+	}
+	gate.resolve({ kind: "intentional_local" }); await back; await settle();
+	assert.deepEqual((worker.sent.slice(before) as Array<{ text: string }>).map(segment => segment.text), ["Partial completed."]);
+	if (!finalize) {
+		const next = assistant(`${completed.content[0].text}Future unit. `, "pending");
+		await host.emit("message_update", { message: next, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Future unit. " } }); await settle();
+		assert.equal((worker.sent.at(-1) as { text: string }).text, "Future unit.");
+	}
+});
+
 test("streaming F11 replays the prefix, continues future deltas, ticks and canonical ordinal", async t => {
 	const host = await setup(t);
 	host.addMessage("old", null, assistant("Earlier answer."));
@@ -620,7 +745,7 @@ test("failed live acquisition retry retains continuation after canonical finaliz
 	assert.equal(worker.sent.length, before + 2, "drained queued blocks cannot play twice");
 });
 
-test("replaying an already completed live part discards later blocks finalized during preparation", async t => {
+test("replaying an earlier live part continues later blocks finalized during preparation", async t => {
 	const host = await setup(t, "auto");
 	await host.start(); await host.emit("before_agent_start", {});
 	const partial = assistant("First part. ", "pending");
@@ -645,7 +770,7 @@ test("replaying an already completed live part discards later blocks finalized d
 	gate.resolve({ kind: "intentional_local" }); await settle();
 	const last = worker.sent.at(-1) as { utterance: number };
 	worker.emit({ type: "idle", utterance: last.utterance }); await settle();
-	assert.deepEqual((worker.sent.slice(before) as Array<{ text: string }>).map(segment => segment.text), ["First part."]);
+	assert.deepEqual((worker.sent.slice(before) as Array<{ text: string }>).map(segment => segment.text), ["First part.", "Second unfinished sentence.", "Third part."]);
 	assert.match(host.widgetLines()?.join(" ") ?? "", /message 1\/3/);
 });
 
