@@ -61,6 +61,40 @@ test("attention fails closed when fresh origin attachment cannot be resolved", a
 	assert.ok(host.notices.some(n => n.message.includes("No attached tmux client")));
 });
 
+for (const newer of ["f8", "stop", "f6", "failure"]) test(`attention retires pending replay before origin lookup: ${newer}`, async t => {
+	const { host, waiting } = await setup(t);
+	await host.command("output auto");
+	const initial = t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", async () => ({ kind: "intentional_local" as const }));
+	await host.shortcut("f11"); await settle();
+	initial.mock.restore();
+	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
+	const replay = Promise.withResolvers<{ kind: "intentional_local" }>();
+	const origin = Promise.withResolvers<{ kind: "intentional_local" }>();
+	let calls = 0;
+	t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", () => {
+		calls++;
+		return calls === 1 ? replay.promise : calls === 2 ? origin.promise : Promise.resolve({ kind: "intentional_local" as const });
+	});
+	await host.shortcut("f11"); await settle();
+	const pending = host.command("attention"); await settle();
+	// Attention waits for the old adoption, whose superseded replay must retire now.
+	replay.resolve({ kind: "intentional_local" }); await settle();
+	assert.equal(calls, 2);
+	if (newer === "failure") {
+		worker.emit({ type: "idle", utterance: (worker.sent.at(-1) as { utterance: number }).utterance });
+		origin.reject(new Error("Lookup failed"));
+	} else {
+		if (newer === "stop") await host.command("stop");
+		else await host.shortcut(newer);
+		await settle();
+		origin.resolve({ kind: "intentional_local" });
+	}
+	await pending; await settle();
+	assert.equal(waiting.hasAttentionRequest(), false);
+	if (newer === "failure") assert.equal(waiting.speechOwner(), undefined, "obsolete replay must not leave the owner waiting forever");
+	if (newer === "f8") assert.equal(worker.pauses.at(-1), true, "F8 pauses the actual old transport");
+});
+
 test("coordinator rejects cancelled, disabled and stale attention requests", async t => {
 	const { waiting, root } = await setup(t);
 	const sender = new SessionCoordinator(root, "sender"); sender.start();
@@ -183,7 +217,7 @@ test("unread attention cannot supersede receiver F6 cold preparation", async t =
 	assert.equal((worker.sent.at(-1) as { text: string }).text, "Origin answer.");
 });
 
-test("explicit attention reserves intent against automatic queued response drain", async t => {
+for (const direction of ["outgoing", "incoming", "incoming cancelled", "incoming superseded"]) test(`${direction} attention reserves intent against automatic queued response drain`, async t => {
 	const { host, waiting } = await setup(t);
 	await host.command("output auto");
 	await host.emit("before_agent_start", {});
@@ -208,12 +242,45 @@ test("explicit attention reserves intent against automatic queued response drain
 	replayGate.resolve({ kind: "intentional_local" }); await settle();
 	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
 	const before = worker.sent.length;
-	const pending = host.command("attention"); await settle();
-	assert.equal(calls, 2);
-	worker.emit({ type: "idle", utterance: (worker.sent.at(-1) as { utterance: number }).utterance }); await settle();
-	assert.equal(worker.sent.length, before, "queued B must not replace explicit attention");
-	originGate.resolve({ kind: "intentional_local" }); await pending;
-	assert.ok(waiting.takeAttentionRequest());
+	if (direction === "outgoing") {
+		const pending = host.command("attention"); await settle();
+		assert.equal(calls, 2);
+		worker.emit({ type: "idle", utterance: (worker.sent.at(-1) as { utterance: number }).utterance }); await settle();
+		assert.equal(worker.sent.length, before, "queued B must not replace explicit attention");
+		originGate.resolve({ kind: "intentional_local" }); await pending;
+		assert.ok(waiting.takeAttentionRequest());
+	} else {
+		host.addMessage("attention", "next", assistant("Completed waiting C."));
+		const target = waiting.activeSessions().find(session => session.sessionId === "origin")!;
+		await fs.writeFile(path.join(waiting.root, "waiting", `${target.instanceId}.json`), JSON.stringify({ ...target, waitingSince: Date.now(), announced: true }));
+		const gate = Promise.withResolvers<void>();
+		let entered = false, clock = 0;
+		t.mock.method(performance, "now", () => clock += 9);
+		const immediate = globalThis.setImmediate;
+		t.mock.method(globalThis, "setImmediate", ((callback: () => void) => {
+			if (entered) return immediate(callback);
+			entered = true;
+			void gate.promise.then(callback);
+			return undefined;
+		}) as typeof setImmediate);
+		waiting.requestAttention(target.instanceId, { kind: "intentional_local" });
+		await new Promise(resolve => setTimeout(resolve, 350));
+		assert.ok(entered, "incoming attention must be preparing history");
+		worker.emit({ type: "idle", utterance: (worker.sent.at(-1) as { utterance: number }).utterance }); await settle();
+		assert.equal(worker.sent.length, before, "queued B must not cancel consumed C");
+		if (direction === "incoming cancelled") waiting.cancelSpeechAcquisition();
+		const replacement = direction === "incoming superseded" ? host.command("attention") : undefined;
+		await settle();
+		gate.resolve(); await settle();
+		if (replacement) {
+			assert.equal(worker.sent.length, before, "stale incoming cleanup must not clear the newer outgoing guard");
+			originGate.resolve({ kind: "intentional_local" }); await replacement;
+			assert.ok(waiting.takeAttentionRequest());
+		} else {
+			assert.equal((worker.sent.at(-1) as { text: string }).text,
+				direction === "incoming" ? "Completed waiting C." : "Queued response.");
+		}
+	}
 });
 
 test("receiver action fences an unread request published before it", async t => {

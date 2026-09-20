@@ -362,8 +362,7 @@ export default async function (pi: ExtensionAPI) {
 	};
 	let completingOwnerSpeech = false;
 	let attentionPollTimer: NodeJS.Timeout | null = null;
-	let attentionRequestPending = false;
-	let outgoingAttentionPreparation: { epoch: number } | undefined;
+	let attentionPreparation: { epoch: number } | undefined;
 	let voiceWorkerIdleTimer: NodeJS.Timeout | null = null;
 	let handleCoordinatedIdle: (utterance: number | undefined) => void = () => {};
 	let playRequestedAttention: (ctx: ExtensionContext, request: AttentionRequest) => void = () => {};
@@ -1721,7 +1720,7 @@ export default async function (pi: ExtensionAPI) {
 
 	const completeOwnerSpeech = (): void => {
 		const expectedUtterance = ownerContentExpected ? lastOwnerUtterance : projectPrefixUtterance;
-		if (!ownsSpeech || !ownerTurnEnded || completingOwnerSpeech || pendingReplay || playbackPaused || deviceRebind || transportStopPending || inputStopPending || outgoingAttentionPreparation?.epoch === playbackRequestEpoch) return;
+		if (!ownsSpeech || !ownerTurnEnded || completingOwnerSpeech || pendingReplay || playbackPaused || deviceRebind || transportStopPending || inputStopPending || attentionPreparation?.epoch === playbackRequestEpoch) return;
 		if (expectedUtterance === undefined) projectAnnouncementPending = false;
 		else if (completedOwnerUtterance !== expectedUtterance) return;
 		completingOwnerSpeech = true;
@@ -1895,7 +1894,7 @@ export default async function (pi: ExtensionAPI) {
 		if (ownsSpeech && coordinator.consumeSpeechPreemptionRequest()) {
 			handleSpeechPreemption();
 		}
-		if (attentionRequestPending || outgoingAttentionPreparation?.epoch === playbackRequestEpoch) return;
+		if (attentionPreparation?.epoch === playbackRequestEpoch) return;
 		if (config.enabled && !attentionSuppressed && coordinator.hasAttentionRequest() && activeContext) {
 			try {
 				const request = coordinator.takeAttentionRequest();
@@ -3478,10 +3477,22 @@ export default async function (pi: ExtensionAPI) {
 		await Promise.resolve();
 	};
 
+	const reserveAttentionIntent = (): { epoch: number } => {
+		// Retire obsolete preparation, not its still-playing transport/lease.
+		pendingReplay = undefined;
+		return attentionPreparation = { epoch: ++playbackRequestEpoch };
+	};
+
+	const finishAttentionPreparation = (preparation: { epoch: number }): void => {
+		if (attentionPreparation !== preparation) return;
+		attentionPreparation = undefined;
+		completeOwnerSpeech();
+	};
+
 	playRequestedAttention = (ctx, request) => {
-		attentionRequestPending = true;
+		const preparation = reserveAttentionIntent();
 		const owner = coordinator!;
-		const epoch = ++playbackRequestEpoch;
+		const epoch = preparation.epoch;
 		const current = () => owner === coordinator && epoch === playbackRequestEpoch &&
 			config.enabled && !attentionSuppressed && owner.attentionRequestIsCurrent(request);
 		void (async () => {
@@ -3500,8 +3511,9 @@ export default async function (pi: ExtensionAPI) {
 			// Preparation is complete: no unguarded cold-history wait after accepting the request.
 			await replaySelected(ctx, true, true);
 			if (!ownsSpeech && !pendingReplay) owner.releaseSpeech();
-		})().catch(error => ctx.ui.notify(`Voice attention failed: ${String(error)}`, "error"))
-			.finally(() => { attentionRequestPending = false; });
+		})().catch(error => {
+			if (current()) ctx.ui.notify(`Voice attention failed: ${String(error)}`, "error");
+		}).finally(() => finishAttentionPreparation(preparation));
 	};
 
 	const attendNextProject = async (ctx: ExtensionContext): Promise<void> => {
@@ -3513,8 +3525,8 @@ export default async function (pi: ExtensionAPI) {
 			return;
 		}
 		owner.cancelSpeechAcquisition();
-		let epoch = ++playbackRequestEpoch;
-		const preparation = outgoingAttentionPreparation = { epoch };
+		const preparation = reserveAttentionIntent();
+		let epoch = preparation.epoch;
 		// Finalizing acquisition intentionally cancels once, synchronously before yielding.
 		const captureEpoch = inputEpoch + (inputInProgress && inputPhase === "acquiring" ? 1 : 0);
 		const current = () => owner === coordinator && epoch === playbackRequestEpoch && captureEpoch === inputEpoch && config.enabled && interactiveVoiceSession;
@@ -3536,10 +3548,7 @@ export default async function (pi: ExtensionAPI) {
 		} catch (error) {
 			if (current()) ctx.ui.notify(`Voice attention failed: ${String(error)}`, "error");
 		} finally {
-			if (outgoingAttentionPreparation === preparation) {
-				outgoingAttentionPreparation = undefined;
-				completeOwnerSpeech();
-			}
+			finishAttentionPreparation(preparation);
 		}
 	};
 
