@@ -362,6 +362,7 @@ export default async function (pi: ExtensionAPI) {
 	let completingOwnerSpeech = false;
 	let attentionPollTimer: NodeJS.Timeout | null = null;
 	let attentionRequestPending = false;
+	let outgoingAttentionPreparation: { epoch: number } | undefined;
 	let voiceWorkerIdleTimer: NodeJS.Timeout | null = null;
 	let handleCoordinatedIdle: (utterance: number | undefined) => void = () => {};
 	let playRequestedAttention: (ctx: ExtensionContext, request: AttentionRequest) => void = () => {};
@@ -1719,7 +1720,7 @@ export default async function (pi: ExtensionAPI) {
 
 	const completeOwnerSpeech = (): void => {
 		const expectedUtterance = ownerContentExpected ? lastOwnerUtterance : projectPrefixUtterance;
-		if (!ownsSpeech || !ownerTurnEnded || completingOwnerSpeech || pendingReplay || playbackPaused || deviceRebind || transportStopPending || inputStopPending) return;
+		if (!ownsSpeech || !ownerTurnEnded || completingOwnerSpeech || pendingReplay || playbackPaused || deviceRebind || transportStopPending || inputStopPending || outgoingAttentionPreparation?.epoch === playbackRequestEpoch) return;
 		if (expectedUtterance === undefined) projectAnnouncementPending = false;
 		else if (completedOwnerUtterance !== expectedUtterance) return;
 		completingOwnerSpeech = true;
@@ -1884,7 +1885,7 @@ export default async function (pi: ExtensionAPI) {
 		if (ownsSpeech && coordinator.consumeSpeechPreemptionRequest()) {
 			handleSpeechPreemption();
 		}
-		if (attentionRequestPending) return;
+		if (attentionRequestPending || outgoingAttentionPreparation?.epoch === playbackRequestEpoch) return;
 		if (config.enabled && !attentionSuppressed && coordinator.hasAttentionRequest() && activeContext) {
 			try {
 				const request = coordinator.takeAttentionRequest();
@@ -3495,11 +3496,12 @@ export default async function (pi: ExtensionAPI) {
 		}
 		owner.cancelSpeechAcquisition();
 		let epoch = ++playbackRequestEpoch;
-		let captureEpoch = inputEpoch;
+		const preparation = outgoingAttentionPreparation = { epoch };
+		// Finalizing acquisition intentionally cancels once, synchronously before yielding.
+		const captureEpoch = inputEpoch + (inputInProgress && inputPhase === "acquiring" ? 1 : 0);
 		const current = () => owner === coordinator && epoch === playbackRequestEpoch && captureEpoch === inputEpoch && config.enabled && interactiveVoiceSession;
 		try {
 			if (inputInProgress) await finishInputForPlayback();
-			captureEpoch = inputEpoch;
 			if (inputStopPending) await inputStopBarrier;
 			if (deviceRebind) await deviceRebind;
 			if (!current()) return;
@@ -3507,12 +3509,15 @@ export default async function (pi: ExtensionAPI) {
 			if (!current()) return;
 			const cancelId = clearPlaybackTransport();
 			epoch = playbackRequestEpoch;
+			preparation.epoch = epoch;
 			await waitForTransportCancellation(cancelId);
 			if (!current()) return;
 			releaseSpeechOwnership(false);
 			owner.requestAttention(waiting.instanceId, connection);
 		} catch (error) {
 			if (current()) ctx.ui.notify(`Voice attention failed: ${String(error)}`, "error");
+		} finally {
+			if (outgoingAttentionPreparation === preparation) outgoingAttentionPreparation = undefined;
 		}
 	};
 
@@ -3612,9 +3617,9 @@ export default async function (pi: ExtensionAPI) {
 		// Tail is beyond the final playable position. Freeze an active sink before
 		// moving the viewport so narration cannot continue behind transcript-tail
 		// following. An already paused or completed transport remains untouched.
+		playbackRequestEpoch += 1;
+		coordinator?.cancelSpeechAcquisition();
 		if (pendingReplay) {
-			playbackRequestEpoch += 1;
-			coordinator?.cancelSpeechAcquisition();
 			pendingReplay = undefined;
 			vocalizer.setPlaybackPaused(true);
 			playbackPaused = true;

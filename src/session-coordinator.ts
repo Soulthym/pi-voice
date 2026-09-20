@@ -15,6 +15,7 @@ export interface SessionPresence {
 	/** Human-readable Pi session title; used for spoken labels. */
 	sessionName?: string;
 	attentionEnabled?: boolean;
+	attentionEpoch?: number;
 }
 
 export interface WaitingSession extends SessionPresence {
@@ -26,6 +27,7 @@ export interface AttentionRequest {
 	requestedAt: number;
 	requestedBy: string;
 	requestId: string;
+	receiverEpoch?: number;
 	connection?: ConnectionDevice;
 }
 
@@ -83,6 +85,7 @@ export class SessionCoordinator {
 
 	cancelSpeechAcquisition(): void {
 		this.#speechRequestEpoch += 1;
+		if (!this.#stopped) this.#writePresence();
 		if (this.#outgoingAttention) remove(this.#outgoingAttention);
 		this.#outgoingAttention = undefined;
 		if (this.#pendingPreemptionFile) {
@@ -302,7 +305,7 @@ export class SessionCoordinator {
 		this.cancelSpeechAcquisition();
 		const waiting = this.waitingSessions().find(session => session.instanceId === instanceId);
 		if (this.#stopped || !waiting) return;
-		const request: AttentionRequest = { requestedAt: Date.now(), requestedBy: this.instanceId, requestId: randomUUID(), connection };
+		const request: AttentionRequest = { requestedAt: Date.now(), requestedBy: this.instanceId, requestId: randomUUID(), receiverEpoch: readJson<SessionPresence>(this.#presenceFile(instanceId))?.attentionEpoch ?? 0, connection };
 		this.#outgoingAttention = path.join(this.root, `attention-request-${this.instanceId}.json`);
 		writeJson(this.#outgoingAttention, request);
 		writeJson(this.#attentionFile(instanceId), request);
@@ -318,9 +321,11 @@ export class SessionCoordinator {
 	}
 
 	takeAttentionRequest(): AttentionRequest | undefined {
-		const request = readJson<AttentionRequest>(this.#attentionFile(this.instanceId));
-		this.consumeAttentionRequest();
-		if (!request || !this.#attentionEnabled || !this.isWaiting() || !this.attentionRequestIsCurrent(request)) return;
+		const file = this.#takeAttentionFile();
+		if (!file) return;
+		const request = readJson<AttentionRequest>(file);
+		remove(file);
+		if (!request || (request.receiverEpoch ?? 0) !== this.#speechRequestEpoch || !this.#attentionEnabled || !this.isWaiting() || !this.attentionRequestIsCurrent(request)) return;
 		const connection = request.connection;
 		if (connection && connection.kind !== "intentional_local" &&
 			(connection.kind !== "device" || typeof connection.id !== "string" || !/^[a-zA-Z0-9._-]{1,128}$/.test(connection.id))) return;
@@ -331,9 +336,20 @@ export class SessionCoordinator {
 		return fs.existsSync(this.#attentionFile(this.instanceId));
 	}
 
-	consumeAttentionRequest(): boolean {
+	#takeAttentionFile(): string | undefined {
 		const file = this.#attentionFile(this.instanceId);
-		if (!fs.existsSync(file)) return false;
+		const claimed = `${file}.${randomUUID()}.claimed`;
+		try {
+			fs.renameSync(file, claimed);
+			return claimed;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		}
+	}
+
+	consumeAttentionRequest(): boolean {
+		const file = this.#takeAttentionFile();
+		if (!file) return false;
 		remove(file);
 		return true;
 	}
@@ -402,6 +418,7 @@ export class SessionCoordinator {
 			updatedAt: Date.now(),
 			sessionId: this.sessionId,
 			attentionEnabled: this.#attentionEnabled,
+			attentionEpoch: this.#speechRequestEpoch,
 			...(this.#sessionName ? { sessionName: this.#sessionName } : {}),
 		};
 	}

@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
+import fsSync from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { mock, test, type TestContext } from "node:test";
@@ -128,6 +130,123 @@ test("attention finalizes capture into the editor before requesting, without sub
 	assert.match(editor, /Keep this draft/);
 	assert.equal(submitted.mock.callCount(), 0);
 	assert.equal(waiting.hasAttentionRequest(), true);
+});
+
+test("external input cancellation during attention finalization cannot publish", async t => {
+	const { host, waiting } = await setup(t);
+	await host.command("input local");
+	const capture = Promise.withResolvers<PhoneCapture>();
+	t.mock.method(PhoneInputClient.prototype, "capture", () => capture.promise);
+	t.mock.method(PhoneInputClient.prototype, "stop", async () => {});
+	t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", async () => ({ kind: "intentional_local" as const }));
+	await host.command("talk"); await settle();
+	const pending = host.command("attention"); await settle();
+	await host.command("input disabled");
+	capture.resolve({ type: "text", data: "Cancelled draft." });
+	await pending;
+	assert.equal(waiting.hasAttentionRequest(), false);
+});
+
+for (const key of ["f9", "f10"]) for (const published of [false, true]) test(`${key} tail cancels ${published ? "published" : "preparing"} attention`, async t => {
+	const { host, waiting } = await setup(t);
+	await host.shortcut("f11"); await settle();
+	const gate = Promise.withResolvers<{ kind: "intentional_local" }>();
+	t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", () => gate.promise);
+	const pending = host.command("attention"); await settle();
+	if (published) { gate.resolve({ kind: "intentional_local" }); await pending; }
+	await host.shortcut(key);
+	gate.resolve({ kind: "intentional_local" }); await pending;
+	assert.equal(waiting.takeAttentionRequest(), undefined);
+});
+
+test("unread attention cannot supersede receiver F6 cold preparation", async t => {
+	const { host, waiting } = await setup(t);
+	host.addMessage("latest", "answer", assistant("Latest answer."));
+	const target = waiting.activeSessions().find(session => session.sessionId === "origin")!;
+	await fs.writeFile(path.join(waiting.root, "waiting", `${target.instanceId}.json`), JSON.stringify({ ...target, waitingSince: Date.now(), announced: true }));
+	waiting.requestAttention(target.instanceId, { kind: "intentional_local" });
+	const gate = Promise.withResolvers<void>();
+	let entered = false, clock = 0;
+	t.mock.method(performance, "now", () => clock += 9);
+	const immediate = globalThis.setImmediate;
+	t.mock.method(globalThis, "setImmediate", ((callback: () => void) => {
+		if (entered) return immediate(callback);
+		entered = true;
+		void gate.promise.then(callback);
+		return undefined;
+	}) as typeof setImmediate);
+	await host.shortcut("f6"); await settle();
+	assert.ok(entered);
+	await new Promise(resolve => setTimeout(resolve, 350));
+	gate.resolve(); await settle();
+	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
+	assert.equal((worker.sent.at(-1) as { text: string }).text, "Origin answer.");
+});
+
+test("explicit attention reserves intent against automatic queued response drain", async t => {
+	const { host, waiting } = await setup(t);
+	await host.command("output auto");
+	await host.emit("before_agent_start", {});
+	const partial = assistant("Old prefix", "pending");
+	await host.emit("message_start", { message: partial });
+	await host.emit("message_update", { message: partial, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Old prefix" } }); await settle();
+	const replayGate = Promise.withResolvers<{ kind: "intentional_local" }>();
+	const originGate = Promise.withResolvers<{ kind: "intentional_local" }>();
+	let calls = 0;
+	t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", () => ++calls === 1 ? replayGate.promise : originGate.promise);
+	await host.shortcut("f11"); await settle();
+	const old = { ...partial, stopReason: "toolUse" };
+	host.addMessage("old", "answer", old);
+	await host.emit("message_end", { message: old });
+	await host.emit("turn_end", { message: old });
+	const next = assistant("Queued response.");
+	await host.emit("message_start", { message: next });
+	await host.emit("message_update", { message: next, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Queued response." } });
+	host.addMessage("next", "old", next);
+	await host.emit("message_end", { message: next });
+	await host.emit("turn_end", { message: next });
+	replayGate.resolve({ kind: "intentional_local" }); await settle();
+	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
+	const before = worker.sent.length;
+	const pending = host.command("attention"); await settle();
+	assert.equal(calls, 2);
+	worker.emit({ type: "idle", utterance: (worker.sent.at(-1) as { utterance: number }).utterance }); await settle();
+	assert.equal(worker.sent.length, before, "queued B must not replace explicit attention");
+	originGate.resolve({ kind: "intentional_local" }); await pending;
+	assert.ok(waiting.takeAttentionRequest());
+});
+
+test("receiver action fences an unread request published before it", async t => {
+	const { waiting, root } = await setup(t);
+	const sender = new SessionCoordinator(root, "sender"); sender.start();
+	t.after(() => sender.shutdown());
+	sender.requestAttention(waiting.instanceId);
+	waiting.cancelSpeechAcquisition();
+	assert.equal(waiting.takeAttentionRequest(), undefined);
+	sender.requestAttention(waiting.instanceId);
+	assert.ok(waiting.takeAttentionRequest(), "requests published after the receiver action remain eligible");
+});
+
+test("taking attention cannot unlink a replacement published during the read", async t => {
+	const { waiting, root } = await setup(t);
+	const sender = new SessionCoordinator(root, "sender"); sender.start();
+	t.after(() => sender.shutdown());
+	sender.requestAttention(waiting.instanceId);
+	const read = fsSync.readFileSync;
+	let replaced = false;
+	const hooked = t.mock.method(fsSync, "readFileSync", ((file: any, ...args: any[]) => {
+		const value = (read as any)(file, ...args);
+		if (!replaced && String(file).includes(`${waiting.instanceId}.json`) && String(file).includes("/attention/")) {
+			replaced = true;
+			sender.requestAttention(waiting.instanceId, { kind: "device", id: "newer" });
+		}
+		return value;
+	}) as typeof read);
+	syncBuiltinESMExports();
+	try { waiting.takeAttentionRequest(); }
+	finally { hooked.mock.restore(); syncBuiltinESMExports(); }
+	assert.ok(replaced);
+	assert.equal(waiting.takeAttentionRequest()?.connection?.kind, "device");
 });
 
 test("disabled attention does not request another project", async t => {
