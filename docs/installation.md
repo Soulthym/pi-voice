@@ -26,7 +26,7 @@ Run `/reload` after installing or updating the extension. Spoken output defaults
 
 ## Linux SSH client
 
-Install `openssh`, `socat`, `mpv`, `ffmpeg`, and PipeWire or PulseAudio recording utilities. From a Pi Voice checkout:
+Install `openssh`, `socat`, `mpv`, `ffmpeg`, `flock` (util-linux), and PipeWire or PulseAudio recording utilities. From a Pi Voice checkout:
 
 ```bash
 mkdir -p "$HOME/.local/bin"
@@ -47,7 +47,7 @@ Install Termux and the **Termux:API Android app from the same source**, normally
 
 ```bash
 pkg update
-pkg install git openssh socat mpv ffmpeg termux-api
+pkg install git openssh socat mpv ffmpeg termux-api util-linux
 ```
 
 Install the bridge scripts from a checkout:
@@ -84,7 +84,7 @@ See [Usage](usage.md#optional-termux-function-key-row) for one-tap F5–F11 cont
 
 ## Local Termux Pi
 
-Install the extension and client dependencies in Termux as above, then run normal `pi`. With `input` and `output` set to `auto`, Pi Voice falls back to Termux's microphone and `mpv`; no SSH wrapper is required.
+Install the extension and client dependencies in Termux as above, then run normal `pi`. With `input` and `output` set to `auto`, a genuinely local session pins Termux's microphone and `mpv`; no SSH wrapper is required.
 
 ## SSH server configuration
 
@@ -101,7 +101,13 @@ Validate with `sshd -t`, then reload `sshd` after changing its configuration. Th
 
 ## Upgrading
 
-Update the host checkout and reload Pi:
+**Required for the current, not-yet-pushed protocol batch:** use the Pi host's **local checkout** as the source for every client script. A fresh clone or client-side `git pull` does not contain these changes yet. Copy the complete `client/pi-voice-*` set using the `scp` example below, including any alternative installed copies/custom client paths; do not mix old and new helpers. Install `flock` (`util-linux`) on Linux/Termux.
+
+Before replacing scripts or exiting wrappers, explicitly stop active playback/capture and confirm actual device stop. If stop is unconfirmed, preserve the original connection, runtime state, tickets, receipts and leases; restore that connection and retry `/voice stop` (or `/voice reconnect` for retained output stop). Do not kill host processes or delete leases as proof. See [recovery](troubleshooting.md#unconfirmed-stop).
+
+After confirmed stop, exit every old wrapper, update all copies together, reconnect and reload the host extension. The microphone now requires origin-scoped random-epoch tickets (`<epoch>.<counter>`, UUID-like identity, not numeric-only) and exact `stopped N` receipts. Audio requires v2 negotiation and completion/stop proof. Existing epoch-qualified ticket state must be retained; only incompatible numeric-era `.tickets` state may be removed **after all old captures are confirmed stopped and old sessions exited**. Never unconditionally remove runtime state or the persistent `flock` fence. See [protocol migration](endpoint-protocol.md#microphone-protocol-migration).
+
+For later published updates, update the host checkout:
 
 ```bash
 cd /path/to/pi-voice
@@ -116,7 +122,7 @@ cd /path/to/pi-voice
 install -m755 client/pi-voice-* "$HOME/.local/bin/"
 ```
 
-For the Unix-socket-to-TCP migration, update the Pi host and reinstall all client scripts, then exit every existing `pi-voice-ssh` shell before reconnecting. Run `/reload` in Pi. No `--tailscale` option or endpoint configuration is needed.
+For the Unix-socket-to-TCP migration, first confirm old devices stopped, update the Pi host and reinstall all client scripts, then exit every existing `pi-voice-ssh` shell before reconnecting. Run `/reload` in Pi. No `--tailscale` option or endpoint configuration is needed.
 
 Exit every existing `pi-voice-ssh` shell before testing a new bridge. Multiple wrappers share a bridge and ControlMaster, so the old bridge remains alive until the final wrapper exits. Current wrappers use owner-tagged locks and recover locks left by crashes; reinstalling all scripts together is required because an already-running legacy wrapper still executes its old locking and endpoint logic.
 

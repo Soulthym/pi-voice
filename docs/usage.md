@@ -14,7 +14,7 @@ The default `submitMode` is `review`: the final prompt remains in the editor for
 
 ## Candidate resolution and spoken editing
 
-Live and final transcription request up to `sttCandidates` hypotheses. The editor displays the same `<asr_candidates_json>`-wrapped JSON array sent to `editModel`. During recording, independently decoded segments have separate arrays—alternatives are not combined into invented whole-utterance hypotheses. The final whole-utterance array replaces these while resolution runs.
+Live and final transcription request up to `sttCandidates` hypotheses. The editor shows a compact, user-only preview with shared phrases and nested alternatives, factored at word boundaries. Every actual candidate remains covered; the display can admit incidental combinations and is not a new ASR hypothesis. The unchanged `<asr_candidates_json>`-wrapped JSON array—not this display—is sent to `editModel`. Independently decoded live segments remain separate; the final whole-utterance preview replaces them while resolution runs.
 
 `editModel` resolves technical ambiguity using the original editor draft and a bounded, text-only excerpt of recent user/assistant context. Tool output is excluded. Candidate markup is only a preview: normal completion replaces it with resolved prose before any automatic submission. If you manually edit the preview or draft, Pi Voice preserves your edits and does not auto-submit that capture. Stop also cancels pending live decoding/resolution and fences late results.
 
@@ -31,7 +31,7 @@ Examples for smart mode include “replace port 8000 with 8080,” “scratch th
 - `all` additionally speaks thinking content, regardless of whether thinking is expanded in the UI.
 - `yield` waits for the completed final response and excludes intermediate tool-use responses.
 
-`Ctrl+Shift+V` toggles spoken output. `/voice stop` cancels speech and also asks an active recording to stop.
+`Ctrl+Shift+V` toggles spoken output. `/voice stop` hard-cancels speech, dictation decoding/editing and queued automatic attention; late results cannot overwrite the editor or submit. Device cleanup continues separately, retaining ownership until stop is confirmed. Explicit playback actions instead stop capture and finalize captured dictation into the editor before playback, without auto-submitting it. Read-only queries do neither. A second microphone tap during acquisition cancels startup; there may be no audio yet.
 
 ## Playback controls
 
@@ -42,13 +42,15 @@ Examples for smart mode include “replace port 8000 with 8080,” “scratch th
 | `F8` | Pause or resume the existing audio player |
 | `F9` (↷) | Play the next sentence/newline unit; advance to the next eligible target or pause and follow the latest transcript tail |
 | `F10` (⏭) | Select and play the next eligible completed transcript target; from the latest target, pause and follow the transcript tail |
-| `F11` | Play this session's waiting response, route attention to the oldest waiting project, or replay the selected message |
+| `F11` (↺) | Replay this project's selected/waiting response; never switch projects |
 | `Alt+V` | Re-anchor the current narrated position (`/voice scroll-to`) |
 | `Alt+T` | Pin to transcript end and follow new output (`/voice bottom`) |
 
 F7/F9 use source sentences and actual newlines, never terminal soft wraps. They work before durations are known and retain pause intent. Code-description sentences are separate steps, with existing focus cues preserved; terminal omissions are skipped. F7 from transcript-tail follow selects the final unit of the selected message.
 
 Live speech, replay, ⏮/⏭ and ↶/↷ use the same mode-filtered transcript order. Each assistant text content block is a target; `all` also includes each thinking block in its actual position. Tool calls separate targets but are not spoken. No artificial thinking/answer alternation is imposed, and text separated by tools is not joined. Timings and source highlights belong to those exact targets. F6/F10 navigate this history; merely scrolling the terminal viewport does not change that selection. Navigation is available while Pi is idle. The destination message is highlighted and exposed immediately, before regenerated audio starts, and Pi Voice invalidates any marker cached in the previously selected message before locating the destination.
+
+Pause intent is sticky: incoming output and background work do not restart playback. Changes that dirty the current spoken asset pause it immediately, retain ownership and never auto-resume; unrelated settings do not pause it.
 
 F8 preserves the current audio connection, highlighting position, and transcript viewport around the paused word. Because the paused sink still owns the physical output resource, it retains the cross-session device lease until resume, seek, or stop. It does not restore bottom-follow merely because playback paused. If no live paused transport survives, resume falls back to regenerating from the nearest persisted timing checkpoint.
 
@@ -73,7 +75,7 @@ See [Narration and highlighting](narration-and-highlighting.md) and [Preprocessi
 
 Only interactive Pi TUI sessions participate in voice coordination. The first project with speakable output owns playback. Other projects record attention only when they produce content that would actually be spoken; tool-only responses, raw tool results, and headless child/subagent sessions do not request attention.
 
-When the owner finishes, Pi announces the oldest waiting project. Waiting audio never starts automatically. When user-audible playback actually switches sessions, Pi announces the newly active project once; reacquiring, seeking, pausing, or replaying again in the same session does not repeat its name. In the waiting project, press F11 or run `/voice attention`. Running either action in another project sends a cross-process request to the waiting session and force-preempts current playback.
+Waiting attention does not interrupt current speech, and waiting audio never starts automatically. When user-audible playback switches sessions, Pi announces the newly active project once; reacquiring, seeking, pausing, or replaying in the same session does not repeat its name. Switch to the waiting project and press F11 to play it. F11 always stays in the current project. **Current implementation:** `/voice attention` also replays the current project; the separate explicit cross-project attention action is not implemented.
 
 Manual prompt submission, replay controls, F11, and `/voice attention` take priority. Cross-process replay waits asynchronously for the current player to acknowledge shutdown; controls remain responsive, newer navigation supersedes the pending target, and F8 preserves its intended paused state. A displaced response is paused and returned to the attention queue rather than automatically resumed.
 
@@ -112,4 +114,4 @@ sed -i --follow-symlinks 's/↶10/↶/g; s/10↷/↷/g' ~/.termux/termux.propert
 termux-reload-settings
 ```
 
-The row maps to microphone, previous message, previous sentence, pause/resume, next sentence, next message, and attention/restart. F5 is registered only when `talkShortcut` is not `disabled`.
+The row maps to microphone, previous message, previous sentence, pause/resume, next sentence, next message, and current-project replay. F5 is registered only when `talkShortcut` is not `disabled`.

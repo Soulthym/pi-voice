@@ -29,7 +29,7 @@ Pi Voice reads `~/.pi/agent/pi-voice.json` by default. Unknown or invalid values
 | `submitMode` | `review` | `review` or `auto`. |
 | `editMode` | `smart` | `smart` or `append`. |
 | `playbackHighlight` | `true` | Enables progressive prose/code highlighting. |
-| `autoScroll` | `true` | Locates the exact rendered spoken word, initially places it at 20% from the top (clamped near transcript ends), permits manual reframing inside the 20–80% band, and re-anchors only when a word crosses a band edge. |
+| `autoScroll` | `true` | Locates the exact rendered spoken word, initially places it at 20% from the top (clamped near transcript ends), follows within the 20–80% band thereafter; manual scrolling overrides following until an explicit follow/navigation action. |
 | `codeNarration` | `guided` | `guided` synchronized focus or plain `summary`. |
 | `codeDescriptionContext` | `block-only` | `block-only` sends only the concerned fence; `conversation` also sends its resolved historical discussion. |
 | `codeDescriptionPreprocessScope` | `since-compaction` | Background preprocessing covers only messages retained by the latest compaction (`all` revisits the entire branch). |
@@ -66,7 +66,7 @@ Use `/voice voice` to report the current voice, or `/voice voice <id>` to set it
 
 ## Automatic and explicit devices
 
-`auto` prefers the device inherited from `pi-voice-ssh`, then the most recently active registered client, then local devices. Explicit `local`, `disabled`, TCP, and Unix values bypass automatic endpoint selection.
+`auto` uses the session's saved current-connection pin. New sessions resolve fresh attachment identity; ambiguous or unavailable identity fails closed, never falling back to the newest registered client or host audio. Genuinely local connections can pin local I/O. Explicit `local`, `disabled`, TCP, and Unix values bypass automatic endpoint selection.
 
 `/voice device <selection>` sets a per-session preference persisted as a non-context-injecting Pi custom entry; `/voice device` reports the effective selection and route without claiming it. It does not change the global JSON endpoint settings. See [Devices and SSH](devices-and-ssh.md).
 
@@ -80,7 +80,7 @@ Use `/voice voice` to report the current voice, or `/voice voice <id>` to set it
 
 `current` follows Pi's active model without assuming a provider or model family.
 
-For the best discussion-aware code narration, set `codeDescriptionContext` to `conversation`. This allows `editModel` to receive Pi's resolved provider-compatible history before each fence, potentially including images, compaction summaries, tool calls, and tool results. With `editModel: "current"`, Pi Voice also preserves the effective system prompt and active tool schemas to make the normal request prefix provider-cache eligible. Keep the privacy-safe `block-only` default if that context should not be sent to a remote provider. See [Models and privacy](models-and-privacy.md).
+For the best discussion-aware code narration, set `codeDescriptionContext` to `conversation`. This allows `editModel` to receive Pi's resolved provider-compatible history through the next fence opening or containing message end, potentially including images, compaction summaries, tool calls, and tool results. With `editModel: "current"`, Pi Voice also preserves the effective system prompt and active tool schemas to make the normal request prefix provider-cache eligible. Keep the privacy-safe `block-only` default if that context should not be sent to a remote provider. See [Models and privacy](models-and-privacy.md).
 
 ## Preprocessing scope and budget
 
@@ -89,8 +89,8 @@ Background description work is split from live work:
 - **Live descriptions** for newly completed messages always run on demand and never consume budget.
 - **Historical backfill** (startup catch-up after reload, compaction, or dependency changes) is bounded twice:
   - `codeDescriptionPreprocessScope`: `since-compaction` processes only messages the latest compaction retained; sessions without compaction process everything.
-  - `codeDescriptionPreprocessBudget`: maximum backfill model requests per session load. Cache hits, local fallbacks, and live/replay requests are free.
-- When the budget is exhausted, remaining blocks stay missing and Pi Voice notifies once. `/voice code-budget unlimited` (or a number) raises the allowance for the current session only and resumes skipped blocks; `/voice code-budget` reports scope, allowance, and usage.
+  - `codeDescriptionPreprocessBudget`: maximum backfill model requests per session load. Cache hits, coalesced requests, preflight failures and live/replay requests are free; failed provider attempts still count.
+- When the budget is exhausted, remaining blocks stay missing and Pi Voice notifies once. `/voice code-budget unlimited` (or a number) authorizes a fresh allowance for the current session only and resumes skipped blocks; ordinary sweeps and unrelated settings never replenish it; `/voice code-budget` reports scope, allowance, and usage.
 
 ## Persistent data
 

@@ -60,7 +60,7 @@ install -m755 client/pi-voice-* "$HOME/.local/bin/"
 Termux additionally requires the Termux:API Android app and:
 
 ```bash
-pkg install openssh socat mpv ffmpeg termux-api
+pkg install openssh socat mpv ffmpeg termux-api util-linux
 ```
 
 Connect with the wrapper, start Pi remotely, and enable spoken output:
@@ -74,7 +74,9 @@ pi
 /voice on
 ```
 
-See [Installation](docs/installation.md) for permissions, dependencies, upgrades, SSH server settings, and local-only setups.
+**Current protocol upgrade:** these changes are not yet pushed. Copy the complete client script set from the **host's local checkout**, updating all client copies together; a client-side `git pull` is insufficient. Confirm old captures stopped before exiting wrappers or migrating state. See [safe upgrades](docs/installation.md#upgrading) and [stop recovery](docs/troubleshooting.md#unconfirmed-stop).
+
+See [Installation](docs/installation.md) for permissions, dependencies, SSH server settings, and local-only setups.
 
 ## Default configuration
 
@@ -129,7 +131,7 @@ See [Configuration](docs/configuration.md) for valid values and setting behavior
 | `F8` | Pause/resume audio and highlighting |
 | `F9` | Next sentence/newline unit; at message end advance, or pause and follow the latest tail |
 | `F10` | Next assistant message; from the latest message, pause and follow the transcript tail |
-| `F11` | Play this or the next waiting project's response |
+| `F11` (↺) | Replay this project's selected/waiting response; never switch projects |
 | `Alt+V` | Re-anchor the current narrated position |
 | `Alt+T` | Pin to and follow the transcript tail |
 | `Ctrl+Shift+V` | Toggle spoken output |

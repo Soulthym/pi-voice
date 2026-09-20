@@ -2,7 +2,7 @@
 
 [← README](../README.md) · [Installation](installation.md) · [Devices and SSH](devices-and-ssh.md)
 
-Use one diagnostic step at a time. After replacing client scripts, exit **all** wrappers before reconnecting because the old shared bridge remains alive until the final shell exits.
+Use one diagnostic step at a time. Confirm active capture/playback stopped before replacing scripts or exiting wrappers. Update **all** client copies from the host's local checkout for the current not-yet-pushed batch, then exit all wrappers before reconnecting: the shared bridge remains alive until the final shell exits. See [safe upgrades](installation.md#upgrading).
 
 ## Confirm routing
 
@@ -12,7 +12,7 @@ In Pi:
 /voice status
 ```
 
-Look for `device=auto→<id>` or `→local`, plus the configured `input` and `output`. Explicitly select a connected client if necessary:
+Look for `device=auto→<id>` or `→local`, plus the configured `input` and `output`. These are metadata, not readiness proof. `/voice reconnect` adopts fresh current-attachment identity without playback. Explicitly select a registered client if necessary:
 
 ```text
 /voice device <id>
@@ -23,6 +23,12 @@ On the Pi host, managed registration JSON files should exist under:
 ```bash
 ls -la ~/.cache/pi-voice/devices
 ```
+
+## Unconfirmed stop
+
+`/voice stop` cancels processing promptly but a timeout/disconnect does not prove remote audio or microphone capture stopped. Ownership stays retained and replacement work is blocked. Restore the **original device connection**, then explicitly retry `/voice stop` for capture cleanup or `/voice reconnect` for retained output cleanup. Input retries use the saved endpoint and full ticket, not a newly selected route; a different server at the same port cannot acknowledge the old epoch. If the original recorder cannot be reached, confirm/stop it on that device out of band before recovery.
+
+Do not remove coordinator leases, ticket state, recorder locks, persistent fences or receipts while confirmation is outstanding. Killing Pi, SSH, a helper or the host worker is not remote stop proof. Do not start a permission-test recording alongside an unconfirmed capture. Successful cleanup permits a later explicit retry; it never automatically restarts playback/capture.
 
 ## “Voice microphone connection closed before returning audio”
 
@@ -66,8 +72,9 @@ The server and client must both include the current pause/resume/stop protocol a
 If the phone slept or the network dropped mid-session, one of the client
 listeners may have died silently. The client supervisor now restarts dead
 listeners automatically (up to 20 times) and `pi-voice-ssh` verifies bridge
-liveness via `/proc/<pid>/cmdline` plus an audio-port probe before trusting a
-pid file. If you still hear nothing after reconnecting:
+liveness via `/proc/<pid>/cmdline` plus a client-local audio-port probe before trusting a
+pid file. This wrapper startup check is distinct from host routing: host route
+queries and current-attachment resolution never open probe connections. If you still hear nothing after reconnecting:
 
 ```bash
 pgrep -af "socat|mpv|pi-voice"   # expect two socat listeners while connected
@@ -81,15 +88,7 @@ the ringer) and Termux battery-optimization exemptions.
 
 ## SSH wrapper waits on a lock
 
-Current wrappers use owner-tagged locks and automatically reclaim dead-owner locks. They also reclaim ownerless directories left by older crashed wrappers once no other legacy wrapper could still own them. Reinstall the complete `client/pi-voice-*` set and restart every wrapper. If a traced older wrapper repeatedly prints `mkdir .../lock`, first confirm no wrapper is alive, then remove the legacy lock once:
-
-```bash
-runtime=${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/pi-voice-ssh-$(id -u)
-pgrep -af pi-voice-ssh
-rm -rf "$runtime"/bridge.lock "$runtime"/targets/*/lock
-```
-
-Never remove these paths while a wrapper is active. New owner-tagged locks are released only by their owner and stale ownership is recovered automatically. For a diagnostic trace, run `timeout 30s bash -x "$(command -v pi-voice-ssh)" -vvv YOUR_HOST >~/pi-voice-ssh-debug.log 2>&1`; review hostnames, usernames, key paths, and secret-bearing proxy options before sharing it.
+Current wrappers use owner-tagged locks and automatically reclaim dead-owner locks. They also reclaim ownerless directories left by older crashed wrappers once no other legacy wrapper could still own them. After confirmed device stop, reinstall the complete `client/pi-voice-*` set and restart every wrapper. If a legacy wrapper is stuck, inspect its owner and client log rather than recursively deleting runtime directories. Do not remove locks while a wrapper or unconfirmed capture may still own them. New owner-tagged locks are released only by their owner and stale ownership is recovered automatically. For a diagnostic trace, run `timeout 30s bash -x "$(command -v pi-voice-ssh)" -vvv YOUR_HOST >~/pi-voice-ssh-debug.log 2>&1`; review hostnames, usernames, key paths, and secret-bearing proxy options before sharing it.
 
 ## SSH forwarding fails
 

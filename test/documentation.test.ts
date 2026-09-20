@@ -35,3 +35,19 @@ test("README, example JSON, and configuration table match current defaults", () 
 	assert.match(read("docs/commands.md"), /\/voice code-retry current/);
 	assert.match(read("docs/commands.md"), /\/voice code-retry historical/);
 });
+
+test("playback and protocol docs retain current behavior and safe upgrade guidance", () => {
+	for (const path of ["README.md", "docs/usage.md"]) {
+		assert.match(read(path), /\| `F11`[^\n]*never switch projects/);
+	}
+	const narration = read("docs/narration-and-highlighting.md");
+	assert.match(narration, /bounded overlapping CTC windows/);
+	assert.match(narration, /Manual scrolling overrides automatic motion/);
+	assert.doesNotMatch(narration, /periodic full-layout resynchronization|longer than 30 seconds use duration-weighted/);
+	const installation = read("docs/installation.md");
+	assert.match(installation, /host's \*\*local checkout\*\*/);
+	assert.match(installation, /flock/);
+	assert.match(installation, /exact `stopped N` receipts/);
+	assert.match(installation, /Never unconditionally remove runtime state/);
+	assert.match(read("docs/troubleshooting.md"), /original device connection/);
+});

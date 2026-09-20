@@ -30,6 +30,6 @@
 
 ## Internal wrapper variables
 
-`pi-voice-ssh` injects `PI_VOICE_DEVICE_ID` into the remote environment. The extension uses it to prefer the client associated with the current shell. Users normally should not set it manually; `/voice device` is the supported explicit override.
+`pi-voice-ssh` injects `PI_VOICE_DEVICE_ID` into the remote environment. The extension uses fresh connection identity to pin a new session or explicit playback/reconnect action. In tmux it resolves the current attachment rather than trusting Pi's startup environment; missing or ambiguous identity fails closed. Users normally should not set it manually; `/voice device` is the supported explicit override and `/voice reconnect` adopts the current attachment without playback.
 
 The wrapper also exports target bookkeeping for its own lifecycle. Variables not listed above are implementation details and may change.
