@@ -2,7 +2,7 @@
 
 [← README](../README.md) · [Installation](installation.md) · [Devices and SSH](devices-and-ssh.md)
 
-Use one diagnostic step at a time. Confirm active capture/playback stopped before replacing scripts or exiting wrappers. Update **all** client copies from the host's local checkout for the current not-yet-pushed batch, then exit all wrappers before reconnecting: the shared bridge remains alive until the final shell exits. See [safe upgrades](installation.md#upgrading).
+Use one diagnostic step at a time. Confirm active capture/playback stopped before replacing scripts or exiting wrappers. The host-only batch after `ade0670` through `d4cf759` needs only a host update and `/reload`. If the earlier protocol migration is outstanding or bridge scripts changed, update **all** client copies together, then exit all wrappers before reconnecting: the shared bridge remains alive until the final shell exits. See [safe upgrades](installation.md#upgrading).
 
 ## Confirm routing
 
@@ -12,7 +12,7 @@ In Pi:
 /voice status
 ```
 
-Look for `device=auto→<id>` or `→local`, plus the configured `input` and `output`. These are metadata, not readiness proof. `/voice reconnect` adopts fresh current-attachment identity without playback. Explicitly select a registered client if necessary:
+Look for the `device:` selection/pin and the configured `input` and `output`. These are metadata, not readiness proof. `/voice reconnect` adopts fresh current-attachment identity without playback. Explicitly select a registered client if necessary:
 
 ```text
 /voice device <id>
@@ -51,6 +51,8 @@ rm -f "$HOME/pi-voice-test.ogg"
 timeout 2s termux-microphone-record -f "$HOME/pi-voice-test.ogg" -l 5 -e opus
 ```
 
+Before retrying or replacing scripts, stop the permission-test recording with `termux-microphone-record -q` and confirm `termux-microphone-record -i` reports `isRecording: false`; the command timeout alone is not stop proof.
+
 If direct recording works, reinstall all `client/pi-voice-*` scripts together and restart every wrapper. Do not mix a new `pi-voice-ssh` with an older bridge/helper set.
 
 On Linux, confirm a real default microphone—not only a monitor source—appears in `wpctl status` or `pactl get-default-source`.
@@ -74,7 +76,7 @@ The server and client must both include the current pause/resume/stop protocol a
 If the phone slept or the network dropped mid-session, one of the client
 listeners may have died silently. The client supervisor now restarts dead
 listeners automatically (up to 20 times) and `pi-voice-ssh` verifies bridge
-liveness via `/proc/<pid>/cmdline` plus a client-local audio-port probe before trusting a
+liveness via matching `/proc/<pid>/cmdline`, falling back to a client-local audio-port probe when needed before trusting a
 pid file. This wrapper startup check is distinct from host routing: host route
 queries and current-attachment resolution never open probe connections. If you still hear nothing after reconnecting:
 
@@ -122,7 +124,11 @@ Run:
 /voice timing
 ```
 
-A `~` in the playback line means actual client feedback has not arrived recently and Pi is estimating position. On Termux, the repository also includes `termux/pi-voice-test-playback-position` for direct mpv clock diagnostics.
+Missing client feedback uses a pause-aware estimated position internally; the playback row does not currently display clock provenance. The `Word timing` row measures source-word estimates instead. On Termux, the repository also includes `termux/pi-voice-test-playback-position` for direct mpv clock diagnostics.
+
+## Voice reaches bottom but native follow looks inactive
+
+Unpaused automatic Voice following at the exact transcript bottom now adopts Pi's native End state and clears its “Jump to latest” banner. Resize/layout changes re-evaluate automatic following; explicit End retains its pin until output grows. Neither changes the chronological playback cursor. Manual browsing and paused framing remain authoritative; use **Jump to voice location** or `Alt+V` to re-arm Voice follow. See [auto-scroll](narration-and-highlighting.md#auto-scroll).
 
 ## Model load failure
 
@@ -132,7 +138,7 @@ Clear only a broken model download from `~/.cache/pi-voice/models`; audio-cache 
 
 ## Reload reports a stale extension context
 
-Current preprocessing captures a session epoch and safely abandons stale work. If an older loaded extension crashes during `/reload`, restart Pi. Completed Opus segments, code descriptions, and complete timing maps remain reusable.
+Current preprocessing captures a session epoch and safely abandons stale work. If an older loaded extension crashes during `/reload`, restart Pi. Compatible completed Opus segments, code descriptions, and complete timing maps remain reusable. The sentence-boundary render-identity 3→4 upgrade deliberately invalidates older timing once; see [cache invalidation](preprocessing-and-cache.md#render-identity-and-invalidation).
 
 ## Attention repeats during tools
 

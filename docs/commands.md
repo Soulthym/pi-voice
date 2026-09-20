@@ -83,7 +83,7 @@ Shortcut names follow Pi's format, for example `alt+m`, `ctrl+shift+m`, or `f8`.
 /voice output [auto|local|tcp://host:port|unix:///path]
 ```
 
-`device` without a value reports the session preference and pinned device metadata, without probing or claiming readiness. Completion lists registered candidates, not proven working devices. With a value, `device` stores a per-session routing preference. `output` controls the global endpoint policy. `/voice reconnect` adopts fresh current-attachment identity without playback; explicit replay/resume and playback-requesting navigation also repin. Automatic narration and dictation use the saved pin, with no automatic fallback. See [Devices and SSH](devices-and-ssh.md).
+`device` without a value reports the session preference and pinned device metadata, without probing or claiming readiness. Completion lists registered candidates, not proven working devices. With a value, `device` stores a per-session routing preference. `output` controls the global endpoint policy. `/voice reconnect` adopts fresh current-attachment identity without playback; explicit replay/resume and playback-requesting navigation also repin unless the session selects `local` or `output` is non-`auto`. Automatic narration and dictation use the saved pin, with no automatic fallback. See [Devices and SSH](devices-and-ssh.md).
 
 ## Timeline, preprocessing, and cache
 
@@ -101,6 +101,6 @@ Shortcut names follow Pi's format, for example `alt+m`, `ctrl+shift+m`, or `f8`.
 
 `scroll-to` re-anchors the current narrated position at 20% without changing play/pause state; its default shortcut is `Alt+V`. `bottom` pins the transcript to its end and restores normal transcript-end following, including while narration remains active; its default shortcut is `Alt+T`.
 
-`code-budget` reports or explicitly resets the session-only historical backfill allowance (`scope` and default budget come from the config) and resumes skipped blocks. `code-retry current` retries recoverable omitted descriptions on the selected playback message. `code-retry historical` opens a picker; pass `all` or a message-ID substring to select non-interactively. Retries still respect the session backfill allowance. Richer regeneration selection is not implemented; this basic picker and these explicit retry commands are the available controls.
+`code-budget` reports or explicitly resets the session-only historical backfill allowance (`scope` and default budget come from the config) and resumes skipped blocks. `code-retry current` retries recoverable omitted descriptions on the selected playback message when it remains in the configured historical scope. `code-retry historical` opens a picker; pass `all` or a message-ID substring to select non-interactively. Retries still respect the session backfill allowance. Richer regeneration selection is not implemented; this basic picker and these explicit retry commands are the available controls.
 
 Code concurrency controls parallel `editModel` requests and is explicit. Timing `auto` derives a CPU worker limit from available RAM and CPU, capped at four. Disabling audio caching does not delete existing Opus files.

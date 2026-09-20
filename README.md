@@ -13,13 +13,13 @@ Kokoro, Whisper, Wav2Vec2 alignment, and audio-cache processing run on the machi
 - Dims unread prose, highlights the active sentence, and reveals words against the client player's real playback position.
 - Reads prose fences and Markdown tables naturally; can describe code and patches using the compaction-aware discussion through each block.
 - Supports guided code focus with synchronized line groups, bold ranges, and exact Tree-sitter targets for JavaScript/TypeScript families.
-- Replays historical messages with previous/next, seek, native pause/resume, and persisted timing controls. Labels estimated/mixed/CTC-refined word timing separately from estimated playback clocks.
+- Replays historical messages with previous/next, seek, native pause/resume, and persisted timing controls. Shows explicit playback state and actual estimated-word counts.
 - Reuses content-addressed 32 kbps VBR Opus segments by default; raw PCM is never retained.
 - Incrementally preprocesses missing code descriptions and speech timing from the selected message forward, then backward.
 - Routes multiple clients and Pi sessions safely with explicit device selection, speech ownership, attention requests, and manual preemption.
 - Keeps synthesis, alignment, playback, and preprocessing outside Pi's TUI event loop.
 
-> **Best contextual narration:** set `"codeDescriptionContext": "conversation"` to let `editModel` explain code using the discussion that led to it. The privacy-safe default, `"block-only"`, sends only the concerned fence. Conversation mode sends Pi's provider-compatible history and may include user/assistant content, images, compaction summaries, tool calls, and tool results. With `editModel: "current"`, it also reuses Pi's effective system prompt and active tool schemas so supported providers can reuse the normal conversation's prompt cache. See [Models and privacy](docs/models-and-privacy.md) before enabling it with a remote model.
+> **Best contextual narration:** set `"codeDescriptionContext": "conversation"` to let `editModel` explain code using the discussion that led to it. The privacy-safe default, `"block-only"`, sends only the concerned fence. Conversation mode sends Pi's provider-compatible history and may include user/assistant content, images, compaction summaries, tool calls, and tool results. It also sends the available effective system prompt and active tool schemas; using the current model can let supported providers reuse the normal conversation's prompt cache. See [Models and privacy](docs/models-and-privacy.md) before enabling it with a remote model.
 
 > Short demonstration videos will be added alongside the relevant features.
 
@@ -31,7 +31,7 @@ Kokoro, Whisper, Wav2Vec2 alignment, and audio-cache processing run on the machi
 | Server, `pi-voice-ssh` from Linux | Linux client defaults |
 | Server, `pi-voice-ssh` from Termux | Termux client |
 | Linux desktop, `pi-voice-ssh` from Termux | Termux client |
-| Termux, normal `pi` | Termux microphone and `mpv` |
+| Termux, normal `pi` with a compatible native ONNX runtime | Termux microphone and `mpv`; [host caveat](docs/installation.md#local-termux-pi) |
 
 Ordinary OpenSSH and Tailscale SSH use the same `pi-voice-ssh` command and reverse TCP transport; no public voice ports or special Tailscale flag are needed. This is intended for personal servers: loopback endpoints are accessible to other local users.
 
@@ -74,7 +74,7 @@ pi
 /voice on
 ```
 
-**This batch (after `ade0670`, through `d4ce9c9`):** host update and `/reload` only; `client/` and `termux/` scripts are unchanged, so no client recopy or SSH restart is needed. If you have not completed the earlier protocol migration, its [safe upgrade steps](docs/installation.md#upgrading) still apply. Never discard outstanding [stop-recovery proof](docs/troubleshooting.md#unconfirmed-stop).
+**This batch (after `ade0670`, through `d4cf759`):** host update and `/reload` only; `client/` and `termux/` scripts are unchanged, so no client recopy or SSH restart is needed. If you have not completed the earlier protocol migration, its [safe upgrade steps](docs/installation.md#upgrading) still apply. Never discard outstanding [stop-recovery proof](docs/troubleshooting.md#unconfirmed-stop).
 
 See [Installation](docs/installation.md) for permissions, dependencies, SSH server settings, and local-only setups.
 
@@ -117,7 +117,7 @@ Pi Voice reads `~/.pi/agent/pi-voice.json`. Missing settings use these defaults;
 }
 ```
 
-See [Configuration](docs/configuration.md) for valid values and setting behavior, or copy [`pi-voice.example.json`](pi-voice.example.json).
+See [Configuration](docs/configuration.md) for valid values and setting behavior, or copy [`pi-voice.example.json`](pi-voice.example.json), which deliberately enables spoken output.
 
 ## Controls
 
@@ -138,7 +138,9 @@ See [Configuration](docs/configuration.md) for valid values and setting behavior
 
 Live and completed content share one playback cursor. Navigation preserves playing/paused intent, including at Tail; from Tail, F6 selects the last message and F7 its last available unit. Alt+T moves only the viewport, not this cursor. Playback/navigation re-arm follow and frame immediately; paused navigation stays silent. Alt+V or **Jump to voice location** re-arms follow without resuming. Later manual scrolling wins again.
 
-“Word timing quality” describes the selected message's saved/current estimates or alignment, not ongoing work. Listening alone does not guarantee CTC refinement.
+Automatic Voice following at the exact bottom adopts Pi's native end-follow and clears its “Jump to latest” banner without selecting playback Tail. Manual scrolling and paused framing still win.
+
+`Word timing: n/total estimated` describes the selected message's source words, not background work; sparse saved timing shows `unknown/pending`. Listening alone does not guarantee alignment refinement.
 
 Speak after pressing the microphone key. Recording normally stops after about 1.35 seconds of silence. In the default review mode, edit the resulting prompt and press Enter yourself.
 

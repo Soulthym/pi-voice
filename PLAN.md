@@ -1,6 +1,14 @@
 # Pi Voice — implemented agreements and live-validation handoff
 
-## Native automatic-bottom handoff — ready for reload
+## Current documentation audit — source `d4cf759`
+
+- Audited the 2026-09-13–2026-09-20 window (149 commits, `3e66cb1` through `d4cf759`), broadening to the September 12 routing migration `1ed15dc` and earlier relevant protocol/control history. Compared current implementation with README, all 13 docs, example config, configuration validation and command help; no production/test changes.
+- **New user LIVE evidence:** the newest batch “seems fixed”; native bottom-follow/banner behavior is now confirmed. Earlier navigation, Jump-to-voice, ASR, fast UI and no-flicker feedback remains valid. This supersedes the pending-live language in historical checkpoints below, not all hardware/error paths. Original EPIPE cause remains unobserved and real start latency unmeasured.
+- Documented automatic exact-bottom native End adoption, resize re-evaluation, chronological Tail separation and manual/paused guards; corrected old phase/word-count/clock UI prose, F8 framing, cache/priority, routing/Stop, environment and migration guidance. Coverage and remaining implementation limits are in the current `FINDINGS.md` entry.
+- Validation: typecheck passed; final full suite **865 passed, 3 compatibility skips, 0 failed**; installed-native **306 passed, no skips/failures**. Two earlier audit full runs hit an intermittent render-cost widget-write assertion; targeted and final full reruns passed. No test fixes or universal-green claim. Documentation links and whitespace checked.
+- This latest batch remains host-only since `ade0670`: host update + `/reload`, no routine client copy/reconnect/SSH restart. Older installed bridges must still match the earlier protocol migration. No live processes, user settings, provider/model calls or private exports touched; untracked `ISSUES.md` preserved.
+
+## Historical native automatic-bottom handoff — ready for reload at that checkpoint
 
 - User LIVE feedback: Voice following now lands at the actual bottom; remaining bug is Pi's native “Jump to latest” banner/end-follow state. Preserve the earlier positive navigation, Jump-to-voice, windowed-follow and flicker feedback; this fix itself is offline-validated only.
 - Completed the interrupted `src/index.ts` / native-test diff. Unpaused automatic arrival at exact maximum scroll now reconciles native end-follow even when the word stays in the 20–80% band, and remembers final-tail restoration. No playback Tail/cursor or pause-state action; manual bottom gestures and paused anchors retain ownership. Subsequent growth still restores the speech window when needed.
@@ -9,7 +17,7 @@
 
 ## Final documentation reconciliation — source `d4ce9c9`
 
-This checkpoint supersedes older current-status/reload headings below; historical agreements and evidence remain preserved. Documentation only: no source, test, client, Termux or settings changes. `ISSUES.md` remains untouched.
+This historical checkpoint superseded older current-status/reload headings below; the current audit above now takes precedence. Historical agreements and evidence remain preserved. Documentation only: no source, test, client, Termux or settings changes. `ISSUES.md` remains untouched.
 
 - **User LIVE evidence already positive:** windowed follow, paused/unpaused navigation, intuitive ASR alternatives, fast UI and fixed flicker. Earlier failures below are historical reports, not evidence these confirmations were withdrawn. **The newest batch after `ade0670` has NOT been live-tested.**
 - **One chronological cursor:** F6/F10 move messages; F7/F9 move source sentences/literal newlines, including active streaming targets and enabled thinking in actual transcript order. Tail is after the latest eligible target; back selects the last message/unit, not the penultimate. Navigation and Tail preserve paused/playing intent; active Tail retains unfinished text/future deltas and source closure through asynchronous waits. Alt+T/native bottom is viewport-only, distinct from playback Tail. Immediate previews retain the selected source's context; later ticks/finalization must not steal them.

@@ -8,23 +8,26 @@ Replay, seeking, synchronized highlighting, and written code descriptions need m
 
 Work is prioritized from the currently selected playback message forward to the session end, then backward toward the beginning. This makes nearby and future navigation useful first while eventually covering the full session.
 
-Preprocessing continues while spoken output is disabled. Live speech, microphone actions, manual replay, and cross-session ownership preempt low-priority work.
+Preprocessing continues while spoken output is disabled. Foreground speech defers further historical description submissions; already-submitted historical requests may finish and retain their slot. Cancellable shared description work aborts only when its last consumer leaves; other consumers keep it alive. Timing recovery yields to foreground speech/microphone ownership.
 
 ## Status lines
 
 Session-wide progress and selected-message playback state use distinct labels:
 
 ```text
-○ Playback · message 280/605 · timing pending
+○ Idle · message 280/605 · timing pending
 ↺ Preparing code descriptions · 24/61 targets processed
 ↺ Recovering speech timing · 109/605 targets ready · decoding cached audio: 2
+Word timing: unknown/pending
 ```
 
-Lines remain ordered input → playback → code descriptions → speech timing. Counts are narration targets (eligible text/thinking blocks), not words or percentages. Timing “ready” means complete compatible coverage; descriptions “processed” can include omissions with retry callouts. Recovery totals cover the configured historical scope. The selected message index is navigation state, not a worker index.
+Lines remain ordered input → playback → code descriptions → speech timing → selected-message word timing. Background phase rows remain mounted across adjacent jobs to avoid flicker; counter updates do not restart the playback state. Background counts are narration targets (eligible text/thinking blocks), not words or percentages. Timing “ready” means complete compatible coverage; descriptions “processed” can include omissions with retry callouts. Recovery totals cover the configured historical scope. The selected message index is navigation state, not a worker index.
 
 On startup, `↺ Checking saved timing · 109/605 targets checked` means preparing identities and validating/restoring saved maps—not inference. Compatible complete maps need no audio decoding, synthesis or alignment. If timing is missing/incompatible, **Recovering speech timing** separately shows active lanes preparing descriptions, restoring timing units, measuring audio, decoding cached audio, generating speech, or estimating word timing. Cached Opus decoding is real work but does not run Kokoro. Background measurement uses duration-weighted word estimates, not forced alignment. A fast recovery counter alone does not prove regeneration or cache loss.
 
-Playback labels message word timing as `estimated`, `mixed (includes estimates)`, or `CTC-refined`. Estimates remain when alignment fails, exceeds resource/queue limits, or cannot reliably refine a long window; later refinement is not guaranteed. `playback clock: estimated` is separate: it describes the transport clock, not word alignment. Cached timing retains quality; older unlabeled snapshots show `quality unknown` rather than claiming refinement. These labels do not change transcript syntax colors or move paused highlights.
+The final row shows `Word timing: n/total estimated` (fully refined: `0/total estimated`). Counts cover actual applicable source words in the selected timed units, including a selected suffix, before navigation checkpoint thinning; code-description coordinates are excluded. Unknown provenance, untimed units and sparse-only restored snapshots show `Word timing: unknown/pending`, not invented totals. In-memory compatible variants retain counts. New streaming words can change the denominator; fixed-total count updates keep their width stable under wrapping.
+
+Estimates remain when alignment fails, exceeds resource/queue limits, or cannot reliably refine a long window; later refinement is not guaranteed. Saved checkpoints retain quality, but sparse snapshots cannot reconstruct full word counts. Word timing is separate from the transport clock; the playback row no longer displays a clock-provenance indicator. Background completion or late refinement cannot reset playing/paused state or move paused highlights.
 
 ## Code descriptions
 

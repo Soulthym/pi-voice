@@ -9,7 +9,7 @@ Pi Voice uses three specialized local audio models and one configurable text mod
 | Role | Default | Purpose |
 | --- | --- | --- |
 | TTS | `onnx-community/Kokoro-82M-v1.0-ONNX@q8` | Synthesizes assistant/code narration. Kokoro cannot recognize speech. |
-| STT | `onnx-community/whisper-tiny.en@fp32` | Transcribes microphone audio and creates final ASR alternatives. |
+| STT | `onnx-community/whisper-tiny.en@fp32` | Transcribes microphone audio and creates live/final ASR alternatives. |
 | Alignment | `onnx-community/wav2vec2-base-960h-ONNX@q8` | Force-aligns known synthesized text to clean Kokoro audio. It does not transcribe dictation. |
 | Editing/narration | `current` | Resolves ASR candidates, performs smart edits, and describes fenced code. |
 
@@ -23,7 +23,7 @@ Approximate first-use downloads are 100 MB for Kokoro q8, 150 MB for Whisper Tin
 
 - `ttsModel` must be compatible with `kokoro-js`.
 - `sttModel` must expose a Transformers.js automatic-speech-recognition pipeline.
-- `alignmentModel` must expose a Transformers.js English CTC pipeline.
+- `alignmentModel` must expose a Transformers.js English CTC pipeline using a supported `wav2vec2`, `hubert`, or `unispeech` architecture.
 - The selected `fp32`, `q8`, or `q4` variant must actually exist in the repository.
 
 Suggested Whisper repositories from lighter to heavier:

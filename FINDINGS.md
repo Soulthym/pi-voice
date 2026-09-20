@@ -2,6 +2,31 @@
 
 Updated incrementally. Companion: `PLAN.md`. Reorganize freely while preserving evidence and disposition.
 
+## Current documentation audit — `d4cf759`, 2026-09-20
+
+**New LIVE evidence supplied by the user:** the newest batch “seems fixed,” and native bottom-follow/banner behavior is confirmed. This supersedes earlier pending-live statements below; it is limited observed success, not proof across all hardware, transport failures or layouts. Earlier navigation, Jump-to-voice, ASR, fast-UI and flicker confirmations stand. Original EPIPE cause remains **UNOBSERVED**; real start latency remains **unmeasured**.
+
+Audit scope: all **149 commits** in the 2026-09-13–2026-09-20 window (`3e66cb1`…`d4cf759`; no commits on September 13–16), plus relevant preceding routing/control/protocol history including September 12 `1ed15dc`. Compared actual current sources/callers and fixtures—not just messages—with README, **all 13 `docs/*.md`**, `pi-voice.example.json`, `src/config.ts` validation/defaults and command help. Example intentionally enables output; no schema/help/example code change needed.
+
+| Commit range / representative changes | Documentation coverage reconciled |
+| --- | --- |
+| `3e66cb1`…`81131d1`, `eb9e9ca`, later input fixes | Usage: candidate evidence, manual edits, owned-preview rollback and Stop; configuration: live/final candidates |
+| `a17782e`, `8c5a05b`…`a62a11d`, `9e59d32` | Preprocessing/cache: generator-independent identity, budget attempts, branch/fallback recovery, bounded variants, one-time identity v4 invalidation |
+| `2b94c09`, `77638de`, `e060772`, `8e4638f` | Narration: numeric/dotted/markup boundaries; usage/cache: stable phase rows, real word counts, unknown coverage and explicit playback states |
+| `ade0670`…`d4ce9c9` | Narration/usage: chronological live/completed cursor, sentence/message Tail, post-wrap glyph-stable highlighting, Jump-to-voice and native fallback limits |
+| `61c7c41`, `ba72618`, `3d1ea03`, `4c07612` | Narration/cache/architecture: cancellation, next-request foreground priority, asynchronous preload and first prose before message end—not measured latency |
+| `2aaffbf`…`83fd88c`, earlier protocol/routing history | Endpoint/devices/installation/troubleshooting: retained opaque proof, retry/error scope, pins, attention, old-client migration vs current host-only update |
+| `b4ee633`…`d4cf759` | Narration/README/troubleshooting: exact automatic bottom adopts native End and clears banner; resize recheck, delayed return-tail intent, unchanged chronological cursor/manual/paused authority |
+| Current config/worker/command implementations | Commands/config/environment/models: read-only queries, default 3 runtime workers and precedence, TTS-only identity, conversation privacy, runtime paths and alignment offline caveat |
+
+**Other inaccuracies corrected:** F8 re-anchors before toggling pause; absent transport resumes from retained source units. Visible UI no longer exposes a `~`/clock-provenance label or old aggregate quality wording. Explicit local/non-auto-output routes bypass ordinary playback repinning. Termux names have separate platform metadata, and native hosting needs a compatible ONNX runtime. SSH argv/option and stale-lock guarantees are qualified; permission tests require actual stop confirmation. Detailed behavior stays in docs rather than growing README into a changelog.
+
+**Remaining implementation/test limits, documented rather than fixed:** narrow-table reference-link URL probes can preserve the baseline without highlight/anchor mapping; lightweight speech parsing is not full CommonMark (link-label punctuation, nested URL parentheses, double-backtick spans, long/indented fences and four-digit list markers). Alignment does not honor `HF_HUB_OFFLINE`. Microphone stop-response accumulation lacks the recording size bound; Linux recorder shutdown waits for its pipeline shell, not independent descendant confirmation. Explicit description retry still uses historical scope. SSH stale-owner check/reclaim is not atomic. These are not newly diagnosed live incidents. Future inline main-model narration remains unimplemented. Native automatic-arrival and delayed-acquisition tests do not form a single natural cached-Markdown/reflow/acquisition end-to-end case.
+
+**Validation:** `npm run check` passed. Final `npm test`: **865 passed, 3 skipped, 0 failed (868 total)**; installed-native checks: **306 passed, 0 skipped/failed** using an inert terminal and sanitized test environment. Two earlier audit full runs each reported **864 passed, 3 skipped, 1 failed** at `test/index-render-cost.test.ts:68` (two widget writes vs one); targeted rerun and final full run passed. Preserve this intermittent result; no source/test changes to mask it. Three standard skips are the older project TUI's MouseRegion/banner compatibility cases. Logs: `/tmp/pi-voice-doc-audit-{check,test,native}.log`. Local Markdown links/anchors and whitespace checked; LSP unavailable.
+
+`git diff ade0670 d4cf759 -- client termux` is empty: **latest batch host update + `/reload` only**, not a promise that older bundled scripts never need upgrading. Outstanding protocol migration still requires matching scripts and preserved stop proof. No providers, real inference, hardware, live Pi/SSH/client restarts, runtime/user settings or private exports used. `ISSUES.md` remains untouched. Historical discussion/evidence below is retained verbatim except checkpoint labeling in PLAN.
+
 ## Pre-reload review corrections to `b4ee633`
 
 - Automatic native-tail adoption now rechecks the 20–80% speech window on layout changes, using existing `lastNarrationLayout` and explicit `atTranscriptTail` intent rather than another flag. Explicit End still waits for document growth; paused/manual framing guards remain intact. Native arrival → small growth → viewport shrink reproduced word 299 above top 304 before the fix; the regression now requires top 297. Explicit End/banner resize retention is also tested.

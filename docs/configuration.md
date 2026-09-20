@@ -2,7 +2,7 @@
 
 [← README](../README.md) · [Commands](commands.md) · [Devices](devices-and-ssh.md)
 
-Pi Voice reads `~/.pi/agent/pi-voice.json` by default. Unknown or invalid values fall back to defaults. Explicit setting values persist changes atomically; omitting the value queries the effective setting without changing state (see [Commands](commands.md)). Use [`pi-voice.example.json`](../pi-voice.example.json) as a copyable example.
+Pi Voice reads `~/.pi/agent/pi-voice.json` by default. Unknown settings and invalid enumerated/range values fall back to defaults; nonempty voice/model IDs still require compatible assets at runtime. Explicit setting values persist changes atomically; omitting the value queries the effective setting without changing state (see [Commands](commands.md)). Use [`pi-voice.example.json`](../pi-voice.example.json) as a copyable example; it deliberately sets `enabled: true`, unlike the default.
 
 ## Settings
 
@@ -17,7 +17,7 @@ Pi Voice reads `~/.pi/agent/pi-voice.json` by default. Unknown or invalid values
 | `ttsWorkers` | `3` | Playback synthesis/lookahead limit, integer `1..8`; change live with `/voice tts-workers <1..8>`. Not an asset dependency. |
 | `sttModel` | `onnx-community/whisper-tiny.en` | Transformers.js ASR repository. |
 | `sttDtype` | `fp32` | `fp32`, `q8`, or `q4`. |
-| `sttCandidates` | `3` | Final ASR hypotheses, `1..8`. |
+| `sttCandidates` | `3` | Live and final ASR hypotheses, `1..8`. |
 | `alignmentModel` | `onnx-community/wav2vec2-base-960h-ONNX` | Transformers.js CTC repository. |
 | `alignmentDtype` | `q8` | `fp32`, `q8`, or `q4`. |
 | `editModel` | `current` | `current` or a Pi-registered `provider/model-id`. |
@@ -39,7 +39,7 @@ Pi Voice reads `~/.pi/agent/pi-voice.json` by default. Unknown or invalid values
 | `audioCache` | `true` | Enables content-addressed Opus segment caching. |
 | `audioCacheBitrate` | `32` | VBR Opus target in kbps, `12..128`. |
 
-Changing model, dtype, voice, speed, narration dependencies, or cache bitrate changes render identity. Pi Voice rebuilds only affected timing/audio data.
+Changing TTS model/dtype, voice, speed, narration dependencies, or cache bitrate changes render identity. Pi Voice rebuilds only affected timing/audio data. Changing `editModel` affects description cache misses, not existing compatible assets; STT/alignment model selection is not part of speech render identity.
 
 For playback concurrency, a valid persisted `ttsWorkers` wins over legacy `PI_VOICE_TTS_WORKERS`; if absent/invalid, a valid environment value is used, then `3`. Saving settings persists the effective value, so later environment changes no longer override it. Runtime changes apply to this Pi session immediately and future sessions on load, not other already-running sessions.
 
@@ -80,7 +80,7 @@ Use `/voice voice` to report the current voice, or `/voice voice <id>` to set it
 
 `current` follows Pi's active model without assuming a provider or model family.
 
-For the best discussion-aware code narration, set `codeDescriptionContext` to `conversation`. This allows `editModel` to receive Pi's resolved provider-compatible history through the next fence opening or containing message end, potentially including images, compaction summaries, tool calls, and tool results. With `editModel: "current"`, Pi Voice also preserves the effective system prompt and active tool schemas to make the normal request prefix provider-cache eligible. Keep the privacy-safe `block-only` default if that context should not be sent to a remote provider. See [Models and privacy](models-and-privacy.md).
+For the best discussion-aware code narration, set `codeDescriptionContext` to `conversation`. This allows `editModel` to receive Pi's resolved provider-compatible history through the next fence opening or containing message end, potentially including images, compaction summaries, tool calls, and tool results. Conversation mode also sends the available effective system prompt and active tool schemas to the selected narrator. Using `editModel: "current"` can make the normal request prefix provider-cache eligible. Keep the privacy-safe `block-only` default if that context should not be sent to a remote provider. See [Models and privacy](models-and-privacy.md).
 
 ## Preprocessing scope and budget
 

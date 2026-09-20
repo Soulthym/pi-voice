@@ -20,7 +20,7 @@ Network playback helpers own full-duplex client connections and forward actual p
 
 ## Streaming narration
 
-The extension incrementally parses assistant deltas into speech and code items. Prose segments are sent immediately. A closing code fence starts a block-only description request; conversation mode waits through following prose until the next fence opening or containing message end. A delivery barrier lets preceding speech continue while preserving later transcript order.
+The extension incrementally parses assistant deltas into speech and code items. Complete sentence/literal-newline prose units are sent as they become available, without waiting for the entire message; unfinished units wait for a boundary or message end. A closing code fence starts a block-only description request; conversation mode waits through following prose until the next fence opening or containing message end. A delivery barrier lets preceding speech continue while preserving later transcript order.
 
 Each narration segment carries source ranges, utterance/segment IDs, optional code focus cues, and description offsets. Playback and alignment events update the corresponding TUI ranges.
 
@@ -56,7 +56,7 @@ Manual activity uses acknowledged force-acquire semantics. The requester writes 
 
 `pi-voice-ssh` registers dynamically allocated reverse TCP forwards as JSON metadata under `~/.cache/pi-voice/devices`. Both SSH implementations use the same loopback transport. The extension validates metadata and checks registered loopback listener presence through procfs when available. Existing Unix endpoint registrations remain supported. Listener presence is not an authenticated health check; port reuse and a failed client bridge are still detected by playback/input connection failures.
 
-Session routing uses a saved current-connection pin, never recent-activity fallback. Explicit playback/reconnect resolves fresh attachment identity; automatic narration and dictation retain the pin. Missing or ambiguous identity fails closed. Registry ordering and legacy loopback candidates are metadata for explicit selection, not permission to switch devices.
+Session routing uses a saved current-connection pin, never recent-activity fallback. Eligible explicit playback and forced reconnect resolve fresh attachment identity (ordinary playback skips adoption for session-local or non-auto output); automatic narration and dictation retain the pin. Missing or ambiguous identity fails closed. Registry ordering and legacy loopback candidates are metadata for explicit selection, not permission to switch devices.
 
 ## Failure and reload behavior
 

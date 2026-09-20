@@ -15,19 +15,21 @@ and stable background rows. Sentence tests cover the reported `10/10. Run /reloa
 Markdown/invisible markers, every formatted delta split, shared code/prose navigation,
 ordered prefixes, decimals/versions, lowercase continuations and UTF-16 offsets.
 
-Final docs reconciliation against source `d4ce9c9`: typecheck passed; **858 passed,
-3 skipped, 0 failed (861 total)**. The older project TUI skips two MouseRegion button
-cases and the native banner. Installed Pi TUI checks: **300 passed, no skips/failures**
+Documentation audit against source `d4cf759`: typecheck passed; **865 passed,
+3 skipped, 0 failed (868 total)** in the final full rerun. The older project TUI skips two MouseRegion button
+cases and the native banner. Two earlier audit full runs each failed the widget-write count in `index-render-cost.test.ts:68`; its targeted rerun and the final full run passed. This intermittent failure remains unresolved, with no test/source changes.
+
+Installed Pi TUI checks: **306 passed, no skips/failures**
 against an inert terminal, including actual click dispatch, glyph-stable post-wrap
 highlighting, tables/graphemes and baseline-preserving unmappable probes. Navigation
 checks cover one live/completed cursor, Tail, pause intent and asynchronous source
 finalization. Worker/provider mocks cover nonblocking preload, first prose before
 message end, foreground priority, last-consumer abort and scoped cleanup episodes.
-These are not live phone, real inference or end-to-end latency measurements. Earlier
-user confirmations cover windowed follow, ASR, fast UI and no flicker; the newest batch
-is not live-tested.
+Automatic-bottom tests cover exact arrival, in-band suppression, growth, resize and manual/paused guards; delayed-acquisition return-tail coverage uses a fake viewport. They do not combine natural cached-Markdown arrival, reflow and delayed acquisition into one end-to-end case.
 
-Installed-native rerun (adjust the global installation path on other hosts):
+These fixture tests use inert terminals, temporary files, subprocesses and some loopback sockets, not live phone sessions, real inference or end-to-end latency measurements. The user now reports the newest batch “seems fixed” and confirms native bottom-follow/banner behavior, supplementing earlier windowed-follow, ASR, fast-UI and no-flicker feedback. This is limited live confirmation, not all-device/error-cause validation.
+
+Installed-native rerun (adjust the global installation path on other hosts; unlike `npm test`, this direct command does not remove arbitrary `PI_VOICE_*` variables—use a clean environment, retaining only the test override):
 
 ```sh
 env -u SSH_CONNECTION -u SSH_CLIENT -u SSH_TTY -u TMUX -u TMUX_PANE \

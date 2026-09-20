@@ -16,7 +16,7 @@ The default `submitMode` is `review`: the final prompt remains in the editor for
 
 Live and final transcription request up to `sttCandidates` hypotheses. The editor shows a compact, user-only preview with shared phrases and nested alternatives, factored at word boundaries. Every actual candidate remains covered; the display can admit incidental combinations and is not a new ASR hypothesis. The unchanged `<asr_candidates_json>`-wrapped JSON array—not this display—is sent to `editModel`. Independently decoded live segments remain separate; the final whole-utterance preview replaces them while resolution runs.
 
-`editModel` resolves technical ambiguity using the original editor draft and a bounded, text-only excerpt of recent user/assistant context. Tool output is excluded. Candidate markup is only a preview: normal completion replaces it with resolved prose before any automatic submission. If you manually edit the preview or draft, Pi Voice preserves your edits and does not auto-submit that capture. Stop also cancels pending live decoding/resolution and fences late results.
+`editModel` resolves technical ambiguity using the original editor draft and a bounded, text-only excerpt of recent user/assistant context. Tool output is excluded. Candidate markup is only a preview: normal completion replaces it with resolved prose before any automatic submission. If you manually edit the preview or draft, Pi Voice preserves your edits and does not auto-submit that capture. Stop also cancels pending live decoding/resolution and fences late results. If the editor still contains Voice's untouched preview, cancellation restores the pre-recording draft; manually edited text survives. `/voice stop` must begin the editor input to be recognized; access with a nonempty draft remains a usability limitation.
 
 Both edit modes use the model:
 
@@ -52,7 +52,7 @@ Live speech, replay, ⏮/⏭ and ↶/↷ use the same mode-filtered transcript o
 
 Pause intent is sticky: incoming output and background work do not restart playback. Changes that dirty the current spoken asset pause it immediately, retain ownership and never auto-resume; unrelated settings do not pause it.
 
-F8 preserves the current audio connection, highlighting position, and transcript viewport around the paused word. Because the paused sink still owns the physical output resource, it retains the cross-session device lease until resume, seek, or stop. It does not restore bottom-follow merely because playback paused. If no live paused transport survives, resume falls back to regenerating from the nearest persisted timing checkpoint.
+F8 re-arms follow and frames the narrated position before toggling pause/resume, so it can move the viewport after manual browsing. It preserves the current audio connection and highlighting position. Because the paused sink still owns the physical output resource, it retains the cross-session device lease until resume, seek, or stop. It does not restore bottom-follow merely because playback paused. If no live paused transport survives, resume falls back to regeneration from the retained source-unit start (or code-description ordinal). From idle at an explicitly pinned viewport end, F8 can replay the selected response; this does not require chronological playback Tail.
 
 F7/F9 select sentence/newline source units independently of timing availability; alignment refines playback highlighting without redefining the navigation units. Unchanged messages reuse valid timing maps and cached Opus segments. Message and time movement preserves the transport's paused versus unpaused state: while paused it updates the highlighted position and queues the replacement sink in paused state; from idle, message replay starts unpaused.
 
@@ -62,12 +62,12 @@ From Tail, the first F6 selects the last eligible message (not its predecessor);
 
 ## Highlighting and status
 
-Unread prose is dimmed. The active sentence or clause receives a subtle background, and each reached word returns to the normal foreground. The playback line shows player state in words, position, duration, and selected message. `playback clock: estimated` identifies an estimated device clock separately from word-timing quality.
+Unread prose is dimmed. The active sentence/newline unit receives a subtle background after native wrapping, and each reached word returns to the normal foreground. The playback line shows **Idle**, **Waiting**, **Playing**, or **Paused**, position, duration, and selected message. A separate final row shows `Word timing: n/total estimated` or `unknown/pending`; this is not a device-clock accuracy indicator.
 
 Background status intentionally separates session work from selected-message state:
 
 ```text
-○ Playback · message 280/605 · timing pending
+○ Idle · message 280/605 · timing pending
 ↺ Checking saved timing · 109/605 targets checked
 ```
 

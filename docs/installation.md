@@ -20,7 +20,7 @@ For local Linux devices, install:
 - PipeWire's `pw-play`, `pw-record`, and `wpctl`; or PulseAudio's `parec` for recording.
 - `mpv` or `ffplay` as a playback fallback.
 
-Pi Voice prefers `pw-play`, then `mpv`, then `ffplay` for local output. It prefers a usable PipeWire source, then a non-monitor PulseAudio source for local input.
+Pi Voice prefers `pw-play`, then `mpv`, then `ffplay` for local output. It prefers a usable PipeWire source, then PulseAudio for local input. Selecting a non-monitor PulseAudio source requires successful `pactl` detection; otherwise the backend uses its default.
 
 Run `/reload` after installing or updating the extension. Spoken output defaults to off; enable it with `/voice on`. Microphone dictation remains available when spoken output is off unless input or the shortcut is disabled.
 
@@ -72,7 +72,7 @@ rm -f "$HOME/pi-voice-test.ogg"
 timeout 2s termux-microphone-record -f "$HOME/pi-voice-test.ogg" -l 5 -e opus
 ```
 
-Speak for five seconds. On some Android 15 builds, the API callback remains blocked even though recording works; the two-second timeout is intentional and recording continues to its configured limit.
+Speak for five seconds. On some Android 15 builds, the API callback remains blocked even though recording works; the two-second timeout is intentional and recording continues to its configured limit. Before connecting or retrying, run `termux-microphone-record -q` and confirm `termux-microphone-record -i` reports `isRecording: false`; timeout alone is not stop proof.
 
 Connect using the wrapper:
 
@@ -84,7 +84,7 @@ See [Usage](usage.md#optional-termux-function-key-row) for one-tap F5–F11 cont
 
 ## Local Termux Pi
 
-Install the extension and client dependencies in Termux as above, then run normal `pi`. With `input` and `output` set to `auto`, a genuinely local session pins Termux's microphone and `mpv`; no SSH wrapper is required.
+Local audio routing supports Termux, but hosting inference also requires a working native ONNX runtime. The pinned Node runtime package does not list Android as a supported platform; the client dependencies alone do not establish stock-Termux host support. With a compatible runtime installed, run normal `pi`. With `input` and `output` set to `auto`, a genuinely local session pins Termux's microphone and `mpv`; no SSH wrapper is required.
 
 ## SSH server configuration
 
@@ -101,7 +101,7 @@ Validate with `sshd -t`, then reload `sshd` after changing its configuration. Th
 
 ## Upgrading
 
-**Host-only follow-up after `ade0670`, through `d4ce9c9`:** no `client/` or `termux/` scripts changed. Already-migrated users need the host update and `/reload` only, with no client recopy or SSH restart. The bridge replacement steps below apply only if scripts changed or the earlier migration is still outstanding.
+**Host-only follow-up after `ade0670`, through `d4cf759`:** no `client/` or `termux/` scripts changed. Already-migrated users need the host update and `/reload` only, with no client recopy or SSH restart. The bridge replacement steps below apply only if scripts changed or the earlier migration is still outstanding.
 
 **Earlier protocol migration, if outstanding:** use the Pi host's **local checkout** as the source for every client script when those changes are not available upstream; a client-side `git pull` is then insufficient. Copy the complete `client/pi-voice-*` set using the `scp` example below, including any alternative installed copies/custom client paths; do not mix old and new helpers. Install `flock` (`util-linux`) on Linux/Termux.
 
@@ -138,4 +138,4 @@ chmod 755 "$HOME"/.local/bin/pi-voice-*
 
 ## Platform status
 
-Linux and Termux are currently supported. Native macOS and Windows capture/playback backends are planned.
+Linux hosting and Linux/Termux clients are supported; local Termux hosting has the native-runtime caveat above. Native macOS and Windows capture/playback backends are planned.

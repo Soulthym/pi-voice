@@ -6,11 +6,11 @@
 
 With `input`/`output` set to `auto`, a new session pins its current connection's device. Reloading/resuming a session restores its saved pin; merely attaching another client does not change it. Pins are stored in the existing session device entry, never global configuration. A genuinely local, non-SSH/non-tmux connection can pin local I/O.
 
-`/voice reconnect` adopts the **current attachment** without starting playback. Replay, resume, playback-requesting navigation and `/voice test` also adopt the current connection before speaking. Cross-project `/voice attention` sends the origin terminal's freshly resolved identity to the waiting session, which adopts that pin instead of resolving its possibly detached pane. Unavailable or ambiguous origin identity fails closed; old tmux environment identity is never guessed. Pause-only and paused navigation do not look up or change identity; navigation previews remain immediate. Automatic narration, dictation and automatic attention retries use the existing pin. An active old transport is terminated before rebinding; reconnect leaves playback paused.
+`/voice reconnect` adopts the **current attachment** without starting playback. Replay, resume, playback-requesting navigation and `/voice test` also adopt the current connection before speaking, except when the session explicitly selects `local` or `output` is non-`auto`. Forced reconnect and attention-origin adoption use their separate paths. Cross-project `/voice attention` sends the origin terminal's freshly resolved identity to the waiting session, which adopts that pin instead of resolving its possibly detached pane. Unavailable or ambiguous origin identity fails closed; old tmux environment identity is never guessed. Pause-only and paused navigation do not look up or change identity; navigation previews remain immediate. Automatic narration, dictation and automatic attention retries use the existing pin. An active old transport is terminated before rebinding; reconnect leaves playback paused.
 
 There is **no fallback** to another client or host I/O when the pin is missing or the connection identity is unavailable/ambiguous. Transport failures stop the affected operation: reconnect/fix the client and explicitly retry. `/voice device`, `/voice output` and `/voice input` without arguments are read-only metadata reports: a listed registration or endpoint does **not** mean connected or ready. Routing never opens a test socket (even an empty connection can kill an existing client player); SSH accepting a reverse connection does not prove client readiness.
 
-Explicit `/voice device local` selects local I/O; `/voice device <id>` selects a registered client until an explicit playback action repins it. Explicit `local`, `disabled`, `tcp://…`, and `unix:///…` endpoint settings bypass automatic routing for that direction. `/voice reconnect` resets the device selection to auto with the new pin, but does not change endpoint settings.
+Explicit `/voice device local` selects local I/O; `/voice device <id>` selects a registered client until an eligible explicit playback action repins it (non-`auto` output bypasses ordinary adoption). Explicit `local`, `disabled`, `tcp://…`, and `unix:///…` endpoint settings bypass automatic routing for that direction. `/voice reconnect` resets the device selection to auto with the new pin, but does not change endpoint settings.
 
 ## Managed SSH topology
 
@@ -38,7 +38,7 @@ For the same client device and SSH target, concurrent wrappers share:
 
 Reference files track interactive wrapper processes. The last shell to exit closes the ControlMaster and client bridge. Stale local wrapper references are cleaned on the next invocation.
 
-Setup and bridge transitions use atomic owner-tagged locks. A contender waits for a live owner, reclaims a dead owner's lock, and cannot delete a replacement acquired concurrently. Current wrappers also recover ownerless lock directories left by a crashed legacy wrapper once no other legacy wrapper could still own them.
+Setup and bridge transitions use atomic owner-tagged locks. A contender waits for a live owner and attempts to reclaim a dead owner's lock. Stale-owner checking and reclaim are separate operations, not a general race-free filesystem guarantee. Current wrappers also recover ownerless lock directories left by a crashed legacy wrapper once no other legacy wrapper could still own them.
 
 Different target hosts use separate masters while sharing the same local bridge. Different client devices register separate IDs and may connect simultaneously.
 
@@ -52,19 +52,19 @@ ${XDG_CONFIG_HOME:-~/.config}/pi-voice/device-id
 
 Copy this file when migrating a client if it should retain the same explicit device selection. Delete it before reconnecting to intentionally create a new identity.
 
-`PI_VOICE_DEVICE_NAME` controls the human-readable registered name. The default is the short hostname, with ` (Termux)` appended on Android.
+`PI_VOICE_DEVICE_NAME` controls the human-readable registered name. The default is the short hostname; the registration records the platform separately.
 
 The wrapper exports `PI_VOICE_DEVICE_ID` and target identity into the remote shell. Direct SSH uses that connection's environment. For tmux, Pi reads the current attached client's identity using the pane/socket and checks that the attachment did not change during lookup; it does not trust the long-lived Pi process's startup device ID. Multiple clients, no attached client, unreadable identity, or unresolved nested tmux fail closed rather than guessing.
 
 ## Wrapper syntax
 
-The wrapper accepts ordinary SSH options before the target and an optional remote command:
+The wrapper accepts common SSH options before the target and an optional executable plus arguments (its option parser is not exhaustive; separate-argument `-B` is not supported):
 
 ```bash
 pi-voice-ssh [--device-dir <absolute-remote-path>] [-p PORT] [-i KEY] [-o OPTION] USER@HOST [REMOTE_COMMAND ...]
 ```
 
-If the target has a configured `RemoteCommand`, the wrapper preserves it while injecting the device environment. Otherwise it opens an interactive shell or runs the supplied command.
+Remote arguments are quoted individually, not parsed as one shell program: use `pi-voice-ssh HOST sh -lc 'echo hello'` for shell syntax, not `pi-voice-ssh HOST 'echo hello'`. A configured `RemoteCommand` is prefixed with `env` to inject device identity, so shell builtins/compound commands likewise need an explicit shell. Otherwise the wrapper opens an interactive shell or runs the supplied executable.
 
 ### Custom device registries
 
