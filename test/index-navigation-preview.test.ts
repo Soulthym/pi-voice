@@ -10,7 +10,7 @@ import { DeviceRouter, type ConnectionDevice } from "../src/device-router.js";
 import { PhoneInputClient, type PhoneCapture } from "../src/phone-input.js";
 import { CodeDescriptionCache } from "../src/code-description-cache.js";
 import * as describer from "../src/code-describer.js";
-import { assistantCodeContext, structuredContextIdentity } from "../src/code-context.js";
+import { assistantCodeContext, structuredContextIdentity, resolvedSessionContext } from "../src/code-context.js";
 import { SpeakableStream } from "../src/speakable.js";
 import { DEFAULT_VOICE_CONFIG } from "../src/config.js";
 
@@ -1126,3 +1126,87 @@ test("live message navigation skips markup-only blocks", async t => {
  const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
  assert.equal((worker?.sent.at(-1) as { text: string })?.text, "Next live sentence.");
  });
+
+for (const closed of [false, true]) for (const handoff of [false, true]) test(`Tail snapshots closure before cancellation (closed: ${closed}, handoff: ${handoff})`, async t => {
+	const host = await setup(t);
+	await host.start();
+	const message = { ...assistant("First. Partial", "pending"), content: [
+		{ type: "text", text: "First. Partial" },
+		...(closed ? [{ type: "toolCall", id: "tool", name: "read", arguments: {} }] : []),
+	] };
+	await host.emit("message_start", { message });
+	await host.emit("message_update", { message, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "First. Partial" } }); await settle();
+	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
+	const before = worker.sent.length;
+	const cancel = t.mock.method(worker, "cancel", () => 703 as never);
+	await host.shortcut("f10"); await settle();
+	assert.equal(cancel.mock.callCount(), 1);
+	const done = { ...message, stopReason: "toolUse" };
+	host.addMessage("A", null, done);
+	await host.emit("message_end", { message: done });
+	await host.emit("turn_end", { message: done });
+	if (handoff) {
+		const next = assistant("New unfinished", "pending");
+		await host.emit("message_start", { message: next });
+		await host.emit("message_update", { message: next, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "New unfinished" } });
+	}
+	assert.equal(worker.sent.length, before);
+	cancel.mock.restore();
+	worker.emit({ type: "idle", cancelId: 703 }); await settle();
+	assert.deepEqual((worker.sent.slice(before) as Array<{ text: string }>).map(segment => segment.text), closed ? [] : ["Partial"]);
+	const last = worker.sent.at(-1) as { utterance: number };
+	worker.emit({ type: "idle", utterance: last.utterance }); await settle();
+	assert.deepEqual((worker.sent.slice(before) as Array<{ text: string }>).map(segment => segment.text), closed ? [] : ["Partial"]);
+});
+
+test("paused preview uses B context while canonical A replay still awaits acquisition", async t => {
+	const host = await setup(t);
+	const config = JSON.parse(await fs.readFile(process.env.PI_VOICE_CONFIG!, "utf8"));
+	await fs.writeFile(process.env.PI_VOICE_CONFIG!, JSON.stringify({ ...config, codeDescriptionContext: "conversation" }));
+	const text = (name: string) => "```js\nconst x = 1;\n```\n" + name + " prose.\n```js\nconst y = 2;";
+	const a = assistant(text("A"), "pending");
+	const b = assistant(text("B"), "pending");
+	const stream = new SpeakableStream();
+	const item = [...stream.push(text("A")), ...stream.flush()].find(item => item.kind === "code")!;
+	assert.equal(item.kind, "code");
+	if (item.kind !== "code") return;
+	const keyFor = (message: typeof a) => describer.codeDescriptionCacheKey(host.ctx, item.block,
+		DEFAULT_VOICE_CONFIG.editModel, DEFAULT_VOICE_CONFIG.codeNarration,
+		structuredContextIdentity(assistantCodeContext([], message, 0, item.source.end, false)!), "conversation");
+	const aKey = keyFor(a);
+	let bKey = keyFor(b);
+	assert.notEqual(aKey, bKey);
+	t.mock.method(CodeDescriptionCache.prototype, "get", (key: string) => {
+		const name = key === aKey ? "Alpha" : key === bKey ? "Bravo" : undefined;
+		return name ? { guided: true, records: [{ speech: `${name} first. ${name} second.`,
+			operations: [{ kind: "line-add" as const, id: name, range: { startLine: 1, endLine: 1 } }] }] } : undefined;
+	});
+	const previews = t.mock.method(NarrationProgress.prototype, "registerSegment");
+	await host.start();
+	await host.emit("message_start", { message: a });
+	await host.emit("message_update", { message: a, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: text("A") } }); await settle();
+	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
+	await host.shortcut("f8");
+	const gate = Promise.withResolvers<boolean>();
+	t.mock.method(SessionCoordinator.prototype, "ownsSpeech", () => false);
+	t.mock.method(SessionCoordinator.prototype, "tryAcquireSpeech", () => false);
+	const acquire = t.mock.method(SessionCoordinator.prototype, "forceAcquireSpeech", () => gate.promise);
+	const pending = host.shortcut("f9"); await settle();
+	assert.equal(acquire.mock.callCount(), 1);
+	const done = { ...a, stopReason: "toolUse" };
+	host.addMessage("canonical-A", null, done);
+	await host.emit("message_end", { message: done });
+	await host.emit("turn_end", { message: done }); await settle();
+	bKey = describer.codeDescriptionCacheKey(host.ctx, item.block,
+		DEFAULT_VOICE_CONFIG.editModel, DEFAULT_VOICE_CONFIG.codeNarration,
+		structuredContextIdentity(assistantCodeContext(resolvedSessionContext(host.entries as never).messages, b, 0, item.source.end, false)!), "conversation");
+	await host.emit("message_start", { message: b });
+	await host.emit("message_update", { message: b, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: text("B") } });
+	const next = host.shortcut("f10");
+	const preview = previews.mock.calls.findLast(call => call.arguments[0].id === -1)?.arguments[0];
+	assert.equal(preview?.text, "Bravo first.");
+	assert.ok(host.render(text("B")).includes(`${NARRATION_ACTIVE_MARKER}Bravo`), host.render(text("B")));
+	assert.ok(preview?.code?.cues.some(cue => cue.operations.some(operation => "id" in operation && operation.id === "Bravo")));
+	gate.resolve(true); await Promise.all([pending, next]); await settle();
+	assert.equal(worker.pauses.at(-1), true);
+});

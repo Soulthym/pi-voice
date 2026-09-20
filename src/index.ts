@@ -452,6 +452,7 @@ export default async function (pi: ExtensionAPI) {
 				continueLiveTurn: boolean;
 				source: typeof liveSource;
 				blockIds: Map<number, string>;
+				closedPrefix: boolean;
 			}
 		| undefined;
 	let playbackTimelineTimer: NodeJS.Timeout | null = null;
@@ -2163,7 +2164,8 @@ export default async function (pi: ExtensionAPI) {
 			const contextual = entry ? completedEntryMessages(activeContext, entry, config.mode, true)
 				.find(message => message.id === target.id) : undefined;
 			const completed = contextual && completedCodeItems(contextual).find(candidate => candidate.sourceEnd === item.source.end);
-			const source = pendingReplay?.source ?? liveSource;
+			const source = pendingReplay && (pendingReplay.target.id === target.id ||
+				[...pendingReplay.blockIds.values()].includes(target.id)) ? pendingReplay.source : liveSource;
 			const messages = config.codeDescriptionContext === "conversation" && !completed && source
 				? assistantCodeContext(source.before, source.assistant, target.contentIndex ?? 0, item.source.end, source.final) : [];
 			const plan = messages && codeDescriptionCache.get(descriptionCacheKey(activeContext, completed?.block ?? item.block,
@@ -2211,6 +2213,10 @@ export default async function (pi: ExtensionAPI) {
 		const replaySource = retry?.source ?? (liveSource && !liveSource.final &&
 			(livePlaybackId === target.id || liveTargetIndex !== undefined) ? liveSource : undefined);
 		const continueLiveTurn = !!replaySource;
+		const prefix = target.tailPrefix ?? target.text.slice(0, sourceOffset);
+		const content = (replaySource?.assistant as { content?: unknown[] } | undefined)?.content;
+		const closedPrefix = retry && target === retry.target ? retry.closedPrefix : (prefix === target.text &&
+			!!(replaySource?.final || (liveTargetIndex ?? 0) < (content?.length ?? 0) - 1));
 		if (!suffix.trim() && !continueLiveTurn) return;
 		if (pendingSpeechPreemption) {
 			notifyVoice(activeContext, "Handoff waiting · stopping the previous device", "warning");
@@ -2236,6 +2242,7 @@ export default async function (pi: ExtensionAPI) {
 			continueLiveTurn,
 			source: replaySource,
 			blockIds: replayBlockIds,
+			closedPrefix,
 		};
 		pendingReplay = request;
 		if (replaySource && !replaySource.final) {
@@ -2424,9 +2431,8 @@ export default async function (pi: ExtensionAPI) {
 		if (continueLiveTurn) {
 			liveCaptureOrigin = sourceOffset;
 			vocalizer.setNarrationSourceOffset(0, target.skipUnits ?? 0);
+			// Closure belongs to the navigation intent, not a later message_end.
 			const prefix = request.target.tailPrefix ?? target.text.slice(0, sourceOffset);
-			const content = (replaySource?.assistant as { content?: unknown[] } | undefined)?.content;
-			const closedPrefix = prefix === target.text && (replaySource?.final || (liveTargetIndex ?? 0) < (content?.length ?? 0) - 1);
 			// A closed block has no unfinished unit to retain at Tail.
 			if (closedPrefix) vocalizer.setNarrationSourceOffset(prefix.length);
 			vocalizer.seedLivePrefix(closedPrefix ? "" : prefix);
