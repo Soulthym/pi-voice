@@ -1059,6 +1059,8 @@ export default async function (pi: ExtensionAPI) {
 	let restoreBottomAfterSpeech = false;
 	let bottomPinned = false;
 	let atTranscriptTail = false;
+	// The chronological cursor's Tail is distinct from the viewport following its end.
+	let navigationAtTail = false;
 	let followHintVisible = false;
 	const markdownLineCache = new Map<string, number>();
 	let belowCacheKey = "";
@@ -1360,6 +1362,7 @@ export default async function (pi: ExtensionAPI) {
 		try {
 			activeScrollView()?.scrollToEnd?.();
 			atTranscriptTail = transcriptIsFollowingEnd();
+			navigationAtTail = atTranscriptTail;
 		} catch {
 			// Follow restoration is cosmetic; ignore missing runtime support.
 		}
@@ -2096,6 +2099,7 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	const previewPlaybackTarget = (target: PlaybackTarget, explicit = true): void => {
+		navigationAtTail = false;
 		playbackUtterances.clear();
 		lastPlaybackTick = undefined;
 		narration.setCompletedText(target.text, target.messageType, target.contentIndex, target.displayOffset);
@@ -3593,11 +3597,11 @@ export default async function (pi: ExtensionAPI) {
 		return epoch === playbackRequestEpoch && interactiveVoiceSession ? epoch : undefined;
 	};
 
-	let navigatedPastLastMessage = false;
 	// Preview raw source before contextual identities yield or device acquisition waits.
 	const previewHistoricalTarget = (ctx: ExtensionContext, movement: -1 | 0 | 1, automatic = false): PlaybackTarget | undefined => {
+		if (navigationAtTail && movement === 1) return;
 		const branch = completedBranch(ctx);
-		const fromTail = movement === -1 && atTranscriptTail && navigatedPastLastMessage;
+		const fromTail = movement === -1 && navigationAtTail;
 		const selected = fromTail || (movement === 0 && pausedForAttention) ? undefined : playbackHistory.selected();
 		const selectedEntry = selected ? branch.findIndex(entry => entry.id === selected.id || selected.id.startsWith(`${entry.id}:`)) : -1;
 		const live = selectedEntry < 0 && !ownerTurnEnded && livePlaybackId !== undefined && selected?.id.startsWith("live:");
@@ -3619,7 +3623,6 @@ export default async function (pi: ExtensionAPI) {
 		}
 		if (!target && movement === -1) target = boundary;
 		if (!target) return;
-		navigatedPastLastMessage = false;
 		const preview = { ...target, time: 0, sourceOffset: 0 };
 		previewPlaybackTarget(preview, !automatic);
 		return preview;
@@ -3733,12 +3736,13 @@ export default async function (pi: ExtensionAPI) {
 
 	const stepSentence = async (ctx: ExtensionContext, direction: -1 | 1, fromPrevious = false, navigation?: PlaybackHistory): Promise<void> => {
 		if (!requireEnabledVoice(ctx)) return;
+		if (navigationAtTail && direction > 0) { scrollToBottom(ctx); return; }
 		const messages = completedAssistantMessages(ctx, config.mode, false);
 		const history = navigation ?? new PlaybackHistory();
 		if (!navigation) {
 			history.sync(messages);
 			const cursor = playbackHistory.resumeTarget();
-			if (cursor && messages.some(message => message.id === cursor.id && message.text === cursor.text)) {
+			if (!navigationAtTail && cursor && messages.some(message => message.id === cursor.id && message.text === cursor.text)) {
 				history.beginCapture(cursor.id, cursor.text, cursor.time, false, cursor.sourceOffset, cursor.skipUnits ?? 0);
 			}
 		}
@@ -3763,13 +3767,15 @@ export default async function (pi: ExtensionAPI) {
 			for (let skipUnits = 0; skipUnits < count; skipUnits++) units.push({ sourceOffset: item.source.start, skipUnits });
 		}
 		const cursor = history.resumeTarget();
-		if (direction < 0 && !atTranscriptTail && complete &&
+		if (direction < 0 && !navigationAtTail && complete &&
 			(!units.length || (!fromPrevious && (cursor?.sourceOffset ?? 0) <= units[0].sourceOffset && !cursor?.skipUnits)) &&
 			(history.status()?.messageIndex ?? 0) > 0) {
 			history.move(-1);
 			return stepSentence(ctx, direction, true, history);
 		}
-		const target = history.sentenceTarget(direction, units, atTranscriptTail || fromPrevious);
+		const target = fromPrevious && direction > 0
+			? units[0] && { ...selected, time: 0, ...units[0] }
+			: history.sentenceTarget(direction, units, navigationAtTail || fromPrevious);
 		if (target) {
 			const fullCapture = target.sourceOffset === units[0]?.sourceOffset && !target.skipUnits;
 			await playTarget(target, fullCapture, true, false, false, false, ctx);
@@ -3777,11 +3783,8 @@ export default async function (pi: ExtensionAPI) {
 			const before = history.status();
 			if (before && before.messageIndex === before.messageCount - 1) followTranscriptTail(ctx);
 			else {
-				const next = history.move(1);
-				if (next) {
-					const target = { ...next, time: 0, sourceOffset: 0 };
-					await playTarget(target, true, true, false, false, false, ctx);
-				}
+				history.move(1);
+				return stepSentence(ctx, direction, true, history);
 			}
 		} else {
 			scheduleMissingTimings(ctx);
@@ -3815,19 +3818,16 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	const followTranscriptTail = (ctx: ExtensionContext): void => {
-		// Tail is beyond the final playable position. Freeze an active sink before
-		// moving the viewport so narration cannot continue behind transcript-tail
-		// following. An already paused or completed transport remains untouched.
-		playbackRequestEpoch += 1;
-		coordinator?.cancelSpeechAcquisition();
-		if (pendingReplay) {
-			pendingReplay = undefined;
-			vocalizer.setPlaybackPaused(true);
-			playbackPaused = true;
-			narration.setPaused(playbackPaused);
-		}
-		pauseCurrentPlayback(false);
+		navigationAtTail = true;
+		// Tail retires historical audio/preparation, not the user's play/pause intent.
+		const paused = playbackPaused;
+		const cancelId = clearPlaybackTransport();
+		playbackPaused = paused;
+		narration.setPaused(paused);
+		queuedPausedMessages.length = 0;
+		queueIncomingWhilePaused = false;
 		scrollToBottom(ctx);
+		releaseAfterTransportCancellation(cancelId, false);
 	};
 
 	pi.registerShortcut("f8", {
@@ -3924,7 +3924,6 @@ export default async function (pi: ExtensionAPI) {
 			const target = previewHistoricalTarget(ctx, 1);
 			if (target) void playTarget(target, true, true, false, true, false, ctx);
 			else {
-				navigatedPastLastMessage = true;
 				followTranscriptTail(ctx);
 			}
 		},

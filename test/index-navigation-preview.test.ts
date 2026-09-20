@@ -72,13 +72,34 @@ for (const count of [0, 1, 3]) for (const playing of [false, true]) test(`explic
 	await settle();
 	if (count) {
 		const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
-		assert.equal(worker.pauses.at(-1), true, "replacement transport stays paused and silent");
-		assert.match(host.widgetLines()?.join(" ") ?? "", /Paused/);
+		assert.equal(worker.pauses.at(-1), !playing, "Tail preserves play/pause intent");
+		if (!playing) assert.match(host.widgetLines()?.join(" ") ?? "", /Paused/);
 	}
 	if (count > 1) {
 		await host.shortcut("f6"); await settle();
 		assert.ok(host.render(`Message ${count - 2}.`).includes(NARRATION_ACTIVE_MARKER));
 	}
+});
+
+for (const paused of [false, true]) test(`mixed chapter/sentence presses share Tail and pause intent (${paused})`, async t => {
+	const host = await setup(t);
+	host.addMessage("A", null, assistant("Older first. Older last."));
+	host.addMessage("B", null, assistant("Newest first. Newest second.\nNewest last."));
+	await host.start(); await host.shortcut("f11"); await settle();
+	if (paused) await host.shortcut("f8");
+	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
+	await host.shortcut("f10"); await settle();
+	const last = host.shortcut("f7");
+	assert.ok(host.render("Newest first. Newest second.\nNewest last.").includes(`${NARRATION_ACTIVE_MARKER}Newest last`));
+	const previous = host.shortcut("f7");
+	const chapter = host.shortcut("f6");
+	const sentence = host.shortcut("f9");
+	assert.ok(host.render("Older first. Older last.").includes(`${NARRATION_ACTIVE_MARKER}Older last`));
+	await Promise.all([last, previous, chapter, sentence]); await settle();
+	assert.equal(worker.pauses.at(-1), paused);
+	assert.equal((worker.sent.at(-1) as { text: string }).text, "Older last.");
+	await host.shortcut("f9"); await settle();
+	assert.ok(host.render("Newest first. Newest second.\nNewest last.").includes(`${NARRATION_ACTIVE_MARKER}Newest first`), "cross-message forward selects its first unit");
 });
 
 test("rapid F6 presses select two previous messages before preparation yields", async t => {
@@ -290,16 +311,17 @@ for (const latest of ["f6", "stop"]) test(`late F11 acquisition failure cannot r
 	assert.ok(!host.notices.some(notice => /Replay paused/.test(notice.message)));
 });
 
-test("rapid F10 to Tail pauses the still-audible previous transport before retiring preparation", async t => {
+test("rapid F10 to Tail cancels the still-audible previous transport and retires preparation", async t => {
 	const host = await setup(t);
 	for (const id of ["A", "B", "C"]) host.addMessage(id, null, assistant(`${id} sentence.`));
 	await host.start(); await host.shortcut("f6"); await settle();
 	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
 	assert.equal((worker.sent.at(-1) as { text: string }).text, "B sentence.");
 	const before = worker.sent.length;
+	const cancel = t.mock.method(worker, "cancel");
 	const next = host.shortcut("f10");
 	const tail = host.shortcut("f10");
-	assert.equal(worker.pauses.at(-1), true);
+	assert.ok(cancel.mock.callCount() > 0);
 	await Promise.all([next, tail]); await settle();
 	assert.equal(worker.sent.length, before);
 	assert.equal(host.scrollView.isFollowingEnd, true);
