@@ -44,7 +44,7 @@ import {
 	type VoiceSubmitMode,
 } from "./config.js";
 import { chunkCodeNarration, plainCodeNarration, type CodeNarrationPlan } from "./code-narration.js";
-import { DeviceRouter, type VoiceDeviceSelection } from "./device-router.js";
+import { DeviceRouter, type ConnectionDevice, type VoiceDeviceSelection } from "./device-router.js";
 import { LiveTranscriptionSession } from "./live-transcription.js";
 import {
 	NARRATION_ACTIVE_MARKER,
@@ -66,7 +66,7 @@ import { applySpokenEdit, parseEditModelSelector, resolveDictationCandidates } f
 import { formatAsrDisplay } from "./asr-display.js";
 import { narrationRenderKey } from "./render-identity.js";
 import { frameNarrationViewport, invalidateNarrationMarkdown } from "./narration-render.js";
-import { SessionCoordinator, type WaitingSession } from "./session-coordinator.js";
+import { SessionCoordinator, type AttentionRequest, type WaitingSession } from "./session-coordinator.js";
 import { supportsInteractiveVoice } from "./session-mode.js";
 import { Vocalizer } from "./vocalizer.js";
 import { isVoice, VOICES } from "./voices.js";
@@ -361,9 +361,10 @@ export default async function (pi: ExtensionAPI) {
 	};
 	let completingOwnerSpeech = false;
 	let attentionPollTimer: NodeJS.Timeout | null = null;
+	let attentionRequestPending = false;
 	let voiceWorkerIdleTimer: NodeJS.Timeout | null = null;
 	let handleCoordinatedIdle: (utterance: number | undefined) => void = () => {};
-	let playRequestedAttention: (ctx: ExtensionContext) => void = () => {};
+	let playRequestedAttention: (ctx: ExtensionContext, request: AttentionRequest) => void = () => {};
 	let releaseSpeechOwnership: (announceNext?: boolean) => void = () => {};
 	let pendingSpeechPreemption:
 		| { purpose: SpeechPurpose | undefined; wasComplete: boolean; spokenText: string; cancelId?: number }
@@ -1879,20 +1880,23 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	const pollWaitingAttention = (): void => {
-		if (!coordinator || deviceRebind || deviceRetryRequired || transportStopPending) return;
+		if (!coordinator || deviceRebind || transportStopPending) return;
 		if (ownsSpeech && coordinator.consumeSpeechPreemptionRequest()) {
 			handleSpeechPreemption();
 		}
-		if (config.enabled && !attentionSuppressed && !playbackPaused && coordinator.hasAttentionRequest() && activeContext) {
+		if (attentionRequestPending) return;
+		if (config.enabled && !attentionSuppressed && coordinator.hasAttentionRequest() && activeContext) {
 			try {
-				if (coordinator.consumeAttentionRequest()) {
-					playRequestedAttention(activeContext);
+				const request = coordinator.takeAttentionRequest();
+				if (request) {
+					playRequestedAttention(activeContext, request);
 					return;
 				}
 			} catch {
 				// Session replacement will create a fresh coordinator and discard this request.
 			}
 		}
+		if (deviceRetryRequired) return;
 		const owner = coordinator.speechOwner();
 		if (ownsSpeech && owner?.instanceId !== coordinator.instanceId) handleSpeechPreemption();
 		if (owner && owner.instanceId !== coordinator.instanceId) {
@@ -1922,8 +1926,8 @@ export default async function (pi: ExtensionAPI) {
 	let deviceRebind: Promise<void> | undefined;
 	const unconfirmedDeviceStops = new WeakSet<Promise<void>>();
 	// Persist only session metadata. Reattachment alone never changes an existing pin.
-	const adoptCurrentConnection = (epoch: number, force = false): Promise<boolean> => {
-		if (!force && (deviceSelection === "local" || config.output !== "auto")) {
+	const adoptCurrentConnection = (epoch: number, force = false, origin?: ConnectionDevice, current = () => true): Promise<boolean> => {
+		if (!force && !origin && (deviceSelection === "local" || config.output !== "auto")) {
 			deviceRetryRequired = false;
 			return Promise.resolve(true);
 		}
@@ -1943,8 +1947,8 @@ export default async function (pi: ExtensionAPI) {
 					stopUnconfirmed = previousStopUnconfirmed;
 				}
 				if (epoch !== playbackRequestEpoch || ctx !== activeContext) return false;
-				const connection = await deviceRouter.resolveCurrentConnection();
-				if (epoch !== playbackRequestEpoch || ctx !== activeContext || !interactiveVoiceSession) return false;
+				const connection = origin ?? await deviceRouter.resolveCurrentConnection();
+				if (!current() || epoch !== playbackRequestEpoch || ctx !== activeContext || !interactiveVoiceSession) return false;
 				const selection = connection.kind === "device" ? connection.id : "local";
 				// Pin identity even if its registration is temporarily absent; operations validate their own direction.
 				// A reconnect is metadata adoption, never a readiness claim.
@@ -1978,8 +1982,8 @@ export default async function (pi: ExtensionAPI) {
 					lastOwnerUtterance = undefined;
 				}
 				if (!force && selection !== "local") await deviceRouter.route(selection, "output", config.output);
-				if (epoch !== playbackRequestEpoch || ctx !== activeContext) return false;
-				if (force) deviceSelection = "auto";
+				if (!current() || epoch !== playbackRequestEpoch || ctx !== activeContext) return false;
+				if (force || origin) deviceSelection = "auto";
 				activeDeviceId = selection;
 				deviceRouter.setEnvironmentDevice(connection.kind === "device" ? connection.id : undefined);
 				pi.appendEntry(DEVICE_SELECTION_ENTRY, { version: 1, selection: deviceSelection, pin: selection });
@@ -3393,6 +3397,7 @@ export default async function (pi: ExtensionAPI) {
 		if (!requireEnabledVoice(ctx)) return;
 		// Pause/resume edits the pending replay without invalidating its preparation.
 		const epoch = pauseResume && pendingReplay ? playbackRequestEpoch : ++playbackRequestEpoch;
+		if (!(pauseResume && pendingReplay)) coordinator?.cancelSpeechAcquisition();
 		if (!deferInput && inputInProgress) {
 			try { await finishInputForPlayback(); }
 			catch (error) {
@@ -3432,7 +3437,7 @@ export default async function (pi: ExtensionAPI) {
 		return preview;
 	};
 
-	const replaySelected = async (ctx: ExtensionContext, automatic = false): Promise<void> => {
+	const replaySelected = async (ctx: ExtensionContext, automatic = false, prepared = false): Promise<void> => {
 		if (!requireEnabledVoice(ctx)) return;
 		if (!automatic) {
 			restoreBottomAfterSpeech = false;
@@ -3440,7 +3445,7 @@ export default async function (pi: ExtensionAPI) {
 		}
 		const restoreTail = atTranscriptTail && transcriptIsFollowingEnd();
 		const target = previewHistoricalTarget(ctx, 0, automatic);
-		const request = await preparePlaybackAction(ctx, false, true);
+		const request = prepared ? playbackRequestEpoch : await preparePlaybackAction(ctx, false, true);
 		if (request === undefined || request !== playbackRequestEpoch) return;
 		if (!target) {
 			ctx.ui.notify("There is no completed assistant message to replay yet", "warning");
@@ -3449,18 +3454,66 @@ export default async function (pi: ExtensionAPI) {
 		playbackPaused = false;
 		narration.setPaused(playbackPaused);
 		// Select now; canonical timing/history catch-up yields inside playTarget.
-		void playTarget(target, true, true, automatic, true, restoreTail, ctx);
+		void playTarget(target, !prepared || !playbackHistory.hasCompleteTimingFor(target.id), true, automatic, true, restoreTail, prepared ? undefined : ctx);
 		// Let already-warm preparation finish its microtask without waiting on cold slices/device handoff.
 		await Promise.resolve();
 	};
 
-	playRequestedAttention = ctx => {
-		pausedForAttention = true;
-		replaySelected(ctx, true);
+	playRequestedAttention = (ctx, request) => {
+		attentionRequestPending = true;
+		const owner = coordinator!;
+		const epoch = ++playbackRequestEpoch;
+		const current = () => owner === coordinator && epoch === playbackRequestEpoch &&
+			config.enabled && !attentionSuppressed && owner.attentionRequestIsCurrent(request);
+		void (async () => {
+			if (inputInProgress) await finishInputForPlayback();
+			if (inputStopPending) await inputStopBarrier;
+			if (!current() || !await preparePlaybackMessages(ctx, epoch) || !current()) return;
+			syncPlaybackMessages(ctx, false, true);
+			if (!await owner.forceAcquireSpeech()) return;
+			if (!current()) { if (!ownsSpeech) owner.releaseSpeech(); return; }
+			// Only the requesting terminal resolves attachment identity; the waiting pane may be detached.
+			if (!await adoptCurrentConnection(epoch, false, request.connection, current) || !current()) {
+				if (!ownsSpeech && !deviceRebind) owner.releaseSpeech();
+				return;
+			}
+			pausedForAttention = true;
+			// Preparation is complete: no unguarded cold-history wait after accepting the request.
+			await replaySelected(ctx, true, true);
+			if (!ownsSpeech && !pendingReplay) owner.releaseSpeech();
+		})().catch(error => ctx.ui.notify(`Voice attention failed: ${String(error)}`, "error"))
+			.finally(() => { attentionRequestPending = false; });
 	};
 
 	const attendNextProject = async (ctx: ExtensionContext): Promise<void> => {
-		await replaySelected(ctx);
+		if (!requireEnabledVoice(ctx)) return;
+		const owner = coordinator;
+		const waiting = owner?.waitingSessions()[0];
+		if (!owner || !waiting || waiting.instanceId === owner.instanceId) {
+			await replaySelected(ctx);
+			return;
+		}
+		owner.cancelSpeechAcquisition();
+		let epoch = ++playbackRequestEpoch;
+		let captureEpoch = inputEpoch;
+		const current = () => owner === coordinator && epoch === playbackRequestEpoch && captureEpoch === inputEpoch && config.enabled && interactiveVoiceSession;
+		try {
+			if (inputInProgress) await finishInputForPlayback();
+			captureEpoch = inputEpoch;
+			if (inputStopPending) await inputStopBarrier;
+			if (deviceRebind) await deviceRebind;
+			if (!current()) return;
+			const connection = await deviceRouter.resolveCurrentConnection();
+			if (!current()) return;
+			const cancelId = clearPlaybackTransport();
+			epoch = playbackRequestEpoch;
+			await waitForTransportCancellation(cancelId);
+			if (!current()) return;
+			releaseSpeechOwnership(false);
+			owner.requestAttention(waiting.instanceId, connection);
+		} catch (error) {
+			if (current()) ctx.ui.notify(`Voice attention failed: ${String(error)}`, "error");
+		}
 	};
 
 	pi.registerShortcut("f6", {
@@ -3668,7 +3721,7 @@ export default async function (pi: ExtensionAPI) {
 
 	pi.registerShortcut("f11", {
 		description: "Replay this project's response",
-		handler: attendNextProject,
+		handler: async ctx => { await replaySelected(ctx); },
 	});
 
 	const registeredTalkShortcut = config.talkShortcut;

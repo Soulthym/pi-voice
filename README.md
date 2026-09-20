@@ -154,6 +154,8 @@ Speak after pressing the microphone key. Recording normally stops after about 1.
 
 ### Termux extended keyboard
 
+`/voice attention` explicitly attends the oldest eligible waiting session using the requesting terminal's fresh device pin, falling back to this project's replay when current/none waiting. F11 always stays in this project. Handoff waits for confirmed stop; stop/newer playback actions cancel pending requests.
+
 Termux can expose one-tap microphone, message navigation, sentence/newline navigation, pause/resume, and replay controls through an optional F5–F11 extra-key row.
 
 [![Termux extended keyboard row for Pi Voice playback controls](docs/assets/pi-voice-ssh-termux-extended-kb.jpg)](docs/usage.md#optional-termux-function-key-row)

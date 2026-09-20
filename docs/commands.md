@@ -22,7 +22,7 @@ Action commands (`on`, `off`, `toggle`, `stop`, `setup`, `test`, `talk`, `attent
 | `/voice setup` | Explicitly warms Kokoro and Wav2Vec2 alignment. Whisper still loads on first transcription. |
 | `/voice test [text]` | Speaks test text or a default readiness phrase. |
 | `/voice talk` | Starts/stops microphone dictation. |
-| `/voice attention` | Currently replays this project's response, like F11; no cross-project routing. |
+| `/voice attention` | Explicitly attend the oldest eligible waiting session using the origin terminal's fresh device pin; replay this project if current/none waiting. Requires enabled voice. F11 remains own-project replay. |
 | `/voice timing` | Reports recent audio-to-highlight and highlight-to-render diagnostic latency. |
 
 ## Speech and narration

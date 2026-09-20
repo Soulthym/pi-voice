@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { ConnectionDevice } from "./connection-device.js";
 
 export interface SessionPresence {
 	interactive: true;
@@ -19,6 +20,13 @@ export interface SessionPresence {
 export interface WaitingSession extends SessionPresence {
 	waitingSince: number;
 	announced: boolean;
+}
+
+export interface AttentionRequest {
+	requestedAt: number;
+	requestedBy: string;
+	requestId: string;
+	connection?: ConnectionDevice;
 }
 
 type Lease = SessionPresence & { kind: string };
@@ -71,9 +79,12 @@ export class SessionCoordinator {
 	#speechRequestEpoch = 0;
 	#pendingPreemptionFile: string | undefined;
 	#attentionEnabled = true;
+	#outgoingAttention: string | undefined;
 
 	cancelSpeechAcquisition(): void {
 		this.#speechRequestEpoch += 1;
+		if (this.#outgoingAttention) remove(this.#outgoingAttention);
+		this.#outgoingAttention = undefined;
 		if (this.#pendingPreemptionFile) {
 			if (readJson<{ requestedBy: string }>(this.#pendingPreemptionFile)?.requestedBy === this.instanceId) remove(this.#pendingPreemptionFile);
 			this.#pendingPreemptionFile = undefined;
@@ -287,10 +298,33 @@ export class SessionCoordinator {
 		if (waiting) writeJson(file, { ...waiting, announced: true, updatedAt: Date.now() });
 	}
 
-	requestAttention(instanceId: string): void {
+	requestAttention(instanceId: string, connection?: AttentionRequest["connection"]): void {
+		this.cancelSpeechAcquisition();
 		const waiting = this.waitingSessions().find(session => session.instanceId === instanceId);
-		if (!waiting) return;
-		writeJson(this.#attentionFile(instanceId), { requestedAt: Date.now(), requestedBy: this.instanceId });
+		if (this.#stopped || !waiting) return;
+		const request: AttentionRequest = { requestedAt: Date.now(), requestedBy: this.instanceId, requestId: randomUUID(), connection };
+		this.#outgoingAttention = path.join(this.root, `attention-request-${this.instanceId}.json`);
+		writeJson(this.#outgoingAttention, request);
+		writeJson(this.#attentionFile(instanceId), request);
+	}
+
+	attentionRequestIsCurrent(request: AttentionRequest): boolean {
+		const sender = this.activeSessions().find(session => session.instanceId === request.requestedBy);
+		const age = Date.now() - request.requestedAt;
+		const newer = readJson<AttentionRequest>(this.#attentionFile(this.instanceId));
+		return !!sender && Number.isFinite(request.requestedAt) && age >= 0 && age < STALE_MS &&
+			(!newer || newer.requestId === request.requestId) &&
+			readJson<AttentionRequest>(path.join(this.root, `attention-request-${sender.instanceId}.json`))?.requestId === request.requestId;
+	}
+
+	takeAttentionRequest(): AttentionRequest | undefined {
+		const request = readJson<AttentionRequest>(this.#attentionFile(this.instanceId));
+		this.consumeAttentionRequest();
+		if (!request || !this.#attentionEnabled || !this.isWaiting() || !this.attentionRequestIsCurrent(request)) return;
+		const connection = request.connection;
+		if (connection && connection.kind !== "intentional_local" &&
+			(connection.kind !== "device" || typeof connection.id !== "string" || !/^[a-zA-Z0-9._-]{1,128}$/.test(connection.id))) return;
+		return request;
 	}
 
 	hasAttentionRequest(): boolean {

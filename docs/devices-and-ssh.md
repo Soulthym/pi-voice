@@ -6,7 +6,7 @@
 
 With `input`/`output` set to `auto`, a new session pins its current connection's device. Reloading/resuming a session restores its saved pin; merely attaching another client does not change it. Pins are stored in the existing session device entry, never global configuration. A genuinely local, non-SSH/non-tmux connection can pin local I/O.
 
-`/voice reconnect` adopts the **current attachment** without starting playback. Replay (including the current `/voice attention` action), resume, playback-requesting navigation and `/voice test` also adopt the current connection before speaking. Pause-only and paused navigation do not look up or change identity; navigation previews remain immediate. Automatic narration, dictation and automatic attention retries use the existing pin. An active old transport is terminated before rebinding; reconnect leaves playback paused.
+`/voice reconnect` adopts the **current attachment** without starting playback. Replay, resume, playback-requesting navigation and `/voice test` also adopt the current connection before speaking. Cross-project `/voice attention` sends the origin terminal's freshly resolved identity to the waiting session, which adopts that pin instead of resolving its possibly detached pane. Unavailable or ambiguous origin identity fails closed; old tmux environment identity is never guessed. Pause-only and paused navigation do not look up or change identity; navigation previews remain immediate. Automatic narration, dictation and automatic attention retries use the existing pin. An active old transport is terminated before rebinding; reconnect leaves playback paused.
 
 There is **no fallback** to another client or host I/O when the pin is missing or the connection identity is unavailable/ambiguous. Transport failures stop the affected operation: reconnect/fix the client and explicitly retry. `/voice device`, `/voice output` and `/voice input` without arguments are read-only metadata reports: a listed registration or endpoint does **not** mean connected or ready. Routing never opens a test socket (even an empty connection can kill an existing client player); SSH accepting a reverse connection does not prove client readiness.
 
@@ -91,7 +91,7 @@ Interactive TUI sessions coordinate through `~/.cache/pi-voice/coordinator`:
 - tool-only and headless child/subagent sessions do not request attention;
 - waiting responses never start automatically;
 - manual input and playback controls can preempt ownership;
-- F11/↺ and `/voice attention` replay this project's response; queued attention does not interrupt current speech;
+- F11/↺ replays this project's response; `/voice attention` explicitly attends the oldest eligible waiting session (current-project replay when current/none waiting); queued attention alone does not interrupt current speech;
 - paused sessions remain paused until explicit user action.
 
 Project labels use the root directory name and add the shortest parent suffix needed to distinguish duplicates.
