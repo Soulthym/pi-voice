@@ -2,7 +2,48 @@
 
 Updated incrementally. Companion: `PLAN.md`. Reorganize freely while preserving evidence and disposition.
 
-## Latest user feedback / discussion phase
+## Final implementation checkpoint — `a62a11d`
+
+**The agreed batch is implemented.** This section and the rewritten `PLAN.md` supersede historical “awaiting discussion”, “deferred”, “resume here”, old HEAD/test counts and unresolved implementation statuses below. The chronological record remains as evidence, not a current task list. User-requested interruptions/reboots were not diagnosed product crashes.
+
+### Validation and disposition
+
+Final parent-run `npm run check`, `npm test` and whitespace check passed: **481 passed, 1 skipped, 0 failed** (482 tests, about 39 seconds). The skipped older-dependency native-banner case was exercised against the installed Pi TUI: **paused anchor, End, banner all passed**, no skips. Logs: `/tmp/pi-voice-final-batch.log`, `/tmp/pi-voice-final-native.log`. The default test runner now sanitizes child-only connection/voice environment and bounds concurrency to four; it does not change the user's environment.
+
+| Findings | Current disposition |
+| --- | --- |
+| PERF-1 through PERF-6 | Render/context/idle caches and bounded yielding preparation implemented. A later immediate-preview regression was fixed in `2639e64`; synthetic cold replay handler ~572→11.7 ms, repeated ~20.8→7.6 ms, maximum measured heartbeat gap ~46.7 ms. Actual live typing/Escape latency still needs verification. |
+| PERF-7, long-unit alignment | Bounded parent/child work and overlapping-window refinement implemented (`94fd4b0`, `52f278d`, `cb94935`); prioritize current/nearest upcoming work and indicate estimates on overload. Long-unit real-model accuracy remains untested. |
+| UI-1 through UI-7, UX-4/UX-6 | Word-boundary nested display-only ASR preview, draft ownership/cancellation and playback/capture exclusion implemented. Editing-model candidate JSON is unchanged. Microphone startup cancellation is protocol-fenced, not merely a UI flag. |
+| PLAY-1 through PLAY-5, PLAY-7, UI-8, UX-2/UX-5 | Sticky/dirty pause, single-action resume, status preservation, Stop suppression, late-request fencing, actual stop-proof ownership and reload cleanup implemented. Missing remote proof deliberately blocks transfer. |
+| SCROLL-1 through SCROLL-4 | Transcript/sentence navigation, immediate 20% framing, ongoing 20–80% following, free paused scrolling, layout-aware Alt+V and native tail/banner integration implemented. The original Ctrl+T report was clarified as uncertain Alt+T/Alt+V behavior; no invented Ctrl+T diagnosis. |
+| TIME-1 through TIME-6 | Bounded paused partial recovery, stale-event fences, frozen paused cursor, exact source/ordinal offsets, compatible replay refinements and drain clocks implemented. |
+| UX-1/UX-3 | Noninterrupting/disabled-session attention and strict fresh-attachment pins implemented. ↺ remains current-project; `/voice attention` explicitly routes to an eligible waiting project with the origin pin and confirmed handoff. |
+| CACHE-1 through CACHE-13 | Model-independent compatible reuse, canonical following-prose context, sticky omissions, stable budget/attempt charging, full-key retry coalescing, retained-compaction eligibility, bounded shared validation, exact spoken-plan timing identity and bounded version reuse implemented. Superseded context-boundary proposals are not current behavior. |
+| SENTENCE-1 through SENTENCE-3 | Whole sentence/literal-newline units, ordered bounded synthesis and sentence navigation remain implemented. Production benchmark selected default **3**, not the earlier standalone result of 4. |
+
+### Important review-driven refinements
+
+- Canonical target finalization waits for the containing transcript entry, renames a batch before syncing, and highlights duplicate thinking fences by source range (`2ba0b7f`, `cb50c27`, `075d67f`, `a1ba79b`).
+- Budgets/cache/version work landed in `eb8a1ca`, `01ea9e7`, with fallback/first-resolution/retained-reference corrections in `e07e44b`; lazy serialized-context compatibility and caller-specific budget rejection fixes followed. Newly generated summaries obey the same 1,500-character validation as restoration; invalid old oversized snapshots are not silently truncated or promised universally reusable.
+- Scroll/timing refinements through `53955ee` and subsequent fixes preserve manual framing through delayed markers/retry, paused completion positions, absolute replay checkpoints, tail intent and rapid provisional selection. Live replay is supported again without dropping future deltas or newer sources (`4c827df`, `da574cb`, `ce98ad5`).
+- Incoming/outgoing attention preparation is fenced symmetrically against automatic drain and superseding controls; obsolete pending replay is retired immediately (`41af337`, `65386b7`, `311dc78`, `d97b7a2`).
+- Empty bridge connections/probes no longer replace a player (`712f939`). Actual endpoint readiness/completion is authoritative, not a successful TCP accept.
+- Recorder admission is ordered against pre-start cancellation, handles ownerless locks and retryable Android stop failures, and uses a server-epoch/counter plus an exact matching stop receipt (`92fb09d`, `5ca4543`, `f2a9808`, `dc99b86`). Reassigned endpoints/generic old ACKs cannot confirm another recorder's stop.
+- Audio stop/completion proof uses random opaque stream identities instead of reusable PIDs (`90b6517`). Numeric-v2 clients are refused before PCM. Helper exit classification waits for control-stream drain so a delayed pre-audio refusal marker does not permanently latch a false failure (`a62a11d`).
+- Shutdown and same-PID reload cannot steal an unconfirmed lease; retired cleanup can be retried without restarting obsolete session callbacks (`e74b4a7`, `1dcb70d`).
+
+### Deployment and remaining evidence gaps
+
+**Client update required.** Copy all current `client/pi-voice-*` files from this host checkout, not GitHub (not pushed), and restart the client wrappers only at the user's chosen time. Earlier copied versions may predate scoped tickets/receipts and opaque audio IDs. See `docs/installation.md` and `docs/endpoint-protocol.md`; numeric ticket-state migration requires confirmed old-recorder shutdown first. Never erase an outstanding receipt/fence or treat host kill/lease deletion as remote stop proof.
+
+No live client/SSH/session settings were changed, and this batch used no real inference, paid application-provider calls or private transcript exports. Real phone/SSH behavior, physical buffers, long-window model accuracy, live typing/Escape latency and the user's intermittent interruption remain live-validation items, not proven fixed incident causes. User manual reboots/interruption are not product-crash evidence. Timing estimates/refinement are explicitly distinguished; no byte-identical provider-payload guarantee is made. Integrated main-model narration/code presentation and richer regeneration selection remain future-only; Confucius/R2T2 remains archived off main. Preserve untracked `ISSUES.md`.
+
+## Historical user feedback / discussion phase (superseded status)
+
+- User corrected the latest crash/reload report: **it was their own action; ignore it as a product failure**. Continue implementation. This does not resolve or invalidate the earlier typing/scrolling/attention symptoms.
+
+- **Implementation recovery:** user reported Pi crash/reload again; cause unknown. HEAD now `d4de64b` canonical transcript/context changes, with uncommitted follow-up source/tests. Prior orphaned agent processes exited on recheck; no duplicate implementation launched. Post-reload typecheck and whitespace check passed; full-suite validation of canonical changes and final subagent review results remain pending. Latest received full-suite result was 242 passed before canonical phase. See `PLAN.md` implementation recovery checkpoint for committed work, interrupted files, remaining phases and measurement caveats. Do not claim this crash is caused/fixed by a particular subsystem.
 
 - **PLAY-5 fix approved:** explicit resume must clear the intended pause for a replacement/fallback player in the same action; no second ⏯ press required. Retain paused navigation and no-background-auto-resume semantics. Verify pending handoff and cold/recreated-worker paths separately.
 
