@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { MarkdownTheme } from "@earendil-works/pi-tui";
 import { NARRATION_ACTIVE_MARKER, NarrationProgress } from "../src/narration-progress.js";
+import { withNarrationLayout } from "../src/narration-render.js";
 
-const native = await import(process.env.PI_VOICE_TEST_TUI_MODULE ?? "@earendil-works/pi-tui");
+const native: typeof import("@earendil-works/pi-tui") = await import(process.env.PI_VOICE_TEST_TUI_MODULE ?? "@earendil-works/pi-tui");
 const plain = (text: string) => text;
 const theme: MarkdownTheme = {
 	heading: plain, link: plain, linkUrl: plain, code: plain, codeBlock: plain,
@@ -15,7 +16,8 @@ for (const width of [28, 100, 120]) test(`native source marker ignores copied hi
 	const progress = new NarrationProgress();
 	// Synthetic substitute for the saved four-line user message: one legacy token
 	// in a quoted first line, unquoted continuation, blank line, then prose.
-	const quote = `> Earlier synthetic ${NARRATION_ACTIVE_MARKER}report is quoted here.\nContinuation of copied report.\n\nA separate follow-up request.`;
+	const historicalMarker = new NarrationProgress().activeMarker;
+	const quote = `> Earlier synthetic ${historicalMarker}${NARRATION_ACTIVE_MARKER}report is quoted here.\nContinuation of copied report.\n\nA separate follow-up request.`;
 	// Raw markers inside the selected source also must not become its local anchor.
 	const source = `${quote}\n\nLater active assistant has several words to narrate. Another sentence follows.`;
 	const start = source.indexOf("Later active");
@@ -37,7 +39,8 @@ for (const width of [28, 100, 120]) test(`native source marker ignores copied hi
 		assert.equal(progress.activeWordStart, start, "source offsets retain all raw marker bytes");
 		assert.equal(progress.sourceTexts[0], source, "no private/exported source text is stripped");
 		const oldLines = history.flatMap(markdown);
-		const activeLines = markdown(transform());
+		const activeLines = withNarrationLayout(new native.Markdown(source, 1, 0, theme, undefined,
+			{ transform })).render(width);
 		assert.deepEqual(activeLines.map(line => line.replace(progress.activeMarker, "")), markdown(source),
 			"the scoped token has zero rendered width, including narrow wrapping");
 		const transcript = new native.ScrollView({ invalidate() {}, render: () => [
@@ -55,7 +58,7 @@ for (const width of [28, 100, 120]) test(`native source marker ignores copied hi
 	}
 });
 
-for (const width of [18, 24, 28, 40]) test(`guided code keeps ANSI and UTF-16 spans at width ${width}`, () => {
+for (const width of [10, 18, 24, 28, 40, 100, 120]) test(`guided code keeps ANSI and UTF-16 spans at width ${width}`, () => {
 	const code = "const icon = '😀'; const face = icon;\nreturn icon;";
 	const source = `\`\`\`ts\n${code}\n\`\`\``;
 	const progress = new NarrationProgress();
@@ -73,40 +76,74 @@ for (const width of [18, 24, 28, 40]) test(`guided code keeps ANSI and UTF-16 sp
 	const transformed = progress.transform(source, "assistant", plain, plain, undefined, true, syntax);
 	assert.ok(transformed.includes("\x1b[1mface"), "bold range starts after the full non-BMP character");
 	assert.ok(transformed.includes("\x1b[32m"), "syntax foreground is retained");
-	const render = (text: string): string[] => new native.Markdown(text, 1, 0, { ...theme, highlightCode: syntax }).render(width)
-		.map((line: string) => native.stripTerminalSequences(line).replaceAll("\u200c", ""));
-	assert.deepEqual(render(transformed), render(source));
+	const codeTheme = { ...theme, highlightCode: syntax };
+	const baseline = new native.Markdown(source, 1, 0, codeTheme).render(width);
+	const lines = withNarrationLayout(new native.Markdown(source, 1, 0, codeTheme, undefined, {
+		transform: text => progress.transform(text, "assistant", plain, plain, undefined, true, syntax),
+	})).render(width);
+	assert.deepEqual(lines.map(native.stripTerminalSequences), baseline.map(native.stripTerminalSequences));
+	assert.ok(lines.some(line => line.includes("\x1b[1m")));
+	assert.ok(lines.some(line => line.includes("\x1b[32m")));
 });
 
-test("each wrapped active row closes its zone before Markdown padding", {
-	todo: "Pi carries background through wrap and appends padding before TUI's end-of-row reset",
-}, () => {
+for (const width of [10, 28, 120]) test(`code description keeps its native callout and marker at width ${width}`, () => {
+	const source = "```ts\nconst face = '😀';\n```";
+	const description = "Alpha supercalifragilisticexpialidocious bravo charlie delta.";
+	const progress = new NarrationProgress();
+	progress.setCompletedText(source);
+	progress.registerSegment({ id: 1, utterance: 1, text: description, source: { start: 0, end: source.length },
+		codeDescription: { blockSource: { start: 0, end: source.length }, text: description, offset: 0 } });
+	progress.setSegmentAudio(1, 0, 10);
+	progress.setPlayback(1, 0);
+	const baselineText = progress.transform(source, "assistant", plain, plain, undefined, false);
+	const baseline = new native.Markdown(baselineText, 1, 0, theme).render(width);
+	const lines = withNarrationLayout(new native.Markdown(source, 1, 0, theme, undefined, {
+		transform: text => progress.transform(text, "assistant", text => `\x1b[38;5;244m${text}\x1b[39m`,
+			text => `\x1b[48;5;236m${text}\x1b[49m`, undefined, true, undefined, progress.activeMarker),
+	})).render(width);
+	assert.deepEqual(lines.map(line => native.stripTerminalSequences(line.replaceAll(progress.activeMarker, ""))),
+		baseline.map(native.stripTerminalSequences));
+	assert.equal(lines.filter(line => line.includes(progress.activeMarker)).length, 1);
+	for (const line of lines.filter(line => line.includes("\x1b[48;5;236m"))) {
+		assert.match(native.stripTerminalSequences(line.slice(0, line.indexOf("\x1b[48;5;236m"))), /^ │ /);
+		assert.ok(native.stripTerminalSequences(line.slice(line.lastIndexOf("\x1b[49m"))).endsWith(" "));
+	}
+});
+
+test("each wrapped active row closes its zone before Markdown padding", () => {
 	const source = "Alpha bravo charlie delta echo foxtrot golf hotel.";
 	const progress = new NarrationProgress();
 	progress.setCompletedText(source);
 	progress.registerSegment({ id: 1, utterance: 1, text: source, source: { start: 0, end: source.length } });
 	progress.setSegmentAudio(1, 0, 10);
 	progress.setPlayback(1, 0);
-	const transformed = progress.transform(source, "assistant", plain,
-		text => `\x1b[48;5;236m${text}\x1b[49m`);
-	const lines: string[] = new native.Markdown(transformed, 1, 0, theme).render(18);
+	const lines: string[] = withNarrationLayout(new native.Markdown(source, 1, 0, theme, undefined, {
+		transform: text => progress.transform(text, "assistant", plain, text => `\x1b[48;5;236m${text}\x1b[49m`),
+	})).render(18);
 	assert.ok(lines.length > 1);
 	assert.equal(lines.filter(line => line.includes("\x1b[48;5;236m")).length, lines.length,
 		"n wrapped rows have n active zones");
 	for (const line of lines.slice(0, -1)) assert.match(line, /\x1b\[49m +$/,
 		"zone must end before right padding, not merely at TUI's terminal-row reset");
+	for (const line of lines) assert.equal([...line.matchAll(/\x1b\[48;5;236m/g)].length, 1);
 });
 
-test("upstream wrapping must ignore ANSI-only state before a long token", {
-	todo: "Pi wrapSingleLine tests currentLine truthiness instead of visible content before breakLongWord",
-}, () => {
-	// No Voice transform, marker, Markdown parser, or source offsets involved.
-	const text = "Alpha supercalifragilisticexpialidocious";
-	const glyphs = (text: string) => native.wrapTextWithAnsi(text, 5).map(native.stripTerminalSequences);
-	assert.deepEqual(glyphs(`\x1b[48;5;236m${text}\x1b[49m`), glyphs(text));
+for (const source of ["Alpha supercalifragilisticexpialidocious", "Alpha abcdefghij."]) test(`post-wrap paint adds no ANSI-only row: ${source}`, () => {
+	const progress = new NarrationProgress();
+	progress.setCompletedText(source);
+	progress.registerSegment({ id: 1, utterance: 1, text: source, source: { start: 0, end: source.length } });
+	progress.setSegmentAudio(1, 0, 10);
+	progress.setPlayback(1, 0);
+	const baseline = new native.Markdown(source, 0, 0, theme).render(5);
+	const lines = withNarrationLayout(new native.Markdown(source, 0, 0, theme, undefined, {
+		transform: text => progress.transform(text, "assistant", plain, text => `\x1b[48;5;236m${text}\x1b[49m`),
+	})).render(5);
+	assert.deepEqual(lines.map(native.stripTerminalSequences), baseline);
+	assert.ok(lines.every(line => native.stripTerminalSequences(line).trim()));
+	assert.equal(lines.filter(line => line.includes("\x1b[48;5;236m")).length, baseline.length);
 });
 
-for (const width of [10, 18, 24, 28, 40]) test(`highlight never moves native glyphs at width ${width}`, async t => {
+for (const width of [10, 18, 24, 28, 40, 100, 120]) test(`highlight never moves native glyphs at width ${width}`, async t => {
 	const styledTheme: MarkdownTheme = {
 		...theme,
 		heading: text => `\x1b[35m${text}\x1b[39m`,
@@ -120,16 +157,15 @@ for (const width of [10, 18, 24, 28, 40]) test(`highlight never moves native gly
 		"1. Alpha **😀 𐐀mega 界面** bravo charlie.",
 		"## Alpha **bravo** charlie delta echo foxtrot golf hotel india juliet kilo lima.",
 		"1. Alpha **bravo** charlie delta echo foxtrot golf hotel india juliet kilo lima.",
+		"> Alpha **supercalifragilisticexpialidocious** bravo charlie delta.",
+		"> Alpha supercalifragilisticexpialidocious bravo charlie delta.",
+		"1. Alpha bravo.\n   1. charlie **supercalifragilisticexpialidocious** delta.",
+		"Alpha 👨‍👩‍👧‍👦 é 😀‍↔️ bravo charlie.",
+		"Alpha [bravo](https://example.com) _charlie_ delta.",
+		"Alpha $\\frac{a}{b}$ bravo.",
 		"Alpha 😀 𐐀mega 界面 bravo charlie delta echo foxtrot golf hotel india.",
 		"Alpha bravo charlie delta echo foxtrot golf hotel.\n\n```ts\nconst face = '😀';\n```",
-	]) await t.test(source, {
-		// Native wrapSingleLine pushes ANSI-only currentLine before an oversized
-		// token. List indentation leaves five content columns here; even the
-		// untransformed bold baseline can contain a spurious blank row.
-		todo: width === 10 && source.startsWith("1.")
-			? "upstream ANSI-only row before long token; needs renderer-level fix, not source rewriting"
-			: false,
-	}, () => {
+	]) await t.test(source, () => {
 		const progress = new NarrationProgress();
 		progress.setCompletedText(source);
 		const end = source.indexOf("\n\n") < 0 ? source.length : source.indexOf("\n\n");
@@ -141,24 +177,41 @@ for (const width of [10, 18, 24, 28, 40]) test(`highlight never moves native gly
 		const baseline = render(source);
 		for (let position = 0; position < 10; position++) {
 			progress.setPlayback(1, position);
-			const transformed = progress.transform(source, "assistant",
-				text => `\x1b[38;5;244m${text}\x1b[39m`,
-				text => `\x1b[48;5;236m${text}\x1b[49m`,
-				undefined, true, undefined, progress.activeMarker);
-			const lines = render(transformed);
-			const markerOnly = render(progress.transform(source, "assistant", plain, plain,
-				undefined, false, undefined, progress.activeMarker));
+			const lines = withNarrationLayout(new native.Markdown(source, 1, 0, styledTheme, undefined, {
+				transform: text => progress.transform(text, "assistant",
+					text => `\x1b[38;5;244m${text}\x1b[39m`,
+					text => `\x1b[48;5;236m${text}\x1b[49m`,
+					undefined, true, undefined, progress.activeMarker),
+			})).render(width);
+			const markerOnly = withNarrationLayout(new native.Markdown(source, 1, 0, styledTheme, undefined, {
+				transform: text => progress.transform(text, "assistant", plain, plain,
+					undefined, false, undefined, progress.activeMarker),
+			})).render(width);
 			assert.deepEqual(glyphs(markerOnly), glyphs(baseline), `marker only: ${source}: position ${position}`);
 			assert.deepEqual(glyphs(lines), glyphs(baseline), `${source}: position ${position}`);
 			assert.equal(lines.filter(line => line.includes(progress.activeMarker)).length, 1);
-			if (source.startsWith("Alpha bravo") && !source.includes("```")) {
-				assert.ok(lines.length > 1);
-				assert.equal(lines.filter(line => /\x1b\[[\d;]*48;5;236m/.test(line)).length, lines.length,
-					"native wrap reapplies one active zone on every visible row; TUI resets each row");
+			for (let row = 0; row < lines.length; row++) {
+				const line = lines[row];
+				const open = line.indexOf("\x1b[48;5;236m");
+				if (open < 0) continue;
+				const plainRow = glyphs([baseline[row]])[0];
+				const left = native.visibleWidth(line.slice(0, open));
+				const close = line.lastIndexOf("\x1b[49m");
+				const right = native.visibleWidth(line.slice(0, close));
+				const prefix = plainRow.match(/^\s*(?:(?:\d+\. |│ )\s*)*/u)?.[0] ?? "";
+				assert.ok(left >= native.visibleWidth(prefix), "background never paints list/quote continuation indentation");
+				assert.ok(right <= native.visibleWidth(plainRow.trimEnd()), "background closes before all right padding");
+				if (!source.includes("https://")) assert.equal([...line.matchAll(/\x1b\[48;5;236m/g)].length, 1,
+					"one contiguous zone on each active row (link destinations remain excluded)");
 			}
-			if (source.includes("**")) assert.ok(lines.some(line => line.includes("\x1b[1m")), "native bold survives");
-			if (source.startsWith("##")) assert.ok(lines.some(line => line.includes("\x1b[35m")), "native heading color survives");
-			if (source.includes("```")) assert.ok(lines.some(line => line.includes("\x1b[32m")), "native code color survives");
+			if (source.startsWith("Alpha bravo") && !source.includes("```")) {
+				if (width < 100) assert.ok(lines.length > 1);
+				assert.equal(lines.reduce((count, line) => count + [...line.matchAll(/\x1b\[48;5;236m/g)].length, 0), lines.length,
+					"exactly one clipped background zone per active native row");
+			}
+			if (source.includes("**")) assert.ok(lines.some(line => /\x1b\[(?:\d+;)*1(?:;\d+)*m/.test(line)), "native bold survives");
+			if (source.startsWith("##")) assert.ok(lines.some(line => /\x1b\[(?:\d+;)*35(?:;\d+)*m/.test(line)), "native heading color survives");
+			if (source.includes("```")) assert.ok(lines.some(line => /\x1b\[(?:\d+;)*32(?:;\d+)*m/.test(line)), "native code color survives");
 		}
 		if (source.includes("𐐀mega")) {
 			progress.previewSourceOffset(source.indexOf("𐐀mega"));

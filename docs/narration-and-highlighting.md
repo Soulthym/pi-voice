@@ -52,7 +52,7 @@ JavaScript/TypeScript-family fences use Tree-sitter target IDs so the model sele
 For each spoken segment, Pi Voice retains source ranges, synthesized duration, optional CTC word alignment, and actual player position.
 
 - Unread words are dim.
-- The active sentence/newline unit receives a background on each visible wrapped line, including inter-word whitespace. Pi's native ANSI wrapper carries styling to each row and its renderer resets at each row boundary; Voice does not split raw UTF-16 text into terminal columns.
+- The active sentence/newline unit receives one clipped background zone on each visible wrapped line, including inter-word whitespace but excluding list/quote prefixes and trailing padding. Voice paints the existing native Markdown rows after wrapping, so activating a highlight cannot move glyphs or add ANSI-only blank rows. Native syntax colors and grapheme boundaries remain intact.
 - Reached words return to normal.
 - Guided code operations activate against playback time.
 
@@ -72,7 +72,7 @@ Pi's native End/Bottom follow and `/voice bottom` pin immediately. New output ex
 
 ### Native UI integration
 
-The button uses Pi's documented [`setWidget` placement](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/docs/tui.md#pattern-5-widgets-abovebelow-editor) and [`MouseRegion` click dispatch](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/docs/tui.md#mouse-input), not an overlay or a replacement editor. The installed implementations are `pi-tui/dist/components/mouse-region.js`, `components/markdown.js` (`Markdown.render`), and `utils.js` (`wrapTextWithAnsi`). Selection-scoped APC markers and ANSI-free separator tokens keep narration metadata out of native word-boundary decisions; original source offsets, code colors, and copied historical markers remain intact.
+The button uses Pi's documented [`setWidget` placement](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/docs/tui.md#pattern-5-widgets-abovebelow-editor) and [`MouseRegion` click dispatch](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/docs/tui.md#mouse-input), not an overlay or a replacement editor. The installed implementations are `pi-tui/dist/components/mouse-region.js`, `components/markdown.js` (`Markdown.render`), and `utils.js` (`wrapTextWithAnsi`). The extension wraps affected Markdown leaves' render/invalidation hooks; it does not patch Pi or replace its Markdown parser. A private tagged probe maps narration spans onto an immutable native baseline, and painting happens only after layout. Only the current leaf's baseline and source-map probe are cached, not a second transcript history. Stable word ticks reuse both layouts; resize, theme and source changes rebuild them. Selection-scoped APC markers are inserted at the final timed glyph, preserving UTF-16 source offsets, syntax colors, and copied historical markers.
 
 ## Timing diagnostics
 

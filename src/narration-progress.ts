@@ -1,4 +1,6 @@
 import { randomBytes } from "node:crypto";
+import { extractAnsiCode } from "@earendil-works/pi-tui/dist/utils.js";
+import { narrationLayoutCapture, narrationLayoutPlan } from "./narration-render.js";
 import type {
 	CodeLineRange,
 	CodeNarrationCue,
@@ -105,7 +107,7 @@ type CodeDescriptionBlock = {
 	activeWord: NarrationSourceRange | undefined;
 };
 
-const WORD_RE = /[\p{L}\p{N}]+(?:[.'’_-][\p{L}\p{N}]+)*/gu;
+const WORD_RE = /[\p{L}\p{N}][\p{L}\p{N}\p{M}]*(?:[.'’_-][\p{L}\p{N}][\p{L}\p{N}\p{M}]*)*/gu;
 const FENCE_RE = /^\s*(`{3,}|~{3,})(.*)$/;
 
 function canonicalWord(text: string): string {
@@ -247,6 +249,15 @@ function alignedStarts(spoken: DisplayWord[], recognized: AlignmentWord[], durat
 
 function excludedMarkdownRanges(markdown: string): NarrationSourceRange[] {
 	const excluded: NarrationSourceRange[] = [];
+	// Copied transcript metadata is source text, not a new narration target.
+	// Keep its bytes/UTF-16 offsets, but never insert tags inside an ANSI/APC.
+	for (let at = markdown.indexOf("\x1b"); at >= 0; at = markdown.indexOf("\x1b", at + 1)) {
+		const ansi = extractAnsiCode(markdown, at);
+		if (ansi) {
+			excluded.push({ start: at, end: at + ansi.length });
+			at += ansi.length - 1;
+		}
+	}
 	let offset = 0;
 	let fence: { marker: string; textLike: boolean } | undefined;
 	for (const line of markdown.split(/(?<=\n)/)) {
@@ -307,14 +318,20 @@ function styleNarrationMarkdown(
 	activeWord: NarrationSourceRange | undefined = undefined,
 	activeMarker = "",
 	shifts?: Array<{ at: number; length: number }>,
+	layoutPaint?: (style: (text: string) => string, text: string) => string,
 ): string {
 	const excluded = [...excludedMarkdownRanges(markdown), ...extraExcluded];
 	const ranges = tokenize(markdown).filter(word => {
 		const unread = word.end > cursor;
 		const speaking = active ? word.end > active.start && word.start < active.end : false;
-		return (unread || speaking) && !excluded.some(range => word.start >= range.start && word.end <= range.end);
+		return (unread || speaking || layoutPaint) && !excluded.some(range => word.start >= range.start && word.end <= range.end);
 	});
 	if (ranges.length === 0) return markdown;
+	// A timed ordered-list number is structural, not a paintable glyph. Anchor
+	// its next content word without inserting metadata into the list marker.
+	if (activeWord && excluded.some(range => activeWord!.start >= range.start && activeWord!.end <= range.end)) {
+		activeWord = ranges.find(range => range.start >= activeWord!.end);
+	}
 	const isActiveRange = (range: NarrationSourceRange): boolean =>
 		active ? range.end > active.start && range.start < active.end : false;
 	const crossesExcludedSyntax = (start: number, end: number): boolean =>
@@ -327,7 +344,7 @@ function styleNarrationMarkdown(
 		const before = output.length;
 		if (!isActiveRange(range)) {
 			const text = markdown.slice(range.start, range.end);
-			output += range.end > cursor ? styleUnread(text) : text;
+			output += range.end > cursor ? styleUnread(text) : layoutPaint ? layoutPaint(text => text, text) : text;
 			shifts?.push({ at: range.end, length: output.length - before - text.length });
 			offset = range.end;
 			continue;
@@ -352,12 +369,17 @@ function styleNarrationMarkdown(
 			const marksActiveWord = activeWord
 				? word.end > activeWord.start && word.start < activeWord.end
 				: false;
-			phrase += `${marksActiveWord ? activeMarker : ""}${word.end > cursor ? styleUnread(text) : text}`;
+			phrase += `${marksActiveWord ? activeMarker : ""}${word.end > cursor ? styleUnread(text) : layoutPaint ? layoutPaint(text => text, text) : text}`;
 			phraseOffset = word.end;
 		}
+		// Paint terminal punctuation too, including a punctuation-only wrapped row.
+		// The legacy string transform retains its existing source-facing contract.
+		const punctuation = layoutPaint && active
+			? markdown.slice(phraseOffset, active.end).match(/^[.,!?;:…]+/u)?.[0] ?? "" : "";
+		phrase += punctuation;
+		offset = ranges[last].end + punctuation.length;
 		output += styleActive(phrase);
-		shifts?.push({ at: ranges[last].end, length: output.length - before - (ranges[last].end - range.start) });
-		offset = ranges[last].end;
+		shifts?.push({ at: offset, length: output.length - before - (offset - range.start) });
 		index = last;
 	}
 	return ansiFreeSeparators(output + markdown.slice(offset));
@@ -398,7 +420,8 @@ function styledIndexAtSourceOffset(styled: string, sourceOffset: number): number
 	return index;
 }
 
-function styleCodeLine(sourceLine: string, styledLine: string, lineNumber: number, block: CodeFocusBlock): string {
+function styleCodeLine(sourceLine: string, styledLine: string, lineNumber: number, block: CodeFocusBlock,
+	paint?: (style: (text: string) => string, text: string) => string): string {
 	const lineActive = [...block.lineGroups.values()]
 		.flat()
 		.some(range => lineNumber >= range.startLine && lineNumber <= range.endLine);
@@ -415,26 +438,27 @@ function styleCodeLine(sourceLine: string, styledLine: string, lineNumber: numbe
 	const insertions = bold.flatMap(span => {
 		const start = styledIndexAtSourceOffset(styledLine, span.start);
 		const end = styledIndexAtSourceOffset(styledLine, span.end);
-		return [
-			{ at: end, text: `${INTENSITY_OFF}${lineActive ? "" : DIM_ON}` },
-			{ at: start, text: `${lineActive ? "" : INTENSITY_OFF}${BOLD_ON}` },
-		];
+		const style = (text: string) => `${lineActive ? "" : INTENSITY_OFF}${BOLD_ON}${text}${INTENSITY_OFF}${lineActive ? "" : DIM_ON}`;
+		const [open, close] = (paint ? paint(style, "\0") : style("\0")).split("\0");
+		return [{ at: end, text: close }, { at: start, text: open }];
 	});
 	for (const insertion of insertions.sort((left, right) => right.at - left.at)) {
 		output = output.slice(0, insertion.at) + insertion.text + output.slice(insertion.at);
 	}
-	return ansiFreeSeparators(lineActive ? output : `${DIM_ON}${output}${INTENSITY_OFF}`);
+	const dim = (text: string) => `${DIM_ON}${text}${INTENSITY_OFF}`;
+	return ansiFreeSeparators(lineActive ? output : paint ? paint(dim, output) : dim(output));
 }
 
 function styleCodeBlock(
 	code: string,
 	block: CodeFocusBlock,
 	highlightSyntax?: (code: string, language?: string) => string[],
+	paint?: (style: (text: string) => string, text: string) => string,
 ): string {
 	const sourceLines = code.split("\n");
 	const highlighted = highlightSyntax?.(code, block.language);
 	return sourceLines
-		.map((line, index) => styleCodeLine(line, highlighted?.[index] ?? line, index + 1, block))
+		.map((line, index) => styleCodeLine(line, highlighted?.[index] ?? line, index + 1, block, paint))
 		.join("\n");
 }
 
@@ -676,8 +700,19 @@ export class NarrationProgress {
 		highlightProgress = true,
 		highlightSyntax?: (code: string, language?: string) => string[],
 		activeMarker = "",
+		layoutPaint?: (style: (text: string) => string, text: string) => string,
 	): string {
 		if (!markdown) return markdown;
+		const capture = narrationLayoutCapture();
+		if (capture) {
+			const plain = (text: string) => text;
+			const baseline = this.transform(markdown, type, plain, plain, descriptionFor, false, highlightSyntax);
+			const layout = narrationLayoutPlan(activeMarker, tag => this.transform(markdown, type,
+				text => tag(styleUnread, text), text => tag(styleActive, text), descriptionFor,
+				highlightProgress, highlightSyntax, activeMarker, tag));
+			if (layout.probe !== baseline) capture(layout);
+			return baseline;
+		}
 		const candidates = this.#blocks.filter(block => block.type === type &&
 			(type === "assistant-thinking"
 				? markdown.slice(block.displayOffset, block.displayOffset + block.text.trim().length) === block.text.trim()
@@ -693,6 +728,7 @@ export class NarrationProgress {
 			styleUnread,
 			styleActive,
 			activeMarker,
+			layoutPaint,
 		);
 		if ((!highlightProgress && !activeMarker) || !this.#active || !block || blockStart === undefined) return injected.markdown;
 
@@ -731,6 +767,7 @@ export class NarrationProgress {
 			activeWord,
 			activeMarker,
 			proseShifts,
+			layoutPaint,
 		);
 		if (!highlightProgress) return transformed;
 		const focused = [...this.#codeBlocks.values()].flatMap(codeBlock => {
@@ -752,10 +789,11 @@ export class NarrationProgress {
 		// Work backwards so inserted styles cannot shift another fence's source position.
 		for (const { codeBlock, at } of focused) {
 			let codeAt = at;
-			const suppressed = suppressFenceSyntaxHighlight(transformed, codeAt);
+			const suppressed = layoutPaint ? { markdown: transformed, codeAt }
+				: suppressFenceSyntaxHighlight(transformed, codeAt);
 			transformed = suppressed.markdown;
 			codeAt = suppressed.codeAt;
-			const styled = styleCodeBlock(codeBlock.code, codeBlock, highlightSyntax);
+			const styled = styleCodeBlock(codeBlock.code, codeBlock, highlightSyntax, layoutPaint);
 			transformed = transformed.slice(0, codeAt) + styled + transformed.slice(codeAt + codeBlock.code.length);
 		}
 		return transformed;
@@ -805,6 +843,7 @@ export class NarrationProgress {
 		styleUnread: (text: string) => string,
 		styleActive: (text: string) => string,
 		activeMarker = "",
+		layoutPaint?: (style: (text: string) => string, text: string) => string,
 	): {
 		markdown: string;
 		shifts: Array<{ at: number; length: number }>;
@@ -830,6 +869,8 @@ export class NarrationProgress {
 				[],
 				tracked?.activeWord,
 				activeMarker,
+				undefined,
+				this.#active && tracked ? layoutPaint : undefined,
 			);
 			const prefix = markdown.slice(0, item.source.end).endsWith("\n") ? "\n" : "\n\n";
 			boxes.push({

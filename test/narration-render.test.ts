@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Container, Markdown, type MarkdownTheme } from "@earendil-works/pi-tui";
-import { invalidateNarrationMarkdown } from "../src/narration-render.js";
+import { invalidateNarrationMarkdown, withNarrationLayout } from "../src/narration-render.js";
 import { NARRATION_ACTIVE_MARKER, NarrationProgress } from "../src/narration-progress.js";
 
 test("joined thinking Markdown refreshes cached markers and clears old highlights", () => {
@@ -86,4 +86,50 @@ test("narration invalidates only affected Markdown, retaining historical parse c
 	invalidateNarrationMarkdown({ children: [{ child: thinking }] }, new Set(["Private thinking"]));
 	thinking.render(100);
 	assert.equal(transforms, 1, "thinking wrapped in MouseRegion must also refresh");
+});
+
+test("current-message paint reuses one native baseline without reparsing history", () => {
+	const progress = new NarrationProgress();
+	const source = `${"1. Alpha **bravo** charlie delta echo foxtrot golf hotel.\n".repeat(40)}\n\`\`\`ts\nconst face = '😀';\n\`\`\``;
+	progress.setCompletedText(source);
+	progress.registerSegment({ id: 1, utterance: 1, text: "Alpha bravo charlie delta echo foxtrot golf hotel.",
+		source: { start: 3, end: source.indexOf("\n") } });
+	progress.setSegmentAudio(1, 0, 10);
+	let baselineSyntaxCalls = 0;
+	let nativeListRenders = 0;
+	let historyTransforms = 0;
+	const root = new Container();
+	for (let i = 0; i < 1000; i++) root.addChild(new Markdown(`Historical message ${i}`, 1, 0, theme, undefined, {
+		transform: text => { historyTransforms++; return text; },
+	}));
+	const target = withNarrationLayout(new Markdown(source, 1, 0, { ...theme,
+		listBullet: text => { nativeListRenders++; return text; }, highlightCode: code => {
+		baselineSyntaxCalls++;
+		return code.split("\n").map(line => `\x1b[32m${line}\x1b[39m`);
+	} }, undefined, { transform: text => progress.transform(text, "assistant",
+		text => `\x1b[38;5;244m${text}\x1b[39m`, text => `\x1b[48;5;236m${text}\x1b[49m`,
+		undefined, true, undefined, progress.activeMarker) }));
+	root.addChild(target);
+	progress.setPlayback(1, 0);
+	root.render(100);
+	assert.equal(baselineSyntaxCalls, 1);
+	assert.equal(nativeListRenders, 80, "one baseline plus one source-map probe");
+	historyTransforms = 0;
+	const times: number[] = [];
+	for (let tick = 1; tick <= 20; tick++) {
+		progress.setPlayback(1, tick / 3);
+		const start = performance.now();
+		invalidateNarrationMarkdown({ children: [root] }, new Set([source]));
+		root.render(100);
+		times.push(performance.now() - start);
+	}
+	assert.equal(historyTransforms, 0, "ticks never transform/render a second copy of history");
+	assert.equal(baselineSyntaxCalls, 1, "native baseline is immutable across word ticks");
+	assert.equal(nativeListRenders, 80, "stable source-map probe is also reused across word ticks");
+	console.log(`current-message post-wrap paint: ${source.length} UTF-16 units, median=${times.sort((a, b) => a - b)[10].toFixed(1)}ms`);
+	root.render(28);
+	assert.equal(baselineSyntaxCalls, 2, "resize replaces, rather than accumulates, the baseline");
+	target.invalidate();
+	root.render(28);
+	assert.equal(baselineSyntaxCalls, 3, "ordinary theme/source invalidation rebuilds native styles");
 });
