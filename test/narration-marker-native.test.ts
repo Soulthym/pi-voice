@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { MarkdownTheme } from "@earendil-works/pi-tui";
 import { NARRATION_ACTIVE_MARKER, NarrationProgress } from "../src/narration-progress.js";
-import { withNarrationLayout } from "../src/narration-render.js";
+import { narrationLayoutCapture, narrationLayoutPlan, withNarrationLayout } from "../src/narration-render.js";
 
 const native: typeof import("@earendil-works/pi-tui") = await import(process.env.PI_VOICE_TEST_TUI_MODULE ?? "@earendil-works/pi-tui");
 const plain = (text: string) => text;
@@ -218,4 +218,54 @@ for (const width of [10, 18, 24, 28, 40, 100, 120]) test(`highlight never moves 
 			assert.equal(progress.activeWordStart, source.indexOf("𐐀mega"), "source offsets stay UTF-16, not terminal columns");
 		}
 	});
+});
+
+for (const width of [10, 28, 100]) for (const source of [
+	"Alpha [ref][label].\n\n[label]: https://example.com",
+	"Alpha [ref].\n\n[ref]: https://example.com",
+	"Alpha [ref][].\n\n[ref]: https://example.com",
+	"Alpha [ref][a b].\n\n[a b]: <https://example.com> \"Title\"",
+	"Alpha \\*ref\\* and <https://example.com> bravo.",
+	"Alpha क्‍ष bravo.",
+	"Alpha e\u0301 👩🏽‍💻 🇮🇳 1️⃣ bravo.",
+]) test(`reference/grapheme projection at ${width}: ${JSON.stringify(source)}`, () => {
+	const progress = new NarrationProgress();
+	progress.setCompletedText(source);
+	progress.registerSegment({ id: 1, utterance: 1, text: source.includes("[ref]") ? "Alpha ref." : source.split("\n")[0],
+		source: { start: 0, end: source.split("\n")[0].length } });
+	progress.setSegmentAudio(1, 0, 10);
+	const baseline = new native.Markdown(source, 1, 0, theme).render(width);
+	for (const highlight of [true, false]) for (const position of [0, 4, 8]) {
+		progress.setPlayback(1, position);
+		const lines = withNarrationLayout(new native.Markdown(source, 1, 0, theme, undefined, {
+			transform: text => progress.transform(text, "assistant",
+				text => highlight ? `\x1b[2m${text}\x1b[22m` : text,
+				text => highlight ? `\x1b[48;5;236m${text}\x1b[49m` : text,
+				undefined, highlight, undefined, progress.activeMarker),
+		})).render(width);
+		assert.deepEqual(lines.map(line => native.stripTerminalSequences(line.replaceAll(progress.activeMarker, ""))),
+			baseline.map(native.stripTerminalSequences));
+		assert.equal(lines.join("").split(progress.activeMarker).length - 1, 1, "projection did not silently fall back");
+		if (highlight) assert.ok(lines.some(line => line.includes("\x1b[48;5;236m")));
+		if (highlight && source.includes("[ref]")) {
+			assert.ok(lines.some(line => /\x1b\[48;5;236m[^\n]*ref/.test(line)), "reference label remains paintable");
+		}
+	}
+});
+
+test("unmappable native probe keeps exact styled/padded baseline and does not crash", () => {
+	const source = "## Alpha **bravo**\n\n1. charlie delta";
+	const styledTheme = { ...theme, bold: (text: string) => `\x1b[1m${text}\x1b[22m` };
+	for (const width of [10, 28]) {
+		const baseline = new native.Markdown(source, 2, 1, styledTheme).render(width);
+		const leaf = withNarrationLayout(new native.Markdown(source, 2, 1, styledTheme, undefined, {
+			transform: text => {
+				narrationLayoutCapture()?.(narrationLayoutPlan("", tag => tag(plain, "synthetic replacement")));
+				return text;
+			},
+		}));
+		assert.deepEqual(leaf.render(width), baseline);
+		leaf.invalidate();
+		assert.deepEqual(leaf.render(width), baseline);
+	}
 });

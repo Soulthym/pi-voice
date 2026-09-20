@@ -1,5 +1,6 @@
 import * as nativeTui from "@earendil-works/pi-tui";
 import { randomBytes } from "node:crypto";
+import { Marked } from "marked";
 import { extractAnsiCode, getGraphemeSegmenter } from "@earendil-works/pi-tui/dist/utils.js";
 
 type Paint = (text: string) => string;
@@ -35,6 +36,8 @@ function layoutGlyphs(lines: string[], layout: Layout, probe: boolean): Glyph[][
 		const glyphs: Glyph[] = [];
 		const prefixWidth = nativeTui.visibleWidth(nativeTui.stripTerminalSequences(line).match(/^[ \t]*(?:│[ \t]+)*/u)?.[0] ?? "");
 		let column = 0;
+		let text = "";
+		const states: Array<{ at: number; paints: number[]; controls: string[] }> = [];
 		let controls: string[] = [];
 		for (let at = 0; at < line.length;) {
 			const ansi = extractAnsiCode(line, at);
@@ -50,18 +53,30 @@ function layoutGlyphs(lines: string[], layout: Layout, probe: boolean): Glyph[][
 				continue;
 			}
 			const end = line.indexOf("\x1b", at);
-			const text = line.slice(at, end < 0 ? line.length : end);
-			for (const { segment } of getGraphemeSegmenter().segment(text)) {
-				const width = nativeTui.visibleWidth(segment);
-				if (width) {
-					const prefix = column < prefixWidth;
-					glyphs.push({ text: segment, start: column, end: column + width, prefix, controls,
-						paints: probe && !prefix ? [...active] : [] });
-					controls = [];
-				}
-				column += width;
+			const part = line.slice(at, end < 0 ? line.length : end);
+			states.push({ at: text.length, paints: [...active], controls });
+			controls = [];
+			text += part;
+			at += part.length || 1;
+		}
+		// Segment the complete visible row: ANSI/tag boundaries are not grapheme
+		// boundaries (notably for Indic conjuncts, combining marks and emoji ZWJ).
+		let state = 0;
+		let controlState = 0;
+		controls = [];
+		for (const { segment, index } of getGraphemeSegmenter().segment(text)) {
+			while (state + 1 < states.length && states[state + 1].at <= index) state++;
+			while (controlState < states.length && states[controlState].at < index + segment.length) {
+				controls.push(...states[controlState++].controls);
 			}
-			at += text.length || 1;
+			const width = nativeTui.visibleWidth(segment);
+			const prefix = column < prefixWidth;
+			if (width) {
+				glyphs.push({ text: segment, start: column, end: column + width, prefix, controls,
+					paints: probe && !prefix ? states[state].paints : [] });
+				controls = [];
+			}
+			column += width;
 		}
 		return glyphs;
 	});
@@ -130,6 +145,35 @@ function paintLayout(lines: string[], rows: Glyph[][], layout: Layout): string[]
 	});
 }
 
+/** Shortcut/collapsed reference identity must not include the inserted paint tags. */
+function explicitProbeReferences(probe: string, layout: Layout): string {
+	const tags = new RegExp(`${layout.prefix}\\d+[+-]\\x07`, "y");
+	const positions: number[] = [];
+	let clean = "";
+	for (let at = 0; at < probe.length;) {
+		tags.lastIndex = at;
+		const tag = tags.exec(probe);
+		if (tag?.index === at) at += tag[0].length;
+		else { positions.push(at); clean += probe[at++]; }
+	}
+	const parser = new Marked();
+	const insertions = new Map<number, string>();
+	parser.walkTokens(parser.lexer(clean), token => {
+		if (token.type !== "link") return;
+		const label = `[${token.text}]`;
+		if (token.raw !== label && token.raw !== `${label}[]`) return;
+		for (let at = clean.indexOf(token.raw); at >= 0; at = clean.indexOf(token.raw, at + token.raw.length)) {
+			if (!probe.slice(positions[at], positions[at + token.raw.length - 1] + 1).includes(layout.prefix)) continue;
+			insertions.set(positions[at + token.raw.length - 1] + (token.raw === label ? 1 : 0),
+				token.raw === label ? label : token.text);
+		}
+	});
+	for (const [at, text] of [...insertions].sort(([a], [b]) => b - a)) {
+		probe = probe.slice(0, at) + text + probe.slice(at);
+	}
+	return probe;
+}
+
 /** Native math replaces source glyphs; keep it atomic rather than feeding tags to LaTeX. */
 function renderProbe(markdown: nativeTui.Markdown, layout: Layout, width: number): string[] {
 	type Token = { type: string; raw?: string; text?: string };
@@ -168,9 +212,9 @@ type MarkdownLeaf = nativeTui.Component & {
 	cachedText?: string; cachedWidth?: number; cachedLines?: string[];
 };
 const wrapped = new WeakSet<object>();
-// One current target only: never keep a second rendered copy of transcript history.
-let baselineCache: { leaf: MarkdownLeaf; text: string; width: number; lines: string[];
-	projection?: { probe: string; rows: Glyph[][] } } | undefined;
+// Two recent leaves: mounted target plus reusable offscreen lookup, not history.
+const baselineCaches = new Map<MarkdownLeaf, { text: string; width: number; lines: string[];
+	projection?: { probe: string; rows?: Glyph[][] } }>();
 
 /** Attach post-wrap narration paint to a native Markdown instance. */
 export function withNarrationLayout<T extends nativeTui.Component>(component: T): T {
@@ -181,7 +225,7 @@ export function withNarrationLayout<T extends nativeTui.Component>(component: T)
 	const render = leaf.render.bind(leaf);
 	const invalidate = leaf.invalidate.bind(leaf);
 	leaf.invalidate = () => {
-		if (baselineCache?.leaf === leaf) baselineCache = undefined;
+		baselineCaches.delete(leaf);
 		invalidate();
 	};
 	leaf.render = width => {
@@ -195,29 +239,39 @@ export function withNarrationLayout<T extends nativeTui.Component>(component: T)
 		try { text = transform(leaf.text, Math.max(1, width - leaf.paddingX * 2)); }
 		finally { capture = previous; }
 		let lines: string[];
+		let baselineCache = baselineCaches.get(leaf);
 		try {
 			leaf.options.transform = () => text;
-			if (layout && baselineCache?.leaf === leaf && baselineCache.text === text && baselineCache.width === width) {
+			if (layout && baselineCache && baselineCache.text === text && baselineCache.width === width) {
 				lines = baselineCache.lines;
 			} else {
 				lines = render(width);
-				if (layout) baselineCache = { leaf, text, width, lines };
+				if (layout) baselineCache = { text, width, lines };
 			}
 		} finally { leaf.options.transform = transform; }
-		if (layout) {
+		if (layout && baselineCache) {
+			baselineCaches.delete(leaf);
+			baselineCaches.set(leaf, baselineCache);
+			if (baselineCaches.size > 2) baselineCaches.delete(baselineCaches.keys().next().value!);
 			// Reached words keep stable source tags; only their paint callbacks and
 			// the timed-word tag change. Do not reparse native Markdown on every tick.
 			const probeText = layout.marker ? layout.probe.replace(layout.marker, "") : layout.probe;
 			let projection = baselineCache?.projection;
 			if (!projection || projection.probe !== probeText) {
-				const NativeMarkdown = leaf.constructor as typeof nativeTui.Markdown;
-				const probe = renderProbe(new NativeMarkdown(probeText, leaf.paddingX, leaf.paddingY,
-					{ ...leaf.theme, highlightCode: code => code.split("\n") },
-					leaf.defaultTextStyle, { ...leaf.options, transform: undefined }), layout, width);
-				projection = { probe: probeText, rows: projectLayout(lines, probe, layout) };
-				if (baselineCache) baselineCache.projection = projection;
+				projection = { probe: probeText };
+				try {
+					const NativeMarkdown = leaf.constructor as typeof nativeTui.Markdown;
+					const probe = renderProbe(new NativeMarkdown(explicitProbeReferences(probeText, layout), leaf.paddingX, leaf.paddingY,
+						{ ...leaf.theme, highlightCode: code => code.split("\n") },
+						leaf.defaultTextStyle, { ...leaf.options, transform: undefined }), layout, width);
+					projection.rows = projectLayout(lines, probe, layout);
+				} catch {
+					// Unknown native replacements/grammar must never abort a transcript.
+					// Cache the failed projection too; preserve every baseline byte.
+				}
+				baselineCache.projection = projection;
 			}
-			lines = paintLayout(lines, projection.rows, layout);
+			if (projection.rows) lines = paintLayout(lines, projection.rows, layout);
 		}
 		leaf.cachedText = leaf.text;
 		leaf.cachedWidth = width;
@@ -290,9 +344,10 @@ export function invalidateNarrationMarkdown(
 			withNarrationLayout(node as nativeTui.Component);
 			// A narration tick changes paint, not native layout. Other invalidations
 			// (theme, resize, source changes) still clear the baseline normally.
-			const baseline = baselineCache;
+			const leaf = node as MarkdownLeaf;
+			const baseline = baselineCaches.get(leaf);
 			node.invalidate?.();
-			baselineCache = baseline;
+			if (baseline) baselineCaches.set(leaf, baseline);
 		}
 	}
 	return true;

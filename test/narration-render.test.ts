@@ -133,3 +133,56 @@ test("current-message paint reuses one native baseline without reparsing history
 	root.render(28);
 	assert.equal(baselineSyntaxCalls, 3, "ordinary theme/source invalidation rebuilds native styles");
 });
+
+test("mounted and offscreen leaves retain two bounded baseline/projection slots", () => {
+	const source = "1. Alpha bravo charlie.\n\n```ts\nconst value = 1;\n```";
+	const progress = new NarrationProgress();
+	progress.setCompletedText(source);
+	progress.registerSegment({ id: 1, utterance: 1, text: "Alpha bravo charlie.", source: { start: 3, end: 23 } });
+	progress.setSegmentAudio(1, 0, 10);
+	progress.setPlayback(1, 0);
+	let baselines = 0;
+	let lists = 0;
+	const make = () => withNarrationLayout(new Markdown(source, 1, 0, { ...theme,
+		listBullet: text => { lists++; return text; },
+		highlightCode: code => { baselines++; return code.split("\n"); },
+	}, undefined, { transform: text => progress.transform(text, "assistant", text => `\x1b[2m${text}\x1b[22m`,
+		text => `\x1b[48;5;236m${text}\x1b[49m`, undefined, true, undefined, progress.activeMarker) }));
+	const mounted = make();
+	const lookup = make();
+	for (let tick = 0; tick < 10; tick++) {
+		progress.setPlayback(1, tick / 2);
+		for (const leaf of [lookup, mounted]) {
+			invalidateNarrationMarkdown({ children: [leaf] }, new Set([source]));
+			leaf.render(40);
+		}
+	}
+	assert.equal(baselines, 2);
+	assert.equal(lists, 4, "both probes survive alternating word ticks");
+	make().render(40); // Evicts the least recently used lookup, not all history.
+	invalidateNarrationMarkdown({ children: [lookup] }, new Set([source]));
+	lookup.render(40);
+	assert.equal(baselines, 4, "only two slots are retained");
+	lookup.render(28);
+	assert.equal(baselines, 5, "resize replaces a slot");
+	lookup.invalidate();
+	lookup.render(28);
+	assert.equal(baselines, 6, "ordinary invalidation still clears native styles");
+});
+
+test("Indic timed words and paint spans use whole graphemes with UTF-16 offsets", () => {
+	const source = "😀 Alpha क्‍ष e\u0301 bravo.";
+	const progress = new NarrationProgress();
+	progress.setCompletedText(source);
+	progress.registerSegment({ id: 1, utterance: 1, text: "Alpha क्‍ष e\u0301 bravo.", source: { start: 0, end: source.length } });
+	progress.setSegmentAudio(1, 0, 10);
+	const timings = progress.sourceWordTimings(1);
+	assert.deepEqual(timings.map(word => word.sourceOffset), [3, 9, 14, 17]);
+	progress.setPlayback(1, timings[1].time);
+	assert.equal(progress.activeWordStart, 9);
+	const leaf = withNarrationLayout(new Markdown(source, 1, 0, theme, undefined, {
+		transform: text => progress.transform(text, "assistant", text => `\x1b[2m${text}\x1b[22m`,
+			text => `\x1b[48;5;236m${text}\x1b[49m`, undefined, true, undefined, progress.activeMarker),
+	}));
+	assert.ok(leaf.render(40).join("").includes(`${progress.activeMarker}क्‍ष`));
+});

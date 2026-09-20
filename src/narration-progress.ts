@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { extractAnsiCode } from "@earendil-works/pi-tui/dist/utils.js";
+import { extractAnsiCode, getGraphemeSegmenter } from "@earendil-works/pi-tui/dist/utils.js";
+import { Marked, Tokenizer } from "marked";
 import { narrationLayoutCapture, narrationLayoutPlan } from "./narration-render.js";
 import type {
 	CodeLineRange,
@@ -116,9 +117,20 @@ function canonicalWord(text: string): string {
 
 function tokenize(text: string, offset = 0): Array<{ text: string; start: number; end: number }> {
 	const words: Array<{ text: string; start: number; end: number }> = [];
+	const graphemes = [...getGraphemeSegmenter().segment(text)];
 	WORD_RE.lastIndex = 0;
+	let at = 0;
 	for (let match = WORD_RE.exec(text); match; match = WORD_RE.exec(text)) {
-		words.push({ text: match[0], start: offset + match.index, end: offset + match.index + match[0].length });
+		while (at + 1 < graphemes.length && graphemes[at + 1].index <= match.index) at++;
+		const start = graphemes[at].index;
+		const matchEnd = match.index + match[0].length;
+		while (at + 1 < graphemes.length && graphemes[at + 1].index < matchEnd) at++;
+		const end = graphemes[at].index + graphemes[at].segment.length;
+		const previous = words[words.length - 1];
+		if (previous && previous.end > offset + start) {
+			previous.end = offset + end;
+			previous.text = text.slice(previous.start - offset, end);
+		} else words.push({ text: text.slice(start, end), start: offset + start, end: offset + end });
 	}
 	return words;
 }
@@ -249,6 +261,33 @@ function alignedStarts(spoken: DisplayWord[], recognized: AlignmentWord[], durat
 
 function excludedMarkdownRanges(markdown: string): NarrationSourceRange[] {
 	const excluded: NarrationSourceRange[] = [];
+	// Use the installed Markdown lexer for reference grammar (including hidden
+	// definitions), escapes and automatic links, rather than guessing brackets.
+	const protect = (raw: string, start = 0, end = raw.length): void => {
+		for (let at = markdown.indexOf(raw); raw && at >= 0; at = markdown.indexOf(raw, at + raw.length)) {
+			if (end > start) excluded.push({ start: at + start, end: at + end });
+		}
+	};
+	const parser = new Marked({ tokenizer: {
+		def(src) {
+			const token = Tokenizer.prototype.def.call(this, src);
+			if (token) protect(token.raw);
+			return token;
+		},
+	} });
+	parser.walkTokens(parser.lexer(markdown), token => {
+		if (token.type === "escape" || token.type === "image") protect(token.raw);
+		if (token.type === "link") {
+			// Explicit links may paint their label, never their destination or
+			// reference identifier. Autolinks must remain a single lexer atom.
+			const label = token.raw.startsWith("[") ? token.raw.indexOf(token.text, 1) : -1;
+			if (label < 0) protect(token.raw);
+			else {
+				protect(token.raw, 0, label);
+				protect(token.raw, label + token.text.length);
+			}
+		}
+	});
 	// Copied transcript metadata is source text, not a new narration target.
 	// Keep its bytes/UTF-16 offsets, but never insert tags inside an ANSI/APC.
 	for (let at = markdown.indexOf("\x1b"); at >= 0; at = markdown.indexOf("\x1b", at + 1)) {
@@ -324,7 +363,7 @@ function styleNarrationMarkdown(
 	const ranges = tokenize(markdown).filter(word => {
 		const unread = word.end > cursor;
 		const speaking = active ? word.end > active.start && word.start < active.end : false;
-		return (unread || speaking || layoutPaint) && !excluded.some(range => word.start >= range.start && word.end <= range.end);
+		return (unread || speaking || layoutPaint) && !excluded.some(range => word.start < range.end && word.end > range.start);
 	});
 	if (ranges.length === 0) return markdown;
 	// A timed ordered-list number is structural, not a paintable glyph. Anchor
