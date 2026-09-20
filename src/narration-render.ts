@@ -180,8 +180,24 @@ function renderProbe(markdown: nativeTui.Markdown, layout: Layout, width: number
 	const native = markdown as unknown as {
 		renderInlineTokens(tokens: Token[], context?: unknown): string;
 		renderToken(token: Token, ...args: unknown[]): string[];
+		wrapCellText(text: string, width: number): string[];
 	};
 	const tags = new RegExp(`${layout.prefix}\\d+[+-]\\x07`, "g");
+	// Native tables interleave wrapped cells. Close/reopen probe spans per cell
+	// line so a continuation cannot paint another column or its borders.
+	const wrapCell = native.wrapCellText.bind(native);
+	native.wrapCellText = (text, width) => {
+		const active = new Set<string>();
+		return wrapCell(text, width).map(line => {
+			const open = [...active].map(id => `${layout.prefix}${id}+\x07`).join("");
+			for (const match of line.matchAll(tags)) {
+				const tag = match[0].slice(layout.prefix.length, -1);
+				if (tag.endsWith("+")) active.add(tag.slice(0, -1));
+				else active.delete(tag.slice(0, -1));
+			}
+			return open + line + [...active].map(id => `${layout.prefix}${id}-\x07`).join("");
+		});
+	};
 	const math = (token: Token, render: (clean: Token) => string[]): string[] => {
 		const codes = [...(token.raw ?? token.text ?? "").matchAll(tags)].map(match => match[0]);
 		const lines = render({ ...token, raw: token.raw?.replace(tags, ""), text: token.text?.replace(tags, "") });

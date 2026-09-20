@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { extractAnsiCode, getGraphemeSegmenter } from "@earendil-works/pi-tui/dist/utils.js";
-import { Marked, type Token } from "marked";
+import { Marked, type Token, type Tokens } from "marked";
 import { narrationLayoutCapture, narrationLayoutPlan } from "./narration-render.js";
 import type {
 	CodeLineRange,
@@ -268,37 +268,69 @@ function excludedMarkdownRanges(markdown: string, atoms: NarrationSourceRange[])
 		excluded.push(range);
 		(atom ? atoms : structural).push(range);
 	};
+	// Keep parser-normalized UTF-16 units tied to original source positions.
+	// Tabs can be expanded and then partially removed by list dedentation.
+	const normalize = (source: string, positions: number[], table = false): { source: string; positions: number[] } => {
+		let text = "";
+		const mapped: number[] = [];
+		for (let i = 0; i < source.length; i++) {
+			if (table && source[i] === "\\" && source[i + 1] === "|") continue;
+			const char = source[i] === "\r" ? "\n" : source[i] === "\t" ? "    " : source[i];
+			text += char;
+			for (let j = 0; j < char.length; j++) mapped.push(positions[i]);
+			if (source[i] === "\r" && source[i + 1] === "\n") i++;
+		}
+		return { source: text, positions: mapped };
+	};
+	const parser = new Marked();
 	// Walk each actual occurrence once, relative to its parent. Blockquotes and
 	// lists strip line prefixes, so retain a UTF-16 source map across those lines.
 	const walk = (tokens: Token[], source: string, positions: number[]): void => {
 		let cursor = 0;
 		for (const token of tokens) {
+			const raw = token.raw.replace(/\t/g, "    ");
 			const mapped: number[] = [];
-			for (const line of token.raw.split(/(?<=\n)/)) {
+			for (const line of raw.split(/(?<=\n)/)) {
 				const at = source.indexOf(line, cursor);
 				if (at < 0) break;
 				for (let i = at; i < at + line.length; i++) mapped.push(positions[i]);
 				cursor = at + line.length;
 			}
-			if (mapped.length !== token.raw.length) continue;
-			if (token.type === "def" || token.type === "escape" || token.type === "html") protect(mapped);
+			if (mapped.length !== raw.length) continue;
+			if (token.type === "def" || token.type === "escape") protect(mapped);
+			if (token.type === "html") {
+				// Block HTML includes visible body text; only tag syntax is structural.
+				let at = 0;
+				for (const inline of parser.Lexer.lexInline(raw)) {
+					if (inline.type === "html") protect(mapped, at, at + inline.raw.length);
+					at += inline.raw.length;
+				}
+			}
 			if (token.type === "image") { protect(mapped, 0, mapped.length, true); continue; }
 			if (token.type === "link") {
 				// Only explicit labels have children eligible for separate paint.
-				const label = token.raw.startsWith("[") ? token.raw.indexOf(token.text, 1) : -1;
+				const text = token.text.replace(/\t/g, "    ");
+				const label = raw.startsWith("[") ? raw.indexOf(text, 1) : -1;
 				if (label < 0) { protect(mapped, 0, mapped.length, true); continue; }
 				protect(mapped, 0, label);
-				protect(mapped, label + token.text.length);
-				walk(token.tokens ?? [], token.text, mapped.slice(label, label + token.text.length));
-			} else if (token.type === "list") walk(token.items, token.raw, mapped);
+				protect(mapped, label + text.length);
+				walk(token.tokens ?? [], text, mapped.slice(label, label + text.length));
+			} else if (token.type === "list") walk(token.items, raw, mapped);
 			else if (token.type === "table") {
-				walk([...token.header, ...token.rows.flat()].map(cell => ({
-					type: "text", raw: cell.text, tokens: cell.tokens,
-				})), token.raw, mapped);
-			} else if ("tokens" in token && token.tokens) walk(token.tokens, token.raw, mapped);
+				const table = normalize(raw, mapped, true);
+				let offset = 0;
+				const rows: Tokens.TableCell[][] = [token.header, [], ...token.rows];
+				for (const [index, line] of table.source.split(/(?<=\n)/).entries()) {
+					walk((rows[index] ?? []).map(cell => ({
+						type: "text", raw: cell.text, tokens: cell.tokens,
+					})), line, table.positions.slice(offset, offset + line.length));
+					offset += line.length;
+				}
+			} else if ("tokens" in token && token.tokens) walk(token.tokens, raw, mapped);
 		}
 	};
-	walk(new Marked().lexer(markdown), markdown, Array.from({ length: markdown.length }, (_, i) => i));
+	const normalized = normalize(markdown, Array.from({ length: markdown.length }, (_, i) => i));
+	walk(parser.lexer(markdown), normalized.source, normalized.positions);
 	const syntaxStart = excluded.length;
 	// Copied transcript metadata is source text, not a new narration target.
 	// Keep its bytes/UTF-16 offsets, but never insert tags inside an ANSI/APC.
