@@ -61,7 +61,8 @@ test("network padding cancellation waits for confirmed helper exit", { timeout: 
 			return child;
 		},
 	} });
-	mock.method(process, "exit", (() => {}) as any);
+	let exits = 0;
+	mock.method(process, "exit", (() => { exits++; }) as any);
 	const events: any[] = [];
 	const writeStdout = process.stdout.write.bind(process.stdout);
 	mock.method(process.stdout, "write", (chunk: any) => {
@@ -102,8 +103,10 @@ test("network padding cancellation waits for confirmed helper exit", { timeout: 
 					await wait(0);
 					child.emit("close", child.exitCode, child.signalCode);
 				}
+				const before = exits;
 				send({ type: "shutdown" });
-				await wait(0);
+				for (let attempt = 0; attempt < 100 && exits === before; attempt++) await wait(5);
+				assert.equal(exits, before + 1, "finish teardown before starting another worker");
 			});
 			await import(new URL(`../src/worker.mjs?network-stop=${encodeURIComponent(name)}`, import.meta.url).href);
 			send({ type: "segment", utterance: 1, segmentId: 1, text: "Stop test.",
@@ -140,7 +143,7 @@ test("network padding cancellation waits for confirmed helper exit", { timeout: 
 			assert.equal(child.stdin.writableEnded, false);
 			assert.ok(!events.some(e => e.type === "idle"));
 
-			if (name === "nonzero exit") child.stdio[3].write(`session ${id}\n`);
+			if (name === "nonzero exit" || name === "refusal after audio admission") child.stdio[3].write(`session ${id}\n`);
 			send({ type: "cancel", cancelId: 42 });
 			await wait(20); // Let destroyed-stdin close and the cancelled end operation settle.
 			assert.ok(child.commands.includes("stop\n"));
@@ -167,6 +170,7 @@ test("network padding cancellation waits for confirmed helper exit", { timeout: 
 				assert.deepEqual(idle, [{ type: "idle", cancelId: 42 }]);
 				assert.ok(!events.some(e => e.type === "error"));
 			} else {
+				assert.ok(!events.some(e => e.type === "remote-not-admitted"), "a false marker after admission cannot release a handle");
 				assert.deepEqual(idle, [], "failed helper exit must not acknowledge cancellation or utterance completion");
 				assert.ok(events.some(e => e.type === "error" && e.code === "REMOTE_PLAYBACK_UNCONFIRMED"));
 				if (name === "nonzero exit") {

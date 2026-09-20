@@ -12,6 +12,7 @@ export type MeasurementPhase = "cache-decode" | "synthesis";
 export type WorkerEvent =
 	| { type: "remote-handle"; output: string; id: string; utterance: number }
 	| { type: "remote-released"; id: string }
+	| { type: "remote-not-admitted"; id: string }
 	| { type: "loading" }
 	| { type: "progress"; percent?: number; file?: string }
 	| { type: "ready"; requestId?: string }
@@ -383,7 +384,7 @@ export class VoiceWorkerClient {
 			}
 			return;
 		}
-		if (event.type === "remote-released") {
+		if (event.type === "remote-released" || event.type === "remote-not-admitted") {
 			const handle = this.#remoteHandles.get(event.id);
 			if (handle && this.#remoteHandles.delete(event.id) && this.#remoteHandles.size === 0 && handle.utterance === this.#remoteUtterance) this.#remoteUnconfirmed = false;
 			return;

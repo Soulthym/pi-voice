@@ -624,6 +624,7 @@ function createNetworkSink(output, sampleRate, utterance) {
 		}
 	});
 	control.on("error", error => { stderr = error.message; });
+	controlLines.on("error", error => { stderr = error.message; });
 	const sink = {
 		requiresStopProof: true,
 		writable: child.stdin,
@@ -684,6 +685,7 @@ function createNetworkSink(output, sampleRate, utterance) {
 	child.on("close", code => {
 		// Classify only after fd3 drains; exit can precede the no-audio marker.
 		// Keep failed remote transports owned: helper death is not sink stop proof.
+		if (code === 2 && noAudio && !audioAdmitted && session) send({ type: "remote-not-admitted", id: session });
 		if ((code === 0 || code === 2 && noAudio && !audioAdmitted) && playback.currentPlayer === sink) playback.clearCurrentPlayer();
 	});
 	return sink;
