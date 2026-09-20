@@ -3,7 +3,6 @@ import * as fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { mock, test } from "node:test";
-import { NARRATION_ACTIVE_MARKER } from "../src/narration-progress.js";
 import { SessionCoordinator } from "../src/session-coordinator.js";
 import { FakeVoiceHost, MockedVoiceWorkerClient, assistant } from "./helpers/fake-voice-host.js";
 
@@ -26,7 +25,7 @@ for (const key of ["f11", "f8"]) for (const pauseResume of (key === "f11" ? [fal
 	});
 	host.addMessage("answer", null, assistant("First sentence. Second sentence."));
 	await host.start();
-	host.scrollView.setDocument(Array.from({ length: 300 }, (_, i) => i === 100 ? `${NARRATION_ACTIVE_MARKER}First` : `line ${i}`), 40);
+	host.scrollView.setDocument(Array.from({ length: 300 }, (_, i) => i === 100 ? () => host.render("First sentence. Second sentence.") : `line ${i}`), 40);
 	for (const manual of [false, true]) {
 		if (pauseResume === "retry") await host.command("stop");
 		await host.command("bottom");

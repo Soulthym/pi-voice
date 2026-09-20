@@ -22,11 +22,6 @@ const waitForScroll = async (host: FakeVoiceHost, expected: number): Promise<voi
 	}
 };
 
-const renderedDocument = (activeLine: number, count = 300): string[] =>
-	Array.from({ length: count }, (_value, line) =>
-		line === activeLine ? `${NARRATION_ACTIVE_MARKER}spoken word` : `line ${line}`,
-	);
-
 test("TUI follows exact words, respects manual browsing, and explicit controls re-anchor", async t => {
 	mock.module("../src/worker-client.js", {
 		namedExports: { VoiceWorkerClient: MockedVoiceWorkerClient },
@@ -55,6 +50,11 @@ test("TUI follows exact words, respects manual browsing, and explicit controls r
 	process.env.PI_VOICE_DEVICE_DIR = path.join(root, "devices");
 
 	const host = new FakeVoiceHost(path.join(root, "project"), "auto-scroll");
+	const renderedDocument = (activeLine: number, count = 300) =>
+		Array.from({ length: count }, (_, line) => line === activeLine
+			? () => host.entries.filter(entry => entry.message?.role === "assistant")
+				.flatMap(entry => entry.message.content.map((block: { text?: string }) => host.render(block.text ?? ""))).join(" ")
+			: `line ${line}`);
 	t.after(async () => {
 		await host.shutdown().catch(() => {});
 		mock.reset();

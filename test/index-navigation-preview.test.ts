@@ -73,17 +73,17 @@ for (const manual of [false, true]) test(`initial marker retry respects manual s
 	const host = await setup(t);
 	host.addMessage("answer", null, assistant("First sentence. Second sentence."));
 	await host.start();
-	const lines = Array.from({ length: 300 }, (_, i) => `line ${i}`);
+	const lines: Array<string | (() => string)> = Array.from({ length: 300 }, (_, i) => `line ${i}`);
 	host.scrollView.setDocument(lines, 40);
 	await host.command("bottom");
 	await host.shortcut("f11"); await settle();
 	assert.equal(host.scrollView.scrollTop, 260, "no marker has been rendered yet");
 	if (manual) host.scrollView.manualScrollTo(50);
-	lines[100] = `${NARRATION_ACTIVE_MARKER}First`;
+	lines[100] = () => host.render("First sentence. Second sentence.");
 	host.scrollView.setDocument(lines, 40);
 	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
 	const segment = worker.sent.at(-1) as { utterance: number; segmentId: number };
-	worker.emit({ type: "segment-audio", ...segment, start: 0, duration: 2 });
+	worker.emit({ ...segment, type: "segment-audio", start: 0, duration: 2 });
 	worker.emit({ type: "playback", utterance: segment.utterance, position: 0.5 });
 	await new Promise(resolve => setTimeout(resolve, 150));
 	assert.equal(host.scrollView.scrollTop, manual ? 50 : 92);
@@ -283,7 +283,7 @@ test("F8 acquisition retry retains replay-from-Tail intent", async t => {
 	const host = await setup(t);
 	host.addMessage("answer", null, assistant("First sentence."));
 	await host.start();
-	host.scrollView.setDocument(Array.from({ length: 300 }, (_, i) => i === 100 ? `${NARRATION_ACTIVE_MARKER}First` : `line ${i}`), 40);
+	host.scrollView.setDocument(Array.from({ length: 300 }, (_, i) => i === 100 ? () => host.render("First sentence.") : `line ${i}`), 40);
 	await host.command("bottom");
 	const acquire = t.mock.method(SessionCoordinator.prototype, "tryAcquireSpeech", () => false);
 	const gate = Promise.withResolvers<boolean>();
@@ -364,6 +364,66 @@ test("streaming F11 replays the prefix, continues future deltas, ticks and canon
 	assert.match(host.widgetLines()?.join(" ") ?? "", /message 2\/2/);
 	await host.shortcut("f11"); await settle();
 	assert.equal(segments.filter(segment => segment.text === "First sentence.").length, 3);
+});
+
+test("live marker survives deltas and source finalization, but paused selection and replay replace it", async t => {
+	const host = await setup(t);
+	host.addMessage("old", null, assistant("Earlier answer."));
+	await host.start();
+	await host.shortcut("f11"); await settle();
+	const markerIn = (text: string) => {
+		const marker = host.render(text).match(/[\u200b\u200c]*\u2063\u200b\u2063\u200c\u2063/)?.[0];
+		assert.ok(marker);
+		return marker;
+	};
+	const oldMarker = markerIn("Earlier answer.");
+	const oldWorker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
+	oldWorker.emit({ type: "idle", utterance: (oldWorker.sent.at(-1) as { utterance: number }).utterance });
+	await settle();
+	await host.emit("before_agent_start", {});
+	const prefix = "First sentence. ";
+	const quoted = `\n> Quoted ${NARRATION_ACTIVE_MARKER}legacy and ${oldMarker}old dynamic bytes.\n`;
+	const text = prefix + quoted + "Last sentence.";
+	const partial = assistant(prefix, "pending");
+	await host.emit("message_start", { message: partial });
+	await host.emit("message_update", { message: partial, assistantMessageEvent: {
+		type: "text_delta", contentIndex: 0, delta: prefix,
+	} }); await settle();
+	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
+	const segment = (worker.sent as Array<{ text: string; utterance: number; segmentId: number }>).findLast(segment => segment.text === "First sentence.")!;
+	worker.emit({ ...segment, type: "segment-audio", start: 0, duration: 2 });
+	worker.emit({ type: "playback", utterance: segment.utterance, position: 0.1 });
+	const liveMarker = markerIn(prefix.trim());
+	assert.notEqual(liveMarker, oldMarker);
+	const assertSource = (marker: string) => {
+		const rendered = host.render(text);
+		assert.equal(rendered.split(marker).length, 2, "exactly one current marker");
+		assert.equal(rendered.replace(marker, ""), text, "raw source bytes and offsets survive rendering");
+		assert.equal(rendered.replace(marker, "").indexOf(quoted), prefix.length);
+	};
+	const complete = assistant(text);
+	await host.emit("message_update", { message: complete, assistantMessageEvent: {
+		type: "text_delta", contentIndex: 0, delta: text.slice(prefix.length),
+	} });
+	assertSource(liveMarker);
+	await host.emit("message_end", { message: complete });
+	assertSource(liveMarker);
+	host.addMessage("canonical", "old", complete);
+	await host.emit("turn_end", { message: complete });
+	await host.emit("agent_settled", {}); await settle();
+	assertSource(liveMarker);
+	await host.shortcut("f8");
+	assertSource(liveMarker);
+	await host.shortcut("f9"); await settle();
+	const selectedMarker = markerIn(text);
+	assert.notEqual(selectedMarker, liveMarker);
+	assert.equal(worker.pauses.at(-1), true);
+	assertSource(selectedMarker);
+	await host.shortcut("f11"); await settle();
+	const replayMarker = markerIn(text);
+	assert.notEqual(replayMarker, selectedMarker);
+	assert.notEqual(replayMarker, liveMarker);
+	assertSource(replayMarker);
 });
 
 for (const beforeDelta of [true, false]) test(`live replay retains unfinished sentences (before first delta: ${beforeDelta})`, async t => {

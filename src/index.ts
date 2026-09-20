@@ -47,7 +47,6 @@ import { chunkCodeNarration, plainCodeNarration, type CodeNarrationPlan } from "
 import { DeviceRouter, type ConnectionDevice, type VoiceDeviceSelection } from "./device-router.js";
 import { LiveTranscriptionSession } from "./live-transcription.js";
 import {
-	NARRATION_ACTIVE_MARKER,
 	NarrationProgress,
 	type NarrationMessageType,
 } from "./narration-progress.js";
@@ -1013,7 +1012,7 @@ export default async function (pi: ExtensionAPI) {
 			},
 			config.enabled && (config.playbackHighlight || config.autoScroll),
 			(code, language) => highlightCode(code, language),
-			config.enabled ? NARRATION_ACTIVE_MARKER : "",
+			config.enabled ? narration.activeMarker : "",
 		);
 
 	pi.registerMarkdownTransformer((markdown, context) =>
@@ -1039,6 +1038,7 @@ export default async function (pi: ExtensionAPI) {
 	let narrationMessageAnchor:
 		| {
 				messageId: string;
+				activeMarker: string;
 				width: number;
 				messageTop: number;
 				contentHeight: number;
@@ -1099,7 +1099,7 @@ export default async function (pi: ExtensionAPI) {
 		try {
 			const transformed = transformNarrationMarkdown(text, "assistant");
 			const component = new Markdown(transformed, 1, 0, getMarkdownTheme());
-			return component.render(width).findIndex(line => line.includes(NARRATION_ACTIVE_MARKER));
+			return component.render(width).findIndex(line => line.includes(narration.activeMarker));
 		} catch {
 			return -1;
 		}
@@ -1228,6 +1228,7 @@ export default async function (pi: ExtensionAPI) {
 			canCacheMessageTop &&
 			messageId &&
 			narrationMessageAnchor?.messageId === messageId &&
+			narrationMessageAnchor.activeMarker === narration.activeMarker &&
 			narrationMessageAnchor.width === innerWidth &&
 			narrationMessageAnchor.contentHeight === resolvedContentHeight &&
 			narrationMessageAnchor.viewportHeight === scrollView.viewportHeight
@@ -1250,12 +1251,13 @@ export default async function (pi: ExtensionAPI) {
 		// avoiding a second full long-context render on every playback tick.
 		if (anchor === undefined && scrollView.render) {
 			const lines = scrollView.render(outerWidth);
-			const markedLine = lines.findIndex(line => line.includes(NARRATION_ACTIVE_MARKER));
+			const markedLine = lines.findIndex(line => line.includes(narration.activeMarker));
 			if (markedLine >= 0) {
 				anchor = markedLine;
 				if (canCacheMessageTop && messageId && localMarkerLine >= 0) {
 					narrationMessageAnchor = {
 						messageId,
+						activeMarker: narration.activeMarker,
 						width: innerWidth,
 						messageTop: markedLine - localMarkerLine,
 						contentHeight: resolvedContentHeight,

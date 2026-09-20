@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { mock, test } from "node:test";
-import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
+import { getMarkdownTheme, initTheme } from "@earendil-works/pi-coding-agent";
 import { NARRATION_ACTIVE_MARKER } from "../src/narration-progress.js";
 import { FakeVoiceHost, MockedVoiceWorkerClient, assistant } from "./helpers/fake-voice-host.js";
 
@@ -11,10 +11,13 @@ mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: Mock
 // Optional installed Pi runtime exercises newer native mouse/banner code without changing dependencies.
 const native = await import(process.env.PI_VOICE_TEST_TUI_MODULE ?? "@earendil-works/pi-tui");
 const settle = () => new Promise(resolve => setTimeout(resolve, 120));
+initTheme("dark");
 
-for (const action of ["paused anchor", "End", "banner", "controls", "search", "search forced render", "drag", "PageDown bottom", "wheel bottom", "scrollbar bottom", "narrow cached"]) test(`native viewport: ${action}`, async t => {
-	const narrow = action === "narrow cached";
-	const tui: any = new native.TuiAltScreen({ columns: narrow ? 28 : 100, rows: 40, write() {}, hideCursor() {} }, false, undefined,
+for (const action of ["paused anchor", "End", "banner", "controls", "search", "search forced render", "drag", "PageDown bottom", "wheel bottom", "scrollbar bottom", "narrow cached", "wide cached"]) test(`native viewport: ${action}`, async t => {
+	const cached = action.endsWith("cached");
+	const width = action === "narrow cached" ? 28 : 100;
+	const terminal = { columns: width, rows: 40, write() {}, hideCursor() {} };
+	const tui: any = new native.TuiAltScreen(terminal, false, undefined,
 		{ scrollToEndIndicator: () => "↓ Jump to latest message (End)" });
 	if (action === "banner" && !tui.handleScrollToEndIndicatorMouseEvent) {
 		t.skip("installed dependency predates the native banner; set PI_VOICE_TEST_TUI_MODULE to a newer Pi TUI");
@@ -28,19 +31,27 @@ for (const action of ["paused anchor", "End", "banner", "controls", "search", "s
 	let marker = 100;
 	const text = Array.from({ length: 60 }, (_, i) => `Sentence ${i} contains several narrated words.`).join(" ");
 	let renderText = () => text;
-	let footerHeight = 8;
-	const transcript = new native.ScrollView({ invalidate() {}, render: (width: number) => narrow
-		? [...Array.from({ length: 1500 }, (_, i) => `history ${i}`),
-			...new native.Markdown(renderText(), 1, 0, getMarkdownTheme()).render(width), ...Array(100).fill("later")]
-		: Array.from({ length: count }, (_, i) => i === marker ? `${NARRATION_ACTIVE_MARKER}First` : `line ${i}`)
+	let quotedHistory = () => "";
+	let historyHeight = 1500;
+	let tailHeight = 100;
+	let editorHeight = 5;
+	let progressHeight = 2;
+	let footerHeight = 1;
+	const transcript = new native.ScrollView({ invalidate() {}, render: (width: number) => cached
+		? [...new native.Markdown(quotedHistory(), 1, 0, getMarkdownTheme()).render(width),
+			...Array.from({ length: historyHeight }, (_, i) => `history ${i}`),
+			...new native.Markdown(renderText(), 1, 0, getMarkdownTheme()).render(width), ...Array(tailHeight).fill("later")]
+		: Array.from({ length: count }, (_, i) => i === marker ? renderText() : `line ${i}`)
 	}, { primary: true, follow: "end", scrollbar: action === "scrollbar bottom" ? "always" : "hidden" });
-	tui.setLayoutRoot(narrow ? new native.VStack([
+	tui.setLayoutRoot(cached ? new native.VStack([
 		{ component: transcript, basis: 0, grow: 1 },
-		{ component: { invalidate() {}, render: () => Array(footerHeight).fill("editor / Voice / footer") }, shrink: 0 },
+		{ component: { invalidate() {}, render: () => Array(editorHeight).fill("editor") }, shrink: 0 },
+		{ component: { invalidate() {}, render: () => Array(progressHeight).fill("Voice progress") }, shrink: 0 },
+		{ component: { invalidate() {}, render: () => Array(footerHeight).fill("footer") }, shrink: 0 },
 	]) : transcript);
 	tui.doRender();
 	const view = tui.getPrimaryScrollView();
-	view.piVoiceCacheNarrationLayout = narrow;
+	view.piVoiceCacheNarrationLayout = cached;
 	const originalBottom = tui.scrollToBottom;
 	const originalGestures = [tui.handleViewportInput, tui.refreshSearch, tui.autoScrollSelection];
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-native-scroll-"));
@@ -53,8 +64,11 @@ for (const action of ["paused anchor", "End", "banner", "controls", "search", "s
 		audioCache: false, codeDescriptionPreprocessConcurrency: 0, timingPreprocessConcurrency: 0 }));
 	const host = new FakeVoiceHost(root, `native-${action}`);
 	Object.assign(host, { tui });
+	// Native viewport assertions do not inspect fake theme call history.
+	host.ctx.ui.theme.fg = (_name: string, text: string) => text;
 	t.after(async () => {
 		await host.shutdown();
+		MockedVoiceWorkerClient.instances.length = 0; // Release callbacks retaining previous hosts/layouts.
 		assert.equal(tui.scrollToBottom, originalBottom, "dispose restores the native adapter");
 		assert.deepEqual([tui.handleViewportInput, tui.refreshSearch, tui.autoScrollSelection], originalGestures);
 		tui.stopSelectionAutoScroll();
@@ -62,27 +76,60 @@ for (const action of ["paused anchor", "End", "banner", "controls", "search", "s
 		await fs.rm(root, { recursive: true, force: true });
 	});
 	if (action === "controls") host.addMessage("previous", null, assistant("Older sentence. Another sentence."));
-	host.addMessage("answer", null, assistant(narrow ? text : "First sentence. Second sentence."));
+	host.addMessage("answer", null, assistant(cached ? text : "First sentence. Second sentence."));
 	await host.start();
-	renderText = () => host.render(text);
+	renderText = () => cached ? host.render(text)
+		: ["First sentence. Second sentence.", "Older sentence. Another sentence."].map(source => host.render(source)).join(" ");
 	await host.shortcut("f11");
 	await settle();
-	if (narrow) {
-		const markerLine = () => transcript.render(28).findIndex((line: string) => line.includes(NARRATION_ACTIVE_MARKER));
-		assert.equal(view.scrollTop, markerLine() - Math.floor(view.viewportHeight * 0.2), "offscreen start at 20%");
+	if (cached) {
+		const activeMarker = () => {
+			const marker = renderText().match(/[\u200b\u200c]*\u2063\u200b\u2063\u200c\u2063/)?.[0];
+			assert.ok(marker, "the actual host render must contain its active marker");
+			return marker;
+		};
+		const oldMarker = activeMarker();
+		quotedHistory = () => ["user", "toolResult"].map(role => host.render(
+			`> Quoted ${NARRATION_ACTIVE_MARKER}legacy marker and ${oldMarker}old narration marker.`, role)).join("\n\n");
+		await host.shortcut("f11");
+		await settle();
+		assert.notEqual(activeMarker(), oldMarker, "replay must retire the copied marker");
+		assert.ok(transcript.render(width).filter((line: string) => line.includes(oldMarker)).length >= 2, "user and tool history retain old dynamic markers");
+		const currentMarker = activeMarker();
+		assert.equal(transcript.render(width).filter((line: string) => line.includes(currentMarker)).length, 1, "only the actual target has the current marker");
+		const markerLine = () => {
+			// Render once per lookup, not once per history line; replay can replace the marker.
+			const marker = activeMarker();
+			return transcript.render(width).findIndex((line: string) => line.includes(marker));
+		};
+		const assertFramed = (label: string) => {
+			const target = markerLine();
+			assert.ok(target >= 0, `${label}: actual narration target exists`);
+			assert.equal(view.scrollTop, Math.max(0, Math.min(view.contentHeight - view.viewportHeight,
+				target - Math.floor(view.viewportHeight * 0.2))), label);
+			assert.ok(target >= view.scrollTop && target < view.scrollTop + view.viewportHeight, `${label}: target visible`);
+		};
+		assertFramed("offscreen start at 20%, ignoring quoted markers");
 		const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
 		const sent = worker.sent as Array<{ utterance: number; segmentId: number }>;
 		const segments = sent.filter(segment => segment.utterance === sent.at(-1)!.utterance);
 		segments.forEach((segment, i) => worker.emit({ type: "segment-audio", utterance: segment.utterance, segmentId: segment.segmentId, start: i * 2, duration: 2 }));
 		for (let i = 0; i < 45; i++) {
-			if (i === 12) footerHeight++; // extra Word timing row
-			if (i === 24) footerHeight += 5; // multiline editor
+			if (i === 12) { terminal.rows = 24; progressHeight = 4; editorHeight = 3; footerHeight = 2; }
+			if (i === 24) { terminal.rows = 52; progressHeight = 1; editorHeight = 10; footerHeight = 3; }
+			if (i === 36) { terminal.rows = 32; progressHeight = 3; editorHeight = 6; footerHeight = 1; }
 			tui.doRender();
 			worker.emit({ type: "playback", utterance: segments.at(-1)!.utterance, position: i * 2 });
 			await settle();
-			const relative = markerLine() - view.scrollTop;
+			assert.equal(view.viewportHeight, terminal.rows - editorHeight - progressHeight - footerHeight, "native layout uses screen height minus chrome");
+			if (i % 12 === 0) {
+				await host.command("scroll-to");
+				assertFramed(`height ${terminal.rows}, editor ${editorHeight}, progress ${progressHeight}, footer ${footerHeight}`);
+			}
+			const target = markerLine();
+			const relative = target - view.scrollTop;
 			assert.ok(relative >= Math.floor(view.viewportHeight * 0.2) && relative <= Math.ceil(view.viewportHeight * 0.8),
-				`word ${i}: marker ${markerLine()}, top ${view.scrollTop}, height ${view.viewportHeight}`);
+				`word ${i}: marker ${target}, top ${view.scrollTop}, height ${view.viewportHeight}`);
 		}
 		tui.handleTerminalInput("\x1b[<64;1;1M");
 		const manualTop = view.scrollTop;
@@ -93,9 +140,31 @@ for (const action of ["paused anchor", "End", "banner", "controls", "search", "s
 		assert.equal(view.scrollTop, manualTop, "layout changes cannot reclaim manual framing");
 		await host.shortcut("f8");
 		const navigation = host.shortcut("f9");
-		assert.equal(view.scrollTop, markerLine() - Math.floor(view.viewportHeight * 0.2), "paused navigation frames synchronously");
+		assertFramed("paused navigation frames synchronously");
 		await navigation;
 		assert.equal(worker.pauses.at(-1), true, "paused navigation stays silent");
+		historyHeight = tailHeight = 0;
+		quotedHistory = () => "";
+		const previousUtterance = (worker.sent.at(-1) as { utterance: number }).utterance;
+		await host.shortcut("f11");
+		await settle();
+		tui.doRender();
+		await host.command("scroll-to");
+		assertFramed("start-of-document clamps to zero");
+		assert.equal(view.scrollTop, 0);
+		// F11 starts an unpaused replay, even after paused navigation; F8 would pause it.
+		assert.equal(worker.pauses.at(-1), false, "replay is playing");
+		const replay = (worker.sent as Array<{ utterance: number; segmentId: number; text: string }>);
+		const latest = replay.filter(segment => segment.utterance === replay.at(-1)!.utterance);
+		assert.notEqual(latest.at(-1)!.utterance, previousUtterance, "drive the regenerated replay, not retired audio");
+		assert.ok(latest.at(-1)!.text.includes("Sentence 59"), "replay includes the final spoken sentence");
+		latest.forEach((segment, i) => worker.emit({ type: "segment-audio", utterance: segment.utterance, segmentId: segment.segmentId, start: i * 2, duration: 2 }));
+		worker.emit({ type: "playback", utterance: latest.at(-1)!.utterance, position: latest.length * 2 - 0.01 });
+		await settle();
+		tui.doRender();
+		await host.command("scroll-to");
+		assertFramed("end-of-document clamps to maximum scroll");
+		assert.equal(view.scrollTop, Math.max(0, view.contentHeight - view.viewportHeight));
 		return;
 	}
 	assert.equal(view.scrollTop, 92);
@@ -125,6 +194,8 @@ for (const action of ["paused anchor", "End", "banner", "controls", "search", "s
 	await settle();
 	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
 	const last = worker.sent.at(-1) as { utterance: number };
+	(worker.sent as Array<{ utterance: number; segmentId: number }>).filter(segment => segment.utterance === last.utterance)
+		.forEach((segment, i) => worker.emit({ type: "segment-audio", utterance: segment.utterance, segmentId: segment.segmentId, start: i * 2, duration: 2 }));
 	const tick = async () => { worker.emit({ type: "playback", utterance: last.utterance, position: 0 }); await settle(); };
 	await tick();
 	assert.equal(view.scrollTop, 92, "programmatic motion does not cancel the ongoing 20–80% follow band");

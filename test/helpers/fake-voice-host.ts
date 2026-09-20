@@ -71,17 +71,17 @@ export class FakeScrollView {
 	viewportHeight = 40;
 	contentHeight = 0;
 	renderCalls = 0;
-	lines: string[] = [];
-	#pendingDocument: { lines: string[]; viewportHeight: number } | undefined;
+	lines: Array<string | (() => string)> = [];
+	#pendingDocument: { lines: Array<string | (() => string)>; viewportHeight: number } | undefined;
 
-	setDocument(lines: string[], viewportHeight = this.viewportHeight): void {
+	setDocument(lines: Array<string | (() => string)>, viewportHeight = this.viewportHeight): void {
 		this.lines = [...lines];
 		this.contentHeight = lines.length;
 		this.viewportHeight = viewportHeight;
 		this.scrollTop = Math.min(this.scrollTop, Math.max(0, this.contentHeight - this.viewportHeight));
 	}
 
-	queueDocument(lines: string[], viewportHeight = this.viewportHeight): void {
+	queueDocument(lines: Array<string | (() => string)>, viewportHeight = this.viewportHeight): void {
 		this.#pendingDocument = { lines: [...lines], viewportHeight };
 	}
 
@@ -98,7 +98,7 @@ export class FakeScrollView {
 
 	render(_width: number): string[] {
 		this.renderCalls += 1;
-		return [...this.lines];
+		return this.lines.map(line => typeof line === "function" ? line() : line);
 	}
 
 	scrollTo(top: number, options: { disableFollow?: boolean } = {}): void {

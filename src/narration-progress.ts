@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import type {
 	CodeLineRange,
 	CodeNarrationCue,
@@ -8,8 +9,13 @@ import { type FencedCodeBlock, isTextFenceLanguage, SpeakableStream } from "./sp
 
 export type NarrationMessageType = "assistant" | "assistant-thinking";
 
-/** Invisible marker used to locate the currently spoken word in rendered TUI lines. */
+/** Legacy marker suffix; copied transcript text can contain it, so never use it alone for lookup. */
 export const NARRATION_ACTIVE_MARKER = "\u2063\u200b\u2063\u200c\u2063";
+
+function freshNarrationMarker(): string {
+	return [...randomBytes(12)].map(byte => byte.toString(2).padStart(8, "0")
+		.replace(/0/g, "\u200b").replace(/1/g, "\u200c")).join("") + NARRATION_ACTIVE_MARKER;
+}
 
 export interface NarrationSourceRange {
 	start: number;
@@ -439,6 +445,7 @@ function suppressFenceSyntaxHighlight(markdown: string, codeAt: number): { markd
 
 /** Tracks synthesized segment timing and transforms the active Markdown block. */
 export class NarrationProgress {
+	#marker = freshNarrationMarker();
 	#blocks: SourceBlock[] = [];
 	#segments = new Map<number, TrackedSegment>();
 	#codeBlocks = new Map<string, CodeFocusBlock>();
@@ -458,6 +465,7 @@ export class NarrationProgress {
 	}
 
 	begin(): void {
+		this.#marker = freshNarrationMarker();
 		this.#blocks = [];
 		this.#segments.clear();
 		this.#codeBlocks.clear();
@@ -742,6 +750,11 @@ export class NarrationProgress {
 			transformed = transformed.slice(0, codeAt) + styled + transformed.slice(codeAt + codeBlock.code.length);
 		}
 		return transformed;
+	}
+
+	/** Selection-scoped render marker. Include this identity in absolute-anchor caches. */
+	get activeMarker(): string {
+		return this.#marker;
 	}
 
 	/** Source blocks whose cached Markdown may carry narration styling. */

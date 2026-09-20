@@ -6,7 +6,6 @@ import { mock, test } from "node:test";
 import { assistant, FakeVoiceHost, MockedVoiceWorkerClient } from "./helpers/fake-voice-host.js";
 import * as codeDescriber from "../src/code-describer.js";
 import { plainCodeNarration } from "../src/code-narration.js";
-import { NARRATION_ACTIVE_MARKER } from "../src/narration-progress.js";
 
 let sourceKeyCalls = 0;
 let chargeKeyWork = () => {};
@@ -135,7 +134,7 @@ test("completed conversation keys survive replay, settling and custom leaves; co
 	let clock = performance.now();
 	const now = mock.method(performance, "now", () => clock);
 	host.scrollView.setDocument(Array.from({ length: 300 }, (_, line) =>
-		line === 160 ? `${NARRATION_ACTIVE_MARKER}Replay target.` : `line ${line}`), 40);
+		line === 160 ? () => host.render("Replay target.") : `line ${line}`), 40);
 	host.scrollView.manualScrollTo(0);
 	chargeKeyWork = () => {
 		if (sourceKeyCalls === 1) assert.equal(host.scrollView.scrollTop, 152, "frame before the first identity computation");
