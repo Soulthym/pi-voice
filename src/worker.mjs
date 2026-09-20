@@ -751,12 +751,17 @@ async function runOperation(operation) {
 		return;
 	}
 	if (operation.type === "preload") {
-		try {
-			await Promise.all(Array.from({ length: synthesisWorkers }, () => sentencePool.generate(operation)));
-			send({ type: "ready", requestId: operation.requestId });
-		} catch (error) {
-			send({ type: "error", requestId: operation.requestId, message: error instanceof Error ? error.message : String(error) });
-		}
+		// Warm every slot, but let the ordered pump use the first available worker.
+		void (async () => {
+			try {
+				if (shuttingDown || operation.epoch !== epoch) throw new Error("Sentence preload cancelled");
+				await Promise.all(Array.from({ length: synthesisWorkers }, () => sentencePool.generate(operation)));
+				if (shuttingDown || operation.epoch !== epoch) throw new Error("Sentence preload cancelled");
+				send({ type: "ready", requestId: operation.requestId });
+			} catch (error) {
+				send({ type: "error", requestId: operation.requestId, message: error instanceof Error ? error.message : String(error) });
+			}
+		})();
 		return;
 	}
 	if (operation.type === "end") {
