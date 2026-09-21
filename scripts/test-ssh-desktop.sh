@@ -53,6 +53,7 @@ JS
 podman exec "$name-server" mkdir -p /work/src
 podman cp "$root/phone-input.mjs" "$name-server:/work/src/phone-input.mjs"
 podman cp scripts/ssh-desktop/check.mjs "$name-server:/work/check.mjs"
+podman cp scripts/ssh-desktop/read-line.mjs "$name-server:/work/read-line.mjs"
 podman cp scripts/ssh-desktop/client.sh "$name-client:/work/run.sh"
 podman exec "$name-client" chown -R voice:voice /work
 podman exec --user voice "$name-client" timeout 180 bash /work/run.sh

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import net from 'node:net';
+import {readLine} from './read-line.mjs';
 // Ubuntu 24.04's Node 18 lacks this language helper; production decoder is unchanged.
 Promise.withResolvers ??= function () { let resolve, reject; const promise = new Promise((a,b) => { resolve=a; reject=b; }); return {promise,resolve,reject}; };
 const {PhoneInputClient} = await import('./src/phone-input.mjs');
@@ -26,15 +27,15 @@ if(mode==='hold') {
 if(mode==='drift') while(!await fs.stat('/work/holding').catch(()=>false)) await new Promise(r=>setTimeout(r,50));
 // Ticket cancellation before record on the SAME connection, over the allocated reverse tunnel.
 const pending=connect(device.inputEndpoint);
-const ticket=await new Promise((resolve,reject)=>{
- pending.on('error',reject); pending.on('connect',()=>pending.write('ticket\n'));
- pending.once('data',b=>resolve(b.toString().trim().split(' ')[1]));
-});
+const ticketLine=readLine(pending);
+pending.once('connect',()=>pending.write('ticket\n'));
+const ticket=(await ticketLine.catch(error=>{pending.destroy(); throw error;})).trim().split(' ')[1];
 assert.match(ticket,/^[a-f0-9]{32}\.\d+$/);
 const ack=await request(device.inputEndpoint,`stop ${ticket}`);
 assert.equal(Buffer.from(ack.slice(3),'base64').toString(),`stopped ${ticket}`);
 let late=''; pending.on('data',b=>late+=b);
 const closed=new Promise(resolve=>pending.once('close',resolve));
+pending.resume();
 pending.write(`record ${ticket}\n`); await closed;
 assert.equal(late,'','cancelled ticket must not start a recorder');
 // A server-local recorder must never be invoked for this registered TCP endpoint.
