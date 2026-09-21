@@ -16,7 +16,7 @@ pactl set-default-source synthetic
 ffmpeg -v error -re -stream_loop -1 -f s16le -ar 16000 -ac 1 -i /work/sine.pcm -f s16le - >/work/mic &
 feed=$!
 printf 'Versions: '; parec --version; pw-record --version
-printf 'PipeWire raw option advertised: '; if pw-record --help 2>&1 | grep -q -- '--raw'; then echo yes; else echo no; fi
+printf 'PipeWire raw option advertised: '; if pw-record --help 2>&1 | grep -- '--raw'; then :; else echo no; fi
 ssh_run() {
  /work/client/pi-voice-ssh -F /dev/null -i /work/key -p 2222 -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/work/known_hosts voice@127.0.0.1 node /work/check.mjs "$1"
 }
@@ -62,9 +62,9 @@ PIPEWIRE_REMOTE=missing PULSE_SERVER=unix:/work/missing ssh_run unavailable-env
 # Real SSH plus real encoder/decoder; only these source failures are injected.
 for mode in natural-eof empty startup-failed; do
   if [[ $mode == natural-eof ]]; then
-    printf '#!/bin/sh\ncat /work/sine.pcm\n' >/work/bin/pw-record
+    printf '#!/bin/sh\n[ "$1" = --help ] && { echo "Usage: pw-record"; exit 0; }\ncat /work/sine.pcm\n' >/work/bin/pw-record
   else
-    printf '#!/bin/sh\nexit %s\n' "$([[ $mode == empty ]] && echo 0 || echo 1)" >/work/bin/pw-record
+    printf '#!/bin/sh\n[ "$1" = --help ] && { echo "Usage: pw-record"; exit 0; }\nexit %s\n' "$([[ $mode == empty ]] && echo 0 || echo 1)" >/work/bin/pw-record
   fi
   chmod +x /work/bin/pw-record
   ssh_run "$mode"

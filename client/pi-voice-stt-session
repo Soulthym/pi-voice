@@ -147,6 +147,17 @@ else
   printf 'error %s\n' "$(encode_message 'No usable default Linux microphone found; connect one and install PipeWire or PulseAudio utilities')"
   exit 0
 fi
+# Probe capabilities, not versions (distributions backport options). Keep this
+# bounded and outside the fence so stop can cancel admission during the probe.
+pw_raw=()
+if [[ $recorder == pw-record ]]; then
+  if ! pw_help=$(timeout -k 1 2 bash -o pipefail -c 'pw-record --help 2>&1 | head -c 65537' 9>&-) || (( ${#pw_help} > 65536 )); then
+    printf 'error %s\n' "$(encode_message 'Could not inspect pw-record raw PCM support (help failed or exceeded limits)')"
+    exit 0
+  fi
+  # No grep -q pipeline: an early reader exit can SIGPIPE a valid help writer.
+  [[ $pw_help =~ (^|[[:space:]])--raw([[:space:]=,]|$) ]] && pw_raw=(--raw)
+fi
 max_record_seconds=${PI_VOICE_MAX_RECORD_SECONDS:-120}
 flock -x 9
 [[ $(cat "$active_file" 2>/dev/null || true) == "$recording_owner" && ! -e $stop_file ]] || exit 1
@@ -155,11 +166,11 @@ printf 'stream\n'
 if [[ $recorder == pw-record ]]; then
   setsid bash -c '
     trap "wait; exit" TERM
-    # pw-record uses raw PCM for stdout ("-"); --raw is a parec-only option.
-    pw-record --format s16 --rate 16000 --channels 1 - 2>/dev/null |
+    # Older native writers implicitly emit raw; libsndfile writers need --raw.
+    pw-record "$@" --format s16 --rate 16000 --channels 1 - 2>/dev/null |
       ffmpeg -hide_banner -loglevel error -f s16le -ar 16000 -ac 1 -i pipe:0 \
         -c:a libopus -application voip -b:a 32k -vbr on -f ogg pipe:1 2>/dev/null
-  ' 9>&- &
+  ' bash "${pw_raw[@]}" 9>&- &
 else
   setsid bash -c '
     trap "wait; exit" TERM

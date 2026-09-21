@@ -48,7 +48,7 @@ for (const script of ["client/pi-voice-stt-session", "client/pi-voice-termux-stt
 		const linux = script === "client/pi-voice-stt-session";
 		const tools: Record<string, string> = linux ? {
 			wpctl: "exit 0", pactl: "exit 1", ffmpeg: "exec cat",
-			"pw-record": `exec '${process.execPath}' -e 'const fs = require("fs"); fs.writeFileSync(process.env.TMPDIR + "/running", "yes"); const timer = setInterval(() => {}, 100); process.on("SIGTERM", () => setTimeout(() => { fs.unlinkSync(process.env.TMPDIR + "/running"); clearInterval(timer); process.exit(0); }, 200));'`,
+			"pw-record": `[[ $1 == --help ]] && { echo "Usage: pw-record"; exit 0; }; exec '${process.execPath}' -e 'const fs = require("fs"); fs.writeFileSync(process.env.TMPDIR + "/running", "yes"); const timer = setInterval(() => {}, 100); process.on("SIGTERM", () => setTimeout(() => { fs.unlinkSync(process.env.TMPDIR + "/running"); clearInterval(timer); process.exit(0); }, 200));'`,
 		} : {
 			"termux-microphone-record": `case "$1" in
 -q) sleep 0.2; rm -f "$TMPDIR/running";;
@@ -165,13 +165,16 @@ esac
 });
 
 for (const script of ["client/pi-voice-stt-session", "client/pi-voice-termux-stt-session", "termux/pi-voice-stt-session"]) {
-	for (const block of ["pending", "admission", "mkdir-crash"]) test(`${script}: ${block} cancellation and delayed stop preserve a newer generation`, async t => {
+	for (const block of ["pending", "admission", "mkdir-crash", ...(script === "client/pi-voice-stt-session" ? ["help"] : [])]) test(`${script}: ${block} cancellation and delayed stop preserve a newer generation`, async t => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-prestart-"));
 		const bin = path.join(root, "bin"); await fs.mkdir(bin);
 		const linux = script === "client/pi-voice-stt-session";
 		const tools = linux ? {
 			pactl: "exit 1", wpctl: "exit 0", ffmpeg: "exec cat",
-			"pw-record": `exec '${process.execPath}' -e 'require("fs").writeFileSync(process.env.TMPDIR + "/running", "yes"); setInterval(() => {}, 100);'`,
+			"pw-record": `if [[ $1 == --help ]]; then
+  if [[ \${BLOCK_CHECK:-} == help ]]; then touch "$TMPDIR/check-blocked"; while [[ ! -e "$TMPDIR/release-check" ]]; do sleep 0.01; done; fi
+  echo "Usage: pw-record"; exit 0
+fi; exec '${process.execPath}' -e 'require("fs").writeFileSync(process.env.TMPDIR + "/running", "yes"); setInterval(() => {}, 100);'`,
 		} : {
 			"termux-microphone-record": `case "$1" in
 -f) touch "$TMPDIR/running"; printf audio > "$2";;
