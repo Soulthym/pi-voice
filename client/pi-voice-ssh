@@ -41,30 +41,96 @@ fi
 
 runtime_root=${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/pi-voice-ssh-${UID:-$(id -u)}
 config_root=${XDG_CONFIG_HOME:-$HOME/.config}/pi-voice
-mkdir -p "$runtime_root" "$config_root"
-chmod 700 "$runtime_root" "$config_root"
-
+config_error() { printf 'Cannot read/write pi-voice device configuration in %s\n' "$config_root" >&2; exit 1; }
+mkdir -p "$config_root" && chmod 700 "$config_root" || config_error
+device_name_file=$config_root/device-name
 device_id_file=$config_root/device-id
-if [[ ! -s $device_id_file ]]; then
-  if command -v uuidgen >/dev/null 2>&1; then uuidgen | tr '[:upper:]' '[:lower:]' >"$device_id_file"
-  else cat /proc/sys/kernel/random/uuid >"$device_id_file"
-  fi
-  chmod 600 "$device_id_file"
-fi
-device_id=$(tr -cd 'a-zA-Z0-9._-' <"$device_id_file")
-[[ -n $device_id ]] || { printf 'Invalid device id in %s\n' "$device_id_file" >&2; exit 1; }
-device_name=${PI_VOICE_DEVICE_NAME-$(hostname -s 2>/dev/null || hostname)}
 validate_device_name() {
   local LC_ALL=C.UTF-8
-  local forbidden whitespace
+  local forbidden whitespace invalid=false utf8
   printf -v whitespace '%b' '[[:space:]\u00a0\u2007\u202f\ufeff]'
   printf -v forbidden '%b' '[\x01-\x1f\x7f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]'
-  if [[ -z ${device_name//$whitespace/} || ${#device_name} -gt 128 || $device_name == *$forbidden* ]]; then
-    printf 'PI_VOICE_DEVICE_NAME must contain 1–128 characters and no control or bidi characters\n' >&2
+  if [[ -z ${device_name//$whitespace/} || ${#device_name} -gt 128 || $device_name == *$forbidden* ]]; then invalid=true; fi
+  # Bash can retain invalid byte sequences; require UTF-8 scalar values before
+  # JSON registration or terminal output (no overlong encodings or surrogates).
+  LC_ALL=C
+  utf8=$'^([\x01-\x7f]|[\xc2-\xdf][\x80-\xbf]|\xe0[\xa0-\xbf][\x80-\xbf]|[\xe1-\xec\xee-\xef][\x80-\xbf]{2}|\xed[\x80-\x9f][\x80-\xbf]|\xf0[\x90-\xbf][\x80-\xbf]{2}|[\xf1-\xf3][\x80-\xbf]{3}|\xf4[\x80-\x8f][\x80-\xbf]{2})+$'
+  if [[ $invalid == true || ! $device_name =~ $utf8 ]]; then
+    printf 'Device name must contain 1–128 UTF-8 characters and no control or bidi characters (not whitespace-only)\n' >&2
     return 2
   fi
 }
+# Publish complete private files without replacing another first launch's choice.
+# No lock is held while a user thinks at the prompt; contenders read the winner.
+publish_config() (
+  umask 077
+  temp=$(mktemp "$config_root/.device-XXXXXX") || exit 1
+  trap 'rm -f "$temp"' EXIT
+  printf '%s\n' "$2" >"$temp" || exit 1
+  ln -T "$temp" "$1" 2>/dev/null || [[ -f $1 ]]
+)
+read_device_name() (
+  local LC_ALL=C.UTF-8 character invalid=false tty_state
+  tty_state=$(stty -g <&"$name_tty") || return 1
+  trap 'stty "$tty_state" <&"$name_tty"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  # Configure before displaying the prompt, including for immediate pasted EOF.
+  stty -echo -icanon min 1 time 0 <&"$name_tty" || return 1
+  printf 'Device name (1–128 characters; input hidden): ' >&"$name_tty"
+  device_name=
+  # Unlike a line read, an empty-delimiter read exposes NUL rather than silently
+  # dropping it. Bound retained input and drain through Enter on invalid input.
+  while IFS= read -r -s -d '' -n 1 -u "$name_tty" character; do
+    case $character in
+      $'\n') [[ $invalid == false ]] || return 1; printf '%s' "$device_name"; return ;;
+      $'\x04') return 1 ;;
+      '') invalid=true ;;
+      $'\x7f'|$'\x08') device_name=${device_name%?} ;;
+      *)
+        if (( ${#device_name} < 129 )); then device_name+=$character
+        else invalid=true
+        fi ;;
+    esac
+  done
+  return 1
+)
+if [[ ! -e $device_name_file ]]; then
+  if ! { exec {name_tty}<>/dev/tty; } 2>/dev/null; then
+    printf 'Missing device name. Run pi-voice-ssh interactively first, or write a validated UTF-8 name to %s (mode 600; directory 700).\n' "$device_name_file" >&2
+    exit 2
+  fi
+  # Never consume SSH stdin, or echo unvalidated terminal escape sequences.
+  if ! device_name=$(read_device_name); then
+    printf '\nDevice name cancelled or invalid; no connection started.\n' >&2
+    exit 2
+  fi
+  printf '\n' >&"$name_tty"
+  exec {name_tty}>&-
+  validate_device_name
+  publish_config "$device_name_file" "$device_name" || config_error
+fi
+# Read at most 1025 bytes (128 UTF-8 characters need at most 512), reject NUL
+# explicitly, and permit just one conventional final newline, not extra lines.
+[[ -f $device_name_file && -r $device_name_file ]] || config_error
+if LC_ALL=C IFS= read -r -d '' -n 1025 device_name <"$device_name_file"; then
+  printf 'Invalid device-name file: NUL or excessive length\n' >&2
+  exit 2
+fi
+device_name=${device_name%$'\n'}
 validate_device_name
+chmod 600 "$device_name_file" || config_error
+if [[ ! -e $device_id_file ]]; then
+  if command -v uuidgen >/dev/null 2>&1; then new_id=$(uuidgen | tr '[:upper:]' '[:lower:]')
+  else new_id=$(</proc/sys/kernel/random/uuid)
+  fi
+  publish_config "$device_id_file" "$new_id" || config_error
+fi
+chmod 600 "$device_id_file" || config_error
+device_id=$(tr -cd 'a-zA-Z0-9._-' <"$device_id_file")
+[[ -n $device_id ]] || { printf 'Invalid device id in %s\n' "$device_id_file" >&2; exit 1; }
+mkdir -p "$runtime_root"
+chmod 700 "$runtime_root"
 # Controls are rejected above; only backslashes and quotes need JSON escaping.
 device_name_json=${device_name//\\/\\\\}
 device_name_json=${device_name_json//\"/\\\"}

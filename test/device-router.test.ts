@@ -35,6 +35,23 @@ test("device labels are validated, preserved by claims, and independent of stabl
 	}
 });
 
+test("duplicate names never select a registry device or mutate an existing connection pin", async t => {
+	const { directory, write } = fixture(t);
+	for (const id of ["old-pin", "connecting", "arbitrary-newest"]) {
+		fs.writeFileSync(path.join(directory, `${id}.json`), JSON.stringify({ ...write(id),
+			name: "Same phone", lastActive: id === "arbitrary-newest" ? Date.now() : 1 }));
+	}
+	const router = new DeviceRouter(directory, "old-pin", { SSH_CONNECTION: "ssh" });
+	const fresh = await router.resolveCurrentConnection({ SSH_CONNECTION: "ssh", PI_VOICE_DEVICE_ID: "connecting" });
+	assert.deepEqual(fresh, { kind: "device", id: "connecting" });
+	assert.equal(router.resolve("auto")?.id, "old-pin", "lookup is not adoption/stop proof");
+	assert.throws(() => router.resolve("Same phone"), { code: "device_unavailable" });
+	assert.equal(router.resolve("connecting")?.name, "Same phone");
+	await assert.rejects(router.resolveCurrentConnection({ SSH_CONNECTION: "ssh" }), { code: "missing_identity" });
+	fs.unlinkSync(path.join(directory, "old-pin.json"));
+	assert.throws(() => router.resolve("auto"), { code: "device_unavailable" });
+});
+
 test("routing returns metadata even for broken forwards, without opening TCP or Unix connections", async t => {
 	const { directory, write } = fixture(t);
 	const create = t.mock.method(net, "createConnection", () => { throw new Error("destructive probe"); });

@@ -14,7 +14,7 @@ const TERMUX_WRAPPER = path.resolve("termux/pi-voice-ssh");
 /** Tools the wrappers legitimately need; audio/SSH tooling is faked explicitly. */
 const CORE_TOOLS = [
 	"awk", "basename", "bash", "cat", "chmod", "cmp", "cut", "date", "dd", "dirname", "env", "grep", "head", "id", "kill",
-	"ln", "mkdir", "mkfifo", "mv", "rmdir", "printf", "readlink", "rm", "sh", "sha256sum", "sleep", "sort", "stat", "tail", "touch",
+	"ln", "mkdir", "mktemp", "mkfifo", "mv", "rmdir", "printf", "readlink", "rm", "sh", "sha256sum", "sleep", "sort", "stat", "tail", "touch",
 	"tr", "base64", "setsid", "timeout", "uname",
 ];
 
@@ -52,6 +52,13 @@ function restrictedPath(root: string, fakes: Record<string, string>): string {
 		// Already linked.
 	}
 	return `${bin}:${core}`;
+}
+
+function prefillName(config: string): string {
+	fs.mkdirSync(path.join(config, "pi-voice"), { recursive: true });
+	const file = path.join(config, "pi-voice", "device-name");
+	if (!fs.existsSync(file)) fs.writeFileSync(file, "testdev\n", { mode: 0o600 });
+	return config;
 }
 
 interface RunResult {
@@ -162,12 +169,12 @@ async function scenario(
 		"#!/usr/bin/env bash\nexec node -e 'const n=require(\"net\");const s=n.createServer(c=>c.on(\"data\",b=>{if(String(b)!==\"PI_VOICE_CONTROLhello\\n\")process.exit(2);c.end(JSON.stringify({type:\"protocol\",version:2})+\"\\n\")}));s.listen(Number(process.env.PI_VOICE_AUDIO_PORT)||8765,\"127.0.0.1\")'",
 	);
 	fs.chmodSync(bridge, 0o755);
+	prefillName(path.join(root, "config"));
 	const result = await runScript(wrapper, args, {
 		XDG_RUNTIME_DIR: runtime,
 		XDG_CONFIG_HOME: path.join(root, "config"),
 		PATH: bin,
 		HOME: root,
-		PI_VOICE_DEVICE_NAME: "testdev",
 		PI_VOICE_CLIENT_COMMAND: bridge,
 		FAKE_SSH_LOG: logFile,
 		FAKE_REGISTRATION_LOG: path.join(root, "registration.json"),
@@ -179,38 +186,68 @@ async function scenario(
 	};
 }
 
-test("device names validate without sanitizing and default to the local hostname", async () => {
+test("first-run device name uses the controlling terminal without consuming SSH stdin", async () => {
+	// PTY setup uses Python's standard library; no terminal or SSH dependency.
+	const child = spawn("python3", ["test/device-name-pty.py"], { stdio: ["ignore", "pipe", "pipe"] });
+	let output = "";
+	child.stdout.on("data", b => output += b);
+	child.stderr.on("data", b => output += b);
+	const [code] = await once(child, "close");
+	assert.equal(code, 0, output);
+});
+
+test("device names come only from validated local files before any connection", async () => {
 	for (const wrapper of [CLIENT_WRAPPER, TERMUX_WRAPPER]) {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "voice-name-"));
 		try {
 			const source = fs.readFileSync(wrapper, "utf8");
+			assert.ok(!source.includes("PI_VOICE_DEVICE_NAME"), "production must not consult the retired override");
 			const script = path.join(root, "name.sh");
 			// Exercise the production validation without starting a bridge or SSH.
-			fs.writeFileSync(script, 'set -eu\n[[ ${USE_DEFAULT:-} != 1 ]] || unset PI_VOICE_DEVICE_NAME\n' +
-				source.slice(source.indexOf("device_name="), source.indexOf("if [[ ${PREFIX:-}")) +
+			fs.writeFileSync(script, 'set -eu\n' +
+				source.slice(source.indexOf("runtime_root="), source.indexOf("if [[ ${PREFIX:-}")) +
 				'\nprintf \'"%s"\\n\' "$device_name_json"\n');
-			const env = { PATH: restrictedPath(root, { hostname: "printf local-host" }), LC_ALL: "C" };
-			for (const name of ["", "   ", "\u00a0", "\ufeff", " \u00a0\u2007\u202f\ufeff ", "x".repeat(129), "é".repeat(129), ...[1, 9, 10, 13, 27, 31, 127, 128, 159, 0x61c, 0x200e, 0x200f, 0x2028, 0x2029, 0x202a, 0x202e, 0x2066, 0x2069].map(c => `a${String.fromCodePoint(c)}b`)]) {
+			const config = path.join(root, "config");
+			const env = { PATH: restrictedPath(root, {}), LC_ALL: "C", HOME: root,
+				XDG_CONFIG_HOME: config, XDG_RUNTIME_DIR: path.join(root, "runtime") };
+			const missing = await runScript(wrapper, ["u@h"], { ...env, PI_VOICE_DEVICE_NAME: "not a fallback" });
+			assert.equal(missing.code, 2);
+			assert.match(missing.stderr, /interactively first/);
+			assert.ok(missing.stderr.includes(path.join(config, "pi-voice", "device-name")));
+			prefillName(config);
+			for (const name of ["", "\0", "a\n\n", "   ", "\u00a0", "\ufeff", " \u00a0\u2007\u202f\ufeff ", "x".repeat(129), "é".repeat(129), ...[1, 9, 10, 13, 27, 31, 127, 128, 159, 0x61c, 0x200e, 0x200f, 0x2028, 0x2029, 0x202a, 0x202e, 0x2066, 0x2069].map(c => `a${String.fromCodePoint(c)}b`)]) {
+				fs.writeFileSync(path.join(config, "pi-voice", "device-name"), name + "\n");
 				const activity = path.join(root, "activity");
 				const fake = `printf activity >>'${activity}'; exit 99`;
 				const result = await runScript(wrapper, ["u@h"], {
 					...env, PATH: restrictedPath(root, { ssh: fake, socat: fake, "pi-voice-client": fake }),
 					HOME: root, XDG_CONFIG_HOME: path.join(root, "config"), XDG_RUNTIME_DIR: path.join(root, "runtime"),
-					PI_VOICE_CLIENT_COMMAND: path.join(root, "bin", "pi-voice-client"), PI_VOICE_DEVICE_NAME: name,
+					PI_VOICE_CLIENT_COMMAND: path.join(root, "bin", "pi-voice-client"),
 				});
 				assert.equal(result.code, 2, JSON.stringify(name));
 				assert.equal(fs.existsSync(activity), false, "invalid names must not start SSH or bridge activity");
-				assert.match(result.stderr, /PI_VOICE_DEVICE_NAME must/);
+				assert.match(result.stderr, /Device name must|Invalid device-name file/);
+				assert.ok(!result.stderr.includes("\x1b"));
 				assert.doesNotMatch(result.stderr + result.stdout, /Connected to/);
 			}
-			for (const name of ['小明 “手机” "phone" \\ café 😀', "é".repeat(128)]) {
-				const result = await runScript(script, [], { ...env, PI_VOICE_DEVICE_NAME: name });
+			for (const bytes of [[0xff], [0xc0, 0xaf], [0xed, 0xa0, 0x80], [0xf4, 0x90, 0x80, 0x80]]) {
+				fs.writeFileSync(path.join(config, "pi-voice", "device-name"), Buffer.from(bytes));
+				assert.equal((await runScript(script, [], env)).code, 2);
+			}
+			for (const name of ['小明 “手机” "phone" \\ café 😀', "é".repeat(128), "😀".repeat(128)]) {
+				fs.writeFileSync(path.join(config, "pi-voice", "device-name"), name + "\n");
+				const result = await runScript(script, [], env);
 				assert.equal(result.code, 0, result.stderr);
 				assert.equal(JSON.parse(result.stdout), name);
 			}
-			const fallback = await runScript(script, [], { ...env, USE_DEFAULT: "1" });
-			assert.equal(fallback.code, 0, fallback.stderr);
-			assert.equal(JSON.parse(fallback.stdout), "local-host");
+			// An inherited obsolete environment setting cannot override the file.
+			const ignored = await runScript(script, [], { ...env, PI_VOICE_DEVICE_NAME: "ignored\n\x1b" });
+			assert.equal(ignored.code, 0, ignored.stderr);
+			assert.equal(JSON.parse(ignored.stdout), "😀".repeat(128));
+			assert.equal(fs.statSync(path.join(config, "pi-voice")).mode & 0o777, 0o700);
+			for (const file of ["device-name", "device-id"]) {
+				assert.equal(fs.statSync(path.join(config, "pi-voice", file)).mode & 0o777, 0o600);
+			}
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
@@ -223,7 +260,9 @@ test("registration preserves names, confirms identity, and keeps the ID across r
 		try {
 			let id: string | undefined;
 			for (const name of ['小明 “手机” "phone" \\ café 😀', "renamed phone"]) {
-				const result = await scenario(root, wrapper, ["u@h"], { PI_VOICE_DEVICE_NAME: name, PI_VOICE_AUDIO_PORT: "24501" });
+				prefillName(path.join(root, "config"));
+				fs.writeFileSync(path.join(root, "config", "pi-voice", "device-name"), name + "\n");
+				const result = await scenario(root, wrapper, ["u@h"], { PI_VOICE_AUDIO_PORT: "24501" });
 				assert.equal(result.code, 0, result.stderr);
 				const registration = JSON.parse(fs.readFileSync(path.join(root, "registration.json"), "utf8"));
 				assert.equal(registration.name, name);
@@ -285,13 +324,14 @@ test("wrapper fallback requires a v2 ACK, never an empty audio probe or TCP acce
 
 test("dry run resolves device-dir precedence and rejects invalid values", async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-voice-ssh-dry-"));
+	prefillName(path.join(root, "config"));
 	try {
 		const dry = (wrapper: string, args: string[], extra: Record<string, string> = {}) =>
 			runScript(wrapper, args, {
 				PI_VOICE_SSH_DRY_RUN: "1",
 				XDG_RUNTIME_DIR: path.join(root, "rt"),
 				HOME: root,
-				PI_VOICE_DEVICE_NAME: "testdev",
+				XDG_CONFIG_HOME: path.join(root, "config"),
 				...extra,
 			});
 
@@ -393,7 +433,7 @@ test("stale bridge pid files are replaced; live bridges are reused", async () =>
 		XDG_RUNTIME_DIR: runtime,
 		PATH: bin,
 		HOME: root,
-		PI_VOICE_DEVICE_NAME: "t",
+		XDG_CONFIG_HOME: prefillName(path.join(root, "config")),
 		FAKE_SSH_LOG: path.join(root, "ssh.log"),
 		FAKE_MASTER_STATE: path.join(root, "master-state"),
 	};
@@ -481,7 +521,7 @@ test("termux wrapper runs the lifecycle and clears stale players", async () => {
 		PATH: bin,
 		HOME: root,
 		PREFIX: path.join(root, "com.termux"),
-		PI_VOICE_DEVICE_NAME: "t",
+		XDG_CONFIG_HOME: prefillName(path.join(root, "config")),
 		PI_VOICE_CLIENT_COMMAND: path.join(root, "counting-bridge"),
 		FAKE_STALE_PLAYER_PID: String(stalePlayer.pid),
 		PI_VOICE_AUDIO_PORT: String(audioPort),

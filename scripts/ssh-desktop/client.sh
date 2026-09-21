@@ -3,7 +3,9 @@ set -euo pipefail
 export XDG_RUNTIME_DIR=/work/runtime PULSE_SERVER=unix:/work/runtime/pulse/native
 export DBUS_SESSION_BUS_ADDRESS=unix:path=/work/runtime/bus
 export PI_VOICE_CLIENT_COMMAND=/work/client/pi-voice-client PI_VOICE_MAX_RECORD_SECONDS=3
-mkdir -m 700 -p "$XDG_RUNTIME_DIR" /work/bin
+# Client-only ephemeral persisted identity; the SSH server has no name config.
+mkdir -m 700 -p "$XDG_RUNTIME_DIR" /work/bin /work/device-config/pi-voice
+(umask 077; printf '%s\n' 'Synthetic desktop client' >/work/device-config/pi-voice/device-name)
 # No player may open speakers. Protocol hello should not even invoke this stub.
 printf '#!/bin/sh\ntouch /work/player-called\nexit 1\n' >/work/bin/mpv
 chmod +x /work/bin/mpv
@@ -18,7 +20,7 @@ feed=$!
 printf 'Versions: '; parec --version; pw-record --version
 printf 'PipeWire raw option advertised: '; if pw-record --help 2>&1 | grep -- '--raw'; then :; else echo no; fi
 ssh_run() {
- /work/client/pi-voice-ssh -F /dev/null -i /work/key -p 2222 -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/work/known_hosts voice@127.0.0.1 node /work/check.mjs "$1"
+ XDG_CONFIG_HOME=/work/device-config /work/client/pi-voice-ssh -F /dev/null -i /work/key -p 2222 -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/work/known_hosts voice@127.0.0.1 node /work/check.mjs "$1"
 }
 ssh_run pulse
 ssh_run pulse-stop
