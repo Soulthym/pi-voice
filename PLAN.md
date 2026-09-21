@@ -1,5 +1,13 @@
 # Pi Voice — implemented agreements and live-validation handoff
 
+## Desktop SSH recovery — 2026-09-21
+
+- Recovered and inspected the interrupted client change and all four harness files before editing. Preserved `ISSUES.md` and historical notes. Identified the three prior orphan test servers by exact container names/images, `/work/sshd_config`, mount inspection and matching init-parent PIDs; removed only owned test resources. No signals to user sshd 1266, live SSH 1818336/1818339, or parent Pi 1097452.
+- Proven defects: Ubuntu PipeWire 1.0.5 rejects `pw-record --raw` before capture; raw stdout requires only `-`. The old bridge TERM handler cleaned listeners then resumed supervision instead of exiting. Retained/completed the interrupted termination fix and removed the unsupported flag; both new regressions fail against `4965fce`.
+- Completed opt-in two-Ubuntu real-SSH harness: 12 capture/routing/environment cases, private networking/keys, synthetic PulseAudio and PipeWire sources, production wrapper/listeners/tickets/encoder/decoder. Existing Termux and strict router fixtures complement it. No physical audio, provider/inference, live restart, or settings changes. Playback hello only, no new playback infrastructure.
+- Final validation: **12/12 real-SSH cases passed**; intentional harness TERM **124**, cleanup verified; typecheck passed; `npm test` **872 passed, 3 compatibility skips, 0 failed (875 total)**. Final container inventory empty. Initial harness cleanup removed client/server in one Podman call and could leave the dependent server; now deletion is ordered and failures are visible. See `FINDINGS.md` and `docs/testing.md` for exact coverage/commands.
+- **User action:** update local desktop `client/pi-voice-*` scripts, then after confirmed stop close/reopen its voice wrappers at the user's chosen time. No host sshd restart, live tool-driven reconnect, or stop-state deletion. Host reload alone cannot repair an old client. The user now identifies Linux Mint and Alt+M failure before recording; the actual installed backend/version/environment and hardware cause are still unknown. Concurrent wrappers deliberately retain the first bridge's launch environment; no automatic active-session restart was added.
+
 ## Current documentation audit — source `d4cf759`
 
 - Audited the 2026-09-13–2026-09-20 window (149 commits, `3e66cb1` through `d4cf759`), broadening to the September 12 routing migration `1ed15dc` and earlier relevant protocol/control history. Compared current implementation with README, all 13 docs, example config, configuration validation and command help; no production/test changes.
