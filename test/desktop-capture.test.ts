@@ -19,7 +19,7 @@ for (const source of ["failed", "empty", "pcm", "stopped"]) test(`desktop captur
 		wpctl: "exit 0", pactl: "exit 1",
 		"pw-record": source === "stopped" ? 'cat "$TMPDIR/synthetic.pcm"; touch "$TMPDIR/ready"; exec sleep 30'
 			: source === "pcm" ? 'cat "$TMPDIR/synthetic.pcm"' : `echo private-recorder-diagnostic >&2; exit ${source === "failed" ? 1 : 0}`,
-	})) await fs.writeFile(path.join(bin, name), `#!/bin/bash\n${body}\n`, { mode: 0o755 });
+	})) await fs.writeFile(path.join(bin, name), `#!/bin/bash\n${name === "pw-record" ? '[[ "$*" == "--format s16 --rate 16000 --channels 1 -" ]] || exit 2' : ""}\n${body}\n`, { mode: 0o755 });
 	const env = { ...process.env, PREFIX: "", PATH: `${bin}:/usr/bin:/bin`, TMPDIR: root, XDG_RUNTIME_DIR: root, PI_VOICE_MAX_RECORD_SECONDS: "5" };
 	const children: Promise<void>[] = [];
 	const wire: Buffer[] = [];

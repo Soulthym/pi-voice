@@ -31,7 +31,8 @@ cleanup() {
   kill "${audio_pid:-}" "${control_pid:-}" 2>/dev/null || true
   wait "${audio_pid:-}" "${control_pid:-}" 2>/dev/null || true
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 0' INT TERM
 
 # Supervise both listeners for the lifetime of the bridge. A single dead
 # socat used to leave the tunnels black-holed: playback kept "working" from

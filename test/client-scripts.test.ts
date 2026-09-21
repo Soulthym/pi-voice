@@ -566,3 +566,32 @@ test("playback session exits with an error when mpv is unavailable", async () =>
 		fs.rmSync(root, { recursive: true, force: true });
 	}
 });
+
+
+test("client bridge terminates on TERM instead of restarting its listeners", async t => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-voice-bridge-term-"));
+	const tools = restrictedPath(root, {
+		mpv: "exit 1", ffmpeg: "exit 1",
+		socat: 'echo "$$" >> "$HOME/listeners"; exec sleep 30',
+	});
+	const child = spawn("bash", [path.join(CLIENT_DIR, "pi-voice-client")], {
+		env: { ...process.env, HOME: root, PREFIX: "", PATH: tools }, detached: true, stdio: "ignore",
+	});
+	const closed = new Promise(resolve => child.once("close", resolve));
+	t.after(() => {
+		try { process.kill(-child.pid!, "SIGKILL"); } catch {}
+		fs.rmSync(root, { recursive: true, force: true });
+	});
+	for (let i = 0; i < 100; i++) {
+		if (fs.existsSync(path.join(root, "listeners")) && fs.readFileSync(path.join(root, "listeners"), "utf8").trim().split("\n").length === 2) break;
+		await new Promise(resolve => setTimeout(resolve, 20));
+	}
+	const listeners = fs.readFileSync(path.join(root, "listeners"), "utf8").trim().split("\n");
+	assert.equal(listeners.length, 2);
+	child.kill("SIGTERM");
+	let timer: ReturnType<typeof setTimeout>;
+	try {
+		assert.equal(await Promise.race([closed, new Promise(resolve => { timer = setTimeout(() => resolve("timeout"), 2000); })]), 0);
+	} finally { clearTimeout(timer!); }
+	for (const pid of listeners) assert.throws(() => process.kill(Number(pid), 0), /ESRCH/);
+});
