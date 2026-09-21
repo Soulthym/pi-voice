@@ -135,6 +135,7 @@ case $1 in
     fi
     # Capture or consume piped registrations without touching the network.
     if [[ $* == *"umask 077; cat >"* && -n \${FAKE_REGISTRATION_LOG:-} ]]; then
+      [[ \${FAKE_REGISTRATION_FAIL:-} != 1 ]] || exit 1
       cat >"$FAKE_REGISTRATION_LOG"
     else
       cat >/dev/null 2>&1 || true
@@ -163,6 +164,7 @@ async function scenario(
 	fs.chmodSync(bridge, 0o755);
 	const result = await runScript(wrapper, args, {
 		XDG_RUNTIME_DIR: runtime,
+		XDG_CONFIG_HOME: path.join(root, "config"),
 		PATH: bin,
 		HOME: root,
 		PI_VOICE_DEVICE_NAME: "testdev",
@@ -176,6 +178,68 @@ async function scenario(
 		log: () => fs.readFileSync(logFile, "utf8").replaceAll("\0", "\n"),
 	};
 }
+
+test("device names validate without sanitizing and default to the local hostname", async () => {
+	for (const wrapper of [CLIENT_WRAPPER, TERMUX_WRAPPER]) {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "voice-name-"));
+		try {
+			const source = fs.readFileSync(wrapper, "utf8");
+			const script = path.join(root, "name.sh");
+			// Exercise the production validation without starting a bridge or SSH.
+			fs.writeFileSync(script, 'set -eu\n[[ ${USE_DEFAULT:-} != 1 ]] || unset PI_VOICE_DEVICE_NAME\n' +
+				source.slice(source.indexOf("device_name="), source.indexOf("if [[ ${PREFIX:-}")) +
+				'\nprintf \'"%s"\\n\' "$device_name_json"\n');
+			const env = { PATH: restrictedPath(root, { hostname: "printf local-host" }), LC_ALL: "C" };
+			for (const name of ["", "   ", "\u00a0", "\ufeff", " \u00a0\u2007\u202f\ufeff ", "x".repeat(129), "é".repeat(129), ...[1, 9, 10, 13, 27, 31, 127, 128, 159, 0x61c, 0x200e, 0x200f, 0x2028, 0x2029, 0x202a, 0x202e, 0x2066, 0x2069].map(c => `a${String.fromCodePoint(c)}b`)]) {
+				const activity = path.join(root, "activity");
+				const fake = `printf activity >>'${activity}'; exit 99`;
+				const result = await runScript(wrapper, ["u@h"], {
+					...env, PATH: restrictedPath(root, { ssh: fake, socat: fake, "pi-voice-client": fake }),
+					HOME: root, XDG_CONFIG_HOME: path.join(root, "config"), XDG_RUNTIME_DIR: path.join(root, "runtime"),
+					PI_VOICE_CLIENT_COMMAND: path.join(root, "bin", "pi-voice-client"), PI_VOICE_DEVICE_NAME: name,
+				});
+				assert.equal(result.code, 2, JSON.stringify(name));
+				assert.equal(fs.existsSync(activity), false, "invalid names must not start SSH or bridge activity");
+				assert.match(result.stderr, /PI_VOICE_DEVICE_NAME must/);
+				assert.doesNotMatch(result.stderr + result.stdout, /Connected to/);
+			}
+			for (const name of ['小明 “手机” "phone" \\ café 😀', "é".repeat(128)]) {
+				const result = await runScript(script, [], { ...env, PI_VOICE_DEVICE_NAME: name });
+				assert.equal(result.code, 0, result.stderr);
+				assert.equal(JSON.parse(result.stdout), name);
+			}
+			const fallback = await runScript(script, [], { ...env, USE_DEFAULT: "1" });
+			assert.equal(fallback.code, 0, fallback.stderr);
+			assert.equal(JSON.parse(fallback.stdout), "local-host");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	}
+});
+
+test("registration preserves names, confirms identity, and keeps the ID across renames", async () => {
+	for (const wrapper of [CLIENT_WRAPPER, TERMUX_WRAPPER]) {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "voice-name-registration-"));
+		try {
+			let id: string | undefined;
+			for (const name of ['小明 “手机” "phone" \\ café 😀', "renamed phone"]) {
+				const result = await scenario(root, wrapper, ["u@h"], { PI_VOICE_DEVICE_NAME: name, PI_VOICE_AUDIO_PORT: "24501" });
+				assert.equal(result.code, 0, result.stderr);
+				const registration = JSON.parse(fs.readFileSync(path.join(root, "registration.json"), "utf8"));
+				assert.equal(registration.name, name);
+				assert.equal(registration.id, id ?? registration.id);
+				id = registration.id;
+				assert.equal(result.stderr, `Connected to ${name}\n`);
+			}
+			const failed = await scenario(root, wrapper, ["u@h"], { FAKE_REGISTRATION_FAIL: "1", PI_VOICE_AUDIO_PORT: "24501" });
+			assert.notEqual(failed.code, 0);
+			assert.doesNotMatch(failed.stdout + failed.stderr, /Connected to/);
+			assert.match(failed.log(), /-O exit/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	}
+});
 
 test("wrapper fallback requires a v2 ACK, never an empty audio probe or TCP accept", async () => {
 	for (const wrapper of [CLIENT_WRAPPER, TERMUX_WRAPPER]) {
@@ -476,6 +540,7 @@ test("allocation failures never publish a device and close newly created masters
 				const result = await scenario(root, wrapper, ["u@h"], failure);
 				assert.notEqual(result.code, 0);
 				assert.match(result.stderr, /forwarding denied|valid remote audio forwarding port/);
+				assert.doesNotMatch(result.stdout + result.stderr, /Connected to/);
 				assert.equal(fs.existsSync(path.join(root, "registration.json")), false);
 				assert.match(result.log(), /-O exit/);
 			} finally {

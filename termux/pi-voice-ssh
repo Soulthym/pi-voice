@@ -53,9 +53,21 @@ if [[ ! -s $device_id_file ]]; then
 fi
 device_id=$(tr -cd 'a-zA-Z0-9._-' <"$device_id_file")
 [[ -n $device_id ]] || { printf 'Invalid device id in %s\n' "$device_id_file" >&2; exit 1; }
-device_name=${PI_VOICE_DEVICE_NAME:-$(hostname -s 2>/dev/null || hostname)}
-device_name=$(printf '%s' "$device_name" | tr -cd '[:alnum:] ._-')
-[[ -n $device_name ]] || device_name=$device_id
+device_name=${PI_VOICE_DEVICE_NAME-$(hostname -s 2>/dev/null || hostname)}
+validate_device_name() {
+  local LC_ALL=C.UTF-8
+  local forbidden whitespace
+  printf -v whitespace '%b' '[[:space:]\u00a0\u2007\u202f\ufeff]'
+  printf -v forbidden '%b' '[\x01-\x1f\x7f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]'
+  if [[ -z ${device_name//$whitespace/} || ${#device_name} -gt 128 || $device_name == *$forbidden* ]]; then
+    printf 'PI_VOICE_DEVICE_NAME must contain 1–128 characters and no control or bidi characters\n' >&2
+    return 2
+  fi
+}
+validate_device_name
+# Controls are rejected above; only backslashes and quotes need JSON escaping.
+device_name_json=${device_name//\\/\\\\}
+device_name_json=${device_name_json//\"/\\\"}
 if [[ ${PREFIX:-} == *com.termux* ]]; then platform=termux; else platform=linux; fi
 
 # Find the SSH destination while preserving options and any remote command.
@@ -321,7 +333,7 @@ remote_audio_port=$(<"$remote_audio_port_file")
 remote_input_port=$(<"$remote_input_port_file")
 now=$(date +%s000)
 printf -v registration '{"version":1,"id":"%s","name":"%s","platform":"%s","audioEndpoint":"tcp://127.0.0.1:%s","inputEndpoint":"tcp://127.0.0.1:%s","connectedAt":%s,"lastActive":%s}\n' \
-  "$device_id" "${device_name//\"/}" "$platform" "$remote_audio_port" "$remote_input_port" "$now" "$now"
+  "$device_id" "$device_name_json" "$platform" "$remote_audio_port" "$remote_input_port" "$now" "$now"
 printf '%s' "$registration" | ssh "${ssh_options[@]}" -S "$control_socket" -o RemoteCommand=none "$target" \
   "umask 077; cat >$(shell_quote "$remote_registration")"
 printf '%s\n' "$$" >"$session_file"
@@ -360,6 +372,8 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# Registration confirms identity, not audio readiness.
+printf 'Connected to %s\n' "$device_name" >&2
 export PI_VOICE_DEVICE_ID=$device_id
 export PI_VOICE_DEVICE_TARGET=$target_hash
 remote_env="PI_VOICE_DEVICE_ID=$(shell_quote "$device_id") PI_VOICE_DEVICE_TARGET=$(shell_quote "$target_hash")"

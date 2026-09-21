@@ -52,7 +52,16 @@ ${XDG_CONFIG_HOME:-~/.config}/pi-voice/device-id
 
 Copy this file when migrating a client if it should retain the same explicit device selection. Delete it before reconnecting to intentionally create a new identity.
 
-`PI_VOICE_DEVICE_NAME` controls the human-readable registered name. The default is the short hostname; the registration records the platform separately.
+`PI_VOICE_DEVICE_NAME` controls only the human-readable registered name. Export it on the client before connecting:
+
+```bash
+export PI_VOICE_DEVICE_NAME='My laptop'
+pi-voice-ssh USER@HOST
+```
+
+When unset, the default is the **local client's** short hostname, not the remote host; explicitly empty is an error. This preexisting variable is now strictly validated, not sanitized: Unicode is preserved and quotes/backslashes are JSON-escaped. See [validation and limits](environment.md#device-name-validation) and [install/upgrade instructions](installation.md#upgrade-device-name-support), including custom launchers and desktop/Termux wrapper copies.
+
+Changing the label leaves the stable device ID and `<id>.json` registry filename unchanged; do not delete `device-id` to rename a client. Platform is recorded separately. The wrapper's `Connected to <name>` message confirms registration identity, and Pi's corresponding message confirms selected identity; neither proves microphone/output readiness. Reconnect from an updated wrapper to register a changed name.
 
 The wrapper exports `PI_VOICE_DEVICE_ID` and target identity into the remote shell. Direct SSH uses that connection's environment. For tmux, Pi reads the current attached client's identity using the pane/socket and checks that the attachment did not change during lookup; it does not trust the long-lived Pi process's startup device ID. Multiple clients, no attached client, unreadable identity, or unresolved nested tmux fail closed rather than guessing.
 

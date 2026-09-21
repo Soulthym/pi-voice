@@ -6,6 +6,12 @@ Synthetic validation: `npm run check` passed; full `npm test` **910 passed, 3 ex
 
 The user previously confirmed successful Linux Mint capture/transcription; that prior LIVE result is now recorded in `FINDINGS.md` and `PLAN.md`, not presented as a test of this keyboard change.
 
+## B device-selection review validation
+
+`npm run check` passed. `npm test`: **914 passed, 3 existing TUI compatibility skips, 0 failed (917 total)**. The installed-native command below (with inherited `PI_VOICE_*` variables removed first) passed **307 tests, no skips/failures**. `bash scripts/test-ssh-desktop.sh` passed all **12 synthetic cases**; owned client/server containers and the run image were removed (container stop required the script's scoped SIGKILL fallback).
+
+Regressions cover stale setters across input cancellation, metadata waits and session replacement; persistent failed input-stop barriers and explicit reconnect recovery; metadata-only lookup failures versus stop failures; safe local-hostname notices; full desktop/Termux wrapper rejection before SSH/bridge activity, including NBSP/BOM-only names; and byte-for-byte config immutability for query/reconnect after setters. Tests use synthetic inputs only, with no inference, provider calls or live-session changes.
+
 ## Opt-in desktop → SSH → server test
 
 With rootless Podman and the checkout's npm dependencies installed:

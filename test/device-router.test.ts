@@ -19,6 +19,22 @@ function fixture(t: { after(fn: () => void): void }) {
 	return { directory, write };
 }
 
+test("device labels are validated, preserved by claims, and independent of stable IDs", t => {
+	const { directory, write } = fixture(t);
+	const device = write("stable");
+	const router = new DeviceRouter(directory, "stable", {});
+	for (const name of ["", "   ", "x".repeat(129), "bad\nname", "bad\u001bname", "bad\u009bname", "bad\u202ename", "bad\u2028name"]) {
+		fs.writeFileSync(path.join(directory, "stable.json"), JSON.stringify({ ...device, name }));
+		assert.throws(() => router.resolve("auto"), { code: "device_unavailable" });
+	}
+	for (const name of ["雪's \\\"laptop\\\"", "📱".repeat(128)]) {
+		fs.writeFileSync(path.join(directory, "stable.json"), JSON.stringify({ ...device, name }));
+		assert.equal(router.claim("auto")?.name, name);
+		assert.equal(router.resolve("auto")?.id, "stable");
+		assert.equal(JSON.parse(fs.readFileSync(path.join(directory, "stable.json"), "utf8")).name, name);
+	}
+});
+
 test("routing returns metadata even for broken forwards, without opening TCP or Unix connections", async t => {
 	const { directory, write } = fixture(t);
 	const create = t.mock.method(net, "createConnection", () => { throw new Error("destructive probe"); });

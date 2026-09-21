@@ -24,6 +24,29 @@ Pi Voice prefers `pw-play`, then `mpv`, then `ffplay` for local output. It prefe
 
 Run `/reload` after installing or updating the extension. Spoken output defaults to off; enable it with `/voice on`. Microphone dictation remains available when spoken output is off unless input or the shortcut is disabled.
 
+## Install a device name
+
+`PI_VOICE_DEVICE_NAME` already existed; current clients validate it strictly instead of silently stripping characters. Set it on the **client**, before starting the SSH wrapper (not in the remote Pi shell):
+
+```bash
+export PI_VOICE_DEVICE_NAME='My laptop'
+pi-voice-ssh YOUR_HOST
+```
+
+On Termux, use the same commands with a label such as `My phone`. To persist it, add the export to the client shell's startup file (for Bash, `~/.bashrc`). A custom launcher can instead contain:
+
+```bash
+#!/usr/bin/env bash
+export PI_VOICE_DEVICE_NAME='My laptop'
+exec pi-voice-ssh "$@"
+```
+
+Give the launcher a different filename from `pi-voice-ssh` to avoid recursion. An equivalent one-line launcher command is `PI_VOICE_DEVICE_NAME='My laptop' exec pi-voice-ssh "$@"`.
+
+If the variable is **unset**, the wrapper uses the client's local short hostname (`hostname -s`, falling back to `hostname`), not the SSH server's name. An explicitly empty value is an error; use `unset PI_VOICE_DEVICE_NAME` to restore the default. See [name validation](environment.md#device-name-validation) for limits and Unicode handling.
+
+After registration, `Connected to <name>` confirms the selected identity, **not audio readiness**. Renaming does not change the persistent device ID or registry filename.
+
 ## Linux SSH client
 
 Install `openssh`, `socat`, `mpv`, `ffmpeg`, `flock` (util-linux), and PipeWire or PulseAudio recording utilities. From a Pi Voice checkout:
@@ -101,7 +124,37 @@ Validate with `sshd -t`, then reload `sshd` after changing its configuration. Th
 
 ## Upgrading
 
-**Host-only follow-up after `ade0670`, through `d4cf759`:** no `client/` or `termux/` scripts changed. Already-migrated users need the host update and `/reload` only, with no client recopy or SSH restart. The bridge replacement steps below apply only if scripts changed or the earlier migration is still outstanding.
+### Upgrade device-name support
+
+This update changes both `client/pi-voice-ssh` and `termux/pi-voice-ssh`; a host update and `/reload` alone are **not sufficient**. Update the host checkout/extension and the installed wrapper on **every desktop and Termux client**, including custom launcher paths. Keep any existing `PI_VOICE_DEVICE_NAME` export if valid; remove it with `unset PI_VOICE_DEVICE_NAME` for the local hostname default, or replace it using the export in [Install a device name](#install-a-device-name). Empty values now fail instead of falling back; invalid names now fail instead of being sanitized.
+
+Before replacing scripts or exiting wrappers, follow the confirmed-stop precautions below. Then exit all old wrappers. On each client, from the matching updated checkout, install the complete shared helper set (this is also the standard Termux installation):
+
+```bash
+mkdir -p "$HOME/.local/bin"
+install -m755 client/pi-voice-* "$HOME/.local/bin/"
+```
+
+If the checkout exists only on the Pi host, run this **on each client**, desktop or Termux:
+
+```bash
+mkdir -p "$HOME/.local/bin"
+scp 'YOUR_HOST:/path/to/pi-voice/client/pi-voice-*' "$HOME/.local/bin/"
+chmod 755 "$HOME"/.local/bin/pi-voice-*
+```
+
+Use the host's updated local checkout when the changes are not yet published upstream. For an installation that deliberately invokes the alternative `termux/pi-voice-ssh`, also replace that exact installed wrapper from the matching `termux/pi-voice-ssh` source; the standard `client/` copy above does not update a separate custom path. For example, on that Termux client:
+
+```bash
+scp 'YOUR_HOST:/path/to/pi-voice/termux/pi-voice-ssh' /absolute/custom/path/pi-voice-ssh
+chmod 755 /absolute/custom/path/pi-voice-ssh
+```
+
+Substitute the actual host checkout and installed paths. Preserve custom launcher exports, but update the underlying wrapper they execute. Reconnect with the chosen export and run `/reload` in Pi. Check the `Connected to <name>` identity message; it is not a playback or microphone test. Do not delete `device-id`, registrations, or runtime state to rename a device.
+
+### Earlier upgrades and protocol migration
+
+**Historical host-only follow-up after `ade0670`, through `d4cf759`:** no `client/` or `termux/` scripts changed in that range. Already-migrated users need the host update and `/reload` only, with no client recopy or SSH restart. The bridge replacement steps below apply only if scripts changed or the earlier migration is still outstanding.
 
 **Earlier protocol migration, if outstanding:** use the Pi host's **local checkout** as the source for every client script when those changes are not available upstream; a client-side `git pull` is then insufficient. Copy the complete `client/pi-voice-*` set using the `scp` example below, including any alternative installed copies/custom client paths; do not mix old and new helpers. Install `flock` (`util-linux`) on Linux/Termux.
 

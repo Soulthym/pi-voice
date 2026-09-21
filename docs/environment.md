@@ -22,11 +22,19 @@
 | `PI_VOICE_AUDIO_PORT` | `8765` | Client loopback audio listener. |
 | `PI_VOICE_CONTROL_PORT` | `8766` | Client loopback microphone-control listener. |
 | `PI_VOICE_MAX_RECORD_SECONDS` | `120` | Client recording limit. The host still caps capture at 120 seconds. |
-| `PI_VOICE_DEVICE_NAME` | short hostname | Advertised client label; platform is recorded separately. |
+| `PI_VOICE_DEVICE_NAME` | local short hostname when unset | Human-readable client label, set/exported on the client before `pi-voice-ssh`; explicitly empty is an error. See validation below. |
 | `PI_VOICE_CLIENT_COMMAND` | `~/.local/bin/pi-voice-client` | Alternate bridge executable started by `pi-voice-ssh`. |
 | `PI_VOICE_SSH_DRY_RUN` | unset | Set to `1` to print resolved SSH/device state without connecting. |
 
 `XDG_CONFIG_HOME` controls the persistent client device-ID location. The SSH wrapper and Linux helpers use `XDG_RUNTIME_DIR`, then `TMPDIR`, then `/tmp` for runtime files. Termux recorder/player helpers instead use `TMPDIR`, falling back to `/data/data/com.termux/files/usr/tmp`; they do not consult `XDG_RUNTIME_DIR`. Retain the original runtime state while stop recovery is outstanding.
+
+## Device-name validation
+
+`PI_VOICE_DEVICE_NAME` is preexisting, but is now strictly validated rather than sanitized. The wrapper accepts **1–128 characters**, counted under `C.UTF-8`, **not 128 bytes**. Unicode names, spaces, quotes and backslashes are preserved; quotes and backslashes are JSON-escaped in the registration, not removed. Control characters (C0/C1, including tabs, newlines and ESC) and bidi controls are rejected. The host also rejects whitespace-only names, bidi controls, line/paragraph separators and surrogate code points in registrations.
+
+Unset uses `hostname -s` on the **local client**, falling back to `hostname`; `export PI_VOICE_DEVICE_NAME=''` fails. Use `unset PI_VOICE_DEVICE_NAME` to restore the default. The label does not change the stable device ID, registry filename, platform or routing identity. `Connected to <name>` confirms identity selection/registration, not audio readiness.
+
+See [installation and upgrades](installation.md#install-a-device-name) for exact exports, custom launchers and client-copy instructions. Setting this variable only on the remote Pi host does not rename a managed client.
 
 ## Internal wrapper variables
 

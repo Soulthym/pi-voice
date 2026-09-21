@@ -41,6 +41,11 @@ export interface VoiceDeviceRegistration {
 
 export type VoiceDeviceSelection = "auto" | "local" | string;
 
+export function validDeviceName(name: string): boolean {
+	return !!name.trim() && [...name].length <= 128 &&
+		!/[\p{Cc}\p{Zl}\p{Zp}\p{Cs}\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u.test(name);
+}
+
 function readRegistration(file: string): VoiceDeviceRegistration | undefined {
 	try {
 		const value = JSON.parse(fs.readFileSync(file, "utf8")) as VoiceDeviceRegistration;
@@ -48,7 +53,7 @@ function readRegistration(file: string): VoiceDeviceRegistration | undefined {
 			value.version !== 1 ||
 			typeof value.id !== "string" ||
 			!/^[a-zA-Z0-9._-]{1,128}$/.test(value.id) ||
-			typeof value.name !== "string" ||
+			typeof value.name !== "string" || !validDeviceName(value.name) ||
 			(value.platform !== "linux" && value.platform !== "termux") ||
 			typeof value.audioEndpoint !== "string" ||
 			typeof value.inputEndpoint !== "string" ||

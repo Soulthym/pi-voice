@@ -84,7 +84,17 @@ test("cancelled dictation ignores late decoder progress, PCM and ASR results dur
 	assert.equal(transcriptions, 1, "start an ASR request before cancellation");
 
 	// Socket EOF may already have happened, while capture still awaits ffmpeg stdout.
-	await host.command("input disabled");
+	const stopped = Promise.withResolvers<void>();
+	cancel.mock.mockImplementation(() => stopped.promise);
+	const noticeCount = host.notices.length;
+	const staleSetter = host.command("input local");
+	await settle();
+	const latestSetter = host.command("input disabled");
+	await settle();
+	stopped.resolve();
+	await Promise.all([staleSetter, latestSetter]);
+	assert.equal(JSON.parse(await fs.readFile(process.env.PI_VOICE_CONFIG, "utf8")).input, "disabled");
+	assert.equal(host.notices.slice(noticeCount).some(n => n.message.includes("Connected to")), false, "stale setter cannot announce success after input stop");
 	editor = "New draft after cancellation";
 	const widget = host.widgets.get("pi-voice-progress");
 	callbacks.onProgress!({ elapsedSeconds: 99, level: 0.1, speechDetected: true });
@@ -95,4 +105,51 @@ test("cancelled dictation ignores late decoder progress, PCM and ASR results dur
 	assert.equal(transcriptions, 1, "late PCM must not start more transcription");
 	assert.deepEqual(host.widgets.get("pi-voice-progress"), widget, "late progress must not restore a cancelled widget");
 	assert.equal(host.modelRequests.length, 0);
+});
+
+test("failed input stop blocks every device setter until reconnect proves cleanup", async t => {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-input-stop-"));
+	const keys = ["PI_VOICE_CONFIG", "PI_VOICE_COORDINATOR_DIR", "PI_VOICE_DEVICE_DIR"];
+	const old = keys.map(key => process.env[key]);
+	process.env.PI_VOICE_CONFIG = path.join(root, "config.json");
+	process.env.PI_VOICE_COORDINATOR_DIR = path.join(root, "coordinator");
+	process.env.PI_VOICE_DEVICE_DIR = path.join(root, "devices");
+	await fs.writeFile(process.env.PI_VOICE_CONFIG, JSON.stringify({ enabled: true, input: "local", output: "local", audioCache: false, timingPreprocessConcurrency: 0 }));
+	t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", async () => ({ kind: "intentional_local" as const }));
+	const started = Promise.withResolvers<void>();
+	const capture = Promise.withResolvers<PhoneCapture>();
+	t.mock.method(PhoneInputClient.prototype, "capture", () => { started.resolve(); return capture.promise; });
+	const cancel = t.mock.method(PhoneInputClient.prototype, "cancel", async () => {});
+	const host = new FakeVoiceHost(root, "input-stop");
+	t.after(async () => {
+		cancel.mock.mockImplementation(async () => {});
+		capture.resolve({ type: "audio", data: Buffer.alloc(0) });
+		await host.shutdown();
+		keys.forEach((key, i) => { if (old[i] === undefined) delete process.env[key]; else process.env[key] = old[i]; });
+		await fs.rm(root, { recursive: true, force: true });
+	});
+	await host.start();
+	await host.shortcut("f4");
+	await started.promise;
+	cancel.mock.mockImplementation(async () => { throw new Error("input stop unconfirmed"); });
+	const snapshot = await fs.readFile(process.env.PI_VOICE_CONFIG, "utf8");
+	const notices = host.notices.length;
+	for (const command of ["input disabled", "device local", "output local", "input local"]) {
+		await assert.rejects(host.command(command), /input stop unconfirmed/);
+	}
+	await host.command("reconnect");
+	for (const command of ["device local", "input disabled", "output local"]) {
+		await assert.rejects(host.command(command), /input stop unconfirmed/);
+	}
+	assert.equal(await fs.readFile(process.env.PI_VOICE_CONFIG, "utf8"), snapshot);
+	assert.equal(host.notices.slice(notices).some(n => n.message.includes("Connected to")), false);
+	const stopped = Promise.withResolvers<void>();
+	cancel.mock.mockImplementation(() => stopped.promise);
+	const reconnect = host.command("reconnect");
+	await settle();
+	assert.equal(host.notices.slice(notices).some(n => n.message.includes("Connected to")), false);
+	stopped.resolve();
+	await reconnect;
+	await host.command("input disabled");
+	assert.equal(JSON.parse(await fs.readFile(process.env.PI_VOICE_CONFIG, "utf8")).input, "disabled");
 });

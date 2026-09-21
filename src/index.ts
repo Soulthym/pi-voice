@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { hostname } from "node:os";
 import type { Message, Tool } from "@earendil-works/pi-ai";
 import { getMarkdownTheme, highlightCode, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Markdown } from "@earendil-works/pi-tui";
@@ -44,7 +45,7 @@ import {
 	type VoiceSubmitMode,
 } from "./config.js";
 import { chunkCodeNarration, plainCodeNarration, type CodeNarrationPlan } from "./code-narration.js";
-import { DeviceRouter, type ConnectionDevice, type VoiceDeviceSelection } from "./device-router.js";
+import { DeviceRouter, validDeviceName, type ConnectionDevice, type VoiceDeviceSelection } from "./device-router.js";
 import { LiveTranscriptionSession } from "./live-transcription.js";
 import {
 	NarrationProgress,
@@ -1736,8 +1737,9 @@ export default async function (pi: ExtensionAPI) {
 
 	const releaseAfterTransportCancellation = (cancelId: number | undefined, announceNext = false, inputCancelled = Promise.resolve()): void => {
 		const leaseEpoch = speechLeaseEpoch;
-		void Promise.all([waitForTransportCancellation(cancelId), inputCancelled]).then(() => {
-			if (deviceRebind) return deviceRebind.then(() => {
+		void Promise.all([waitForTransportCancellation(cancelId), inputCancelled, inputStopBarrier]).then(() => {
+			const rebind = deviceRebind;
+			if (rebind) return rebind.catch(error => { if (unconfirmedDeviceStops.has(rebind)) throw error; }).then(() => {
 				if (ownsSpeech && speechLeaseEpoch === leaseEpoch) releaseSpeechOwnership(announceNext);
 			});
 			if (ownsSpeech && speechLeaseEpoch === leaseEpoch) releaseSpeechOwnership(announceNext);
@@ -2066,6 +2068,31 @@ export default async function (pi: ExtensionAPI) {
 		speakAttentionNotification(waiting);
 	};
 
+	// Identity feedback only: registration and pinning do not prove audio readiness.
+	const notifyConnectedDevice = (ctx: ExtensionContext | null, direction?: "input" | "output"): void => {
+		if (inputStopPending || transportStopPending) return;
+		try {
+			const host = hostname();
+			const localName = validDeviceName(host) ? host : "local device";
+			const selection = activeDeviceId ?? deviceSelection;
+			if (direction) {
+				const route = deviceRouter.routeMetadata(selection, direction, config[direction]);
+				if (route.kind === "disabled" || route.kind === "custom") {
+					notifyVoice(ctx, `${direction}: ${route.kind === "disabled" ? "disabled" : "custom endpoint configured"} · audio readiness not checked`, "info");
+					return;
+				}
+				if (route.kind === "intentional_local") {
+					notifyVoice(ctx, `Connected to ${localName} · local ${direction}; audio readiness not checked`, "info");
+					return;
+				}
+			}
+			const device = deviceRouter.resolve(selection);
+			notifyVoice(ctx, `Connected to ${device?.name ?? localName} · identity selected; audio readiness not checked`, "info");
+		} catch (error) {
+			notifyVoice(ctx, `Device: ${error instanceof Error ? error.message : String(error)}`, "warning");
+		}
+	};
+
 	let deviceRebind: Promise<void> | undefined;
 	const unconfirmedDeviceStops = new WeakSet<Promise<void>>();
 	// Persist only session metadata. Reattachment alone never changes an existing pin.
@@ -2109,7 +2136,7 @@ export default async function (pi: ExtensionAPI) {
 					changed ||= inputInProgress && (inputRoute.endpoint !== inputEndpoint ||
 						(inputRoute.kind === "device" ? inputRoute.device.connectedAt : undefined) !== inputGeneration);
 				} catch (error) { if (!identityChanged && inputInProgress) throw error; }
-				if (previous || transportStopPending || (force && deviceRetryRequired) || (changed && (ownsSpeech || inputInProgress))) {
+				if (previous || transportStopPending || inputStopPending || (force && deviceRetryRequired) || (changed && (ownsSpeech || inputInProgress))) {
 					// Termination, not a TCP accept or a cancellation timeout, proves the old sink is gone.
 					stopUnconfirmed = true;
 					await Promise.all([trackStop("output", vocalizer.shutdown()), cancelActiveInput()]);
@@ -2138,6 +2165,7 @@ export default async function (pi: ExtensionAPI) {
 					inputEndpoint = inputRoute.endpoint;
 					inputGeneration = inputRoute.kind === "device" ? inputRoute.device.connectedAt : undefined;
 				}
+				if (force || changed || deviceRetryRequired) notifyConnectedDevice(ctx);
 				deviceRetryRequired = false;
 				return true;
 			} catch (error) {
@@ -2158,6 +2186,23 @@ export default async function (pi: ExtensionAPI) {
 			else clearBarrier();
 		});
 		return adoption.catch(() => false);
+	};
+
+	// Metadata lookup failures do not block overrides; unconfirmed stops always do.
+	const prepareDeviceSetting = async (ctx: ExtensionContext, stopOutput: boolean): Promise<boolean> => {
+		const inputCancelled = inputInProgress ? cancelActiveInput() : inputStopBarrier;
+		const cancelId = stopOutput ? clearPlaybackTransport() : undefined;
+		const epoch = stopOutput ? playbackRequestEpoch : ++playbackRequestEpoch;
+		if (stopOutput) {
+			narration.finish();
+			releaseAfterTransportCancellation(cancelId, false, inputCancelled);
+		}
+		await inputCancelled;
+		const rebind = deviceRebind;
+		if (rebind) await rebind.catch(error => { if (unconfirmedDeviceStops.has(rebind)) throw error; });
+		await inputStopBarrier;
+		await transportStopBarrier;
+		return epoch === playbackRequestEpoch && ctx === activeContext && interactiveVoiceSession;
 	};
 
 	const previewPlaybackTarget = (target: PlaybackTarget, explicit = true): void => {
@@ -3135,6 +3180,8 @@ export default async function (pi: ExtensionAPI) {
 			const epoch = playbackRequestEpoch;
 			await adoptCurrentConnection(epoch, true);
 			if (epoch !== playbackRequestEpoch || activeContext !== ctx) return;
+		} else {
+			notifyConnectedDevice(ctx);
 		}
 		inputProgressMessage = undefined;
 		// Remove progress widgets from versions before the unified, ordered display.
@@ -4477,7 +4524,6 @@ export default async function (pi: ExtensionAPI) {
 						playbackPaused = ownsSpeech;
 						narration.setPaused(playbackPaused);
 						vocalizer.setPlaybackPaused(playbackPaused);
-						notifyVoice(ctx, `Device pinned: ${activeDeviceId ?? deviceSelection} · no playback started`, "info");
 					}
 					return;
 				}
@@ -4491,23 +4537,12 @@ export default async function (pi: ExtensionAPI) {
 						notifyVoice(ctx, "Usage: /voice device auto|local|<connected-device-id>", "error");
 						return;
 					}
-					if (inputInProgress) await cancelActiveInput();
-					const cancelId = clearPlaybackTransport();
-					narration.finish();
-					releaseAfterTransportCancellation(cancelId);
+					if (!await prepareDeviceSetting(ctx, true)) return;
 					deviceSelection = requested;
 					pi.appendEntry(DEVICE_SELECTION_ENTRY, { version: 1, selection: requested });
 					activeDeviceId = undefined;
 					if (requested === "auto" && !await adoptCurrentConnection(playbackRequestEpoch, true)) return;
-					let device;
-					try { device = deviceRouter.resolve(activeDeviceId ?? deviceSelection); } catch (error) {
-						notifyVoice(ctx, `Device: ${error instanceof Error ? error.message : String(error)}`, "warning");
-						return;
-					}
-					notifyVoice(ctx,
-						device ? `device: ${device.name} · metadata only` : "device: local input/output",
-						"info",
-					);
+					if (requested !== "auto") notifyConnectedDevice(ctx);
 					refreshStatus();
 					return;
 				}
@@ -4792,12 +4827,9 @@ export default async function (pi: ExtensionAPI) {
 						notifyVoice(ctx, "Usage: /voice output auto|local|tcp://host:port|unix:///path", "error");
 						return;
 					}
-					if (inputInProgress) await cancelActiveInput();
-					const cancelId = clearPlaybackTransport();
-					narration.finish();
-					releaseAfterTransportCancellation(cancelId);
+					if (!await prepareDeviceSetting(ctx, true)) return;
 					await updateConfig({ ...config, output });
-					notifyVoice(ctx, `output: ${output}`, "info");
+					notifyConnectedDevice(ctx, "output");
 					return;
 				}
 				case "edit": {
@@ -4844,10 +4876,10 @@ export default async function (pi: ExtensionAPI) {
 						notifyVoice(ctx, "Usage: /voice input auto|local|disabled|tcp://host:port|unix:///path", "error");
 						return;
 					}
-					if (inputInProgress) await cancelActiveInput();
+					if (!await prepareDeviceSetting(ctx, false)) return;
 					if (speechReservedForInput) releaseSpeechOwnership(false);
 					await updateConfig({ ...config, input });
-					notifyVoice(ctx, `input: ${input}`, "info");
+					notifyConnectedDevice(ctx, "input");
 					return;
 				}
 				case "test": {
