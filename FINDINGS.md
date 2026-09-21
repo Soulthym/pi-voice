@@ -2,6 +2,34 @@
 
 Updated incrementally. Companion: `PLAN.md`. Reorganize freely while preserving evidence and disposition.
 
+## Review follow-up — `88ee55b` / `faee523`
+
+The earlier unconditional removal of `--raw` below was valid only for the tested
+native PipeWire 1.0.5 writer, not newer libsndfile defaults (WAV/AU). Capability
+probing now uses bounded help, without semver assumptions or grep-q/SIGPIPE false
+negatives. It runs outside the admission fence; cancellation is rechecked before
+capture. Advertised `--raw` is passed, old implicit raw otherwise. Probe failures
+report an explicit error; recorder failures retain the no-decodable-audio diagnostic.
+No monitor/server-local fallback was added.
+
+Harness cleanup ignores repeated INT/TERM while disabling EXIT recursion, bounds
+Podman diagnostics/removals, preserves failure status and touches only owned names
+and temporary keys. Ticket reads now accumulate through newline with timeout/size/
+EOF checks and preserve the socket plus extra bytes. Actual fragmented TCP tests
+and six repeated-signal cleanup fixtures pass. New PipeWire families are explicitly
+fixtures, with flag and full decoded PCM sample assertions, not a second real image.
+
+Validation: real two-container SSH **12/12 passed twice**, actual PipeWire **1.0.5** /
+PulseAudio **16.1**; final cleanup left no containers or run image tags and removed
+its temporary keys. `npm run check` passed; `npm test`: **902 passed, 3 existing TUI
+skips, 0 failed (905 total)**. LSP unavailable. Logs:
+`/tmp/voice-ssh-review-final.log`, `/tmp/voice-review-full.log`. Only isolated test
+resources were used; no hardware, host services/settings, live SSH/Pi, providers or
+inference touched. Actual Mint microphone cause/recovery remains unknown.
+`ISSUES.md` preserved. Local-desktop copy commands from this host checkout and
+required wrapper restart **after verified capture stop** are in `docs/testing.md`;
+no forced lease cleanup or deployment performed.
+
 ## Desktop SSH recovery — 2026-09-21, baseline `4965fce`
 
 **New user evidence:** Linux Mint desktop, Alt+M decoding error before the microphone starts. This corrects the older unknown-OS note below, but does not identify the live backend/version, environment, permissions or hardware cause. `4965fce` was diagnostic-only.

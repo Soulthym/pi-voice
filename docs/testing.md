@@ -42,8 +42,10 @@ Playback is hello-only; the player is a tripwire, not a virtual playback smoke t
 
 Cleanup traps remove the dependent client **before** its server, then the run's
 image tag and temporary keys. Failures retain their exit status and print bounded
-synthetic-only diagnostics (last 4096 bytes per log); cleanup failures also fail the
-run. Containers carry `io.pi-voice.ssh-desktop=<run-name>`. After an untrappable
+synthetic-only diagnostics (last 4096 bytes per log, 10-second command deadline);
+removals have 15-second deadlines (plus one second before forced termination).
+Cleanup ignores subsequent INT/TERM, disables EXIT recursion, and removes only
+this run's names and temporary directory; cleanup failures also fail the run. Containers carry `io.pi-voice.ssh-desktop=<run-name>`. After an untrappable
 SIGKILL, inspect ownership before removing only that run's resources:
 
 ```sh
@@ -55,24 +57,47 @@ podman rm -f "$run-server"
 podman rmi "$run"
 ```
 
-Validated: **12/12 SSH cases passed**, deliberate harness TERM returned **124** with
-both containers removed, and final `npm test` **872 passed / 3 compatibility skips /
-0 failed (875 total)**; typecheck passed. The three skips remain the older project
+Review validation: **12/12 SSH cases passed** on real PipeWire **1.0.5** / PulseAudio
+**16.1**, with both owned containers, image tag and temporary keys removed.
+Six isolated repeated-signal cleanup regressions passed. Final `npm test`:
+**902 passed / 3 compatibility skips / 0 failed (905 total)**; typecheck passed. The three skips remain the older project
 TUI's MouseRegion/banner cases. No test containers remained.
 
 ### Desktop client fix deployment
 
-The corrected `pw-record` invocation uses `-` for raw stdout, **not `--raw`**
-(unsupported by Ubuntu's PipeWire 1.0.5). The bridge now exits on TERM rather than
-restarting listeners during final-wrapper cleanup. Both regressions fail against
-`4965fce`; hardware causality remains unconfirmed.
+`pw-record` help is probed with bounded time/output before recording, outside the
+admission fence; cancellation is rechecked under the fence before launch. Use
+`--raw` when advertised, otherwise the older native writer's implicit raw stdout.
+No semver guessing: newer libsndfile defaults can be WAV (1.4.0) or AU (1.4.9/1.6.8),
+not PCM suitable for ffmpeg's raw input. New-family coverage is **fixtures only**:
+argv-sensitive writers, header traps and real encoder/decoder sample counts, plus
+failed/oversized/timed-out help and meaningful recorder startup failures. No second
+PipeWire image/version was tested. Ticket-line tests fragment actual TCP writes
+and cover trailing buffered bytes, size bounds, timeout and EOF.
+The bridge exits on TERM rather than restarting listeners; hardware causality
+remains unconfirmed.
 
 Update **all `client/pi-voice-*` scripts on the local desktop**, not just the remote
 host extension. After confirming capture/playback stopped, close that desktop's
 voice wrappers and reconnect when convenient; retain the remote tmux session.
 Do not delete stop-proof state or restart host sshd. Host `/reload` alone cannot
 fix an older client executable. See [installation](installation.md) for copying
-scripts and migration safety.
+scripts and migration safety. From a **local desktop terminal**, after verified
+capture stop (if unconfirmed, restore the original route and retry Stop; do not
+force-clear leases), close all that desktop's voice wrappers normally, then:
+
+```sh
+HOST='your-existing-ssh-host-alias' # same host that holds this checkout
+mkdir -p "$HOME/.local/bin"
+scp "$HOST:/home/curiosithy/code/pi/pi-voice/client/pi-voice-*" "$HOME/.local/bin/"
+chmod 755 "$HOME"/.local/bin/pi-voice-*
+"$HOME/.local/bin/pi-voice-ssh" "$HOST"
+```
+
+Use the usual SSH options/remote command if required; reattach the existing remote
+tmux session. This copies the **host checkout**, not unpushed GitHub content. Update
+custom installed script paths too. Wrapper restart is required after verified stop;
+no lease/fence deletion, host-service restart or live update was performed here.
 
 ## Fixture suite
 
