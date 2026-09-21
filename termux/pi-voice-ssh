@@ -39,6 +39,26 @@ if [[ -n $device_dir_override && $device_dir_override != /* ]]; then
   exit 2
 fi
 
+# Find the SSH destination while preserving options and any remote command.
+target_index=-1
+index=0
+while (( index < ${#args[@]} )); do
+  arg=${args[index]}
+  if [[ $arg == -- ]]; then
+    ((index += 1)); target_index=$index; break
+  fi
+  if [[ $arg != -* ]]; then target_index=$index; break; fi
+  case $arg in
+    -b|-c|-D|-E|-e|-F|-I|-i|-J|-L|-l|-m|-O|-o|-P|-p|-Q|-R|-S|-W|-w)
+      ((index += 2)) ;;
+    *) ((index += 1)) ;;
+  esac
+done
+(( target_index >= 0 && target_index < ${#args[@]} )) || { printf 'Unable to identify SSH target\n' >&2; exit 2; }
+target=${args[target_index]}
+ssh_options=("${args[@]:0:target_index}")
+remote_command=("${args[@]:target_index+1}")
+
 runtime_root=${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/pi-voice-ssh-${UID:-$(id -u)}
 config_root=${XDG_CONFIG_HOME:-$HOME/.config}/pi-voice
 config_error() { printf 'Cannot read/write pi-voice device configuration in %s\n' "$config_root" >&2; exit 1; }
@@ -70,7 +90,7 @@ publish_config() (
   ln -T "$temp" "$1" 2>/dev/null || [[ -f $1 ]]
 )
 read_device_name() (
-  local LC_ALL=C.UTF-8 character invalid=false tty_state
+  local LC_ALL=C.UTF-8 character invalid=false tty_state bytes=0
   tty_state=$(stty -g <&"$name_tty") || return 1
   trap 'stty "$tty_state" <&"$name_tty"' EXIT
   trap 'exit 130' INT
@@ -80,23 +100,31 @@ read_device_name() (
   printf 'Device name (1–128 characters; input hidden): ' >&"$name_tty"
   device_name=
   # Unlike a line read, an empty-delimiter read exposes NUL rather than silently
-  # dropping it. Bound retained input and drain through Enter on invalid input.
-  while IFS= read -r -s -d '' -n 1 -u "$name_tty" character; do
+  # dropping it. Read bytes so malformed UTF-8 cannot swallow Enter/EOF; keep
+  # at most 512 bytes (128 UTF-8 scalars), then validate the complete name.
+  while LC_ALL=C IFS= read -r -s -d '' -n 1 -u "$name_tty" character; do
     case $character in
       $'\n') [[ $invalid == false ]] || return 1; printf '%s' "$device_name"; return ;;
-      $'\x04') return 1 ;;
+      $'\x03'|$'\x04') return 1 ;;
       '') invalid=true ;;
-      $'\x7f'|$'\x08') device_name=${device_name%?} ;;
+      $'\x7f'|$'\x08')
+        device_name=${device_name%?}
+        bytes=$(LC_ALL=C; printf '%s' "${#device_name}") ;;
       *)
-        if (( ${#device_name} < 129 )); then device_name+=$character
+        if (( bytes < 512 )); then device_name+=$character; ((bytes += 1))
         else invalid=true
         fi ;;
     esac
   done
   return 1
 )
+ssh_config=
 if [[ ! -e $device_name_file ]]; then
-  if ! { exec {name_tty}<>/dev/tty; } 2>/dev/null; then
+  # Resolve batch intent with SSH itself, including config files and option case.
+  # This is the same local config query used below, never a login connection.
+  ssh_config=$(ssh -G "${ssh_options[@]}" "$target" 2>/dev/null)
+  if [[ $(awk '$1=="batchmode" {print $2; exit}' <<<"$ssh_config") == yes ]] ||
+     ! { exec {name_tty}<>/dev/tty; } 2>/dev/null; then
     printf 'Missing device name. Run pi-voice-ssh interactively first, or write a validated UTF-8 name to %s (mode 600; directory 700).\n' "$device_name_file" >&2
     exit 2
   fi
@@ -136,27 +164,7 @@ device_name_json=${device_name//\\/\\\\}
 device_name_json=${device_name_json//\"/\\\"}
 if [[ ${PREFIX:-} == *com.termux* ]]; then platform=termux; else platform=linux; fi
 
-# Find the SSH destination while preserving options and any remote command.
-target_index=-1
-index=0
-while (( index < ${#args[@]} )); do
-  arg=${args[index]}
-  if [[ $arg == -- ]]; then
-    ((index += 1)); target_index=$index; break
-  fi
-  if [[ $arg != -* ]]; then target_index=$index; break; fi
-  case $arg in
-    -b|-c|-D|-E|-e|-F|-I|-i|-J|-L|-l|-m|-O|-o|-P|-p|-Q|-R|-S|-W|-w)
-      ((index += 2)) ;;
-    *) ((index += 1)) ;;
-  esac
-done
-(( target_index >= 0 && target_index < ${#args[@]} )) || { printf 'Unable to identify SSH target\n' >&2; exit 2; }
-target=${args[target_index]}
-ssh_options=("${args[@]:0:target_index}")
-remote_command=("${args[@]:target_index+1}")
-
-ssh_config=$(ssh -G "${ssh_options[@]}" "$target" 2>/dev/null)
+ssh_config=${ssh_config:-$(ssh -G "${ssh_options[@]}" "$target" 2>/dev/null)}
 host=$(awk '$1=="hostname" {print $2; exit}' <<<"$ssh_config")
 user=$(awk '$1=="user" {print $2; exit}' <<<"$ssh_config")
 port=$(awk '$1=="port" {print $2; exit}' <<<"$ssh_config")

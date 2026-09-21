@@ -13,7 +13,7 @@ import termios
 import time
 
 
-def terminal(wrapper, env, answer, expected=0, barrier=None):
+def terminal(wrapper, env, answer, expected=0, barrier=None, options=(), null_stdin=False):
     incoming, outgoing = os.pipe()
     os.write(outgoing, b"SSH stdin must survive\n")
     os.close(outgoing)
@@ -21,7 +21,9 @@ def terminal(wrapper, env, answer, expected=0, barrier=None):
     if pid == 0:
         os.dup2(incoming, 0)
         os.close(incoming)
-        os.execve("/bin/bash", ["bash", str(wrapper), "host"], env)
+        if null_stdin:
+            os.dup2(os.open(os.devnull, os.O_RDONLY), 0)
+        os.execve("/bin/bash", ["bash", str(wrapper), "-F", env["TEST_SSH_CONFIG"], *options, "host"], env)
     os.close(incoming)
     output = b""
     sent = False
@@ -48,7 +50,7 @@ def terminal(wrapper, env, answer, expected=0, barrier=None):
             raise AssertionError(("PTY wrapper hung", answer, output))
         _, status = os.waitpid(pid, 0)
         waited = True
-        assert os.waitstatus_to_exitcode(status) == expected, output
+        assert os.waitstatus_to_exitcode(status) in (expected if isinstance(expected, tuple) else (expected,)), output
         assert termios.tcgetattr(fd)[3] & (termios.ECHO | termios.ICANON) == (termios.ECHO | termios.ICANON), "prompt must restore the terminal"
         return output
     finally:
@@ -64,19 +66,37 @@ for wrapper in [Path("client/pi-voice-ssh").resolve(), Path("termux/pi-voice-ssh
         bin_dir = root / "bin"
         bin_dir.mkdir()
         ssh = bin_dir / "ssh"
-        ssh.write_text('#!/bin/bash\ncat >"$HOME/stdin"\nprintf "hostname fake\\nuser fake\\nport 22\\n"\n')
+        ssh.write_text('#!/bin/bash\n[[ $1 == -G ]] || exit 99\ncat >"$HOME/stdin"\nexec /usr/bin/ssh "$@"\n')
         ssh.chmod(0o755)
         env = {**os.environ, "HOME": str(root), "XDG_CONFIG_HOME": str(root / "config"),
                "XDG_RUNTIME_DIR": str(root / "runtime"), "PI_VOICE_SSH_DRY_RUN": "1",
                "PATH": str(bin_dir) + ":/usr/bin:/bin", "LC_ALL": "C"}
+        ssh_config = root / "ssh-config"
+        ssh_config.write_text("")
+        env["TEST_SSH_CONFIG"] = str(ssh_config)
         config = root / "config" / "pi-voice"
         name_file = config / "device-name"
         id_file = config / "device-id"
-        for answer in [b"\x04", b"\n", b"   \n", b"bad\x1b[31m\n", b"bad\0name\n", b"x" * 129 + b"\n"]:
+        for options in [("-oBatchMode=yes",), ("-o", "bAtChMoDe=YeS"), ()]:
+            ssh_config.write_text("Host *\n  BatchMode yes\n" if not options else "")
+            output = terminal(wrapper, env, b"", 2, options=options, null_stdin=True)
+            assert b"input hidden" not in output and b"device-name (mode 600" in output, output
+            assert not name_file.exists() and not id_file.exists()
+        # Explicit no takes precedence over config and leaves prompting available.
+        output = terminal(wrapper, env, b"\x04", 2, options=("-oBatchMode=no",))
+        assert b"input hidden" in output, output
+        ssh_config.write_text("")
+        for locale in ["C", "C.UTF-8"]:
+            for answer in [b"bad\xc3\n", b"bad\xc3\x04", b"bad\xc3\x03"]:
+                output = terminal(wrapper, {**env, "LC_ALL": locale}, answer,
+                                  (-signal.SIGINT, 2) if answer.endswith(b"\x03") else 2)
+                assert not name_file.exists() and not id_file.exists()
+        for answer in [b"\x04", b"\n", b"   \n", b"bad\x1b[31m\n", b"bad\0name\n", b"x" * 129 + b"\n", ("é" * 129 + "\n").encode(), ("😀" * 129 + "\n").encode()]:
             output = terminal(wrapper, env, answer, 2)
             assert b"Connected to" not in output and b"\x1b" not in output, output
             assert not name_file.exists() and not id_file.exists()
-        output = terminal(wrapper, env, b"\x03", -signal.SIGINT)
+        # Bash read may receive Ctrl-C as a byte rather than a terminal signal.
+        output = terminal(wrapper, env, b"\x03", (-signal.SIGINT, 2))
         assert not name_file.exists() and not id_file.exists()
         # Both prompts are open before either answers: no prompt lock, first publish wins.
         barrier = threading.Barrier(2)
@@ -91,7 +111,11 @@ for wrapper in [Path("client/pi-voice-ssh").resolve(), Path("termux/pi-voice-ssh
         id_file.write_text("12345678-1234-4234-8234-123456789abc\n")
         old_id = id_file.read_bytes()
         name = '小明 "phone" \\ café 😀'
-        output = terminal(wrapper, env, (name + "X\x7f\n").encode())
+        for valid in ["😀" * 128, "é" * 128]:
+            terminal(wrapper, env, (valid + "\n").encode())
+            assert name_file.read_text() == valid + "\n"
+            name_file.unlink()
+        output = terminal(wrapper, env, (name + "é\x7f😀\x08\n").encode())
         assert name_file.read_text() == name + "\n"
         assert id_file.read_bytes() == old_id
         assert (root / "stdin").read_bytes() == b"SSH stdin must survive\n"
@@ -116,4 +140,4 @@ for wrapper in [Path("client/pi-voice-ssh").resolve(), Path("termux/pi-voice-ssh
                                   stdin=subprocess.DEVNULL, capture_output=True, timeout=5,
                                   start_new_session=True)
         assert readonly.returncode == 1 and b"configuration" in readonly.stderr
-print("PASS: both wrappers PTY prompt/save/reuse/cancel/EOF/stdin/permissions/legacy ID/concurrency")
+print("PASS: both wrappers PTY batch/config/malformed UTF-8/backspace/limits/prompt/save/reuse/cancel/EOF/stdin/permissions/legacy ID/concurrency")

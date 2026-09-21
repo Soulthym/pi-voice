@@ -30,7 +30,7 @@ On each **client**, desktop or Termux, run `pi-voice-ssh YOUR_HOST` from a termi
 
 The wrapper saves the literal UTF-8 label at `${XDG_CONFIG_HOME:-$HOME/.config}/pi-voice/device-name` (normally `~/.config/pi-voice/device-name`), beside the existing `device-id`. It reuses that file on subsequent connections. Both files are private (600), in a private directory (700), and newly created files are atomically published without replacing another first launch's choice. Concurrent prompts do not lock out other wrappers; the first successfully saved name wins.
 
-There is **no device-name environment override or hostname fallback**, including inherited obsolete variables. Existing installations without the file prompt on their **next interactive connection**, retaining their stable ID. Noninteractive first runs fail immediately with the path and instructions; stdin intended for SSH is never consumed by the prompt (`/dev/tty` is used).
+There is **no device-name environment override or hostname fallback**, including inherited obsolete variables. Existing installations without the file prompt on their **next interactive connection**, retaining their stable ID. First runs with SSH `BatchMode=yes` (from `-oBatchMode=yes`, `-o BatchMode=yes`, or SSH configuration) or without a controlling terminal fail with the path and provisioning instructions. Otherwise prompting uses `/dev/tty`, even with redirected stdin; stdin intended for SSH is never consumed by the prompt.
 
 For unattended provisioning, write a validated literal UTF-8 name (not shell quotes or JSON), optionally ending with one newline, to that exact client file before connecting. For example, on a new installation:
 

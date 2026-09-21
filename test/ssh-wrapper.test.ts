@@ -210,7 +210,9 @@ test("device names come only from validated local files before any connection", 
 			const config = path.join(root, "config");
 			const env = { PATH: restrictedPath(root, {}), LC_ALL: "C", HOME: root,
 				XDG_CONFIG_HOME: config, XDG_RUNTIME_DIR: path.join(root, "runtime") };
-			const missing = await runScript(wrapper, ["u@h"], { ...env, PI_VOICE_DEVICE_NAME: "not a fallback" });
+			const missing = await runScript(wrapper, ["u@h"], { ...env,
+				PATH: restrictedPath(root, { ssh: 'printf "batchmode no\\n"' }),
+				PI_VOICE_DEVICE_NAME: "not a fallback" });
 			assert.equal(missing.code, 2);
 			assert.match(missing.stderr, /interactively first/);
 			assert.ok(missing.stderr.includes(path.join(config, "pi-voice", "device-name")));
