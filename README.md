@@ -74,7 +74,7 @@ pi
 /voice on
 ```
 
-**This batch (after `ade0670`, through `d4cf759`):** host update and `/reload` only; `client/` and `termux/` scripts are unchanged, so no client recopy or SSH restart is needed. If you have not completed the earlier protocol migration, its [safe upgrade steps](docs/installation.md#upgrading) still apply. Never discard outstanding [stop-recovery proof](docs/troubleshooting.md#unconfirmed-stop).
+**Device-name update:** recopy the SSH wrapper on every desktop/Termux client using the [upgrade commands](docs/installation.md#upgrade-device-name-support). `pi-voice-ssh --set-device-name` prompts visibly; `pi-voice-ssh --set-device-name "My device"` provisions/renames headlessly without SSH or changing the ID. No target or other options are allowed. Normal first-connection prompts are visible too. Existing connections are not restarted; after confirmed stop, close all wrappers and reconnect to use the new name. If you have not completed the earlier protocol migration, its [safe upgrade steps](docs/installation.md#upgrading) still apply. Never discard outstanding [stop-recovery proof](docs/troubleshooting.md#unconfirmed-stop).
 
 See [Installation](docs/installation.md) for permissions, dependencies, SSH server settings, and local-only setups.
 

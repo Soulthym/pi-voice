@@ -5,7 +5,7 @@ export DBUS_SESSION_BUS_ADDRESS=unix:path=/work/runtime/bus
 export PI_VOICE_CLIENT_COMMAND=/work/client/pi-voice-client PI_VOICE_MAX_RECORD_SECONDS=3
 # Client-only ephemeral persisted identity; the SSH server has no name config.
 mkdir -m 700 -p "$XDG_RUNTIME_DIR" /work/bin /work/device-config/pi-voice
-(umask 077; printf '%s\n' 'Synthetic desktop client' >/work/device-config/pi-voice/device-name)
+XDG_CONFIG_HOME=/work/device-config /work/client/pi-voice-ssh --set-device-name 'Synthetic desktop client'
 # No player may open speakers. Protocol hello should not even invoke this stub.
 printf '#!/bin/sh\ntouch /work/player-called\nexit 1\n' >/work/bin/mpv
 chmod +x /work/bin/mpv

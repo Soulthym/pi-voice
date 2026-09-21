@@ -1,12 +1,20 @@
 # Pi Voice — implemented agreements and live-validation handoff
 
-## Latest clarification — persistent client names replace environment naming
+## Current handoff — visible names and standalone setup/rename
+
+- Both SSH wrapper copies accept only `--set-device-name ["Device name"]` as a standalone first-argument mode. No-name mode always opens a visible `/dev/tty` prompt, including existing names; the positional form is headless. Extra arguments/options fail before configuration mutation or SSH. Flags in remote commands remain remote arguments.
+- Setter validation and bounded flock/private-temp/atomic-rename reuse the `80aca1d` publication fix, with explicit name replacement only; no ID creation or modification, SSH config query, network, bridge, runtime files or restart. Normal first-run publication remains first-writer-wins. Direct client/phone and stream helpers remain non-prompting.
+- The byte reader retains malformed UTF-8 newline/EOF handling and safe terminal restoration. It displays safe complete UTF-8 prefixes, spaces and Unicode, redraws for Backspace without cell-width arithmetic, and never echoes supplied control/bidi sequences. SSH stdin remains untouched.
+- Official unattended provisioning and rename use the CLI, not manual file writes. Confirm stop, close all client wrappers, update installed desktop/Termux copies and reconnect; renamed registrations apply next connection, never implicitly restart existing sessions. Retain the device ID and recovery state.
+- Validation: `npm run check`; full suite **917 passed, 3 existing compatibility skips, 0 failed (920 total)**; isolated synthetic real-SSH **12/12 cases passed**, now provisioning through the setter. PTY/headless coverage includes visibility before Enter, Unicode/Backspace, cancellation/invalid UTF-8, ID preservation, concurrency, strict arity, no TTY and no network/runtime activity. No LSP configured; no live sessions, provider/model/hardware calls, settings or `ISSUES.md` changes.
+
+## Previous clarification — persistent client names replace environment naming
 
 - The first interactive desktop/Termux SSH connection prompts for a name before SSH, registration or daemon launch; future connections read `${XDG_CONFIG_HOME:-$HOME/.config}/pi-voice/device-name`, beside the stable `device-id`. This entirely supersedes the previous environment/hostname naming design, including inherited obsolete exports. Existing installations prompt on their next interactive connection when the file is missing; unattended first runs fail with provisioning instructions.
 - Private atomic first-writer publication keeps concurrent first launches on one ID/name without holding a lock across a prompt. `/dev/tty` leaves SSH stdin intact; invalid names/cancellation/EOF do not connect. Direct client/phone bridges do not register metadata and remain non-prompting.
 - Names remain display-only: duplicate names do not route/authenticate. Fresh verified SSH attachment identity and existing session-pin/confirmed-stop adoption barriers are unchanged; no automatic mid-playback repin.
 - Validation: typecheck; full suite **917 passed, 3 existing TUI compatibility skips, 0 failed (920 total)**; real isolated SSH **12/12 cases passed**, client-only ephemeral name configuration. PTY checks cover both wrappers, first save/reuse, EOF/Ctrl+C, Unicode/quotes, private permissions, preserved stdin/legacy ID, concurrent prompts/ID creation and configuration errors. No extension UI/API changes; native TUI rerun not required.
-- Operator: confirm playback/capture stop, close all client wrappers, install the updated complete client script set (including separately installed Termux copies), reconnect and answer the prompt, then `/reload` on the host. To rename, confirm stop/close wrappers first and edit only the local name file; never regenerate the ID. No live sessions/settings/provider/model calls or user files were changed; `ISSUES.md` preserved. See `docs/installation.md` and the current ledger entry.
+- Operator: confirm playback/capture stop, close all client wrappers, install the updated complete client script set (including separately installed Termux copies), reconnect and answer the prompt, then `/reload` on the host. To rename, confirm stop/close wrappers first and use the standalone setter described above; never regenerate the ID. No live sessions/settings/provider/model calls or user files were changed; `ISSUES.md` preserved. See `docs/installation.md` and the current ledger entry.
 
 ## Current A keyboard handoff
 

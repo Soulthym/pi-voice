@@ -33,7 +33,7 @@ The name is read only from `${XDG_CONFIG_HOME:-$HOME/.config}/pi-voice/device-na
 
 Empty or whitespace-only names are errors. The UTF-8 file contains the literal name, optionally followed by one newline; additional lines and NUL are invalid. The directory is mode 700 and files are mode 600. Missing names in noninteractive runs fail with the exact local path and provisioning instructions, never choose a hostname. The label does not change the stable device ID, registry filename, platform or routing identity. `Connected to <name>` confirms identity selection/registration, not audio readiness.
 
-See [installation and upgrades](installation.md#install-a-device-name) for first-run prompts, file provisioning, safe renaming and client-copy instructions. Editing configuration on the remote Pi host does not rename a managed client.
+See [installation and upgrades](installation.md#install-a-device-name) for visible first-run prompts, standalone `pi-voice-ssh --set-device-name ["Device name"]` provisioning/renaming and client-copy instructions. The setter changes only the local name, never creates a new ID, and needs no SSH options or target. Editing configuration on the remote Pi host does not rename a managed client.
 
 ## Internal wrapper variables
 

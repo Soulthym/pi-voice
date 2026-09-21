@@ -26,24 +26,24 @@ Run `/reload` after installing or updating the extension. Spoken output defaults
 
 ## Install a device name
 
-On each **client**, desktop or Termux, run `pi-voice-ssh YOUR_HOST` from a terminal. On the first connection it asks for a device name **before** starting SSH or the bridge. Input is hidden to avoid echoing unvalidated terminal controls. Enter a label such as `My laptop` or `My phone`; Ctrl+C or EOF cancels without connecting or creating identity files.
+On each **client**, desktop or Termux, run `pi-voice-ssh YOUR_HOST` from a terminal. On the first connection it asks for a device name **before** starting SSH or the bridge. Input is visible as you type, including Unicode and Backspace; unsafe control/bidi sequences and incomplete or malformed UTF-8 are never echoed. Enter a label such as `My laptop` or `My phone`; Ctrl+C or EOF cancels without connecting or creating identity files.
 
 The wrapper saves the literal UTF-8 label at `${XDG_CONFIG_HOME:-$HOME/.config}/pi-voice/device-name` (normally `~/.config/pi-voice/device-name`), beside the existing `device-id`. It reuses that file on subsequent connections. Both files are private (600), in a private directory (700), and newly created files are atomically published without replacing another first launch's choice. Concurrent prompts do not lock out other wrappers; the first successfully saved name wins.
 
 There is **no device-name environment override or hostname fallback**, including inherited obsolete variables. Existing installations without the file prompt on their **next interactive connection**, retaining their stable ID. First runs with SSH `BatchMode=yes` (from `-oBatchMode=yes`, `-o BatchMode=yes`, or SSH configuration) or without a controlling terminal fail with the path and provisioning instructions. Otherwise prompting uses `/dev/tty`, even with redirected stdin; stdin intended for SSH is never consumed by the prompt.
 
-For unattended provisioning, write a validated literal UTF-8 name (not shell quotes or JSON), optionally ending with one newline, to that exact client file before connecting. For example, on a new installation:
+Use the standalone local CLI for setup or renaming (also the official unattended provisioning path):
 
 ```bash
-config_root=${XDG_CONFIG_HOME:-$HOME/.config}/pi-voice
-mkdir -p "$config_root"
-chmod 700 "$config_root"
-(umask 077; set -C; printf '%s\n' 'My laptop' >"$config_root/device-name")
+pi-voice-ssh --set-device-name              # visible prompt, even if already named
+pi-voice-ssh --set-device-name "My laptop"  # headless; no TTY required
 ```
 
-This refuses to overwrite an existing name. See [name validation](environment.md#device-name-validation): 1–128 characters, not whitespace-only, no controls/bidi or extra lines; Unicode, spaces, quotes and backslashes are preserved. Invalid input fails rather than being sanitized.
+Only one optional positional name is accepted: no SSH target, SSH options, `--device-dir`, or other flags. The flag must be first. Extra arguments/options fail before mutation or SSH; `-v --set-device-name` is an error. After an SSH target, `host remotecommand --set-device-name` remains a remote command, not local setup. No equals-form is supported. Option-like names starting with `-` must be entered at the prompt. The no-argument form requires a controlling terminal and gives a provisioning example if unavailable.
 
-**Rename safely:** explicitly stop playback/capture and confirm actual stop, then close **all** wrappers on that client. Edit only the local `device-name` file, retain mode 600, and open a fresh connection. Never regenerate/delete `device-id` to customize the label. If stop is unconfirmed, retain the old connection/state and follow [recovery](troubleshooting.md#unconfirmed-stop) first.
+Setup never queries SSH configuration, connects, starts bridges or creates a device ID. It validates and atomically replaces **only the name**, using the same bounded publication lock; existing ID bytes remain untouched. Concurrent explicit setters publish whole files, last writer wins. Normal first-run prompts still preserve the first writer's choice. Invalid or cancelled input leaves the old name intact. See [name validation](environment.md#device-name-validation): 1–128 characters, not whitespace-only, no controls/bidi or extra lines; Unicode, spaces, quotes and backslashes are preserved. Invalid input fails rather than being sanitized.
+
+**Rename safely:** explicitly stop playback/capture and confirm actual stop, then close **all** wrappers on that client. Run `pi-voice-ssh --set-device-name "New label"` locally, then open a fresh connection. Existing bridges/registrations pick up the name on the next connection; the setter never implicitly restarts anything. Never regenerate/delete `device-id` to customize the label. If stop is unconfirmed, retain the old connection/state and follow [recovery](troubleshooting.md#unconfirmed-stop) first.
 
 After registration, `Connected to <name>` confirms the selected identity, **not audio readiness**. Renaming does not change the persistent device ID or registry filename.
 
@@ -126,11 +126,11 @@ Validate with `sshd -t`, then reload `sshd` after changing its configuration. Th
 
 ### Upgrade device-name support
 
-First-save failure after the hidden prompt (including on Termux): update both installed wrapper variants from this checkout using the commands below, then retry interactively. Publication now uses a short, bounded `flock` plus a private temporary file and atomic rename, not hard links. Linux/Termux already require `flock` (`util-linux`); it is now needed for first-time identity saving even on playback-only clients. Experimental macOS setups also need a `flock` implementation supporting `-x -w` (native macOS support remains unimplemented), or pre-provision both identity files. No lock is held during the prompt. The empty `.device.lock` fence remains intentionally; the kernel releases its lock on exit. Do not delete that fence while wrappers may be saving.
+For visible prompts and standalone setup/rename, or first-save failure after an older hidden prompt (including on Termux): update both installed wrapper variants from this checkout using the commands below, then retry interactively. Publication now uses a short, bounded `flock` plus a private temporary file and atomic rename, not hard links. Linux/Termux already require `flock` (`util-linux`); it is now needed for first-time identity saving even on playback-only clients. Experimental macOS setups also need a `flock` implementation supporting `-x -w` (native macOS support remains unimplemented), or pre-provision both identity files. No lock is held during the prompt. The empty `.device.lock` fence remains intentionally; the kernel releases its lock on exit. Do not delete that fence while wrappers may be saving.
 
 On save failure, the diagnostic identifies the failed operation and utility reason. Check that the local config directory is on writable storage owned by your Termux/client user and that `flock` is installed; retry after correcting the reported cause. A failed name save can leave `device-name` absent: this is safe and the next run prompts again. **Retain `device-id` and the config directory**; do not reset identity or delete runtime/registration state to recover.
 
-This update changes both `client/pi-voice-ssh` and `termux/pi-voice-ssh`; a host update and `/reload` alone are **not sufficient**. Update the host checkout/extension and the installed wrapper on **every desktop and Termux client**, including custom launcher paths. The previous environment-based naming design is superseded entirely: remove obsolete name exports from launchers/shell startup files; even inherited values are ignored. Existing clients missing `device-name` prompt on their next interactive connection; unattended clients must [provision the local file](#install-a-device-name) first. Existing `device-id` is retained.
+This update changes both `client/pi-voice-ssh` and `termux/pi-voice-ssh`; a host update and `/reload` alone are **not sufficient**. Update the host checkout/extension and the installed wrapper on **every desktop and Termux client**, including custom launcher paths. The previous environment-based naming design is superseded entirely: remove obsolete name exports from launchers/shell startup files; even inherited values are ignored. Existing clients missing `device-name` prompt on their next interactive connection; unattended clients must [run the headless setter](#install-a-device-name) first. Existing `device-id` is retained.
 
 Before replacing scripts or exiting wrappers, follow the confirmed-stop precautions below. Then exit all old wrappers. On each client, from the matching updated checkout, install the complete shared helper set (this is also the standard Termux installation):
 

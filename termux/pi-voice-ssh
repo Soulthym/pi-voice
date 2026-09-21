@@ -1,8 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if (( $# == 0 )); then
-  printf 'Usage: pi-voice-ssh [--device-dir <absolute-remote-path>] [ssh options] user@target [remote command]\n' >&2
+set_name=false
+if [[ ${1:-} == --set-device-name ]]; then
+  set_name=true
+  if (( $# > 2 )) || [[ ${2:-} == -* ]]; then
+    printf 'Usage: pi-voice-ssh --set-device-name ["Device name"] (standalone; no SSH target or other options)\n' >&2
+    exit 2
+  fi
+  name_supplied=false
+  if (( $# == 2 )); then name_supplied=true; device_name=$2; fi
+  shift "$#"
+fi
+
+if [[ $set_name == false ]] && (( $# == 0 )); then
+  printf 'Usage: pi-voice-ssh [--device-dir <absolute-remote-path>] [ssh options] user@target [remote command]\n       pi-voice-ssh --set-device-name ["Device name"] (standalone local setup/rename)\n' >&2
   exit 2
 fi
 
@@ -14,6 +26,7 @@ CONTROL_PORT=${PI_VOICE_CONTROL_PORT:-8766}
 # intended remote path, and unset falls back to ~/.cache/pi-voice/devices.
 device_dir_override=${PI_VOICE_DEVICE_DIR:-}
 args=()
+if [[ $set_name == false ]]; then
 while (($# > 0)); do
   case $1 in
     --device-dir)
@@ -47,6 +60,10 @@ while (( index < ${#args[@]} )); do
   if [[ $arg == -- ]]; then
     ((index += 1)); target_index=$index; break
   fi
+  if [[ $arg == --set-device-name ]]; then
+    printf -- '--set-device-name must be first and standalone; no SSH options or target\n' >&2
+    exit 2
+  fi
   if [[ $arg != -* ]]; then target_index=$index; break; fi
   case $arg in
     -b|-c|-D|-E|-e|-F|-I|-i|-J|-L|-l|-m|-O|-o|-P|-p|-Q|-R|-S|-W|-w)
@@ -56,8 +73,13 @@ while (( index < ${#args[@]} )); do
 done
 (( target_index >= 0 && target_index < ${#args[@]} )) || { printf 'Unable to identify SSH target\n' >&2; exit 2; }
 target=${args[target_index]}
+if [[ $target == --set-device-name ]]; then
+  printf -- '--set-device-name must be first and standalone; no SSH options or target\n' >&2
+  exit 2
+fi
 ssh_options=("${args[@]:0:target_index}")
 remote_command=("${args[@]:target_index+1}")
+fi
 
 runtime_root=${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/pi-voice-ssh-${UID:-$(id -u)}
 config_root=${XDG_CONFIG_HOME:-$HOME/.config}/pi-voice
@@ -80,8 +102,8 @@ validate_device_name() {
     return 2
   fi
 }
-# Publish complete private files without replacing another first launch's choice.
-# No lock is held while a user thinks at the prompt; contenders read the winner.
+# First launches read the winner; only an explicit setter replaces the name.
+# No lock is held while a user thinks at the prompt.
 publish_config() {
   local error
   if error=$({
@@ -94,7 +116,7 @@ publish_config() {
     exec 9>"$config_root/.device.lock" || exit 1
     operation='acquire publication lock (5 seconds; requires flock from util-linux)'
     flock -x -w 5 9 || exit 1
-    [[ ! -e $1 && ! -L $1 ]] || exit 0
+    [[ ${3:-false} == true || ( ! -e $1 && ! -L $1 ) ]] || exit 0
     operation='create private temporary file'
     temp=$(mktemp "$config_root/.device-XXXXXX") || exit 1
     operation='write temporary file'
@@ -110,19 +132,19 @@ publish_config() {
   return 1
 }
 read_device_name() (
-  local LC_ALL=C.UTF-8 character invalid=false tty_state bytes=0
+  local LC_ALL=C.UTF-8 character invalid=false tty_state bytes=0 displayed= prompt='Device name (1–128 characters): '
   tty_state=$(stty -g <&"$name_tty") || return 1
   trap 'stty "$tty_state" <&"$name_tty"' EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
   # Configure before displaying the prompt, including for immediate pasted EOF.
-  stty -echo -icanon min 1 time 0 <&"$name_tty" || return 1
-  printf 'Device name (1–128 characters; input hidden): ' >&"$name_tty"
+  stty -echo -icanon -isig min 1 time 0 <&"$name_tty" || return 1
+  printf '%s\0337' "$prompt" >&"$name_tty"
   device_name=
   # Unlike a line read, an empty-delimiter read exposes NUL rather than silently
   # dropping it. Read bytes so malformed UTF-8 cannot swallow Enter/EOF; keep
   # at most 512 bytes (128 UTF-8 scalars), then validate the complete name.
-  while LC_ALL=C IFS= read -r -s -d '' -n 1 -u "$name_tty" character; do
+  while LC_ALL=C IFS= read -r -d '' -n 1 -u "$name_tty" character; do
     case $character in
       $'\n') [[ $invalid == false ]] || return 1; printf '%s' "$device_name"; return ;;
       $'\x03'|$'\x04') return 1 ;;
@@ -135,17 +157,36 @@ read_device_name() (
         else invalid=true
         fi ;;
     esac
+    # Render only complete, safe UTF-8 prefixes. Space-only prefixes are safe
+    # while typing; the final validator still rejects a blank submitted name.
+    if (device_name="x$device_name"; validate_device_name) 2>/dev/null || validate_device_name 2>/dev/null; then
+      if [[ $device_name == "$displayed"* ]]; then
+        printf '%s' "${device_name:${#displayed}}" >&"$name_tty"
+      else
+        # Restore the input origin and erase the old suffix, including wide
+        # characters/wrapped lines; never calculate terminal cell widths.
+        printf '\0338\033[J%s' "$device_name" >&"$name_tty"
+      fi
+      displayed=$device_name
+    fi
   done
   return 1
 )
 ssh_config=
-if [[ ! -e $device_name_file ]]; then
+if [[ $set_name == true && $name_supplied == true ]]; then
+  validate_device_name
+  publish_config "$device_name_file" "$device_name" true || exit 1
+  exit 0
+fi
+if [[ $set_name == true || ! -e $device_name_file ]]; then
   # Resolve batch intent with SSH itself, including config files and option case.
   # This is the same local config query used below, never a login connection.
-  ssh_config=$(ssh -G "${ssh_options[@]}" "$target" 2>/dev/null)
+  if [[ $set_name == false ]]; then
+    ssh_config=$(ssh -G "${ssh_options[@]}" "$target" 2>/dev/null)
+  fi
   if [[ $(awk '$1=="batchmode" {print $2; exit}' <<<"$ssh_config") == yes ]] ||
      ! { exec {name_tty}<>/dev/tty; } 2>/dev/null; then
-    printf 'Missing device name. Run pi-voice-ssh interactively first, or write a validated UTF-8 name to %s (mode 600; directory 700).\n' "$device_name_file" >&2
+    printf 'Device name needs a controlling terminal (and non-BatchMode for SSH). Use pi-voice-ssh --set-device-name "My device" to provision %s without a terminal.\n' "$device_name_file" >&2
     exit 2
   fi
   # Never consume SSH stdin, or echo unvalidated terminal escape sequences.
@@ -156,7 +197,8 @@ if [[ ! -e $device_name_file ]]; then
   printf '\n' >&"$name_tty"
   exec {name_tty}>&-
   validate_device_name
-  publish_config "$device_name_file" "$device_name" || exit 1
+  publish_config "$device_name_file" "$device_name" "$set_name" || exit 1
+  [[ $set_name == false ]] || exit 0
 fi
 # Read at most 1025 bytes (128 UTF-8 characters need at most 512), reject NUL
 # explicitly, and permit just one conventional final newline, not extra lines.

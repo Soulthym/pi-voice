@@ -14,7 +14,7 @@ import termios
 import time
 
 
-def terminal(wrapper, env, answer, expected=0, barrier=None, options=(), null_stdin=False):
+def terminal(wrapper, env, answer, expected=0, barrier=None, options=(), null_stdin=False, setter=False, preview=b""):
     incoming, outgoing = os.pipe()
     os.write(outgoing, b"SSH stdin must survive\n")
     os.close(outgoing)
@@ -24,7 +24,8 @@ def terminal(wrapper, env, answer, expected=0, barrier=None, options=(), null_st
         os.close(incoming)
         if null_stdin:
             os.dup2(os.open(os.devnull, os.O_RDONLY), 0)
-        os.execve("/bin/bash", ["bash", str(wrapper), "-F", env["TEST_SSH_CONFIG"], *options, "host"], env)
+        args = ["--set-device-name"] if setter else ["-F", env["TEST_SSH_CONFIG"], *options, "host"]
+        os.execve("/bin/bash", ["bash", str(wrapper), *args], env)
     os.close(incoming)
     output = b""
     sent = False
@@ -42,11 +43,14 @@ def terminal(wrapper, env, answer, expected=0, barrier=None, options=(), null_st
                 if not chunk:
                     break
                 output += chunk
-                if b"input hidden): " in output and not sent:
+                if b"characters): " in output and not sent:
                     if barrier:
                         barrier.wait(timeout=5)
-                    os.write(fd, answer)
+                    os.write(fd, preview or answer)
                     sent = True
+                if sent and preview and preview in output:
+                    os.write(fd, answer)
+                    preview = b""
         else:
             raise AssertionError(("PTY wrapper hung", answer, output))
         _, status = os.waitpid(pid, 0)
@@ -78,14 +82,73 @@ for wrapper in [Path("client/pi-voice-ssh").resolve(), Path("termux/pi-voice-ssh
         config = root / "config" / "pi-voice"
         name_file = config / "device-name"
         id_file = config / "device-id"
+        def headless(*args, expected=0):
+            result = subprocess.run(["bash", str(wrapper), *args], env=env,
+                                    stdin=subprocess.DEVNULL, capture_output=True,
+                                    start_new_session=True, timeout=10)
+            assert result.returncode == expected, (args, result)
+            return result
+
+        # A setter cannot even query SSH configuration or launch a helper.
+        real_fake_ssh = ssh.read_text()
+        ssh.write_text('#!/bin/sh\ntouch "$HOME/network-called"\nexit 99\n')
+        for args in [("--set-device-name", "name", "host"),
+                     ("--set-device-name", "--device-dir", "/remote"),
+                     ("-v", "--set-device-name", "host"),
+                     ("--", "--set-device-name"),
+                     ("--set-device-name", "My device", "-v"),
+                     ("--device-dir", "/remote", "--set-device-name", "host")]:
+            headless(*args, expected=2)
+            assert not config.exists(), args
+        result = headless("--set-device-name", expected=2)
+        assert b"controlling terminal" in result.stderr
+        for name in ["", "   ", "bad\x1b[31m", "bad\u202e", "x" * 129, b"bad\xff"]:
+            headless("--set-device-name", name, expected=2)
+            assert not name_file.exists() and not id_file.exists()
+        headless("--set-device-name", "My device")
+        assert name_file.read_text() == "My device\n" and not id_file.exists()
+        id_file.write_bytes(b"legacy ID exactly\n")
+        headless("--set-device-name", "小明 café 😀")
+        assert name_file.read_text() == "小明 café 😀\n"
+        assert id_file.read_bytes() == b"legacy ID exactly\n"
+        failed_mv = bin_dir / "mv"
+        failed_mv.write_text('#!/bin/sh\necho "rename denied" >&2\nexit 1\n')
+        failed_mv.chmod(0o755)
+        headless("--set-device-name", "not saved", expected=1)
+        assert name_file.read_text() == "小明 café 😀\n"
+        assert id_file.read_bytes() == b"legacy ID exactly\n"
+        assert not list(config.glob(".device-*"))
+        failed_mv.unlink()
+        terminal(wrapper, env, b" rename\n", setter=True, preview=b"visible")
+        assert name_file.read_text() == "visible rename\n"
+        for cancel in [b"\x03", b"\x04", b"bad\xc3\n", b"bad\xc3\x04"]:
+            terminal(wrapper, env, cancel, (-signal.SIGINT, 2) if cancel == b"\x03" else 2, setter=True)
+            assert name_file.read_text() == "visible rename\n"
+            assert id_file.read_bytes() == b"legacy ID exactly\n"
+        # Concurrent explicit renames replace complete files and retain identity.
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(lambda name: headless("--set-device-name", name),
+                          ["setter one", "setter two", "setter three", "setter four"]))
+        assert name_file.read_text() in [n + "\n" for n in ["setter one", "setter two", "setter three", "setter four"]]
+        assert id_file.read_bytes() == b"legacy ID exactly\n"
+        assert not (root / "network-called").exists()
+        assert not (root / "runtime").exists()
+        name_file.unlink()
+        id_file.unlink()
+        ssh.write_text(real_fake_ssh)
+        headless("--set-device-name", "remote semantics")
+        headless("host", "remotecommand", "--set-device-name")
+        assert name_file.read_text() == "remote semantics\n"
+        name_file.unlink()
+        id_file.unlink()
         for options in [("-oBatchMode=yes",), ("-o", "bAtChMoDe=YeS"), ()]:
             ssh_config.write_text("Host *\n  BatchMode yes\n" if not options else "")
             output = terminal(wrapper, env, b"", 2, options=options, null_stdin=True)
-            assert b"input hidden" not in output and b"device-name (mode 600" in output, output
+            assert b"characters): " not in output and b"--set-device-name" in output, output
             assert not name_file.exists() and not id_file.exists()
         # Explicit no takes precedence over config and leaves prompting available.
         output = terminal(wrapper, env, b"\x04", 2, options=("-oBatchMode=no",))
-        assert b"input hidden" in output, output
+        assert b"characters): " in output, output
         ssh_config.write_text("")
         for locale in ["C", "C.UTF-8"]:
             for answer in [b"bad\xc3\n", b"bad\xc3\x04", b"bad\xc3\x03"]:
@@ -94,7 +157,7 @@ for wrapper in [Path("client/pi-voice-ssh").resolve(), Path("termux/pi-voice-ssh
                 assert not name_file.exists() and not id_file.exists()
         for answer in [b"\x04", b"\n", b"   \n", b"bad\x1b[31m\n", b"bad\0name\n", b"x" * 129 + b"\n", ("é" * 129 + "\n").encode(), ("😀" * 129 + "\n").encode()]:
             output = terminal(wrapper, env, answer, 2)
-            assert b"Connected to" not in output and b"\x1b" not in output, output
+            assert b"Connected to" not in output and b"\x1b[31m" not in output, output
             assert not name_file.exists() and not id_file.exists()
         # Bash read may receive Ctrl-C as a byte rather than a terminal signal.
         output = terminal(wrapper, env, b"\x03", (-signal.SIGINT, 2))
@@ -125,7 +188,7 @@ for wrapper in [Path("client/pi-voice-ssh").resolve(), Path("termux/pi-voice-ssh
         fake_mv.chmod(0o755)
         output = terminal(wrapper, env, b"private name\n", 1)
         assert b"atomic rename" in output and b"Permission denied" in output, output
-        assert b"private name" not in output and b"\x1b" not in output, output
+        assert b"private name" in output and b"\x1b[31m" not in output, output
         assert not name_file.exists() and id_file.read_bytes() == old_id
         assert not list(config.glob(".device-*"))
         # Signals immediately before rename leave no half-file or held lock.
@@ -170,8 +233,13 @@ for wrapper in [Path("client/pi-voice-ssh").resolve(), Path("termux/pi-voice-ssh
             assert name_file.read_text() == valid + "\n"
             name_file.unlink()
         output = terminal(wrapper, env, (name + "é\x7f😀\x08\n").encode())
+        assert name.encode() in output and b'\x1b8\x1b[J' in output, output
         assert name_file.read_text() == name + "\n"
         assert id_file.read_bytes() == old_id
+        output = terminal(wrapper, env, b"renamed visibly\n", setter=True)
+        assert b"renamed visibly" in output
+        assert name_file.read_text() == "renamed visibly\n" and id_file.read_bytes() == old_id
+        terminal(wrapper, env, (name + "\n").encode(), setter=True)
         assert (root / "stdin").read_bytes() == b"SSH stdin must survive\n"
         output = terminal(wrapper, env, b"unused\n")
         assert b"Device name (" not in output

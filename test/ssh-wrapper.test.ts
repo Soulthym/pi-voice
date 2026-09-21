@@ -204,7 +204,7 @@ test("device names come only from validated local files before any connection", 
 			assert.ok(!source.includes("PI_VOICE_DEVICE_NAME"), "production must not consult the retired override");
 			const script = path.join(root, "name.sh");
 			// Exercise the production validation without starting a bridge or SSH.
-			fs.writeFileSync(script, 'set -eu\n' +
+			fs.writeFileSync(script, 'set -eu\nset_name=false\n' +
 				source.slice(source.indexOf("runtime_root="), source.indexOf("if [[ ${PREFIX:-}")) +
 				'\nprintf \'"%s"\\n\' "$device_name_json"\n');
 			const config = path.join(root, "config");
@@ -214,7 +214,7 @@ test("device names come only from validated local files before any connection", 
 				PATH: restrictedPath(root, { ssh: 'printf "batchmode no\\n"' }),
 				PI_VOICE_DEVICE_NAME: "not a fallback" });
 			assert.equal(missing.code, 2);
-			assert.match(missing.stderr, /interactively first/);
+			assert.match(missing.stderr, /--set-device-name/);
 			assert.ok(missing.stderr.includes(path.join(config, "pi-voice", "device-name")));
 			prefillName(config);
 			for (const name of ["", "\0", "a\n\n", "   ", "\u00a0", "\ufeff", " \u00a0\u2007\u202f\ufeff ", "x".repeat(129), "é".repeat(129), ...[1, 9, 10, 13, 27, 31, 127, 128, 159, 0x61c, 0x200e, 0x200f, 0x2028, 0x2029, 0x202a, 0x202e, 0x2066, 0x2069].map(c => `a${String.fromCodePoint(c)}b`)]) {

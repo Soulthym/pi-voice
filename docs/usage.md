@@ -2,6 +2,10 @@
 
 [← README](../README.md) · [Commands](commands.md) · [Configuration](configuration.md)
 
+## Client device name
+
+`pi-voice-ssh --set-device-name` opens a visible local prompt, even if already named. `pi-voice-ssh --set-device-name "My device"` sets it headlessly. Both are standalone: no SSH target or other options. Normal first connections also prompt visibly. Names are validated before atomic saving; the ID is retained. After confirmed playback/capture stop, close all client wrappers and reconnect to use a renamed label; no implicit restart occurs. See [setup, errors and upgrades](installation.md#install-a-device-name).
+
 ## Dictation
 
 Press `Alt+M` or F4 to begin recording. Pi Voice streams Ogg/Opus from the selected device, performs host-side voice activity detection, and shows a revisable Whisper preview in the editor.
