@@ -152,6 +152,17 @@ test("accepts a live binary phone audio stream and drains the decoder before res
 	}
 });
 
+for (const audio of [wav(0), Buffer.from("not an audio container")]) test("rejects streams without decoded samples with a private actionable diagnostic", async () => {
+	const server = ticketServer((socket, receipt) => {
+		socket.once("data", command => socket.end(String(command) === "stop\n"
+			? receipt : Buffer.concat([Buffer.from("stream\n"), audio])));
+	});
+	const port = await listen(server);
+	try {
+		await assert.rejects(new PhoneInputClient().capture(`tcp://127.0.0.1:${port}`), /no decodable audio; check the selected device's recorder/);
+	} finally { await new Promise<void>(resolve => server.close(() => resolve())); }
+});
+
 test("failed microphone stop rejects cancellation and prevents replacement capture until confirmed", async () => {
 	let records = 0;
 	let safe = false;

@@ -2,6 +2,18 @@
 
 Updated incrementally. Companion: `PLAN.md`. Reorganize freely while preserving evidence and disposition.
 
+## Desktop SSH dictation investigation — baseline `6a5fe13`
+
+LIVE report: PC-over-SSH dictation returns “Microphone audio decoding failed”; earlier phone ASR worked. **PC OS and actual live cause remain unconfirmed.** No hardware capture, provider/model calls, SSH probes, runtime changes, or live restarts performed.
+
+Verified offline candidate: desktop `pw-record` startup failure (mock exit 1), or successful exit without PCM, feeds empty input to real ffmpeg. The encoder exits successfully with Ogg headers but no audio packets; the real host decoder fails, formerly producing only the generic error. Recorder stderr and pipeline status are discarded; the binary `stream` protocol has no trailing source-error frame. The host now reports **no decodable audio** with selected-recorder/access/tool checks, without retaining stderr or claiming a specific permission/device failure. Zero-sample WAV is also rejected rather than accepted solely on decoder exit 0; nonzero exits and partial float samples still fail closed.
+
+`test/desktop-capture.test.ts` exercises actual desktop ticket/record/stop scripts through a loopback fake bridge, fake microphone and real encoder/decoder. Synthetic PCM decodes completely on natural EOF and explicit process-group stop; empty/failed sources reproduce the error. This does not prove every codec/version flushes correctly. `test/phone-input.test.ts` covers malformed and empty WAV rejection. Ticket ACK, cancellation, draft preservation, endpoint generation and routing logic are unchanged.
+
+Source trace: desktop supports PipeWire/PulseAudio raw PCM → ffmpeg/Ogg, not SoX/arecord/native macOS. Termux records/tails Ogg and confirms stop before final-page drainage. Streaming is binary after `stream\n`, not base64; legacy `audio` responses are base64. SSH reverses the registered input port to the client listener; saved session pins can retain a different device. Wrapper metadata labels every non-Termux client `linux`, **not reliable OS identification**. Ask which PC OS and which device/input is selected before prescribing microphone/tool fixes. This diagnostic-only change needs a host extension reload to take effect; no phone/PC client script update is required, and no reload was performed.
+
+Validation: TypeScript check and targeted desktop/phone/recorder-stop/client/routing/SSH/UI cancellation and stop-proof fixtures pass (UI mocks require `--experimental-test-module-mocks`). Live cause/fix remains pending user evidence.
+
 ## Current documentation audit — `d4cf759`, 2026-09-20
 
 **New LIVE evidence supplied by the user:** the newest batch “seems fixed,” and native bottom-follow/banner behavior is confirmed. This supersedes earlier pending-live statements below; it is limited observed success, not proof across all hardware, transport failures or layouts. Earlier navigation, Jump-to-voice, ASR, fast-UI and flicker confirmations stand. Original EPIPE cause remains **UNOBSERVED**; real start latency remains **unmeasured**.

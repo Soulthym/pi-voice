@@ -88,8 +88,10 @@ class LiveVoiceDetector {
 		this.#drained.promise.catch(() => {});
 		this.#child.on("error", () => this.#drained.reject(new Error("Microphone decoder failed to start")));
 		this.#child.once("close", code => {
-			if (code === 0 && this.#carry.length === 0) this.#drained.resolve();
-			else this.#drained.reject(new Error("Microphone audio decoding failed"));
+			if (this.#totalSamples === 0) {
+				this.#drained.reject(new Error("Microphone stream contained no decodable audio; check the selected device's recorder, microphone access, and audio tools"));
+			} else if (code === 0 && this.#carry.length === 0) this.#drained.resolve();
+			else this.#drained.reject(new Error("Microphone audio decoding failed; the stream may be invalid or incomplete"));
 		});
 		this.#child.stderr.resume(); // Never retain decoder diagnostics containing input details.
 		this.#child.stdout.on("data", chunk => {
