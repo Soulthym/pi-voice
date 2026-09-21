@@ -1,6 +1,9 @@
 """Offline controlling-terminal checks; no SSH, daemon, or user configuration."""
 from concurrent.futures import ThreadPoolExecutor
 import threading
+import ctypes
+import ctypes.util
+import struct
 import errno
 import fcntl
 import os
@@ -14,12 +17,56 @@ import termios
 import time
 
 
-def terminal(wrapper, env, answer, expected=0, barrier=None, options=(), null_stdin=False, setter=False, preview=b""):
+class Screen:
+    """Real libvterm screen, not assertions over raw escape bytes."""
+    class Rect(ctypes.Structure):
+        _fields_ = [(name, ctypes.c_int) for name in ("top", "bottom", "left", "right")]
+
+    def __init__(self):
+        self.lib = ctypes.CDLL(ctypes.util.find_library("vterm") or "libvterm.so")
+        for name, args, result in [
+            ("vterm_new", [ctypes.c_int, ctypes.c_int], ctypes.c_void_p),
+            ("vterm_set_utf8", [ctypes.c_void_p, ctypes.c_int], None),
+            ("vterm_obtain_screen", [ctypes.c_void_p], ctypes.c_void_p),
+            ("vterm_screen_reset", [ctypes.c_void_p, ctypes.c_int], None),
+            ("vterm_input_write", [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t], ctypes.c_size_t),
+            ("vterm_screen_get_text", [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, self.Rect], ctypes.c_size_t),
+            ("vterm_free", [ctypes.c_void_p], None),
+        ]:
+            function = getattr(self.lib, name)
+            function.argtypes, function.restype = args, result
+        self.term = self.lib.vterm_new(4, 40)
+        self.lib.vterm_set_utf8(self.term, 1)
+        self.screen = self.lib.vterm_obtain_screen(self.term)
+        self.lib.vterm_screen_reset(self.screen, 1)
+        self.feed(b"history\r\n" * 3)  # Prompt starts on the last row.
+
+    def feed(self, data):
+        self.lib.vterm_input_write(self.term, data, len(data))
+
+    def lines(self):
+        lines = []
+        for row in range(4):
+            buffer = ctypes.create_string_buffer(1024)
+            size = self.lib.vterm_screen_get_text(self.screen, buffer, len(buffer), self.Rect(row, row + 1, 0, 40))
+            lines.append(buffer.raw[:size].decode().rstrip())
+        return lines
+
+    def close(self):
+        self.lib.vterm_free(self.term)
+
+
+def terminal(wrapper, env, answer, expected=0, barrier=None, options=(), null_stdin=False, setter=False, preview=b"", screen_steps=()):
+    screen = Screen() if screen_steps else None
+    steps = list(screen_steps)
+    pending_screen = None
     incoming, outgoing = os.pipe()
     os.write(outgoing, b"SSH stdin must survive\n")
     os.close(outgoing)
     pid, fd = pty.fork()
     if pid == 0:
+        if screen:
+            fcntl.ioctl(1, termios.TIOCSWINSZ, struct.pack("HHHH", 4, 40, 0, 0))
         os.dup2(incoming, 0)
         os.close(incoming)
         if null_stdin:
@@ -43,22 +90,41 @@ def terminal(wrapper, env, answer, expected=0, barrier=None, options=(), null_st
                 if not chunk:
                     break
                 output += chunk
+                if screen:
+                    screen.feed(chunk)
                 if b"characters): " in output and not sent:
                     if barrier:
                         barrier.wait(timeout=5)
-                    os.write(fd, preview or answer)
+                    if screen:
+                        data, pending_screen = steps.pop(0)
+                        os.write(fd, data)
+                    else:
+                        os.write(fd, preview or answer)
                     sent = True
                 if sent and preview and preview in output:
                     os.write(fd, answer)
                     preview = b""
+            elif pending_screen is not None:
+                lines = screen.lines()
+                assert lines[-1] == pending_screen, lines
+                assert lines[-2] == "Device name (1–128 characters):", lines
+                if steps:
+                    data, pending_screen = steps.pop(0)
+                    os.write(fd, data)
+                else:
+                    pending_screen = None
+                    os.write(fd, answer)
         else:
             raise AssertionError(("PTY wrapper hung", answer, output))
         _, status = os.waitpid(pid, 0)
         waited = True
         assert os.waitstatus_to_exitcode(status) in (expected if isinstance(expected, tuple) else (expected,)), output
+        assert not steps and pending_screen is None, "screen checks must complete"
         assert termios.tcgetattr(fd)[3] & (termios.ECHO | termios.ICANON) == (termios.ECHO | termios.ICANON), "prompt must restore the terminal"
         return output
     finally:
+        if screen:
+            screen.close()
         os.close(fd)
         if not waited:
             os.kill(pid, signal.SIGKILL)
@@ -119,6 +185,55 @@ for wrapper in [Path("client/pi-voice-ssh").resolve(), Path("termux/pi-voice-ssh
         assert id_file.read_bytes() == b"legacy ID exactly\n"
         assert not list(config.glob(".device-*"))
         failed_mv.unlink()
+        # Bad rename destinations must not absorb a temp file or change identity.
+        saved = config / "saved-name"
+        name_file.rename(saved)
+        for symlink in [False, True]:
+            target = config / "directory"
+            target.mkdir()
+            if symlink:
+                name_file.symlink_to(target, target_is_directory=True)
+            else:
+                target.rename(name_file)
+            result = headless("--set-device-name", "not saved", expected=1)
+            assert b"destination must be a regular file" in result.stderr
+            assert not list((target if symlink else name_file).iterdir())
+            assert not list(config.glob(".device-*"))
+            assert saved.read_text() == "小明 café 😀\n"
+            assert id_file.read_bytes() == b"legacy ID exactly\n"
+            if symlink:
+                name_file.unlink()
+                target.rmdir()
+            else:
+                name_file.rmdir()
+        saved.rename(name_file)
+        # Last row, 40 columns: wrapping used to stale the saved absolute cursor.
+        terminal(wrapper, env, b"\n", setter=True, screen_steps=[
+            (b"abcdefghijklmno", "> abcdefghijklmno"),
+            (b"\x7f", "> abcdefghijklmn"),
+            (b"Z", "> abcdefghijklmnZ"),
+            (b"x" * 40, "< " + "x" * 37),
+            (b"\x7fY", "< " + "x" * 36 + "Y"),
+        ])
+        assert name_file.read_text() == "abcdefghijklmnZ" + "x" * 39 + "Y\n"
+        terminal(wrapper, env, b"\n", setter=True, screen_steps=[
+            (("界" * 25).encode(), "< " + "界" * 18),
+            (b"\x7f", "< " + "界" * 18),
+            ("明".encode(), "< " + "界" * 17 + "明"),
+        ])
+        assert name_file.read_text() == "界" * 24 + "明\n"
+        terminal(wrapper, env, b"\n", setter=True, screen_steps=[
+            ("小明 café 😀 é".encode(), "> 小明 café 😀 é"),
+            (b"\x7f", "> 小明 café 😀 e"),
+            (b"\x7f\x7f\x7f", "> 小明 café"),
+            ("新".encode(), "> 小明 café 新"),
+        ])
+        assert name_file.read_text() == "小明 café 新\n"
+        for unsafe in [b"\x1b[31m", "\u202e".encode(), b"\xff"]:
+            terminal(wrapper, env, b"\n", expected=2, setter=True, screen_steps=[
+                (b"safe", "> safe"), (unsafe, "> safe"),
+            ])
+            assert name_file.read_text() == "小明 café 新\n"
         terminal(wrapper, env, b" rename\n", setter=True, preview=b"visible")
         assert name_file.read_text() == "visible rename\n"
         for cancel in [b"\x03", b"\x04", b"bad\xc3\n", b"bad\xc3\x04"]:
@@ -233,7 +348,7 @@ for wrapper in [Path("client/pi-voice-ssh").resolve(), Path("termux/pi-voice-ssh
             assert name_file.read_text() == valid + "\n"
             name_file.unlink()
         output = terminal(wrapper, env, (name + "é\x7f😀\x08\n").encode())
-        assert name.encode() in output and b'\x1b8\x1b[J' in output, output
+        assert name.encode() in output and b'\r\x1b[2K' in output, output
         assert name_file.read_text() == name + "\n"
         assert id_file.read_bytes() == old_id
         output = terminal(wrapper, env, b"renamed visibly\n", setter=True)

@@ -74,7 +74,7 @@ pi
 /voice on
 ```
 
-**Device-name update:** recopy the SSH wrapper on every desktop/Termux client using the [upgrade commands](docs/installation.md#upgrade-device-name-support). `pi-voice-ssh --set-device-name` prompts visibly; `pi-voice-ssh --set-device-name "My device"` provisions/renames headlessly without SSH or changing the ID. No target or other options are allowed. Normal first-connection prompts are visible too. Existing connections are not restarted; after confirmed stop, close all wrappers and reconnect to use the new name. If you have not completed the earlier protocol migration, its [safe upgrade steps](docs/installation.md#upgrading) still apply. Never discard outstanding [stop-recovery proof](docs/troubleshooting.md#unconfirmed-stop).
+**Device-name update:** recopy the SSH wrapper on every desktop/Termux client using the [upgrade commands](docs/installation.md#upgrade-device-name-support). `pi-voice-ssh --set-device-name` prompts visibly; `pi-voice-ssh --set-device-name "My device"` provisions/renames headlessly without SSH or changing the ID. No target or other options are allowed. Normal first-connection prompts are visible too. The editable name uses a one-row tail preview (`<` means earlier text is hidden); the full name is saved. Existing connections are not restarted; after confirmed stop, close all wrappers and reconnect to use the new name. If you have not completed the earlier protocol migration, its [safe upgrade steps](docs/installation.md#upgrading) still apply. Never discard outstanding [stop-recovery proof](docs/troubleshooting.md#unconfirmed-stop).
 
 See [Installation](docs/installation.md) for permissions, dependencies, SSH server settings, and local-only setups.
 
