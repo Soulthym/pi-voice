@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { mock, test } from "node:test";
 import { DeviceRouter, type ConnectionDevice } from "../src/device-router.js";
 import type { VoiceConfig } from "../src/config.js";
+import { SessionCoordinator } from "../src/session-coordinator.js";
 import { FakeVoiceHost, MockedVoiceWorkerClient, assistant, streamBlockedResponse } from "./helpers/fake-voice-host.js";
 
 class Worker extends MockedVoiceWorkerClient {
@@ -213,7 +214,8 @@ for (const setting of ["device", "input", "output"]) test(`${setting} setters fe
 		await Promise.all([reconnect, stale, latest]);
 		await host.command(setting);
 		assert.match(host.notices.at(-1)!.message, new RegExp(`${setting}: local`));
-		assert.equal(host.notices.slice(notices).filter(n => n.message.includes("Connected to")).length, 1, "only the current setter announces success");
+		assert.equal(host.notices.slice(notices).filter(n => n.message.includes("Connected to")).length,
+			setting === "input" && !fail ? 2 : 1, "only the current setter announces success; input preserves the reconnect");
 		assert.equal(host.notices.slice(notices).some(n => n.message.includes("Stop unconfirmed")), false, "metadata failures are not stop failures");
 	}
 	// Session replacement also invalidates a setter waiting on metadata.
@@ -231,6 +233,19 @@ for (const setting of ["device", "input", "output"]) test(`${setting} setters fe
 	assert.equal(await fs.readFile(process.env.PI_VOICE_CONFIG, "utf8"), snapshot);
 	await host.command(setting);
 	assert.match(host.notices.at(-1)!.message, new RegExp(`${setting}: local`));
+	// Both facades now report a new ID before any session event increments the epoch.
+	const dynamicLookup = Promise.withResolvers<ConnectionDevice>();
+	resolve.mock.mockImplementation(() => dynamicLookup.promise);
+	const dynamicReconnect = host.command("reconnect");
+	await settle();
+	const dynamicSetter = host.command(`${setting} ${setting === "device" ? "auto" : "tcp://localhost:12345"}`);
+	await settle();
+	host.sessionManager.getSessionId = () => "replacement-session";
+	dynamicLookup.resolve({ kind: "intentional_local" });
+	await Promise.all([dynamicReconnect, dynamicSetter]);
+	assert.equal(await fs.readFile(process.env.PI_VOICE_CONFIG, "utf8"), snapshot);
+	await host.command(setting);
+	assert.match(host.notices.at(-1)!.message, new RegExp(`${setting}: local`));
 	const hostname = t.mock.method(os, "hostname");
 	try {
 		for (const name of ["bad\u001b[31mhost", "\u00a0\ufeff", "bad\u202ehost", "x".repeat(129)]) {
@@ -241,4 +256,53 @@ for (const setting of ["device", "input", "output"]) test(`${setting} setters fe
 			assert.ok(!host.notices.at(-1)!.message.includes(name));
 		}
 	} finally { hostname.mock.restore(); syncBuiltinESMExports(); }
+});
+
+
+test("input-only setting preserves replay awaiting ownership and F8 control", async t => {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-input-replay-"));
+	const keys = ["PI_VOICE_CONFIG", "PI_VOICE_COORDINATOR_DIR", "PI_VOICE_DEVICE_DIR"];
+	const old = keys.map(key => process.env[key]);
+	process.env.PI_VOICE_CONFIG = path.join(root, "config.json");
+	process.env.PI_VOICE_COORDINATOR_DIR = path.join(root, "coordinator");
+	process.env.PI_VOICE_DEVICE_DIR = path.join(root, "devices");
+	await fs.writeFile(process.env.PI_VOICE_CONFIG, JSON.stringify({ enabled: true, input: "disabled", output: "local", audioCache: false, timingPreprocessConcurrency: 0 }));
+	t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", async () => ({ kind: "intentional_local" as const }));
+	const host = new FakeVoiceHost(root, "input-replay");
+	host.addMessage("a", null, assistant("Replay survives the input setting."));
+	const index = Worker.instances.length;
+	const acquired = Promise.withResolvers<void>();
+	const started = Promise.withResolvers<void>();
+	const tryAcquire = SessionCoordinator.prototype.tryAcquireSpeech;
+	t.after(async () => {
+		acquired.resolve();
+		await host.shutdown();
+		keys.forEach((key, i) => { if (old[i] === undefined) delete process.env[key]; else process.env[key] = old[i]; });
+		await fs.rm(root, { recursive: true, force: true });
+	});
+	await host.start();
+	const worker = Worker.instances[index] as Worker;
+	t.mock.method(SessionCoordinator.prototype, "tryAcquireSpeech", () => false);
+	t.mock.method(SessionCoordinator.prototype, "forceAcquireSpeech", async function(this: SessionCoordinator) {
+		started.resolve();
+		await acquired.promise;
+		return tryAcquire.call(this);
+	});
+	await host.shortcut("f5");
+	await started.promise;
+	await host.command("input local");
+	assert.equal(JSON.parse(await fs.readFile(process.env.PI_VOICE_CONFIG, "utf8")).input, "local");
+	assert.equal(worker.sent.length, 0);
+	acquired.resolve();
+	await settle();
+	assert.ok(worker.sent.length, "the pending replay must start, not orphan its acquired lease");
+	await fs.stat(path.join(root, "coordinator", "speech.lock", "lease.json"));
+	await host.shortcut("f8");
+	assert.equal(worker.pauses.at(-1), true, "F8 pauses the acquired replay rather than a dead waiting request");
+	await host.shortcut("f8");
+	await settle();
+	assert.equal(worker.pauses.at(-1), false);
+	await host.command("stop");
+	await settle();
+	await assert.rejects(fs.stat(path.join(root, "coordinator", "speech.lock", "lease.json")), { code: "ENOENT" });
 });

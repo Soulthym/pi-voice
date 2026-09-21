@@ -295,7 +295,8 @@ export class FakeVoiceHost {
 	}
 
 	async command(args: string): Promise<void> {
-		await this.commands.get("voice")?.handler(args, this.ctx);
+		// Pi creates a separate command context sharing the dynamic session facade.
+		await this.commands.get("voice")?.handler(args, { ...this.ctx, waitForIdle: async () => {} });
 	}
 
 	async shortcut(key: string): Promise<void> {

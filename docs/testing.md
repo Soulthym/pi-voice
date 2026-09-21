@@ -1,5 +1,11 @@
 # Tests
 
+## Device-setting review follow-up
+
+`npm run check` passed. Full `npm test`: **915 passed, 3 existing TUI compatibility skips, 0 failed (918 total)**. Installed-native key/scroll/marker tests: **307 passed, no skips/failures**.
+
+Command tests now use distinct command/event context wrappers sharing a session facade. Setter regressions cover same-session success, session-epoch replacement and a dynamic session-ID change during a wait; these are synthetic checks, not live SDK identity proof. Input-only changes preserve delayed replay acquisition and usable F8 controls, while capture-stop confirmation still precedes application. Existing output/device rebind and failed-stop checks remain covered. No live configuration, SSH/client session, hardware, inference or provider calls were used. Reload and client-update instructions are unchanged.
+
 ## A keyboard mapping validation
 
 Synthetic validation: `npm run check` passed; full `npm test` **910 passed, 3 existing TUI compatibility skips, 0 failed (913 total)**. Installed-native key/scroll/marker tests **307 passed, no skips/failures**, using inert terminals. `test/native-keys.test.ts` checks actual native F4/F5 byte decoding and default-binding conflicts without loading personal keybindings. Registration tests cover default/custom/disabled microphone bindings, F4 deduplication, custom F5 collision/F11 support and independent F5 replay; mocked capture starts through F4. No new live capture, inference or OS-wide compatibility claim.

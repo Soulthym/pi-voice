@@ -2188,11 +2188,16 @@ export default async function (pi: ExtensionAPI) {
 		return adoption.catch(() => false);
 	};
 
+	let deviceSettingEpoch = 0;
 	// Metadata lookup failures do not block overrides; unconfirmed stops always do.
 	const prepareDeviceSetting = async (ctx: ExtensionContext, stopOutput: boolean): Promise<boolean> => {
+		const settingEpoch = ++deviceSettingEpoch;
+		const sessionEpoch = contextEpoch;
+		// SDK command/event contexts are distinct facades with dynamic session getters.
+		const sessionId = ctx.sessionManager.getSessionId();
 		const inputCancelled = inputInProgress ? cancelActiveInput() : inputStopBarrier;
 		const cancelId = stopOutput ? clearPlaybackTransport() : undefined;
-		const epoch = stopOutput ? playbackRequestEpoch : ++playbackRequestEpoch;
+		const epoch = playbackRequestEpoch;
 		if (stopOutput) {
 			narration.finish();
 			releaseAfterTransportCancellation(cancelId, false, inputCancelled);
@@ -2202,7 +2207,9 @@ export default async function (pi: ExtensionAPI) {
 		if (rebind) await rebind.catch(error => { if (unconfirmedDeviceStops.has(rebind)) throw error; });
 		await inputStopBarrier;
 		await transportStopBarrier;
-		return epoch === playbackRequestEpoch && ctx === activeContext && interactiveVoiceSession;
+		return settingEpoch === deviceSettingEpoch && sessionEpoch === contextEpoch &&
+			sessionId === activeContext?.sessionManager.getSessionId() &&
+			epoch === playbackRequestEpoch && interactiveVoiceSession;
 	};
 
 	const previewPlaybackTarget = (target: PlaybackTarget, explicit = true): void => {

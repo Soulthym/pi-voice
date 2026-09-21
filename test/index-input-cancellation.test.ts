@@ -87,10 +87,12 @@ test("cancelled dictation ignores late decoder progress, PCM and ASR results dur
 	const stopped = Promise.withResolvers<void>();
 	cancel.mock.mockImplementation(() => stopped.promise);
 	const noticeCount = host.notices.length;
+	const beforeStop = await fs.readFile(process.env.PI_VOICE_CONFIG, "utf8");
 	const staleSetter = host.command("input local");
 	await settle();
 	const latestSetter = host.command("input disabled");
 	await settle();
+	assert.equal(await fs.readFile(process.env.PI_VOICE_CONFIG, "utf8"), beforeStop, "input must not apply before confirmed capture stop");
 	stopped.resolve();
 	await Promise.all([staleSetter, latestSetter]);
 	assert.equal(JSON.parse(await fs.readFile(process.env.PI_VOICE_CONFIG, "utf8")).input, "disabled");
