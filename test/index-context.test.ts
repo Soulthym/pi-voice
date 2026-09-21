@@ -108,7 +108,7 @@ test("paused sentence navigation uses cached code units without timings or new m
 		modelResponse(requestText(request).includes("fail()") ? "" : "It calls run. The call has no arguments."));
 	t.after(async () => { await host.shutdown().catch(() => {}); restoreWorker(); VoiceWorkerClient.prototype.setPlaybackPaused = originalPause; await restoreEnvironment(); });
 	host.addMessage("answer", null, assistant("Intro.\n```ts\nrun();\n```\nOutro."));
-	await host.start(); await host.shortcut("f11"); await settle();
+	await host.start(); await host.shortcut("f5"); await settle();
 	assert.equal(host.modelRequests.length, 1);
 	await host.shortcut("f8");
 	assert.equal(pauses.at(-1), true);
@@ -152,7 +152,7 @@ test("live, rendering, replay, and timing share one contextual description reque
 	await streamCompletedResponse(host, "assistant-1", "user-1", first);
 	assert.equal(host.modelRequests.length, 1);
 	assert.match(host.render(first), /contextual description/);
-	await host.shortcut("f11");
+	await host.shortcut("f5");
 	await settle();
 	assert.equal(host.modelRequests.length, 1);
 
@@ -164,7 +164,7 @@ test("live, rendering, replay, and timing share one contextual description reque
 	host.addMessage("later-user", "assistant-2", user("A later turn must not change either historical key."));
 	assert.match(host.render(first), /contextual description/);
 	assert.match(host.render(second), /contextual description/);
-	await host.shortcut("f11");
+	await host.shortcut("f5");
 	await settle();
 	assert.equal(host.modelRequests.length, 2);
 

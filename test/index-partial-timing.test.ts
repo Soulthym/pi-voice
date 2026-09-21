@@ -63,7 +63,7 @@ test("F9 does not follow transcript tail from an incomplete latest timing prefix
 	const worker = MockedVoiceWorkerClient.instances.find(instance => instance.sent.length > 0);
 	assert.ok(worker);
 	const replayStart = worker.sent.length;
-	await host.shortcut("f11");
+	await host.shortcut("f5");
 	const replaySegments = worker.sent.slice(replayStart) as Array<{
 		utterance: number;
 		segmentId: number;

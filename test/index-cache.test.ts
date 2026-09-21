@@ -35,7 +35,7 @@ test("cold replay adopts the resolved plan without pausing on later settings or 
 	const response = new Promise<any>(done => { resolve = done; });
 	const host = await setup(t, 0, () => response);
 	host.addMessage("answer", null, assistant("Before.\n```ts\nrun();\n```\nAfter."));
-	await host.start(); await host.shortcut("f11"); await settle();
+	await host.start(); await host.shortcut("f5"); await settle();
 	assert.equal(host.modelRequests.length, 1);
 	resolve(assistant("A contextual description.")); await settle();
 	const worker = MockedVoiceWorkerClient.instances.find(worker => worker.sent.length)!;
@@ -48,7 +48,7 @@ test("cold replay adopts the resolved plan without pausing on later settings or 
 	sent.forEach((segment, i) => worker.emit({ type: "segment-audio", utterance, segmentId: segment.segmentId, start: i, duration: 1 }));
 	worker.emit({ type: "idle", utterance }); await settle();
 	assert.ok(host.entries.some(entry => entry.customType === "pi-voice.playback-timing"), "resolved capture remains persistable");
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	const beforeDirty = worker.pauses.length;
 	await host.command("speed 1.2"); await settle();
 	assert.ok(worker.pauses.slice(beforeDirty).includes(true), "changing an already-used render still pauses");
@@ -72,7 +72,7 @@ test("local context-overflow fallback has a stable identity and retains prose ti
 	assert.equal(snapshots().length, 1);
 	const count = measured.length;
 	await host.emit("agent_settled", {}); await host.command("autoscroll off"); await settle();
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	assert.equal(measured.length, count);
 	assert.equal(host.modelRequests.length, 0);
 	assert.equal(host.notices.filter(notice => notice.message.includes("insufficient context")).length, 1);
@@ -175,7 +175,7 @@ for (const joiner of ["replay", "live"] as const) {
 		host.addMessage("answer", null, assistant(text));
 		await host.start(); await settle();
 		assert.equal(attempts, 1, "historical request owns the pending key");
-		if (joiner === "replay") await host.shortcut("f11");
+		if (joiner === "replay") await host.shortcut("f5");
 		else await streamCompletedResponse(host, "live-answer", "answer", text);
 		await settle();
 		assert.equal(attempts, 1, "uncharged request joins existing generation");
@@ -188,7 +188,7 @@ for (const joiner of ["replay", "live"] as const) {
 		assert.ok(MockedVoiceWorkerClient.instances.some(worker => JSON.stringify(worker.sent).includes("Runs the requested operation")));
 		await host.command("code-budget");
 		assert.match(host.notices.at(-1)!.message, /budget=1; used=1;/);
-		await host.emit("agent_settled", {}); await host.shortcut("f11"); await settle();
+		await host.emit("agent_settled", {}); await host.shortcut("f5"); await settle();
 		assert.equal(attempts, 2, "subsequent replay and backfill reuse the successful plan");
 	});
 }

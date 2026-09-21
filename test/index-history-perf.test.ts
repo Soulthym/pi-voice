@@ -78,7 +78,7 @@ for (const scenario of ["f6", "f9", "timing", "aborted", "error", "prefix", "col
 			let previewIdentities: number | undefined;
 			mock.method(host.tui, "requestRender", () => { previewIdentities ??= memos.length; });
 			const start = performance.now();
-			await host.shortcut("f11");
+			await host.shortcut("f5");
 			const handlerMs = performance.now() - start;
 			assert.equal(previewIdentities, 0, "immediate preview must not resolve the whole history");
 			assert.ok(memos.length < 500, "handler returns before cold history catch-up completes");
@@ -88,11 +88,11 @@ for (const scenario of ["f6", "f9", "timing", "aborted", "error", "prefix", "col
 			assert.ok(memos.length >= 500, "catch-up resolves all canonical source identities");
 			assert.ok(memos.every(memo => !memo.legacy), "empty/new caches never serialize legacy context");
 			const warmed = memos.length;
-			await host.shortcut("f11");
+			await host.shortcut("f5");
 			for (let i = 0; i < 80; i++) await tick();
 			assert.ok(memos.length <= warmed + 1, "warm completed identities are reused");
 			assert.ok(maxGap < 100, `cold catch-up blocked heartbeat for ${maxGap.toFixed(1)}ms`);
-			t.diagnostic(`500 messages: F11 handler ${handlerMs.toFixed(1)}ms; max heartbeat gap ${maxGap.toFixed(1)}ms`);
+			t.diagnostic(`500 messages: F5 handler ${handlerMs.toFixed(1)}ms; max heartbeat gap ${maxGap.toFixed(1)}ms`);
 			return;
 		}
 		const texts = Array.from({ length: 30 }, (_, i) => scenario === "prefix"
@@ -112,16 +112,16 @@ for (const scenario of ["f6", "f9", "timing", "aborted", "error", "prefix", "col
 			assert.equal(memos.length, texts.length);
 			assert.ok(memos.every(memo => memo.legacySettings && memo.legacySettings.length <= 64),
 				"each block retains only a compact runtime-prefix fingerprint");
-			await host.shortcut("f11");
+			await host.shortcut("f5");
 			const old = new Map(memos.map(memo => [memo.identity, { ...memo }]));
 			prompt += "changed";
-			await host.shortcut("f11");
+			await host.shortcut("f5");
 			for (const text of texts) host.render(text);
 			assert.ok(memos.some(memo => memo.legacySettings !== old.get(memo.identity)?.legacySettings), "runtime prefix changes invalidate the memo");
 			assert.deepEqual(memos.map(memo => memo.legacy), memos.map(memo => old.get(memo.identity)?.legacy), "block-only legacy keys retain compatibility");
 			assert.ok(memos.every(memo => memo.legacy?.every(key => /^[a-f0-9]{64}$/.test(key))), "legacy contexts retain only hashes");
 			host.ctx.model = { ...host.ctx.model, id: "changed-model" };
-			await host.shortcut("f11");
+			await host.shortcut("f5");
 			for (const text of texts) host.render(text);
 			assert.ok(memos.some(memo => JSON.stringify(memo.legacy) !== JSON.stringify(old.get(memo.identity)?.legacy)), "model changes refresh legacy keys");
 			assert.equal(host.modelRequests.length, 0);
@@ -137,7 +137,7 @@ for (const scenario of ["f6", "f9", "timing", "aborted", "error", "prefix", "col
 			assert.equal(measure.mock.callCount(), 0, "cancelled history preparation must not start timing workers");
 			return;
 		}
-		const older = host.shortcut("f11");
+		const older = host.shortcut("f5");
 		await tick();
 		const newer = host.shortcut(scenario);
 		await Promise.all([older, newer]);

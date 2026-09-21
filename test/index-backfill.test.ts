@@ -196,7 +196,7 @@ test("backfill budget caps historical work while live descriptions stay free", a
 	// Ordinary sweeps, replay and setting changes cannot replenish spent requests.
 	await host.emit("agent_settled", {});
 	await host.command("speed 1.1");
-	await host.shortcut("f11");
+	await host.shortcut("f5");
 	await settle();
 	assert.equal(host.modelRequests.length, requestsBeforeQueries);
 	await host.command("code-budget");

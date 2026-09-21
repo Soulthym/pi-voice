@@ -66,7 +66,7 @@ for (const count of [0, 1, 3]) for (const playing of [false, true]) test(`explic
 	}
 	await host.start();
 	if (count) {
-		await host.shortcut("f11"); await settle();
+		await host.shortcut("f5"); await settle();
 		if (!playing) await host.shortcut("f8");
 	}
 	await host.shortcut("f10"); await settle();
@@ -88,7 +88,7 @@ for (const paused of [false, true]) test(`mixed chapter/sentence presses share T
 	const host = await setup(t);
 	host.addMessage("A", null, assistant("Older first. Older last."));
 	host.addMessage("B", null, assistant("Newest first. Newest second.\nNewest last."));
-	await host.start(); await host.shortcut("f11"); await settle();
+	await host.start(); await host.shortcut("f5"); await settle();
 	if (paused) await host.shortcut("f8");
 	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
 	await host.shortcut("f10"); await settle();
@@ -126,7 +126,7 @@ for (const manual of [false, true]) test(`initial marker retry respects manual s
 	const lines: Array<string | (() => string)> = Array.from({ length: 300 }, (_, i) => `line ${i}`);
 	host.scrollView.setDocument(lines, 40);
 	await host.command("bottom");
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	assert.equal(host.scrollView.scrollTop, 260, "no marker has been rendered yet");
 	if (manual) host.scrollView.manualScrollTo(50);
 	lines[100] = () => host.render("First sentence. Second sentence.");
@@ -158,7 +158,7 @@ for (const key of ["f7", "f9"]) for (const changedCount of [false, true]) {
 	test(`${key} ignores discarded branch cursors with ${changedCount ? "different" : "equal"} message counts`, async t => {
 		const host = await setup(t);
 		host.addMessage("discarded", null, assistant("Discarded first. Discarded second."));
-		await host.start(); await host.shortcut("f11"); await settle();
+		await host.start(); await host.shortcut("f5"); await settle();
 		const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
 		const before = worker.sent.length;
 		host.entries.splice(host.entries.findIndex(entry => entry.id === "discarded"), 1);
@@ -177,7 +177,7 @@ for (const resumeDuringPreparation of [false, true]) test(`F8 retains pending se
 	const host = await setup(t);
 	const text = "First sentence. Second sentence. Third sentence.";
 	host.addMessage("answer", null, assistant(text));
-	await host.start(); await host.shortcut("f11"); await settle();
+	await host.start(); await host.shortcut("f5"); await settle();
 	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
 	const before = worker.sent.length;
 	const pending = host.shortcut("f9");
@@ -200,7 +200,7 @@ test("sentence navigation resolves known absolute timing after the branch grows"
 	t.mock.method(MockedVoiceWorkerClient.prototype, "measureSegment", async () => 2);
 	const host = await setup(t);
 	host.addMessage("answer", null, assistant("First sentence. Second sentence. Third sentence."));
-	await host.start(); await host.shortcut("f11"); await settle();
+	await host.start(); await host.shortcut("f5"); await settle();
 	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
 	const full = worker.sent as Array<{ text: string; utterance: number; segmentId: number }>;
 	full.forEach((segment, i) => worker.emit({ type: "segment-audio", utterance: segment.utterance, segmentId: segment.segmentId, start: i * 2, duration: 2 }));
@@ -224,7 +224,7 @@ test("cached description sentence previews carry description offsets before acqu
 	t.after(() => { cached.mock.restore(); acquire.mock.restore(); force.mock.restore(); });
 	const text = "```js\nconst x = 1;\n```";
 	host.addMessage("answer", null, assistant(text));
-	await host.start(); await host.shortcut("f11"); await settle();
+	await host.start(); await host.shortcut("f5"); await settle();
 	assert.ok(host.render(text).includes(`${NARRATION_ACTIVE_MARKER}First`), "first description word, not raw fence");
 	await host.shortcut("f9"); await settle();
 	assert.ok(host.render(text).includes(`${NARRATION_ACTIVE_MARKER}Second`), "skipUnits maps to the second description sentence");
@@ -235,7 +235,7 @@ test("cached description sentence previews carry description offsets before acqu
 test("paused buffered idle records timing without advancing sentence selection", async t => {
 	const host = await setup(t);
 	host.addMessage("answer", null, assistant("First sentence. Second sentence. Third sentence."));
-	await host.start(); await host.shortcut("f11"); await settle();
+	await host.start(); await host.shortcut("f5"); await settle();
 	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
 	const segments = worker.sent as Array<{ text: string; utterance: number; segmentId: number }>;
 	segments.forEach((segment, i) => worker.emit({ type: "segment-audio", utterance: segment.utterance,
@@ -250,14 +250,14 @@ test("paused buffered idle records timing without advancing sentence selection",
 	assert.equal(worker.pauses.at(-1), true);
 });
 
-for (const duringPreparation of [false, true]) for (const latest of ["f6", "stop"]) test(`overlapping cold F11 cannot supersede ${latest} (preparation started: ${duringPreparation})`, async t => {
+for (const duringPreparation of [false, true]) for (const latest of ["f6", "stop"]) test(`overlapping cold F5 cannot supersede ${latest} (preparation started: ${duringPreparation})`, async t => {
 	const host = await setup(t);
 	await host.start();
 	for (let i = 0; i < 40; i++) host.addMessage(`cold-${i}`, null, assistant(`Answer ${i}.\n\`\`\`js\nx(${i});\n\`\`\``));
 	let clock = 0;
 	t.mock.method(performance, "now", () => clock += 9);
 	const worker = MockedVoiceWorkerClient.instances.at(-1)!;
-	const replay = host.shortcut("f11");
+	const replay = host.shortcut("f5");
 	if (duringPreparation) await replay;
 	const newer = latest === "stop" ? host.command("stop") : host.shortcut(latest);
 	await Promise.all([replay, newer]);
@@ -271,14 +271,14 @@ for (const duringPreparation of [false, true]) for (const latest of ["f6", "stop
 	}
 });
 
-for (const latest of ["f6", "stop"]) test(`F11 identity wait cannot overwrite newer ${latest}`, async t => {
+for (const latest of ["f6", "stop"]) test(`F5 identity wait cannot overwrite newer ${latest}`, async t => {
 	const host = await setup(t, "auto");
 	const workerIndex = MockedVoiceWorkerClient.instances.length;
 	for (const id of ["A", "B", "C"]) host.addMessage(id, null, assistant(`${id} sentence.`));
 	await host.start();
 	const identity = Promise.withResolvers<ConnectionDevice>();
 	const resolve = t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", () => identity.promise);
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	assert.equal(resolve.mock.callCount(), 1);
 	if (latest === "stop") await host.command("stop");
 	else await host.shortcut("f6");
@@ -289,7 +289,7 @@ for (const latest of ["f6", "stop"]) test(`F11 identity wait cannot overwrite ne
 	else assert.deepEqual(sent.map(segment => segment.text).filter(text => !text.startsWith("Project ")), ["B sentence."], JSON.stringify(host.notices));
 });
 
-for (const latest of ["f6", "stop"]) test(`late F11 acquisition failure cannot retire newer ${latest}`, async t => {
+for (const latest of ["f6", "stop"]) test(`late F5 acquisition failure cannot retire newer ${latest}`, async t => {
 	const host = await setup(t);
 	const workerIndex = MockedVoiceWorkerClient.instances.length;
 	for (const id of ["A", "B", "C"]) host.addMessage(id, null, assistant(`${id} sentence.`));
@@ -297,7 +297,7 @@ for (const latest of ["f6", "stop"]) test(`late F11 acquisition failure cannot r
 	const acquisition = Promise.withResolvers<boolean>();
 	const acquire = t.mock.method(SessionCoordinator.prototype, "tryAcquireSpeech", () => false);
 	const force = t.mock.method(SessionCoordinator.prototype, "forceAcquireSpeech", () => acquisition.promise);
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	assert.equal(force.mock.callCount(), 1);
 	acquire.mock.restore();
 	if (latest === "stop") await host.command("stop");
@@ -339,7 +339,7 @@ test("F8 acquisition retry retains replay-from-Tail intent", async t => {
 	const acquire = t.mock.method(SessionCoordinator.prototype, "tryAcquireSpeech", () => false);
 	const gate = Promise.withResolvers<boolean>();
 	const force = t.mock.method(SessionCoordinator.prototype, "forceAcquireSpeech", () => gate.promise);
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	assert.equal(force.mock.callCount(), 1);
 	gate.resolve(false); await settle();
 	acquire.mock.restore(); force.mock.restore();
@@ -353,7 +353,7 @@ test("F8 acquisition retry retains replay-from-Tail intent", async t => {
 	assert.equal(host.scrollView.isFollowingEnd, true);
 });
 
-for (const [key, live] of [["f11", false], ["f6", false], ["f9", false], ["f11", true]] as const) test(`${key} handles microphone stop rejection without abandoning the ownership fence (live: ${live})`, async t => {
+for (const [key, live] of [["f5", false], ["f6", false], ["f9", false], ["f5", true]] as const) test(`${key} handles microphone stop rejection without abandoning the ownership fence (live: ${live})`, async t => {
 	const host = await setup(t);
 	host.addMessage("answer", null, assistant("First sentence. Second sentence."));
 	await host.start(); await host.command("input local");
@@ -508,7 +508,7 @@ for (const finalize of [false, true]) test(`live Tail retains partial source thr
 	}
 });
 
-test("streaming F11 replays the prefix, continues future deltas, ticks and canonical ordinal", async t => {
+test("streaming F5 replays the prefix, continues future deltas, ticks and canonical ordinal", async t => {
 	const host = await setup(t);
 	host.addMessage("old", null, assistant("Earlier answer."));
 	await host.start();
@@ -521,7 +521,7 @@ test("streaming F11 replays the prefix, continues future deltas, ticks and canon
 	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
 	const segments = worker.sent as Array<{ text: string; utterance: number; segmentId: number }>;
 	const before = segments.length;
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	assert.deepEqual(segments.slice(before).map(segment => segment.text), ["First sentence.", "Second sentence."]);
 	const second = segments.findLast(segment => segment.text === "Second sentence.")!;
 	segments.forEach((segment, i) => worker.emit({ type: "segment-audio", utterance: segment.utterance, segmentId: segment.segmentId, start: i * 2, duration: 2 }));
@@ -538,7 +538,7 @@ test("streaming F11 replays the prefix, continues future deltas, ticks and canon
 	assert.deepEqual(segments.map(segment => segment.text).filter(text => !text.startsWith("Project ")),
 		["First sentence.", "Second sentence.", "First sentence.", "Second sentence.", "Third sentence."]);
 	assert.match(host.widgetLines()?.join(" ") ?? "", /message 2\/2/);
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	assert.equal(segments.filter(segment => segment.text === "First sentence.").length, 3);
 });
 
@@ -546,7 +546,7 @@ test("live marker survives deltas and source finalization, but paused selection 
 	const host = await setup(t);
 	host.addMessage("old", null, assistant("Earlier answer."));
 	await host.start();
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	const markerIn = (text: string) => {
 		const marker = host.render(text).match(/\x1b_pi-voice-[a-f0-9]+\x1b\\\u2063\u200b\u2063\u200c\u2063/)?.[0];
 		assert.ok(marker);
@@ -595,7 +595,7 @@ test("live marker survives deltas and source finalization, but paused selection 
 	assert.notEqual(selectedMarker, liveMarker);
 	assert.equal(worker.pauses.at(-1), true);
 	assertSource(selectedMarker);
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	const replayMarker = markerIn(text);
 	assert.notEqual(replayMarker, selectedMarker);
 	assert.notEqual(replayMarker, liveMarker);
@@ -615,7 +615,7 @@ for (const beforeDelta of [true, false]) test(`live replay retains unfinished se
 		await settle();
 	};
 	if (!beforeDelta) await delta("An unfinished");
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	assert.equal((worker.sent as Array<{ text: string }>).filter(segment => !segment.text.startsWith("Project ")).length, 0, "replay must not flush an unfinished prefix");
 	await delta(beforeDelta ? "An unfinished sentence. " : " sentence. ");
 	assert.deepEqual((worker.sent as Array<{ text: string }>).map(segment => segment.text).filter(text => !text.startsWith("Project ")), ["An unfinished sentence."]);
@@ -639,7 +639,7 @@ for (const finalize of [false, true]) test(`live replay refreshes after device w
 	const before = worker.sent.length;
 	const gate = Promise.withResolvers<ConnectionDevice>();
 	const resolve = t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", () => gate.promise);
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	assert.equal(resolve.mock.callCount(), 1, `explicit live replay repins the connection: ${JSON.stringify(host.notices)} ${host.widgetLines()?.join(" ")}`);
 	partial.content[0].thinking += "More thought. ";
 	await host.emit("message_update", { message: structuredClone(partial), assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "More thought. " } });
@@ -685,7 +685,7 @@ for (const latest of ["stop", "f6"]) test(`pending live replay yields to ${lates
 	const before = worker.sent.length;
 	const gate = Promise.withResolvers<ConnectionDevice>();
 	t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", () => gate.promise);
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	if (latest === "stop") await host.command("stop"); else await host.shortcut("f6");
 	gate.resolve({ kind: "intentional_local" }); await settle();
 	const complete = { ...partial, stopReason: "stop", content: [...partial.content, { type: "text", text: "Future sentence. " }] };
@@ -710,7 +710,7 @@ test("live replay survives finalization during cold preparation without automati
 	// Every historical entry yields, leaving replay preparation pending through turn_end.
 	let clock = 0;
 	t.mock.method(performance, "now", () => clock += 9);
-	await host.shortcut("f11");
+	await host.shortcut("f5");
 	const complete = { ...partial, stopReason: "stop", content: [...partial.content, { type: "text", text: "Later block." }] };
 	await host.emit("message_update", { message: complete, assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: "Later block." } });
 	await host.emit("message_end", { message: complete });
@@ -732,7 +732,7 @@ test("failed live acquisition retry retains continuation after canonical finaliz
 	const owns = t.mock.method(SessionCoordinator.prototype, "ownsSpeech", () => false);
 	const acquire = t.mock.method(SessionCoordinator.prototype, "tryAcquireSpeech", () => false);
 	const force = t.mock.method(SessionCoordinator.prototype, "forceAcquireSpeech", async () => false);
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	assert.match(host.notices.at(-1)?.message ?? "", /Replay paused/);
 	const complete = { ...partial, stopReason: "stop", content: [...partial.content, { type: "text", text: "Final block." }] };
 	await host.emit("message_update", { message: complete, assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: "Final block." } });
@@ -760,7 +760,7 @@ test("replaying an earlier live part continues later blocks finalized during pre
 	const before = worker.sent.length;
 	const gate = Promise.withResolvers<ConnectionDevice>();
 	t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", () => gate.promise);
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	partial.content[1].text += " sentence. ";
 	await host.emit("message_update", { message: structuredClone(partial), assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: " sentence. " } });
 	partial.content.push({ type: "text", text: "Third part." });
@@ -786,7 +786,7 @@ test("live replay refreshes deltas received while the old sink cancellation is u
 	const worker = MockedVoiceWorkerClient.instances.at(-1)!;
 	const before = worker.sent.length;
 	const cancel = t.mock.method(worker, "cancel", () => 501 as never);
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	assert.equal(cancel.mock.callCount(), 1);
 	partial.content[0].text += "Middle sentence. ";
 	await host.emit("message_update", { message: structuredClone(partial), assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Middle sentence. " } });
@@ -808,7 +808,7 @@ test("pending live replay keeps its source IDs across the next tool turn", async
 	const before = worker.sent.length;
 	const gate = Promise.withResolvers<ConnectionDevice>();
 	t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", () => gate.promise);
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	const complete = { ...partial, stopReason: "toolUse", content: [...partial.content, { type: "text", text: "Old final." }] };
 	await host.emit("message_update", { message: complete, assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: "Old final." } });
 	await host.emit("message_end", { message: complete });
@@ -864,7 +864,7 @@ for (const wait of ["device", "history"]) for (const scenario of ["partial", "co
 			return undefined;
 		}) as typeof setImmediate);
 	}
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	assert.ok(entered, "replay must be held at the async gate");
 	const old = { ...partial, stopReason: "toolUse", content: [...partial.content, { type: "text", text: "Old final." }] };
 	await host.emit("message_update", { message: old, assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: "Old final." } });
@@ -929,13 +929,13 @@ for (const wait of ["device", "history"]) for (const scenario of ["partial", "co
 	if (scenario === "third-completed") assert.equal(cleared.mock.callCount(), 0, "draining B must not clear completed C's waiting source");
 	if (!completed) {
 		assert.ok(host.notices.some(notice => /Response waiting/.test(notice.message)), "displaced partial response must retain completion attention");
-		await host.shortcut("f11"); await settle();
+		await host.shortcut("f5"); await settle();
 	}
 	assert.deepEqual(spoken(), ["Old prefix", "Old final.", "New prefix completed."]);
 	await idle();
 	assert.deepEqual(spoken(), ["Old prefix", "Old final.", "New prefix completed."], "neither source may replay twice");
 	if (scenario === "third-completed") {
-		await host.shortcut("f11"); await settle();
+		await host.shortcut("f5"); await settle();
 		assert.equal(cleared.mock.callCount(), 1, "handling C clears its waiting source");
 		await idle();
 		assert.deepEqual(spoken(), ["Old prefix", "Old final.", "New prefix completed.", "New prefix completed."]);
@@ -947,7 +947,7 @@ for (const wait of ["device", "history"]) for (const scenario of ["partial", "co
 		await host.emit("message_end", { message: third });
 		await host.emit("turn_end", { message: third });
 		assert.ok(host.notices.some(notice => /Response waiting/.test(notice.message)), "queued playback must preserve the latest partial source's attention");
-		await host.shortcut("f11"); await settle();
+		await host.shortcut("f5"); await settle();
 		await idle();
 		assert.deepEqual(spoken(), ["Old prefix", "Old final.", "New prefix completed.", "Third prefix completed."]);
 	}
@@ -963,7 +963,7 @@ for (const stopReason of ["aborted", "error"]) test(`pending live replay is reti
 	const before = worker.sent.length;
 	const gate = Promise.withResolvers<ConnectionDevice>();
 	t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", () => gate.promise);
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	const complete = { ...partial, stopReason };
 	await host.emit("message_end", { message: complete });
 	await host.emit("turn_end", { message: complete });
@@ -1097,7 +1097,7 @@ test("live message navigation skips markup-only blocks", async t => {
 	assert.equal((worker.sent.at(-1) as { text: string }).text, "Last sentence.");
 });
 
- test("F11 explicitly resumes while paused navigation awaits cancellation", async t => {
+ test("F5 explicitly resumes while paused navigation awaits cancellation", async t => {
  const host = await setup(t);
  await host.start();
  const message = assistant("First sentence. Second sentence. Third sentence. ", "pending");
@@ -1107,7 +1107,7 @@ test("live message navigation skips markup-only blocks", async t => {
  await host.shortcut("f8");
  const cancel = t.mock.method(worker, "cancel", () => 702 as never);
  void host.shortcut("f9"); await settle();
- await host.shortcut("f11"); await settle();
+ await host.shortcut("f5"); await settle();
  cancel.mock.restore();
  worker.emit({ type: "idle", cancelId: 702 }); await settle();
  assert.equal(worker.pauses.at(-1), false);

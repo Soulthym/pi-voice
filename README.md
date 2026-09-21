@@ -125,13 +125,13 @@ See [Configuration](docs/configuration.md) for valid values and setting behavior
 
 | Key | Action |
 | --- | --- |
-| `Alt+M` or `F5` | Start/stop microphone dictation |
+| `Alt+M` or `F4` | Start/stop microphone dictation |
+| `F5` (↺) | Replay this project's selected/waiting response; never switch projects |
 | `F6` | Previous assistant message |
 | `F7` | Previous sentence or literal-newline unit |
 | `F8` | Pause/resume audio and highlighting |
 | `F9` | Next sentence/newline unit; cross messages, then enter playback Tail |
 | `F10` | Next assistant message; after the latest, enter playback Tail |
-| `F11` (↺) | Replay this project's selected/waiting response; never switch projects |
 | `Alt+V` | Re-anchor the current narrated position |
 | `Alt+T` | Pin to and follow the transcript tail |
 | `Ctrl+Shift+V` | Toggle spoken output |
@@ -162,9 +162,9 @@ Speak after pressing the microphone key. Recording normally stops after about 1.
 
 ### Termux extended keyboard
 
-`/voice attention` explicitly attends the oldest eligible waiting session using the requesting terminal's fresh device pin, falling back to this project's replay when current/none waiting. F11 always stays in this project. Handoff waits for confirmed stop; stop/newer playback actions cancel pending requests.
+`/voice attention` explicitly attends the oldest eligible waiting session using the requesting terminal's fresh device pin, falling back to this project's replay when current/none waiting. F5 always stays in this project. Handoff waits for confirmed stop; stop/newer playback actions cancel pending requests.
 
-Termux can expose one-tap microphone, message navigation, sentence/newline navigation, pause/resume, and replay controls through an optional F5–F11 extra-key row.
+Termux can expose one-tap microphone, message navigation, sentence/newline navigation, pause/resume, and replay controls through an optional F4–F10 extra-key row.
 
 [![Termux extended keyboard row for Pi Voice playback controls](docs/assets/pi-voice-ssh-termux-extended-kb.jpg)](docs/usage.md#optional-termux-function-key-row)
 

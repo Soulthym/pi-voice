@@ -68,7 +68,7 @@ test("setter queries reflect live settings, automatic routing and reload-only sh
 		["audio-cache", "off", "off"], ["audio-bitrate", "64", "64 kbps"],
 		["output", "tcp://example.invalid:1234", "tcp://example.invalid:1234 (explicit)"],
 		["input", "disabled", "disabled (explicit)"],
-		["shortcut", "disabled", "alt+m (also f5); configured=disabled (run /reload to apply)"],
+		["shortcut", "disabled", "alt+m (also f4); configured=disabled (run /reload to apply)"],
 		["submit", "auto", "auto"], ["edit", "append", "append"],
 		["device", "local", "local → local"],
 	];
@@ -86,7 +86,7 @@ test("setter queries reflect live settings, automatic routing and reload-only sh
 		assert.ok(notice.message.startsWith("Voice · "));
 		assert.ok(!notice.message.includes("\x1b"), "reports remain plain text without a theme");
 		if (command === "help") {
-			assert.match(notice.message, /↺ F11 replay this project/);
+			assert.match(notice.message, /↺ F5 replay this project/);
 			assert.match(notice.message, /⏯ F8 pause\/resume/);
 			assert.match(notice.message, /⏮\/⏭ F6\/F10 previous\/next message/);
 			assert.match(notice.message, /alt\+v: follow narrated position/);
@@ -118,18 +118,30 @@ test("setter queries reflect live settings, automatic routing and reload-only sh
 	await query("edit-model", "edit-model: current → test/changed");
 
 	for (const [settings, expected, microphoneKeys] of [
-		[{ talkShortcut: "alt+t" }, "f5", ["f5"]],
-		[{ talkShortcut: "f5" }, "f5", ["f5"]],
-		[{ talkShortcut: "alt+m", scrollToShortcut: "f5" }, "alt+m", ["alt+m"]],
-		[{ talkShortcut: "f5", scrollBottomShortcut: "f5" }, "none", []],
-		[{ talkShortcut: "alt+t", scrollToShortcut: "f5" }, "none", []],
+		[{}, "alt+m (also f4)", ["alt+m", "f4"]],
+		[{ talkShortcut: "ctrl+shift+m" }, "ctrl+shift+m (also f4)", ["ctrl+shift+m", "f4"]],
+		[{ talkShortcut: "f11" }, "f11 (also f4)", ["f11", "f4"]],
+		[{ talkShortcut: "f5" }, "f5 (also f4)", ["f5", "f4"]],
+		[{ talkShortcut: "alt+t" }, "f4", ["f4"]],
+		[{ talkShortcut: "f4" }, "f4", ["f4"]],
+		[{ talkShortcut: "alt+m", scrollToShortcut: "f4" }, "alt+m", ["alt+m"]],
+		[{ talkShortcut: "f4", scrollBottomShortcut: "f4" }, "none", []],
+		[{ talkShortcut: "alt+t", scrollToShortcut: "f4" }, "none", []],
 		[{ talkShortcut: "disabled" }, "disabled", []],
-	] as const) {
+	] as Array<[Record<string, string>, string, string[]]>) {
 		await t.test(`shortcut collisions: ${JSON.stringify(settings)}`, async () => {
-			await fs.writeFile(env.PI_VOICE_CONFIG, JSON.stringify(settings));
+			await fs.writeFile(env.PI_VOICE_CONFIG, JSON.stringify({ enabled: true, ...settings }));
 			const collisionHost = new FakeVoiceHost(path.join(root, "project"), "collisions");
+			const registrations = mock.method(collisionHost.api, "registerShortcut");
 			try {
 				await collisionHost.start();
+				assert.equal(registrations.mock.calls.filter((call: { arguments: unknown[] }) => call.arguments[0] === "f4").length,
+					settings.talkShortcut === "disabled" ? 0 : settings.scrollToShortcut === "f4" || settings.scrollBottomShortcut === "f4" ? 2 : 1);
+				assert.equal(collisionHost.shortcuts.has("f11"), settings.talkShortcut === "f11");
+				if (settings.talkShortcut !== "f5") {
+					await collisionHost.shortcut("f5");
+					assert.match(collisionHost.notices.at(-1)!.message, /Replay unavailable/);
+				}
 				// Inspect the final host map, not merely the configured registration requests.
 				assert.deepEqual([...collisionHost.shortcuts].filter(([, shortcut]) =>
 					(shortcut as { description?: string }).description === "🎙 Start or stop dictation",

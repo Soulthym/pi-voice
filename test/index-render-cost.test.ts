@@ -118,7 +118,7 @@ test("completed conversation keys survive replay, settling and custom leaves; co
 	const sentCount = () => MockedVoiceWorkerClient.instances.reduce((sum, worker) => sum + worker.sent.length, 0);
 	const replay = async () => {
 		const before = sentCount();
-		await host.shortcut("f11");
+		await host.shortcut("f5");
 		// The shortcut does not await preparation. Observe actual mocked transport work.
 		for (let i = 0; i < 2000 && sentCount() === before; i++) {
 			await new Promise(resolve => setImmediate(resolve));

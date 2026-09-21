@@ -1,5 +1,12 @@
 # Pi Voice — implemented agreements and live-validation handoff
 
+## Current A keyboard handoff
+
+- Current mapping: Alt+M/custom mic unchanged; automatic F4 unless `talkShortcut=disabled`, deduplicating custom F4. F5 own-project replay remains registered with mic shortcuts disabled. No automatic F11; custom F11 allowed; existing collision rules retained. Desktop order: F4 mic, F5 replay, F6 previous message, F7 previous sentence, F8 pause/resume, F9 next sentence, F10 next message.
+- Termux: `F4🎙 | F6⏮ | F7↶ | F8⏯ | F9↷ | F10⏭ | F5↺`; manually edit local phone `termux.properties`, no generator. Historical F11/F5 audit references below retain their original meaning.
+- **User LIVE evidence now recorded:** Linux Mint capture/transcription succeeded; earlier pending-confirmation statements are historical. This is user-reported prior success, not a new live test of A or proof of the original failure cause.
+- No live restart, provider/inference call, user settings/cache, ISSUES or archive edits. Apply host changes with `/reload` when the user chooses; update the optional Termux row locally. Device-name support also requires updating client wrappers together as documented in `docs/installation.md`. OS/terminal/Fn and custom-binding conflicts are not ruled out by native default checks.
+
 ## Desktop SSH recovery — 2026-09-21
 
 - Recovered and inspected the interrupted client change and all four harness files before editing. Preserved `ISSUES.md` and historical notes. Identified the three prior orphan test servers by exact container names/images, `/work/sshd_config`, mount inspection and matching init-parent PIDs; removed only owned test resources. No signals to user sshd 1266, live SSH 1818336/1818339, or parent Pi 1097452.

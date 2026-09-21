@@ -98,7 +98,7 @@ test("failed descriptions render retry errors, stay silent, and recover via code
 	providerHealthy = true;
 	const before = calls.length;
 	const beforeReplay = spoken;
-	await host.shortcut("f11");
+	await host.shortcut("f5");
 	for (let index = 0; index < 150 && spoken === beforeReplay; index++) await new Promise(resolve => setTimeout(resolve, 10));
 	await settle();
 	assert.ok(spoken > beforeReplay, "replay acquired the mocked transport");

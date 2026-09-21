@@ -80,7 +80,7 @@ Connect using the wrapper:
 pi-voice-ssh YOUR_HOST
 ```
 
-See [Usage](usage.md#optional-termux-function-key-row) for one-tap F5–F11 controls.
+See [Usage](usage.md#optional-termux-function-key-row) for one-tap F4–F10 controls.
 
 ## Local Termux Pi
 

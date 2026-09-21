@@ -6,7 +6,7 @@ Bare `/voice` is an alias for `/voice status`.
 
 Every value-setting command below accepts an omitted value to report its **current effective value**, without saving configuration, starting/reconfiguring workers, changing playback/ownership/transcript following, resetting budgets, or calling a provider. Brackets mark optional values. Explicit values retain their normal validation and setting behavior.
 
-Automatic input/output and device queries show the resolved route (including an active device pin); `edit-model current` shows Pi's current model or `unavailable`. `timing-preprocess` shows the currently resolved limit and, when running, the active batch limit. `shortcut` shows the loaded binding (and F5 alias), plus any configured change awaiting `/reload`. `code-budget` retains its scope/allowance/usage report.
+Automatic input/output and device queries show the resolved route (including an active device pin); `edit-model current` shows Pi's current model or `unavailable`. `timing-preprocess` shows the currently resolved limit and, when running, the active batch limit. `shortcut` shows the loaded binding (and F4 alias), plus any configured change awaiting `/reload`. `code-budget` retains its scope/allowance/usage report.
 
 Action commands (`on`, `off`, `toggle`, `stop`, `setup`, `test`, `talk`, `attention`, `reconnect`, `scroll-to`, `bottom`, and `code-retry`) retain their intentional behavior; they are not setting queries. `status`, `timing` and `help` are read-only reports.
 
@@ -23,7 +23,7 @@ Action commands (`on`, `off`, `toggle`, `stop`, `setup`, `test`, `talk`, `attent
 | `/voice setup` | Explicitly warms Kokoro and Wav2Vec2 alignment. Whisper still loads on first transcription. |
 | `/voice test [text]` | Speaks test text or a default readiness phrase. |
 | `/voice talk` | Starts/stops microphone dictation. |
-| `/voice attention` | Explicitly attend the oldest eligible waiting session using the origin terminal's fresh device pin; replay this project if current/none waiting. Requires enabled voice. F11 remains own-project replay. |
+| `/voice attention` | Explicitly attend the oldest eligible waiting session using the origin terminal's fresh device pin; replay this project if current/none waiting. Requires enabled voice. F5 remains own-project replay. |
 | `/voice timing` | Shows selected timing quality and recent audio-to-highlight/highlight-to-render diagnostic latency. |
 
 ## Speech and narration
@@ -71,7 +71,7 @@ Weights download lazily. A selected dtype must exist in that repository.
 /voice input [auto|local|disabled|tcp://host:port|unix:///path]
 ```
 
-Shortcut names follow Pi's format, for example `alt+m`, `ctrl+shift+m`, or `f8`. Run `/reload` after changing the shortcut because extension shortcuts are registered during loading. Setting it to `disabled` also disables F5.
+Shortcut names follow Pi's format, for example `alt+m`, `ctrl+shift+m`, or `f8`. Run `/reload` after changing the shortcut because extension shortcuts are registered during loading. Setting it to `disabled` also disables the automatic F4 microphone alias, not F5 replay. Custom shortcuts (including `f11`) retain existing collision rules.
 
 `review` leaves recognized text in the editor; `auto` submits it. `smart` may apply spoken edits to the original draft; `append` resolves ASR ambiguity but keeps correction phrases literal.
 

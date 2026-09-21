@@ -28,7 +28,7 @@ test("sticky pause queues new responses; settings preserve ownership and dirty a
 	});
 	host.addMessage("first", null, assistant("First sentence. Second sentence."));
 	const workerIndex = MockedVoiceWorkerClient.instances.length;
-	await host.start(); await host.shortcut("f11"); await settle();
+	await host.start(); await host.shortcut("f5"); await settle();
 	const worker = MockedVoiceWorkerClient.instances[workerIndex]!;
 	const segments = worker.sent as Array<{ text: string; utterance: number; segmentId: number }>;
 	const first = segments.find(segment => segment.text === "First sentence.")!;
@@ -58,7 +58,7 @@ test("sticky pause queues new responses; settings preserve ownership and dirty a
 	worker.emit({ type: "idle", utterance: segments.at(-1)!.utterance }); await settle();
 	assert.ok(segments.at(-1)?.text.includes("requires attention next"));
 
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	for (const command of ["voice af_bella", "speed 1.2", "tts-model test/tts", "tts-dtype fp32"]) {
 		worker.emit({ type: "speaking" });
 		const count = segments.length;
@@ -76,7 +76,7 @@ test("sticky pause queues new responses; settings preserve ownership and dirty a
 	assert.equal(worker.pauses.at(-1), true, "message navigation retains pause");
 	await host.shortcut("f9"); await settle();
 	assert.equal(worker.pauses.at(-1), true, "sentence navigation retains pause");
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	assert.equal(worker.pauses.at(-1), false, "explicit replay exits tail/paused state");
 	observer.clearWaiting();
 	await host.shortcut("f10"); await settle();
@@ -147,7 +147,7 @@ for (const paused of [false, true]) {
 		await host.start();
 		const worker = MockedVoiceWorkerClient.instances[workerIndex]!;
 		const segments = worker.sent as Array<{ text: string; utterance: number }>;
-		if (paused) { await host.shortcut("f11"); await settle(); await host.shortcut("f8"); }
+		if (paused) { await host.shortcut("f5"); await settle(); await host.shortcut("f8"); }
 		const oldUtterance = segments.at(-1)?.utterance;
 		const message = assistant("");
 		message.content = ["firstAction", "secondAction"].map(name => ({ type: "text", text: `\`\`\`ts\n${name}();\n\`\`\`` }));

@@ -95,7 +95,7 @@ test("delayed speech handoff keeps only the latest replay target and desired pau
 
 	const worker = host.firstWorkerClient();
 	assert.ok(worker);
-	await host.shortcut("f11");
+	await host.shortcut("f5");
 	await new Promise(resolve => setTimeout(resolve, 100));
 	assert.equal(worker.sent.length, 0, "replay must not start before ownership is released");
 

@@ -1,5 +1,11 @@
 # Tests
 
+## A keyboard mapping validation
+
+Synthetic validation: `npm run check` passed; full `npm test` **910 passed, 3 existing TUI compatibility skips, 0 failed (913 total)**. Installed-native key/scroll/marker tests **307 passed, no skips/failures**, using inert terminals. `test/native-keys.test.ts` checks actual native F4/F5 byte decoding and default-binding conflicts without loading personal keybindings. Registration tests cover default/custom/disabled microphone bindings, F4 deduplication, custom F5 collision/F11 support and independent F5 replay; mocked capture starts through F4. No new live capture, inference or OS-wide compatibility claim.
+
+The user previously confirmed successful Linux Mint capture/transcription; that prior LIVE result is now recorded in `FINDINGS.md` and `PLAN.md`, not presented as a test of this keyboard change.
+
 ## Opt-in desktop → SSH → server test
 
 With rootless Podman and the checkout's npm dependencies installed:
@@ -135,8 +141,9 @@ Installed-native rerun (adjust the global installation path on other hosts; unli
 ```sh
 env -u SSH_CONNECTION -u SSH_CLIENT -u SSH_TTY -u TMUX -u TMUX_PANE \
   PI_VOICE_TEST_TUI_MODULE=/home/curiosithy/.nvm/versions/node/v26.7.0/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui/dist/index.js \
+  PI_VOICE_TEST_KEYBINDINGS_MODULE=/home/curiosithy/.nvm/versions/node/v26.7.0/lib/node_modules/@earendil-works/pi-coding-agent/dist/core/keybindings.js \
   node --import tsx --test --experimental-test-module-mocks --test-concurrency=4 \
-  test/index-native-scroll.test.ts test/narration-marker-native.test.ts
+  test/native-keys.test.ts test/index-native-scroll.test.ts test/narration-marker-native.test.ts
 ```
 
 Node test options are forwarded before the test glob, for example:

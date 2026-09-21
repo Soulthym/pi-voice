@@ -50,8 +50,8 @@ test("worker events drive speaking styling, idle completion, and error notices",
 	await host.start();
 	await streamCompletedResponse(host, "assistant-1", "user-1", "A completed response for replay.");
 
-	// Replay through F11 acquires speech and starts a worker utterance.
-	await host.shortcut("f11");
+	// Replay through F5 acquires speech and starts a worker utterance.
+	await host.shortcut("f5");
 
 	const instance = host.firstWorkerClient();
 	assert.ok(instance, "the extension must have created its worker client");
@@ -86,7 +86,7 @@ test("worker events drive speaking styling, idle completion, and error notices",
 
 	// A terminal utterance error surfaces once and releases the device lease so
 	// another session cannot be blocked behind a player that no longer exists.
-	await host.shortcut("f11");
+	await host.shortcut("f5");
 	const failed = instance!.sent.at(-1) as { utterance: number };
 	const errorCountBefore = host.notices.filter(notice => notice.level === "error").length;
 	instance!.emit({ type: "error", message: "synthesis exploded", utterance: failed.utterance } as never);

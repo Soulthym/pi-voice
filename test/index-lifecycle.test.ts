@@ -83,7 +83,7 @@ test("Stop and session replacement fence pending test/replay and suppress attent
 	assert.equal(worker.sent.length, 0, "Stop must suppress the announcement poll");
 	await host.command("off"); await host.command("on"); await tick();
 	assert.equal(worker.sent.length, 0, "enable must not revive Stop-cancelled work");
-	await host.shortcut("f11");
+	await host.shortcut("f5");
 	await tick();
 	assert.match(JSON.stringify(worker.sent), /This project's response/);
 	assert.equal(owner.hasAttentionRequest(), false, "replay must not route to the waiting project");
@@ -126,7 +126,7 @@ test("shutdown retains the lease until both microphone and player terminate", as
 	const player = Promise.withResolvers<void>();
 	mock.method(PhoneInputClient.prototype, "cancel", () => mic.promise);
 	mock.method(worker, "terminate", () => player.promise);
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	assert.ok(observer.speechOwner());
 	const shutdown = host.shutdown(); await settle();
 	try {
@@ -143,7 +143,7 @@ test("shutdown retains the lease until both microphone and player terminate", as
 test("double microphone tap during replay releases only the cancelled lease after player ack", async t => {
 	const { host, observer, worker } = await lifecycleHost(t);
 	const capture = mock.method(PhoneInputClient.prototype, "capture", async (): Promise<PhoneCapture> => ({ type: "text", data: "" }));
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	mock.method(worker, "cancel", () => 501 as never);
 	await host.command("talk"); await settle();
 	await host.command("talk"); await settle();
@@ -151,10 +151,10 @@ test("double microphone tap during replay releases only the cancelled lease afte
 	worker.emit({ type: "idle", cancelId: 501 }); await settle();
 	assert.equal(observer.speechOwner(), undefined);
 	assert.equal(capture.mock.callCount(), 0);
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	await host.command("talk"); await settle();
 	await host.command("stop");
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	worker.emit({ type: "idle", cancelId: 501 }); await settle();
 	assert.ok(observer.speechOwner(), "late acknowledgement must not release newer replay");
 });
@@ -218,7 +218,7 @@ test("TTS changes during microphone-only ownership do not sticky-pause the submi
 
 for (const idleBeforeResume of [true, false]) test(`resuming paused attention drains queued response (idle before resume: ${idleBeforeResume})`, async t => {
 	const { host, observer, worker } = await lifecycleHost(t);
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	observer.markWaiting();
 	worker.emit({ type: "idle", utterance: (worker.sent.at(-1) as { utterance: number }).utterance }); await settle();
 	assert.match(JSON.stringify(worker.sent.at(-1)), /requires attention/);
@@ -247,7 +247,7 @@ test("cancellation between activation and reservation continuation releases that
 
 test("retired worker callbacks after shutdown cannot append timings or mutate UI", async t => {
 	const { host, worker } = await lifecycleHost(t);
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	const utterance = (worker.sent.at(-1) as { utterance: number }).utterance;
 	await host.shutdown();
 	const before = [host.entries.length, host.notices.length, host.widgetOperations.length, host.styleCalls.length];
@@ -260,7 +260,7 @@ test("retired worker callbacks after shutdown cannot append timings or mutate UI
 
 test("resuming completed paused announcement before incoming message_end keeps its continuation lease", async t => {
 	const { host, observer, worker } = await lifecycleHost(t);
-	await host.shortcut("f11"); await settle(); observer.markWaiting();
+	await host.shortcut("f5"); await settle(); observer.markWaiting();
 	worker.emit({ type: "idle", utterance: (worker.sent.at(-1) as { utterance: number }).utterance }); await settle();
 	const notification = (worker.sent.at(-1) as { utterance: number }).utterance;
 	await host.shortcut("f8");
@@ -346,7 +346,7 @@ test("Stop remains prompt but failed recorder stop keeps the lease and blocks re
 		assert.ok(observer.speechOwner());
 		assert.match(JSON.stringify(host.notices), /ownership retained/);
 		const before = worker.sent.length;
-		await host.shortcut("f11"); await settle();
+		await host.shortcut("f5"); await settle();
 		assert.equal(worker.sent.length, before);
 		assert.ok(observer.speechOwner());
 		capture.resolve({ type: "text", data: "Cancelled draft" }); await settle();

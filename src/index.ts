@@ -1479,7 +1479,7 @@ export default async function (pi: ExtensionAPI) {
 			label = `🎙 Voice · ${inputPhase === "acquiring" ? "connecting" : inputPhase}`;
 			color = "accent";
 		} else if (pausedForAttention) {
-			label = `Voice · waiting · ${coordinator?.projectLabel() ?? "project"} · ↺ F11`;
+			label = `Voice · waiting · ${coordinator?.projectLabel() ?? "project"} · ↺ F5`;
 			color = "warning";
 		} else if (playbackPaused) {
 			label = "⏯ Voice · paused · F8 resume";
@@ -3623,7 +3623,7 @@ export default async function (pi: ExtensionAPI) {
 				blockedSpeechText = "";
 				if (!blockedWarningIssued) {
 					blockedWarningIssued = true;
-					notifyVoice(ctx, "Response waiting · ↺ F11 plays this project; /voice attention switches projects", "warning");
+					notifyVoice(ctx, "Response waiting · ↺ F5 plays this project; /voice attention switches projects", "warning");
 				}
 				refreshStatus();
 			} else if (speechBlocked) {
@@ -3721,7 +3721,7 @@ export default async function (pi: ExtensionAPI) {
 		let skip = fromTail ? 0 : selectedEntry >= 0 ? Math.abs(movement) : movement === -1 && !live ? 1 : 0;
 		let target: PlaybackMessage | undefined = live && movement === 0 ? selected : undefined;
 		let boundary = selected;
-		// Only parse the selected/adjacent source, not every completed response on a cold F11.
+		// Only parse the selected/adjacent source, not every completed response on a cold F5.
 		for (let i = selectedEntry >= 0 ? selectedEntry : branch.length - 1; !target && i >= 0 && i < branch.length; i += direction) {
 			const messages = completedEntryMessages(ctx, branch[i]!, config.mode, false);
 			const selectedBlock = i === selectedEntry ? messages.findIndex(message => message.id === selected?.id) : -1;
@@ -4048,7 +4048,7 @@ export default async function (pi: ExtensionAPI) {
 				return;
 			}
 			if (!pauseCurrentPlayback(true)) {
-				notifyVoice(ctx, "Nothing playing · ↺ F11 to replay", "warning");
+				notifyVoice(ctx, "Nothing playing · ↺ F5 to replay", "warning");
 			}
 		},
 	});
@@ -4070,7 +4070,7 @@ export default async function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerShortcut("f11", {
+	pi.registerShortcut("f5", {
 		description: "↺ Replay this project's response",
 		handler: async ctx => { await replaySelected(ctx); },
 	});
@@ -4088,7 +4088,7 @@ export default async function (pi: ExtensionAPI) {
 			});
 		};
 		registerTalkShortcut(config.talkShortcut);
-		if (config.talkShortcut !== "f5") registerTalkShortcut("f5");
+		if (config.talkShortcut !== "f4") registerTalkShortcut("f4");
 	}
 
 	const scrollToNarration = (ctx: ExtensionContext): void => {
@@ -4895,7 +4895,7 @@ export default async function (pi: ExtensionAPI) {
 				default:
 					notifyVoice(ctx, [
 						"/voice <command> · settings without a value show the current value",
-						"🎙 talk · ↺ F11 replay this project · ⏯ F8 pause/resume",
+						"🎙 talk · ↺ F5 replay this project · ⏯ F8 pause/resume",
 						"⏮/⏭ F6/F10 previous/next message · ↶/↷ F7/F9 previous/next sentence",
 						`${config.scrollToShortcut}: follow narrated position · ${config.scrollBottomShortcut}: transcript tail`,
 						"Control · on | off | toggle | stop | attention | reconnect | setup | test",

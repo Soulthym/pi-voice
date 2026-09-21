@@ -91,7 +91,7 @@ test("session pins, fresh explicit attachment, read-only metadata and lookup/sto
 	await host.shortcut("f8"); await settle();
 	assert.equal(pin(), "B", "resume adopts the fresh attachment in one action");
 	assert.equal(worker.outputs.at(-1), "unix:///test/B");
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	assert.equal(pin(), "B");
 	assert.equal(worker.outputs.at(-1), "unix:///test/B");
 	assert.equal(process.env.PI_VOICE_DEVICE_ID, "A");
@@ -111,7 +111,7 @@ test("session pins, fresh explicit attachment, read-only metadata and lookup/sto
 	await host.shortcut("f7"); await settle();
 	assert.equal(resolve.mock.callCount(), pausedCalls);
 	assert.equal(worker.pauses.at(-1), true);
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	const beforeStop = worker.sent.length;
 	await host.command("stop");
 	deferred.resolve({ kind: "device", id: "A" }); lookup = undefined;
@@ -154,7 +154,7 @@ test("session pins, fresh explicit attachment, read-only metadata and lookup/sto
 	const reconnect = host.command("reconnect"); await settle();
 	assert.equal(termination.mock.callCount(), 1);
 	const beforeRebind = worker.sent.length;
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	assert.equal(worker.sent.length, beforeRebind);
 	terminated.resolve(); await reconnect; await settle();
 	assert.equal(worker.sent.length, beforeRebind, "missing B does not start after old sink terminates");

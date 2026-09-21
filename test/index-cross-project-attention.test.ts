@@ -34,11 +34,11 @@ async function setup(t: TestContext) {
 	return { root, host, waiting };
 }
 
-test("attention requests the eligible waiting project with fresh origin identity; F11 stays own", async t => {
+test("attention requests the eligible waiting project with fresh origin identity; F5 stays own", async t => {
 	const { host, waiting } = await setup(t);
 	const resolve = mock.method(DeviceRouter.prototype, "resolveCurrentConnection", async () => ({ kind: "device" as const, id: "fresh-phone" }));
 	t.after(() => resolve.mock.restore());
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	assert.equal(waiting.hasAttentionRequest(), false);
 	await host.command("attention");
 	const request = waiting.takeAttentionRequest();
@@ -65,7 +65,7 @@ for (const newer of ["f8", "stop", "f6", "failure"]) test(`attention retires pen
 	const { host, waiting } = await setup(t);
 	await host.command("output auto");
 	const initial = t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", async () => ({ kind: "intentional_local" as const }));
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	initial.mock.restore();
 	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
 	const replay = Promise.withResolvers<{ kind: "intentional_local" }>();
@@ -75,7 +75,7 @@ for (const newer of ["f8", "stop", "f6", "failure"]) test(`attention retires pen
 		calls++;
 		return calls === 1 ? replay.promise : calls === 2 ? origin.promise : Promise.resolve({ kind: "intentional_local" as const });
 	});
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	const pending = host.command("attention"); await settle();
 	// Attention waits for the old adoption, whose superseded replay must retire now.
 	replay.resolve({ kind: "intentional_local" }); await settle();
@@ -129,7 +129,7 @@ for (const newer of ["stop", "attention"]) test(`newer ${newer} supersedes origi
 
 test("attention does not publish before confirmed player stop", async t => {
 	const { host, waiting } = await setup(t);
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	let stopped!: () => void;
 	const terminate = mock.method(MockedVoiceWorkerClient.prototype, "terminate", () => new Promise<void>(r => { stopped = r; }));
 	const resolve = mock.method(DeviceRouter.prototype, "resolveCurrentConnection", async () => ({ kind: "intentional_local" as const }));
@@ -183,7 +183,7 @@ test("external input cancellation during attention finalization cannot publish",
 
 for (const key of ["f9", "f10"]) for (const published of [false, true]) test(`${key} tail cancels ${published ? "published" : "preparing"} attention`, async t => {
 	const { host, waiting } = await setup(t);
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	const gate = Promise.withResolvers<{ kind: "intentional_local" }>();
 	t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", () => gate.promise);
 	const pending = host.command("attention"); await settle();
@@ -228,7 +228,7 @@ for (const direction of ["outgoing", "incoming", "incoming cancelled", "incoming
 	const originGate = Promise.withResolvers<{ kind: "intentional_local" }>();
 	let calls = 0;
 	t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", () => ++calls === 1 ? replayGate.promise : originGate.promise);
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	const old = { ...partial, stopReason: "toolUse" };
 	host.addMessage("old", "answer", old);
 	await host.emit("message_end", { message: old });
@@ -332,7 +332,7 @@ test("published attention does not reacquire an announcement and cancel itself",
 
 test("failed attention lookup completes an origin that became idle behind the guard", async t => {
 	const { host, waiting } = await setup(t);
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
 	const gate = Promise.withResolvers<never>();
 	t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", () => gate.promise);

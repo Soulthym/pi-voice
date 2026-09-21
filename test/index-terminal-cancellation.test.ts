@@ -67,7 +67,7 @@ for (const stopReason of ["aborted", "error"]) {
 			assert.equal(await fs.readFile(leasePath, "utf8"), originalLease);
 
 			if (replacement === "replay") {
-				await host.shortcut("f11");
+				await host.shortcut("f5");
 				await tick();
 				assert.ok(!worker.sent.some(segment => (segment as { text: string }).text.includes("historical response")), "replacement waits for stop proof");
 				worker.emit({ type: "idle", cancelId });

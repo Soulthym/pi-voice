@@ -2,6 +2,15 @@
 
 Updated incrementally. Companion: `PLAN.md`. Reorganize freely while preserving evidence and disposition.
 
+## Current keyboard mapping and user LIVE evidence
+
+- A: default Alt+M/custom microphone bindings unchanged; automatic F4 only when `talkShortcut` is not `disabled` (custom F4 deduplicated). F5 replays this project independently of microphone-shortcut disablement. No automatic F11; custom F11 remains allowed. Existing registration collisions are unchanged. Desktop: F4 mic, F5 replay, F6 previous message, F7 previous sentence, F8 pause/resume, F9 next sentence, F10 next message.
+- Termux row: `F4🎙 | F6⏮ | F7↶ | F8⏯ | F9↷ | F10⏭ | F5↺`; edit the phone's local `~/.termux/termux.properties`, no generator. See `docs/usage.md`.
+- Historical F11 replay / F5 microphone references below describe their original audit mappings; they are intentionally preserved, not current instructions. Pi keybindings/extensions and relevant TUI/terminal docs were read; native defaults have no F4/F5 bindings. Terminal/OS interception and user/extension collisions remain possible.
+- **Previously unrecorded user LIVE confirmation:** Linux Mint microphone capture and transcription worked. This supersedes earlier pending-recovery language below for that observed result; it does not establish the original hardware/backend cause or validate this new keyboard mapping. No new live test, inference, deployment, session restart or user-settings change was performed.
+
+Validation for A: `npm run check` passed; full `npm test` **910 passed / 3 existing TUI compatibility skips / 0 failed (913 total)**; installed-native key/scroll/marker tests **307 passed / 0 skipped / 0 failed**. No LSP server configured. Initial validation exposed a test-only implicit type and disabled-voice fixture setup mistake; both were corrected before the clean full rerun. Logs: `/tmp/pi-voice-A-{check,test,native}.log`. Final integrated device-selection validation is recorded in `docs/testing.md`.
+
 ## Review follow-up — `88ee55b` / `faee523`
 
 The earlier unconditional removal of `--raw` below was valid only for the tested

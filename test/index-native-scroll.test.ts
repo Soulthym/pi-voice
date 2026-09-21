@@ -46,7 +46,7 @@ for (const messageType of ["assistant", "assistant-thinking"] as const) test(`mo
 		names.forEach((name, i) => { if (previous[i] === undefined) delete process.env[name]; else process.env[name] = previous[i]; });
 		await fs.rm(root, { recursive: true, force: true });
 	});
-	await host.start(); await host.shortcut("f11"); await settle();
+	await host.start(); await host.shortcut("f5"); await settle();
 	await host.shortcut("f8");
 	await host.command("highlight off"); await settle();
 	const clean = (lines: string[]) => lines.map(line => native.stripTerminalSequences(line).replaceAll(NARRATION_ACTIVE_MARKER, ""));
@@ -171,7 +171,7 @@ for (const action of ["auto tail start", "auto tail small", "auto tail resize", 
 	transform = source => host.render(source);
 	renderText = () => cached ? narrationLeaf.render(width).join("\n")
 		: ["First sentence. Second sentence.", "Older sentence. Another sentence."].map(source => host.render(source)).join(" ");
-	await host.shortcut("f11");
+	await host.shortcut("f5");
 	await settle();
 	if (cached) {
 		const activeMarker = () => {
@@ -182,7 +182,7 @@ for (const action of ["auto tail start", "auto tail small", "auto tail resize", 
 		const oldMarker = activeMarker();
 		quotedHistory = () => ["user", "toolResult"].map(role => host.render(
 			`> Quoted ${NARRATION_ACTIVE_MARKER}legacy marker and ${oldMarker}old narration marker.`, role)).join("\n\n");
-		await host.shortcut("f11");
+		await host.shortcut("f5");
 		await settle();
 		assert.notEqual(activeMarker(), oldMarker, "replay must retire the copied marker");
 		assert.ok(transcript.render(width).filter((line: string) => line.includes(oldMarker)).length >= 2, "user and tool history retain old dynamic markers");
@@ -252,13 +252,13 @@ for (const action of ["auto tail start", "auto tail small", "auto tail resize", 
 		historyHeight = tailHeight = 0;
 		quotedHistory = () => "";
 		const previousUtterance = (worker.sent.at(-1) as { utterance: number }).utterance;
-		await host.shortcut("f11");
+		await host.shortcut("f5");
 		await settle();
 		tui.doRender();
 		await host.command("scroll-to");
 		assertFramed("start-of-document clamps to zero");
 		assert.equal(view.scrollTop, 0);
-		// F11 starts an unpaused replay, even after paused navigation; F8 would pause it.
+		// F5 starts an unpaused replay, even after paused navigation; F8 would pause it.
 		assert.equal(worker.pauses.at(-1), false, "replay is playing");
 		const replay = (worker.sent as Array<{ utterance: number; segmentId: number; text: string }>);
 		const latest = replay.filter(segment => segment.utterance === replay.at(-1)!.utterance);
@@ -287,7 +287,7 @@ for (const action of ["auto tail start", "auto tail small", "auto tail resize", 
 	assert.equal(tui.getPrimaryScrollView(), transcript, "explicit preview must not reset native primary layout");
 	if (action === "controls") {
 		await host.shortcut("f8");
-		for (const key of ["f6", "f7", "f9", "f10", "f8", "f11"]) {
+		for (const key of ["f6", "f7", "f9", "f10", "f8", "f5"]) {
 			tui.handleTerminalInput("\x1b[<64;1;1M");
 			assert.notEqual(view.scrollTop, 92);
 			const action = host.shortcut(key);
@@ -302,7 +302,7 @@ for (const action of ["auto tail start", "auto tail small", "auto tail resize", 
 	}
 	// Genuine input cancels follow; programmatic layout/framing does not.
 	tui.handleTerminalInput("\x1b[<64;1;1M");
-	await host.shortcut("f11");
+	await host.shortcut("f5");
 	assert.equal(view.scrollTop, 92, "replay immediately rearms after manual browsing");
 	view.scrollTo(30);
 	tui.requestRender(true);
@@ -413,7 +413,7 @@ for (const action of ["auto tail start", "auto tail small", "auto tail resize", 
 		worker.emit({ type: "idle", utterance: last.utterance });
 		await settle();
 		assert.equal(view.scrollTop, manualTop, "completion cannot reclaim manual framing");
-		await host.shortcut("f11");
+		await host.shortcut("f5");
 		assert.equal(view.scrollTop, 142, "explicit Voice control immediately rearms follow");
 		return;
 	}
@@ -450,7 +450,7 @@ for (const action of ["auto tail start", "auto tail small", "auto tail resize", 
 	}
 
 	if (action === "paused anchor" || action === "button") {
-		await host.shortcut("f11"); // Restore the preview after the synthetic tick (no worker segments).
+		await host.shortcut("f5"); // Restore the preview after the synthetic tick (no worker segments).
 		await settle();
 		marker = 299;
 		await host.command("scroll-to");
@@ -544,7 +544,7 @@ for (const action of ["auto tail start", "auto tail small", "auto tail resize", 
 	await settle();
 	assert.equal(view.scrollTop, 280, "completion honors the native end intent");
 
-	await host.shortcut("f11");
+	await host.shortcut("f5");
 	await settle();
 	const replay = worker.sent.at(-1) as { utterance: number };
 	jump();

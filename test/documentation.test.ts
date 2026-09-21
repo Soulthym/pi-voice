@@ -38,8 +38,13 @@ test("README, example JSON, and configuration table match current defaults", () 
 
 test("playback and protocol docs retain current behavior and safe upgrade guidance", () => {
 	for (const path of ["README.md", "docs/usage.md"]) {
-		assert.match(read(path), /\| `F11`[^\n]*never switch projects/);
+		assert.match(read(path), /\| `F5`[^\n]*never switch projects/);
 	}
+	const usage = read("docs/usage.md");
+	assert.ok(usage.includes("F4🎙 | F6⏮ | F7↶ | F8⏯ | F9↷ | F10⏭ | F5↺"));
+	assert.deepEqual([...usage.matchAll(/key: '(F\d+)'/g)].map(match => match[1]), ["F4", "F6", "F7", "F8", "F9", "F10", "F5"]);
+	assert.match(usage, /local Termux shell/);
+	assert.match(usage, /No row generator/);
 	const narration = read("docs/narration-and-highlighting.md");
 	assert.match(narration, /bounded overlapping CTC windows/);
 	assert.match(narration, /Manual scrolling overrides automatic motion/);

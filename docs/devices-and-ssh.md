@@ -91,7 +91,7 @@ Interactive TUI sessions coordinate through `~/.cache/pi-voice/coordinator`:
 - tool-only and headless child/subagent sessions do not request attention;
 - waiting responses never start automatically;
 - manual input and playback controls can preempt ownership;
-- F11/↺ replays this project's response; `/voice attention` explicitly attends the oldest eligible waiting session (current-project replay when current/none waiting); queued attention alone does not interrupt current speech;
+- F5/↺ replays this project's response; `/voice attention` explicitly attends the oldest eligible waiting session (current-project replay when current/none waiting); queued attention alone does not interrupt current speech;
 - paused sessions remain paused until explicit user action.
 
 Project labels use the root directory name and add the shortest parent suffix needed to distinguish duplicates.

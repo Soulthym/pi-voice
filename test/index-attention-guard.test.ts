@@ -102,9 +102,9 @@ test("manual playback controls work while a response is generating", async t => 
 	// A response completes normally even though controls were pressed meanwhile.
 	await streamCompletedResponse(host, "assistant-1", "user-1", "First answer with content.");
 
-	// F11 forces attention transfer and replays completed responses while generating.
+	// F5 forces attention transfer and replays completed responses while generating.
 	const requestsBefore = host.modelRequests.length;
-	await host.shortcut("f11");
+	await host.shortcut("f5");
 	await settle();
 	assert.equal(
 		host.notices.filter(notice => notice.message.includes("before navigating playback")).length,

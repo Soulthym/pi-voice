@@ -62,7 +62,7 @@ test("cancelled dictation ignores late decoder progress, PCM and ASR results dur
 		await fs.rm(root, { recursive: true, force: true });
 	});
 	await host.start();
-	await host.command("talk");
+	await host.shortcut("f4");
 	const callbacks = await started.promise;
 	devices = [newer, phone];
 	const claims = claim.mock.callCount();

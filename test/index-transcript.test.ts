@@ -66,7 +66,7 @@ for (const mode of ["all", "assistant", "yield"]) test(`${mode}: live, replay an
 	}
 	worker.emit({ type: "playback", utterance: segments.at(-1)!.utterance, position: 0.5 });
 	worker.sent.length = 0;
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	assert.deepEqual(spoken(), ["After tool."]);
 	await host.shortcut("f8");
 	worker.sent.length = 0;
@@ -131,7 +131,7 @@ test("streaming waits through following prose and tool-separated blocks; replay/
 	assert.equal(host.modelRequests.length, 0);
 	await delta(0, "Following explanation.\n");
 	assert.equal(host.modelRequests.length, 0);
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	assert.deepEqual(spoken(), ["Preceding prose.", "Preceding prose."]);
 	assert.equal(host.modelRequests.length, 0, "live replay must still wait for the agreed code context boundary");
 	partial.content.push({ type: "toolCall", id: "call", name: "read", arguments: { path: "source.ts" } }, { type: "text", text: "" });
@@ -164,7 +164,7 @@ test("streaming waits through following prose and tool-separated blocks; replay/
 	await host.emit("turn_end", { message: complete });
 	await host.emit("agent_settled", {}); await settle();
 	worker.sent.length = 0;
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	await host.shortcut("f6"); await settle();
 	host.model.id = "another-model";
 	await host.command("edit-model test/another-model");
@@ -179,7 +179,7 @@ test("consecutive thinking blocks retain distinct targets inside Pi's joined Mar
 	const text = "Same thought.\n```ts\nrun();\n```\nFollowing reason.";
 	const complete = { ...assistant(""), content: [{ type: "thinking", thinking: text }, { type: "thinking", thinking: text }] };
 	host.addMessage("answer", null, complete);
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	assert.deepEqual(spoken(), ["Same thought.", "The code performs the requested operation.", "Following reason."]);
 	const joined = `${text}\n\n${text}`;
 	let rendered = host.render(joined, "assistant-thinking");

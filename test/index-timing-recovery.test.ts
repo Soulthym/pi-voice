@@ -41,7 +41,7 @@ for (const paused of [false, true]) test(`missing-unit recovery preserves the ta
 	await streamCompletedResponse(host, "assistant", "user", "First sentence has enough words. Second sentence has enough words. Third sentence has enough words.");
 	const worker = MockedVoiceWorkerClient.instances.slice(workerStart).find(instance => instance.sent.length > 0)!;
 	const beforeReplay = worker.sent.length;
-	await host.shortcut("f11");
+	await host.shortcut("f5");
 	const first = worker.sent[beforeReplay] as { utterance: number; segmentId: number };
 	worker.emit({ type: "segment-audio", segmentId: first.segmentId, start: 0, duration: 2 } as never);
 	worker.emit({ type: "playback", utterance: first.utterance, position: 0 } as never);

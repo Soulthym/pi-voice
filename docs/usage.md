@@ -4,13 +4,13 @@
 
 ## Dictation
 
-Press `Alt+M` or F5 to begin recording. Pi Voice streams Ogg/Opus from the selected device, performs host-side voice activity detection, and shows a revisable Whisper preview in the editor.
+Press `Alt+M` or F4 to begin recording. Pi Voice streams Ogg/Opus from the selected device, performs host-side voice activity detection, and shows a revisable Whisper preview in the editor.
 
 Recording ends after approximately 1.35 seconds of trailing silence. Press the same key again to stop manually. A recording with no detected speech times out after 12 seconds, and the host enforces a 120-second safety limit.
 
 The default `submitMode` is `review`: the final prompt remains in the editor for correction or extension, and you press Enter to submit it. `auto` submits immediately.
 
-`/voice off` disables spoken output, not dictation. Set `input` to `disabled` or `talkShortcut` to `disabled` if microphone input must be unavailable. Disabling `talkShortcut` also disables F5.
+`/voice off` disables spoken output, not dictation. Set `input` to `disabled` or `talkShortcut` to `disabled` if microphone input must be unavailable. Disabling `talkShortcut` also disables the automatic F4 microphone alias, but leaves F5 replay registered. The default Alt+M and any custom microphone shortcut are unchanged; custom `f4` is registered only once, and custom `f11` remains allowed. F5 is no longer an automatic microphone alias; F11 is no longer automatic replay. Explicit shortcut collisions retain Pi's existing registration/override rules.
 
 ## Candidate resolution and spoken editing
 
@@ -35,14 +35,16 @@ Examples for smart mode include “replace port 8000 with 8080,” “scratch th
 
 ## Playback controls
 
+Desktop order: **F4 microphone, F5 replay, F6 previous message, F7 previous sentence, F8 pause/resume, F9 next sentence, F10 next message**. Pi's documented and installed native default bindings do not reserve F4 or F5. User keybindings and other extensions can still conflict; desktop environments, terminals, multiplexers and Fn/media-key modes may intercept keys before Pi receives them. This is not a claim of universal OS support.
+
 | Key | Action |
 | --- | --- |
+| `F5` (↺) | Replay this project's selected/waiting response; never switch projects |
 | `F6` (⏮) | Select the previous eligible live or completed transcript target |
 | `F7` (↶) | Select the previous sentence/newline unit, crossing eligible targets; clamp at the transcript start |
 | `F8` | Pause or resume the existing audio player |
 | `F9` (↷) | Select the next sentence/newline unit; cross eligible targets, then enter playback Tail |
 | `F10` (⏭) | Select the next eligible live or completed transcript target; after the latest, enter playback Tail |
-| `F11` (↺) | Replay this project's selected/waiting response; never switch projects |
 | `Alt+V` | Re-anchor the current narrated position (`/voice scroll-to`) |
 | `Alt+T` | Pin to transcript end and follow new output (`/voice bottom`) |
 
@@ -79,29 +81,29 @@ See [Narration and highlighting](narration-and-highlighting.md) and [Preprocessi
 
 Only interactive Pi TUI sessions participate in voice coordination. The first project with speakable output owns playback. Other projects record attention only when they produce content that would actually be spoken; tool-only responses, raw tool results, and headless child/subagent sessions do not request attention.
 
-Waiting attention does not interrupt current speech, and waiting audio never starts automatically. When user-audible playback switches sessions, Pi announces the newly active project once; reacquiring, seeking, pausing, or replaying in the same session does not repeat its name. Run `/voice attention` to explicitly attend the oldest eligible waiting session, including an already-announced wait. If that session is current, or none is waiting, it replays this project's response. F11 always stays in the current project. Disabled voice does not transfer attention. The command finalizes captured dictation into the editor without submitting, waits for confirmed player/microphone stop, and sends a coordinator request carrying the origin terminal's freshly resolved device identity. The waiting pane adopts that pin without guessing an old detached tmux attachment. Stop or newer playback actions cancel pending requests; stale requests are rejected.
+Waiting attention does not interrupt current speech, and waiting audio never starts automatically. When user-audible playback switches sessions, Pi announces the newly active project once; reacquiring, seeking, pausing, or replaying in the same session does not repeat its name. Run `/voice attention` to explicitly attend the oldest eligible waiting session, including an already-announced wait. If that session is current, or none is waiting, it replays this project's response. F5 always stays in the current project. Disabled voice does not transfer attention. The command finalizes captured dictation into the editor without submitting, waits for confirmed player/microphone stop, and sends a coordinator request carrying the origin terminal's freshly resolved device identity. The waiting pane adopts that pin without guessing an old detached tmux attachment. Stop or newer playback actions cancel pending requests; stale requests are rejected.
 
-Manual prompt submission, replay controls, F11, and `/voice attention` take priority. Cross-process replay waits asynchronously for the current player to acknowledge shutdown; controls remain responsive, newer navigation supersedes the pending target, and F8 preserves its intended paused state. A displaced response is paused and returned to the attention queue rather than automatically resumed.
+Manual prompt submission, replay controls, F5, and `/voice attention` take priority. Cross-process replay waits asynchronously for the current player to acknowledge shutdown; controls remain responsive, newer navigation supersedes the pending target, and F8 preserves its intended paused state. A displaced response is paused and returned to the attention queue rather than automatically resumed.
 
 ## Optional Termux function-key row
 
-The extended row provides one-tap access to dictation and every F6–F11 playback control:
+The extended row is exactly `F4🎙 | F6⏮ | F7↶ | F8⏯ | F9↷ | F10⏭ | F5↺`.
 
-The screenshot below is from the older time-jump layout; current sentence buttons use `↶` and `↷` without numbers.
+The screenshot below is historical: it predates the current F4 microphone/F5 replay mapping and sentence buttons `↶` and `↷` without numbers.
 
 ![Older Termux extended keyboard row with microphone, message navigation, playback controls and replay](assets/pi-voice-ssh-termux-extended-kb.jpg)
 
-Add the row to `extra-keys` in `~/.termux/termux.properties`. Insert this before the configuration's final `]]`:
+In a **local Termux shell**, edit `extra-keys` in `~/.termux/termux.properties` on the phone, not on the SSH host. No row generator is provided. For an existing Voice row, change its microphone key from F5 to F4 and replay from F11 to F5, preserving other keys. To add a row, insert this before the configuration's final `]]`:
 
 ```properties
   ], [\
-    {key: 'F5',  display: '🎙'},\
+    {key: 'F4',  display: '🎙'},\
     {key: 'F6',  display: '⏮'},\
     {key: 'F7',  display: '↶'},\
     {key: 'F8',  display: '⏯'},\
     {key: 'F9',  display: '↷'},\
     {key: 'F10', display: '⏭'},\
-    {key: 'F11', display: '↺'}\
+    {key: 'F5', display: '↺'}\
   ]]
 ```
 
@@ -118,4 +120,4 @@ sed -i --follow-symlinks 's/↶10/↶/g; s/10↷/↷/g' ~/.termux/termux.propert
 termux-reload-settings
 ```
 
-The row maps to microphone, previous message, previous sentence, pause/resume, next sentence, next message, and current-project replay. F5 is registered only when `talkShortcut` is not `disabled`.
+The row maps to microphone, previous message, previous sentence, pause/resume, next sentence, next message, and current-project replay. F4 is registered only when `talkShortcut` is not `disabled`.

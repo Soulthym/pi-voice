@@ -8,7 +8,7 @@ import { FakeVoiceHost, MockedVoiceWorkerClient, assistant } from "./helpers/fak
 
 mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: MockedVoiceWorkerClient } });
 const settle = async () => { for (let i = 0; i < 12; i++) await new Promise(resolve => setImmediate(resolve)); };
-for (const key of ["f11", "f8"]) for (const pauseResume of (key === "f11" ? [false, true, "retry", "delayed"] as const : [false, true] as const)) test(`${key} replay from tail restores bottom unless the user browses away (pause/resume: ${pauseResume})`, async t => {
+for (const key of ["f5", "f8"]) for (const pauseResume of (key === "f5" ? [false, true, "retry", "delayed"] as const : [false, true] as const)) test(`${key} replay from tail restores bottom unless the user browses away (pause/resume: ${pauseResume})`, async t => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-tail-"));
 	const keys = ["PI_VOICE_CONFIG", "PI_VOICE_COORDINATOR_DIR", "PI_VOICE_DEVICE_DIR"];
 	const previous = keys.map(key => process.env[key]);

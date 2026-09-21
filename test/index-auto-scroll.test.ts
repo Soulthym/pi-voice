@@ -97,13 +97,13 @@ test("TUI follows exact words, respects manual browsing, and explicit controls r
 	assert.equal(host.scrollView.scrollTop, 280, "new tail text restores the spoken window but remembers final bottom-follow");
 	assert.equal(host.scrollView.isFollowingEnd, true);
 
-	// F11 starts replay and must place an out-of-frame marked word at 20%.
+	// F5 starts replay and must place an out-of-frame marked word at 20%.
 	// Register every sentence as a separate 2-second checkpoint so F7/F9 below
 	// exercise genuine timeline movement rather than restarting checkpoint zero.
 	const replayStart = worker!.sent.length;
 	host.scrollView.setDocument(renderedDocument(160), 40);
 	host.scrollView.manualScrollTo(0);
-	await host.shortcut("f11");
+	await host.shortcut("f5");
 	assert.equal(host.scrollView.scrollTop, 152, "message replay should anchor before its first audio event");
 	const replaySegments = worker!.sent.slice(replayStart) as Array<{
 		utterance: number;
@@ -320,7 +320,7 @@ test("TUI follows exact words, respects manual browsing, and explicit controls r
 	host.addMessage("assistant-2", "user-2", assistant("Second historical response."));
 	await host.emit("agent_settled", { type: "agent_settled" });
 	host.scrollView.setDocument(renderedDocument(240), 40);
-	await host.shortcut("f11");
+	await host.shortcut("f5");
 	await host.shortcut("f8");
 	assert.equal(worker!.pauses.at(-1), true);
 	// Pi's Markdown component still has the previous message's marker cached when
@@ -377,7 +377,7 @@ test("TUI follows exact words, respects manual browsing, and explicit controls r
 	host.scrollView.setDocument(renderedDocument(80), 40);
 	host.scrollView.manualScrollTo(200);
 	const manualReplayStart = worker!.sent.length;
-	await host.shortcut("f11");
+	await host.shortcut("f5");
 	assert.equal(host.scrollView.scrollTop, 72);
 	const manualReplay = (worker!.sent.slice(manualReplayStart) as Array<{ utterance: number }>).at(-1)!;
 	worker!.emit({ type: "idle", utterance: manualReplay.utterance } as never);
@@ -388,7 +388,7 @@ test("TUI follows exact words, respects manual browsing, and explicit controls r
 	assert.equal(host.scrollView.scrollTop, 260, "F10 after genuine idle completion follows the transcript tail");
 	assert.equal(host.scrollView.isFollowingEnd, true);
 	assert.equal(worker!.sent.length, completedCount, "tail-follow must not regenerate completed audio");
-	await host.shortcut("f11");
+	await host.shortcut("f5");
 	worker!.emit({ type: "idle", utterance: (worker!.sent.at(-1) as { utterance: number }).utterance } as never);
 
 	// Manual replay during a newly streaming turn must never append later live

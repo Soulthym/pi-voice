@@ -23,7 +23,7 @@ Pi Voice reads `~/.pi/agent/pi-voice.json` by default. Unknown settings and inva
 | `editModel` | `current` | `current` or a Pi-registered `provider/model-id`. |
 | `output` | `auto` | `auto`, `local`, `tcp://host:port`, or `unix:///absolute/path`. |
 | `input` | `auto` | `auto`, `local`, `disabled`, TCP, or Unix endpoint. |
-| `talkShortcut` | `alt+m` | Pi key identifier such as `alt+m`, `ctrl+shift+m`, `f5`, or `disabled`. |
+| `talkShortcut` | `alt+m` | Pi key identifier such as `alt+m`, `ctrl+shift+m`, `f4`, or `disabled`. |
 | `scrollToShortcut` | `alt+v` | Re-anchor the current narrated position. `/voice scroll-to` does the same. |
 | `scrollBottomShortcut` | `alt+t` | Pin the transcript to its end and resume transcript-end following. `/voice bottom` does the same. |
 | `submitMode` | `review` | `review` or `auto`. |

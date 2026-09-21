@@ -24,7 +24,7 @@ test("suffix playback ticks and completed tail-follow preserve sentence navigati
 		await fs.rm(root, { recursive: true, force: true });
 	});
 	host.addMessage("answer", null, assistant("First sentence. Second sentence.\nFinal line."));
-	await host.start(); await host.shortcut("f11"); await settle();
+	await host.start(); await host.shortcut("f5"); await settle();
 	const worker = MockedVoiceWorkerClient.instances.find(worker => worker.sent.length)!;
 	const spoken = worker.sent as Array<{ utterance: number; segmentId: number; text: string }>;
 	await host.shortcut("f9"); await settle();
@@ -35,7 +35,7 @@ test("suffix playback ticks and completed tail-follow preserve sentence navigati
 	await host.shortcut("f9"); await settle();
 	assert.deepEqual(spoken.slice(before).map(segment => segment.text), ["Final line."], "the tick must not reset the suffix cursor to zero");
 	// Start a full replay, then finish without a final clock tick.
-	await host.shortcut("f11"); await settle();
+	await host.shortcut("f5"); await settle();
 	const first = spoken.findLast(segment => segment.text === "First sentence.")!;
 	const full = spoken.filter(segment => segment.utterance === first.utterance);
 	full.forEach((segment, i) => worker.emit({ type: "segment-audio", utterance: segment.utterance, segmentId: segment.segmentId, start: i * 2, duration: 2 }));

@@ -24,7 +24,7 @@ export const voiceQueryCases: ReadonlyArray<readonly [string, RegExp]> = [
 	["device", /^device: auto → local$/],
 	["output", /^output: local \(explicit\)$/],
 	["input", /^input: disabled \(explicit\)$/],
-	["shortcut", /^shortcut: alt\+m \(also f5\)$/],
+	["shortcut", /^shortcut: alt\+m \(also f4\)$/],
 	["submit", /^submit: review$/],
 	["edit", /^edit: smart$/],
 ];
