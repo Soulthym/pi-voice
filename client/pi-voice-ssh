@@ -82,13 +82,33 @@ validate_device_name() {
 }
 # Publish complete private files without replacing another first launch's choice.
 # No lock is held while a user thinks at the prompt; contenders read the winner.
-publish_config() (
-  umask 077
-  temp=$(mktemp "$config_root/.device-XXXXXX") || exit 1
-  trap 'rm -f "$temp"' EXIT
-  printf '%s\n' "$2" >"$temp" || exit 1
-  ln -T "$temp" "$1" 2>/dev/null || [[ -f $1 ]]
-)
+publish_config() {
+  local error
+  if error=$({
+    umask 077
+    temp= operation='open publication lock'
+    trap 'status=$?; [[ -z $temp ]] || rm -f "$temp"; if (( status != 0 )); then printf "Save operation failed: %s\n" "$operation" >&2; fi' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    # Keep the fence inode: unlinking it lets waiters lock different files.
+    exec 9>"$config_root/.device.lock" || exit 1
+    operation='acquire publication lock (5 seconds; requires flock from util-linux)'
+    flock -x -w 5 9 || exit 1
+    [[ ! -e $1 && ! -L $1 ]] || exit 0
+    operation='create private temporary file'
+    temp=$(mktemp "$config_root/.device-XXXXXX") || exit 1
+    operation='write temporary file'
+    printf '%s\n' "$2" >"$temp" || exit 1
+    operation='atomic rename'
+    mv -f "$temp" "$1" || exit 1
+  } 2>&1); then
+    return 0
+  fi
+  printf 'Cannot save %s in device configuration. Check storage/permissions and retry; retain device-id.\n' "${1##*/}" >&2
+  # Utility diagnostics may contain paths; never emit terminal control bytes.
+  printf '%s\n' "$error" | LC_ALL=C tr -cd '\11\12\40-\176' >&2
+  return 1
+}
 read_device_name() (
   local LC_ALL=C.UTF-8 character invalid=false tty_state bytes=0
   tty_state=$(stty -g <&"$name_tty") || return 1
@@ -136,7 +156,7 @@ if [[ ! -e $device_name_file ]]; then
   printf '\n' >&"$name_tty"
   exec {name_tty}>&-
   validate_device_name
-  publish_config "$device_name_file" "$device_name" || config_error
+  publish_config "$device_name_file" "$device_name" || exit 1
 fi
 # Read at most 1025 bytes (128 UTF-8 characters need at most 512), reject NUL
 # explicitly, and permit just one conventional final newline, not extra lines.
@@ -152,7 +172,7 @@ if [[ ! -e $device_id_file ]]; then
   if command -v uuidgen >/dev/null 2>&1; then new_id=$(uuidgen | tr '[:upper:]' '[:lower:]')
   else new_id=$(</proc/sys/kernel/random/uuid)
   fi
-  publish_config "$device_id_file" "$new_id" || config_error
+  publish_config "$device_id_file" "$new_id" || exit 1
 fi
 chmod 600 "$device_id_file" || config_error
 device_id=$(tr -cd 'a-zA-Z0-9._-' <"$device_id_file")

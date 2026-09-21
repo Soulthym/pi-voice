@@ -13,7 +13,7 @@ const TERMUX_WRAPPER = path.resolve("termux/pi-voice-ssh");
 
 /** Tools the wrappers legitimately need; audio/SSH tooling is faked explicitly. */
 const CORE_TOOLS = [
-	"awk", "basename", "bash", "cat", "chmod", "cmp", "cut", "date", "dd", "dirname", "env", "grep", "head", "id", "kill",
+	"awk", "basename", "bash", "cat", "chmod", "cmp", "cut", "date", "dd", "dirname", "env", "flock", "grep", "head", "id", "kill",
 	"ln", "mkdir", "mktemp", "mkfifo", "mv", "rmdir", "printf", "readlink", "rm", "sh", "sha256sum", "sleep", "sort", "stat", "tail", "touch",
 	"tr", "base64", "setsid", "timeout", "uname",
 ];
