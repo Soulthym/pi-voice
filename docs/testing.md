@@ -1,5 +1,11 @@
 # Tests
 
+## Persistent client-name validation
+
+Latest clarification replaces environment/hostname naming with a first-interactive-run prompt and a local persisted file. `npm run check` passed; full `npm test`: **917 passed, 3 existing TUI compatibility skips, 0 failed (920 total)**. Isolated real SSH: **12/12 cases passed**; only the client receives `/work/device-config/pi-voice/device-name`, through a wrapper-scoped `XDG_CONFIG_HOME`. No UI/API changes or new native-TUI run.
+
+The normal suite invokes `test/device-name-pty.py` using **Python 3's standard library** (test-only dependency). Both wrapper copies are tested with real controlling PTYs and fake SSH: first prompt/save/reuse, Ctrl+C/EOF, hidden invalid controls, Unicode/quotes, preserved SSH stdin and legacy ID, private permissions, configuration errors, concurrent first prompts and 12-way new-ID publication. Other wrapper tests validate file boundaries, ignored obsolete environment values, fail-fast noninteractive behavior and registration failures; router tests prove duplicate names cannot select or repin devices. No hardware, inference, live sessions or user configuration is touched. See [upgrade/operator steps](installation.md#upgrade-device-name-support).
+
 ## Device-setting review follow-up
 
 `npm run check` passed. Full `npm test`: **915 passed, 3 existing TUI compatibility skips, 0 failed (918 total)**. Installed-native key/scroll/marker tests: **307 passed, no skips/failures**.

@@ -1,5 +1,13 @@
 # Pi Voice — implemented agreements and live-validation handoff
 
+## Latest clarification — persistent client names replace environment naming
+
+- The first interactive desktop/Termux SSH connection prompts for a name before SSH, registration or daemon launch; future connections read `${XDG_CONFIG_HOME:-$HOME/.config}/pi-voice/device-name`, beside the stable `device-id`. This entirely supersedes the previous environment/hostname naming design, including inherited obsolete exports. Existing installations prompt on their next interactive connection when the file is missing; unattended first runs fail with provisioning instructions.
+- Private atomic first-writer publication keeps concurrent first launches on one ID/name without holding a lock across a prompt. `/dev/tty` leaves SSH stdin intact; invalid names/cancellation/EOF do not connect. Direct client/phone bridges do not register metadata and remain non-prompting.
+- Names remain display-only: duplicate names do not route/authenticate. Fresh verified SSH attachment identity and existing session-pin/confirmed-stop adoption barriers are unchanged; no automatic mid-playback repin.
+- Validation: typecheck; full suite **917 passed, 3 existing TUI compatibility skips, 0 failed (920 total)**; real isolated SSH **12/12 cases passed**, client-only ephemeral name configuration. PTY checks cover both wrappers, first save/reuse, EOF/Ctrl+C, Unicode/quotes, private permissions, preserved stdin/legacy ID, concurrent prompts/ID creation and configuration errors. No extension UI/API changes; native TUI rerun not required.
+- Operator: confirm playback/capture stop, close all client wrappers, install the updated complete client script set (including separately installed Termux copies), reconnect and answer the prompt, then `/reload` on the host. To rename, confirm stop/close wrappers first and edit only the local name file; never regenerate the ID. No live sessions/settings/provider/model calls or user files were changed; `ISSUES.md` preserved. See `docs/installation.md` and the current ledger entry.
+
 ## Current A keyboard handoff
 
 - Current mapping: Alt+M/custom mic unchanged; automatic F4 unless `talkShortcut=disabled`, deduplicating custom F4. F5 own-project replay remains registered with mic shortcuts disabled. No automatic F11; custom F11 allowed; existing collision rules retained. Desktop order: F4 mic, F5 replay, F6 previous message, F7 previous sentence, F8 pause/resume, F9 next sentence, F10 next message.

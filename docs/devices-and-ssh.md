@@ -52,16 +52,13 @@ ${XDG_CONFIG_HOME:-~/.config}/pi-voice/device-id
 
 Copy this file when migrating a client if it should retain the same explicit device selection. Delete it before reconnecting to intentionally create a new identity.
 
-`PI_VOICE_DEVICE_NAME` controls only the human-readable registered name. Export it on the client before connecting:
+The human-readable name is saved beside the ID at `${XDG_CONFIG_HOME:-$HOME/.config}/pi-voice/device-name`. Both desktop and Termux wrappers prompt on the first interactive connection when it is missing, then reuse the saved name. Existing installs prompt on their next interactive connection without changing their ID. There is no name environment override or hostname fallback, even for inherited obsolete variables. Noninteractive first connections must provision the file or fail with instructions. See [validation and limits](environment.md#device-name-validation) and [install/upgrade instructions](installation.md#upgrade-device-name-support).
 
-```bash
-export PI_VOICE_DEVICE_NAME='My laptop'
-pi-voice-ssh USER@HOST
-```
+Names are display metadata, **not authentication or routing identity**. Duplicate names never select or redirect a device: routing uses stable IDs and fresh verified connection/SSH-attachment identity at the existing adoption boundaries, not an arbitrary newest registry entry. An unrelated control sender/registry label is not attachment proof. Automatic narration retains its pin; changing a file or attaching a client never automatically repins mid-playback or bypasses confirmed-stop barriers.
 
-When unset, the default is the **local client's** short hostname, not the remote host; explicitly empty is an error. This preexisting variable is now strictly validated, not sanitized: Unicode is preserved and quotes/backslashes are JSON-escaped. See [validation and limits](environment.md#device-name-validation) and [install/upgrade instructions](installation.md#upgrade-device-name-support), including custom launchers and desktop/Termux wrapper copies.
+`pi-voice-client` and the older `pi-voice-phone` bridge do not register devices or choose names; the SSH wrappers alone publish metadata. Internal per-stream helpers never prompt.
 
-Changing the label leaves the stable device ID and `<id>.json` registry filename unchanged; do not delete `device-id` to rename a client. Platform is recorded separately. The wrapper's `Connected to <name>` message confirms registration identity, and Pi's corresponding message confirms selected identity; neither proves microphone/output readiness. Reconnect from an updated wrapper to register a changed name.
+Changing the label leaves the stable device ID and `<id>.json` registry filename unchanged; do not delete `device-id` to rename a client. Platform is recorded separately. The wrapper's `Connected to <name>` message confirms registration identity, and Pi's corresponding message confirms selected identity; neither proves microphone/output readiness. Before editing the local name file, confirm playback/capture stopped and close all wrappers on that client; then reconnect from an updated wrapper to register the changed name. Preserve connections/state if stop remains unconfirmed.
 
 The wrapper exports `PI_VOICE_DEVICE_ID` and target identity into the remote shell. Direct SSH uses that connection's environment. For tmux, Pi reads the current attached client's identity using the pane/socket and checks that the attachment did not change during lookup; it does not trust the long-lived Pi process's startup device ID. Multiple clients, no attached client, unreadable identity, or unresolved nested tmux fail closed rather than guessing.
 

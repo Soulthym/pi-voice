@@ -26,24 +26,24 @@ Run `/reload` after installing or updating the extension. Spoken output defaults
 
 ## Install a device name
 
-`PI_VOICE_DEVICE_NAME` already existed; current clients validate it strictly instead of silently stripping characters. Set it on the **client**, before starting the SSH wrapper (not in the remote Pi shell):
+On each **client**, desktop or Termux, run `pi-voice-ssh YOUR_HOST` from a terminal. On the first connection it asks for a device name **before** starting SSH or the bridge. Input is hidden to avoid echoing unvalidated terminal controls. Enter a label such as `My laptop` or `My phone`; Ctrl+C or EOF cancels without connecting or creating identity files.
+
+The wrapper saves the literal UTF-8 label at `${XDG_CONFIG_HOME:-$HOME/.config}/pi-voice/device-name` (normally `~/.config/pi-voice/device-name`), beside the existing `device-id`. It reuses that file on subsequent connections. Both files are private (600), in a private directory (700), and newly created files are atomically published without replacing another first launch's choice. Concurrent prompts do not lock out other wrappers; the first successfully saved name wins.
+
+There is **no device-name environment override or hostname fallback**, including inherited obsolete variables. Existing installations without the file prompt on their **next interactive connection**, retaining their stable ID. Noninteractive first runs fail immediately with the path and instructions; stdin intended for SSH is never consumed by the prompt (`/dev/tty` is used).
+
+For unattended provisioning, write a validated literal UTF-8 name (not shell quotes or JSON), optionally ending with one newline, to that exact client file before connecting. For example, on a new installation:
 
 ```bash
-export PI_VOICE_DEVICE_NAME='My laptop'
-pi-voice-ssh YOUR_HOST
+config_root=${XDG_CONFIG_HOME:-$HOME/.config}/pi-voice
+mkdir -p "$config_root"
+chmod 700 "$config_root"
+(umask 077; set -C; printf '%s\n' 'My laptop' >"$config_root/device-name")
 ```
 
-On Termux, use the same commands with a label such as `My phone`. To persist it, add the export to the client shell's startup file (for Bash, `~/.bashrc`). A custom launcher can instead contain:
+This refuses to overwrite an existing name. See [name validation](environment.md#device-name-validation): 1–128 characters, not whitespace-only, no controls/bidi or extra lines; Unicode, spaces, quotes and backslashes are preserved. Invalid input fails rather than being sanitized.
 
-```bash
-#!/usr/bin/env bash
-export PI_VOICE_DEVICE_NAME='My laptop'
-exec pi-voice-ssh "$@"
-```
-
-Give the launcher a different filename from `pi-voice-ssh` to avoid recursion. An equivalent one-line launcher command is `PI_VOICE_DEVICE_NAME='My laptop' exec pi-voice-ssh "$@"`.
-
-If the variable is **unset**, the wrapper uses the client's local short hostname (`hostname -s`, falling back to `hostname`), not the SSH server's name. An explicitly empty value is an error; use `unset PI_VOICE_DEVICE_NAME` to restore the default. See [name validation](environment.md#device-name-validation) for limits and Unicode handling.
+**Rename safely:** explicitly stop playback/capture and confirm actual stop, then close **all** wrappers on that client. Edit only the local `device-name` file, retain mode 600, and open a fresh connection. Never regenerate/delete `device-id` to customize the label. If stop is unconfirmed, retain the old connection/state and follow [recovery](troubleshooting.md#unconfirmed-stop) first.
 
 After registration, `Connected to <name>` confirms the selected identity, **not audio readiness**. Renaming does not change the persistent device ID or registry filename.
 
@@ -126,7 +126,7 @@ Validate with `sshd -t`, then reload `sshd` after changing its configuration. Th
 
 ### Upgrade device-name support
 
-This update changes both `client/pi-voice-ssh` and `termux/pi-voice-ssh`; a host update and `/reload` alone are **not sufficient**. Update the host checkout/extension and the installed wrapper on **every desktop and Termux client**, including custom launcher paths. Keep any existing `PI_VOICE_DEVICE_NAME` export if valid; remove it with `unset PI_VOICE_DEVICE_NAME` for the local hostname default, or replace it using the export in [Install a device name](#install-a-device-name). Empty values now fail instead of falling back; invalid names now fail instead of being sanitized.
+This update changes both `client/pi-voice-ssh` and `termux/pi-voice-ssh`; a host update and `/reload` alone are **not sufficient**. Update the host checkout/extension and the installed wrapper on **every desktop and Termux client**, including custom launcher paths. The previous environment-based naming design is superseded entirely: remove obsolete name exports from launchers/shell startup files; even inherited values are ignored. Existing clients missing `device-name` prompt on their next interactive connection; unattended clients must [provision the local file](#install-a-device-name) first. Existing `device-id` is retained.
 
 Before replacing scripts or exiting wrappers, follow the confirmed-stop precautions below. Then exit all old wrappers. On each client, from the matching updated checkout, install the complete shared helper set (this is also the standard Termux installation):
 
@@ -150,7 +150,7 @@ scp 'YOUR_HOST:/path/to/pi-voice/termux/pi-voice-ssh' /absolute/custom/path/pi-v
 chmod 755 /absolute/custom/path/pi-voice-ssh
 ```
 
-Substitute the actual host checkout and installed paths. Preserve custom launcher exports, but update the underlying wrapper they execute. Reconnect with the chosen export and run `/reload` in Pi. Check the `Connected to <name>` identity message; it is not a playback or microphone test. Do not delete `device-id`, registrations, or runtime state to rename a device.
+Substitute the actual host checkout and installed paths. Update the underlying wrapper custom launchers execute. Reconnect interactively, answer the first-run name prompt if the file is missing, and run `/reload` in Pi. Check the `Connected to <name>` identity message; it is not a playback or microphone test. Do not delete `device-id`, registrations, or runtime state to rename a device.
 
 ### Earlier upgrades and protocol migration
 
