@@ -6,21 +6,19 @@ root=$(mktemp -d)
 name=pi-voice-test-$$-$RANDOM
 cleanup() {
   status=$?
-  trap - EXIT INT TERM
+  # Repeated interrupts must not abort owned cleanup or replace its exit status.
+  trap '' INT TERM
+  trap - EXIT
   if (( status != 0 )); then
     echo "Desktop SSH test failed (exit $status); bounded container diagnostics:" >&2
-    podman exec "$name-server" tail -c 4096 /work/sshd.log >&2 2>/dev/null || true
-    podman exec "$name-client" bash -c 'tail -c 4096 /work/runtime/pi-voice-ssh-*/client-bridge.log /work/pipewire.log /work/wireplumber.log' >&2 2>/dev/null || true
+    timeout -k 1 10 podman exec "$name-server" tail -c 4096 /work/sshd.log >&2 2>/dev/null || true
+    timeout -k 1 10 podman exec "$name-client" bash -c 'tail -c 4096 /work/runtime/pi-voice-ssh-*/client-bridge.log /work/pipewire.log /work/wireplumber.log' >&2 2>/dev/null || true
   fi
   # Remove the dependent network-namespace client BEFORE its server.
   for role in client server; do
-    if podman container exists "$name-$role"; then
-      podman rm -f -t 1 "$name-$role" >/dev/null || { (( status != 0 )) || status=1; }
-    fi
+    timeout -k 1 15 podman rm --ignore -f -t 1 "$name-$role" >/dev/null || { (( status != 0 )) || status=1; }
   done
-  if podman image exists "$name"; then
-    podman rmi "$name" >/dev/null || { (( status != 0 )) || status=1; }
-  fi
+  timeout -k 1 15 podman rmi --ignore "$name" >/dev/null || { (( status != 0 )) || status=1; }
   rm -rf "$root"
   exit "$status"
 }
