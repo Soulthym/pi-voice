@@ -67,6 +67,7 @@ test("device badge ends only the first native row in every progress precedence, 
 		}
 	}
 	assert.deepEqual(deviceProgressLines([], "local", 80), [], "no invented progress work");
+	assert.deepEqual(deviceProgressLines(["⏯ Paused"], "Local", 160), ["⏯ Paused [Local]"], "no picker hint even with spare room");
 });
 
 test("notices use one Voice label and native Pi severity, without ANSI or duplicate severity icons", () => {

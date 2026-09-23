@@ -91,9 +91,9 @@ function badgeRegion(child: tui.Component, locate: (lines: string[], width: numb
 	}) : content;
 }
 
-export function deviceProgressComponent(lines: string[], name: string, open: () => void, hint = ""): tui.Component {
+export function deviceProgressComponent(lines: string[], name: string, open: () => void): tui.Component {
 	return badgeRegion({
-		render: width => deviceProgressLines(lines, name, Math.max(0, width - 2), hint).map(line => ` ${line}`),
+		render: width => deviceProgressLines(lines, name, Math.max(0, width - 2)).map(line => ` ${line}`),
 		invalidate() {},
 	}, (rows, width) => {
 		const row = tui.stripTerminalSequences(rows[0] ?? "");

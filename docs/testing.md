@@ -2,6 +2,8 @@
 
 ## Native device badge picker
 
+Streaming progress follow-up after `36d9b3b`: `npm run check` passed; full checkout suite **940 passed, 29 compatibility skips**, full installed-native suite **969 passed, no skips**, no failures. `test/index-live-progress.test.ts` mounts the extension widget callback/replacement path with mocked transport: pending/live text growth, warm-state events, block boundaries, ticks, pause, Stop, finish and shutdown. It reproduces premature Idle labeling, **not the reported literal disappearance**; live cause remains unconfirmed. Progress/footer badges no longer display shortcut hints; Alt+D binding/help remain unchanged. Logs: `/tmp/pi-voice-live-progress-tests.log`, `/tmp/pi-voice-live-progress-native.log`.
+
 Final integration after `e44775d`: `npm run check` passed; full `npm test`: **939 passed, 29 compatibility skips, 0 failed (968 total)**. The **full installed-native `npm test`** passed **968 tests, no skips/failures**, including all optionally gated cases, not only the 27 picker tests. No LSP server is configured; TypeScript and diff checks passed. Logs: `/tmp/pi-voice-integration-full.log`, `/tmp/pi-voice-integration-native.log`.
 
 The actual `index.ts` picker is exercised in a mounted 40-column native screen: long duplicate Unicode names, colliding short IDs, visible current marker before the name, pointer selection persisting the full ID, and Enter's default local choice. Streaming route-switch checks retain the exact suffix through paused same-route reconnect; input-only switching finalizes review-only dictation without pausing the next manually submitted turn's automatic narration.

@@ -584,7 +584,11 @@ export default async function (pi: ExtensionAPI) {
 					playback.messageIndex = completed + Math.max(0, liveIds.indexOf(playback.messageId));
 					playback.messageCount = completed + Math.max(1, liveIds.length);
 				}
-				const icon = playbackStateLabel(playbackPaused, state, !!pendingReplay?.waiting);
+				// Worker readiness and gaps between source blocks are not turn completion.
+				const waiting = !!pendingReplay?.waiting || (state === "idle" && ownsSpeech && !attentionSuppressed &&
+					(speechPurpose === "turn" || speechPurpose === "replay") &&
+					(!ownerTurnEnded || (lastOwnerUtterance !== undefined && completedOwnerUtterance !== lastOwnerUtterance)));
+				const icon = playbackStateLabel(playbackPaused, state, waiting);
 				if (!playback.hasTimings || playback.duration <= 0) {
 					playbackLine = `${icon} · ${pendingPlaybackTiming(playback.messageIndex, playback.messageCount)}`;
 				} else {
@@ -619,7 +623,7 @@ export default async function (pi: ExtensionAPI) {
 			const uiEpoch = contextEpoch;
 			ctx.ui.setWidget("pi-voice-progress", lines.length > 0 ? () => deviceProgressComponent(lines, name, () => {
 				if (uiEpoch === contextEpoch && interactiveVoiceSession) void pickDevice(ctx);
-			}, devicePickerConflict ? "/voice devices" : "Alt+D") : undefined, { placement: "belowEditor" });
+			}) : undefined, { placement: "belowEditor" });
 			progressWidgetVisible = lines.length > 0;
 			progressWidgetKey = key;
 			refreshStatus();
@@ -1515,8 +1519,7 @@ export default async function (pi: ExtensionAPI) {
 		} else {
 			color = "success";
 		}
-		if (!progressWidgetVisible) footerDeviceStatus = deviceFooterText(label, selectedDeviceLabel, footerWidth,
-			devicePickerConflict ? "/voice devices" : "Alt+D devices");
+		if (!progressWidgetVisible) footerDeviceStatus = deviceFooterText(label, selectedDeviceLabel, footerWidth);
 		const text = footerDeviceStatus?.text ?? label;
 		ctx.ui.setStatus("pi-voice", ctx.ui.theme.fg(color, text));
 	};
@@ -4601,6 +4604,7 @@ export default async function (pi: ExtensionAPI) {
 					releaseAfterTransportCancellation(cancelId, false, inputCancelled);
 					state = "idle";
 					refreshStatus();
+					refreshPlaybackTimeline();
 					notifyVoice(ctx, "Stop requested · draft preserved", "info");
 					return;
 				}

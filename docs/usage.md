@@ -75,9 +75,9 @@ The snapshot lists valid, apparently available registered devices plus **Local (
 
 Opening/cancelling does not stop capture/playback, claim ownership, change pins, or explicitly move the viewport. Choosing uses the same confirmed-stop, sticky transition as `/voice device <id>` and preserves the draft/playback cursor. Existing playback stays silently paused; idle or input-only ownership does not pause future automatic narration. Explicit endpoint overrides still win.
 
-The idle footer reserves room for primary activity and a closed, width-bounded device badge before optional voice information and key hints; other extension statuses and Pi's footer remain in place.
+The idle footer reserves room for primary activity and a closed, width-bounded device badge before optional voice information; other extension statuses and Pi's footer remain in place.
 
-Mouse/touch needs fullscreen Pi with native `MouseRegion` support and a terminal emitting SGR mouse events. Regular/frame-mode and older TTYs retain the keyboard selector overlay, plain label and Alt+D hint (space permitting), not an emulated button. Custom footers that replace Pi's built-in footer use Alt+D. Touch follows the same terminal protocol; physical phone gestures have not been validated. No SSH-wrapper key interception or client upgrade is needed.
+Mouse/touch needs fullscreen Pi with native `MouseRegion` support and a terminal emitting SGR mouse events. Regular/frame-mode and older TTYs retain the keyboard selector overlay and plain label, not an emulated button. Progress/footer badges show no picker shortcut hint; Alt+D remains available and listed in help. Custom footers that replace Pi's built-in footer use Alt+D. Touch follows the same terminal protocol; physical phone gestures have not been validated. No SSH-wrapper key interception or client upgrade is needed.
 
 **Shortcut conflict:** Pi actually defaults Alt+D to `tui.editor.deleteWordForward`; this extension deliberately replaces it, while **Alt+Delete** remains the default deletion alternative. Pi reports built-in/other-extension shortcut conflicts and may skip a reserved custom binding. If `talkShortcut`, `scrollToShortcut`, or `scrollBottomShortcut` is already Alt+D, Voice preserves that control, warns, and leaves `/voice devices` and supported mouse clicks available. Change bindings only if desired, then `/reload`.
 

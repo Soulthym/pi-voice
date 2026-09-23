@@ -53,25 +53,25 @@ export function deviceBadge(name: string, width: number): string {
 	return `[${truncateToWidth(name, Math.max(0, Math.min(24, Math.floor(width / 2) - 2)))}]`;
 }
 
-/** Keep activity and a closed device badge before optional voice details and key hints. */
-export function deviceFooterText(label: string, name: string, width: number, hint = ""): { text: string; badge: string } {
+/** Keep activity and a closed device badge before optional voice details. */
+export function deviceFooterText(label: string, name: string, width: number): { text: string; badge: string } {
 	width = Math.max(2, width);
 	const [voice, activity, ...details] = label.split(" · ");
 	const primary = [voice, activity].filter(Boolean).join(" · ");
 	const badge = `[${truncateToWidth(name, Math.max(0, Math.min(24, width - visibleWidth(primary) - 3)))}]`;
 	const room = Math.max(0, width - visibleWidth(badge) - 1);
 	let text = truncateToWidth(primary, room);
-	for (const extra of [...details, hint]) {
+	for (const extra of details) {
 		if (extra && visibleWidth(text + ` · ${extra}`) <= room) text += ` · ${extra}`;
 	}
 	return { text: `${text} ${badge}`.trimStart(), badge };
 }
 
 /** Reserve the first physical row for the selected identity, without adding a row on narrow terminals. */
-export function deviceProgressLines(lines: readonly string[], name: string, width: number, hint = ""): string[] {
+export function deviceProgressLines(lines: readonly string[], name: string, width: number): string[] {
 	if (!lines.length || width < 1) return [];
 	const badge = deviceBadge(name, width);
-	const suffix = ` ${hint && width >= visibleWidth(badge) + visibleWidth(hint) + 8 ? `${hint} ` : ""}${badge}`;
+	const suffix = ` ${badge}`;
 	const first = truncateToWidth(lines[0], Math.max(0, width - visibleWidth(suffix))) + suffix;
 	return [truncateToWidth(first, width), ...(lines.length > 1 ? wrapTextWithAnsi(lines.slice(1).join("\n"), width) : [])];
 }

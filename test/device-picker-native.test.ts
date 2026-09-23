@@ -133,9 +133,9 @@ for (const width of [40, 90]) {
 		let result: Promise<string | undefined> | undefined;
 		const controller = new AbortController();
 		t.after(() => controller.abort());
-		let current = deviceFooterText("Voice · ready · af_heart", name, width, "Alt+D devices");
+		let current = deviceFooterText("Voice · ready · af_heart", name, width);
 		const status = (available?: number) => {
-			if (available !== undefined) current = deviceFooterText("Voice · ready · af_heart", name, available, "Alt+D devices");
+			if (available !== undefined) current = deviceFooterText("Voice · ready · af_heart", name, available);
 			return current;
 		};
 		const footer = new FooterComponent({ state: {}, sessionManager: { getEntries: () => [], getCwd: () => "/tmp", getSessionName: () => undefined }, getContextUsage: () => undefined } as any,
@@ -320,10 +320,12 @@ test("passive overlay cannot allow typing through an expired prompt", nativeOpti
 	passive.hide();
 });
 
-test("footer keeps primary activity before optional identity detail and hints", () => {
+test("footer keeps primary activity before optional identity detail, without a picker hint", () => {
 	for (const activity of ["ready", "blocked", "stopping", "speaking", "listening", "downloading"]) {
-		for (const width of [27, 40]) {
-			const { text, badge } = deviceFooterText(`Voice · ${activity} · af_heart`, "手机 👩‍💻 é [name]", width, "Alt+D devices");
+		for (const width of [27, 40, 160]) {
+			const { text, badge } = deviceFooterText(`Voice · ${activity} · af_heart`, "手机 👩‍💻 é [name]", width);
+			assert.doesNotMatch(text, /Alt\+D|\/voice devices/);
+			if (width === 160) assert.equal(text, `Voice · ${activity} · af_heart ${badge}`);
 			assert.ok(native.visibleWidth(text) <= width);
 			assert.ok(text.startsWith(`Voice · ${activity}`));
 			assert.ok(text.endsWith(badge));

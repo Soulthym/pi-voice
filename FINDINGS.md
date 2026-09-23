@@ -2,6 +2,15 @@
 
 Updated incrementally. Companion: `PLAN.md`. Reorganize freely while preserving evidence and disposition.
 
+## User LIVE report — streaming playbar / hint removal after `36d9b3b`
+
+- User reports the playbar randomly disappears while assistant text streams. **Literal disappearance and its live root remain unconfirmed**; do not treat the narrower reproduced bug as proof of that report's cause.
+- Proven defect: `refreshProgressWidget` derived its playback label from the worker-wide `state`. Ready/unscoped idle and completed source-block utterances can set that state to idle while the owned response still awaits text/synthesis. The mounted extension event-sequence test reproduced premature Idle. The builder now uses existing turn/utterance ownership and completion markers to label that gap Waiting, while preserving Paused precedence, actual Playing, unknown timing, errors and true completion. Stop now refreshes the timeline immediately rather than waiting for transport events.
+- The playback row itself is gated by enabled/history selection, **not** `vocalizer.isSpeaking`. Streaming text growth, selected capture updates, canonicalization and background preparation preserved the row in the reproduction. No speculative history pinning, duration invention, worker preload rewrite or routing changes were added. Existing paused cursor/native follow/input-only and same-route reconnect tests remain green.
+- Regression mounts the actual extension widget callback/replacement path and exercises growing source text, pending timing, loading/ready/unscoped idle, playback ticks, consecutive source blocks, pause, Stop, true completion and shutdown. This is mocked transport evidence, not a real model/description-provider or live terminal reproduction.
+- Removed visible shortcut hints entirely from progress/footer badges; first-row badge/pointer behavior remains. Alt+D binding and help/docs shortcut entries remain unchanged. Alt+S, Alt+I and F2 have no conflicts in checked Pi 0.84.2/installed 0.85.1 and Voice defaults; other extensions and terminal interception remain unverified. No replacement chosen.
+- Validation: `npm run check`; full checkout suite **940 passed / 29 compatibility skips**, full installed-native suite **969 passed / no skips**, no failures. Logs: `/tmp/pi-voice-live-progress-tests.log`, `/tmp/pi-voice-live-progress-native.log`. No LSP configured. No live provider/model/hardware calls, settings/session changes, private exports or push; untracked ISSUES/demo assets preserved.
+
 ## Final picker integration after `e44775d`
 
 - Inherited routing changes were checked and committed separately as `8d665ce`. Reconnect of an already-paused unchanged route must retire its sink once incoming deltas are queued; resume preserves the audible suffix without duplicated prefix or lost future text. Input-only ownership must not set playback pause intent; finalized dictation stays review-only, and a later manually submitted turn narrates normally.
