@@ -36,7 +36,7 @@ test("manual names/IDs and cycles are sticky across ambiguous attachments, contr
 	await register("B", "Phone B");
 	const config = JSON.stringify({ enabled: true, input: "auto", audioCache: false, timingPreprocessConcurrency: 0 });
 	await fs.writeFile(process.env.PI_VOICE_CONFIG, config);
-	const lookup = t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", async () => { throw new Error("Multiple tmux clients can access this pane"); });
+	const lookup = t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", async (): Promise<{ kind: "device"; id: string }> => { throw new Error("Multiple tmux clients can access this pane"); });
 	const host = new FakeVoiceHost(root, "manual");
 	let footer = "";
 	host.ctx.ui.setStatus = (_key: string, value?: string) => { footer = value ?? ""; };
@@ -64,7 +64,11 @@ test("manual names/IDs and cycles are sticky across ambiguous attachments, contr
 	assert.match(footer, /\[Linux Mint PC\]$/);
 	assert.equal(host.widgets.get("pi-voice-progress"), undefined, "idle badge uses the existing footer, not another widget row");
 	host.addMessage("a", null, assistant("First sentence. Second sentence."));
+	const entries = host.entries.length;
+	const stopped = worker.pauses.length;
 	await host.command("device");
+	assert.equal(host.entries.length, entries, "query does not save or claim a selection");
+	assert.equal(worker.pauses.length, stopped, "query never touches playback");
 	assert.match(host.notices.at(-2)!.message, /Linux Mint PC \(A\).*Phone B \(B\)/);
 	assert.equal(lookup.mock.callCount(), calls);
 	await host.shortcut("f5"); await settle();
@@ -117,6 +121,18 @@ test("manual names/IDs and cycles are sticky across ambiguous attachments, contr
 	await host.command("reconnect");
 	assert.equal(lookup.mock.callCount(), calls + 1);
 	assert.equal(pin().selection, "A", "failed auto lookup leaves the old manual pin");
+	lookup.mock.mockImplementation(async () => ({ kind: "device" as const, id: "B" }));
+	await host.command("reconnect");
+	assert.deepEqual(pin(), { version: 1, selection: "auto", pin: "B" });
+	await host.command("output tcp://127.0.0.1:23456");
+	await host.command("input unix:///custom-mic");
+	const overrides = await fs.readFile(process.env.PI_VOICE_CONFIG, "utf8");
+	await host.command("device A");
+	assert.match(host.notices.at(-1)!.message, /overrides unchanged \(input: custom endpoint, output: custom endpoint\)/);
+	assert.equal(await fs.readFile(process.env.PI_VOICE_CONFIG, "utf8"), overrides);
+	await host.shortcut("f5"); await settle();
+	assert.equal(worker.outputs.at(-1), "tcp://127.0.0.1:23456", "explicit output overrides the pinned endpoint");
+	assert.match(host.widgetComponents.get("pi-voice-progress")!.render!(80)[0], /\[Linux Mint PC\]$/, "badge is selection metadata, not a custom endpoint URL");
 });
 
 test("registered cycle is stable, wraps, skips missing/invalid entries and rejects ambiguous names without probes", async t => {

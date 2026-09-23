@@ -2157,10 +2157,10 @@ export default async function (pi: ExtensionAPI) {
 					changed ||= inputInProgress && (inputRoute.endpoint !== inputEndpoint ||
 						(inputRoute.kind === "device" ? inputRoute.device.connectedAt : undefined) !== inputGeneration);
 				} catch (error) { if ((!identityChanged && inputInProgress) || (manual !== undefined && manual !== "auto")) throw error; }
-				if (manual !== undefined || previous || transportStopPending || inputStopPending || (force && deviceRetryRequired) || (changed && (ownsSpeech || inputInProgress))) {
+				if (manual !== undefined || previous || transportStopPending || inputStopPending || (force && (deviceRetryRequired || inputInProgress)) || (changed && (ownsSpeech || inputInProgress))) {
 					// Termination, not a TCP accept or a cancellation timeout, proves the old sink is gone.
 					stopUnconfirmed = true;
-					if (manual !== undefined && inputInProgress) await finishInputForPlayback();
+					if (force && inputInProgress) await finishInputForPlayback();
 					await Promise.all([trackStop("output", vocalizer.shutdown()), cancelActiveInput()]);
 					stopUnconfirmed = false;
 					for (const resolve of transportCancelWaiters.values()) resolve();

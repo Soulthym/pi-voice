@@ -147,7 +147,7 @@ for (const phase of ["resolution", "termination"]) test(`Talk waits through ${ph
  assert.ok(host.notices.some(notice => notice.message.includes("B-input")));
 });
 
-for (const change of ["endpoint", "generation"]) test(`same-ID input ${change} change cancels capture with intentional local output`, async t => {
+for (const change of ["endpoint", "generation"]) test(`same-ID input ${change} change finalizes capture with intentional local output`, async t => {
  const { host, registration, register } = await setup(t);
  await host.command("output local");
  const recording = Promise.withResolvers<any>();
@@ -155,17 +155,20 @@ for (const change of ["endpoint", "generation"]) test(`same-ID input ${change} c
  await host.command("talk"); await settle();
  assert.equal(capture.mock.callCount(), 1);
  const stopped = Promise.withResolvers<void>();
- const cancel = t.mock.method(PhoneInputClient.prototype, "cancel", () => stopped.promise);
+ const stop = t.mock.method(PhoneInputClient.prototype, "stop", () => stopped.promise);
+ let editor = "";
+ host.ctx.ui.getEditorText = () => editor;
+ host.ctx.ui.setEditorText = (text: string) => { editor = text; };
  if (change === "endpoint") registration.inputEndpoint = "unix:///replacement-input";
  else registration.connectedAt++;
  await register();
  let adopted = false;
  const reconnect = host.command("reconnect").then(() => { adopted = true; }); await settle();
- assert.ok(cancel.mock.callCount(), "input metadata must be compared independently of output");
+ assert.ok(stop.mock.callCount(), "input metadata must be compared independently of output");
  assert.equal(adopted, false, "pin adoption awaits capture stop proof");
- stopped.resolve(); recording.resolve({ type: "text", data: "obsolete draft" });
+ stopped.resolve(); recording.resolve({ type: "text", data: "Preserved draft" });
  await reconnect; await settle();
- assert.equal(host.ctx.ui.getEditorText(), "", "retired capture cannot finalize after rebind");
+ assert.match(editor, /Preserved draft/, "reconnect finalizes rather than discards capture");
 });
 
 test("failed rebind keeps its barrier and lease through later playback and shutdown", async t => {

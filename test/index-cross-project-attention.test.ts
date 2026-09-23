@@ -52,6 +52,24 @@ test("attention requests the eligible waiting project with fresh origin identity
 	assert.equal(waiting.attentionRequestIsCurrent(next), false);
 });
 
+test("attention carries the manual origin pin without resolving ambiguous attachments", async t => {
+	const { root, host, waiting } = await setup(t);
+	await fs.mkdir(path.join(root, "devices"));
+	const available = path.join(root, "available");
+	await fs.writeFile(available, "");
+	await fs.writeFile(path.join(root, "devices", "manual.json"), JSON.stringify({ version: 1, id: "manual", name: "Linux Mint PC",
+		platform: "linux", audioEndpoint: `unix://${available}`, inputEndpoint: `unix://${available}`, connectedAt: 1, lastActive: 1 }));
+	const resolve = t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", async () => { throw new Error("Multiple attached clients"); });
+	await host.command('device "Linux Mint PC"');
+	await host.command("attention");
+	const request = waiting.takeAttentionRequest()!;
+	assert.deepEqual(request.connection, { kind: "device", id: "manual" });
+	assert.equal(waiting.attentionRequestIsCurrent(request), true);
+	assert.equal(resolve.mock.callCount(), 0);
+	await host.command("stop");
+	assert.equal(waiting.attentionRequestIsCurrent(request), false);
+});
+
 test("attention fails closed when fresh origin attachment cannot be resolved", async t => {
 	const { host, waiting } = await setup(t);
 	const resolve = mock.method(DeviceRouter.prototype, "resolveCurrentConnection", async () => { throw new Error("No attached tmux client"); });
@@ -142,7 +160,7 @@ test("attention does not publish before confirmed player stop", async t => {
 	assert.equal(waiting.hasAttentionRequest(), true);
 });
 
-test("attention finalizes capture into the editor before requesting, without submission", async t => {
+for (const action of ["attention", "device local", "reconnect"]) test(`${action} finalizes capture into the editor without submission`, async t => {
 	const { host, waiting } = await setup(t);
 	await host.command("input local");
 	await host.command("submit auto");
@@ -156,14 +174,14 @@ test("attention finalizes capture into the editor before requesting, without sub
 	const resolve = mock.method(DeviceRouter.prototype, "resolveCurrentConnection", async () => ({ kind: "intentional_local" as const }));
 	t.after(() => { recording.mock.restore(); stop.mock.restore(); resolve.mock.restore(); });
 	await host.command("talk"); await settle();
-	const pending = host.command("attention"); await settle();
+	const pending = host.command(action); await settle();
 	assert.equal(stop.mock.callCount(), 1);
 	assert.equal(waiting.hasAttentionRequest(), false);
 	capture.resolve({ type: "text", data: "Keep this draft." });
 	await pending;
 	assert.match(editor, /Keep this draft/);
 	assert.equal(submitted.mock.callCount(), 0);
-	assert.equal(waiting.hasAttentionRequest(), true);
+	assert.equal(waiting.hasAttentionRequest(), action === "attention");
 });
 
 test("external input cancellation during attention finalization cannot publish", async t => {
