@@ -1,6 +1,15 @@
 # Tests
 
-## Persistent client-name validation
+## Explicit device routing and first-row selection badge
+
+Final `npm run check` passed; full `npm test`: **923 passed, 3 existing compatibility skips, 0 failed (926 total)**. Installed-native inert-terminal key/scroll/marker tests: **307 passed, no skips/failures**. Shell syntax/diff checks passed; no LSP configured.
+
+New fake-device checks cover name/ID selection under ambiguous attachments, sticky ordinary controls/reload, auto-mode return, deterministic wrapping/empty/one/missing/duplicate cycles, non-submitting capture finalization and manual draft preservation, confirmed-stop failure retaining pin/tag/lease, canonical cursor/new endpoint, read-only queries and unchanged custom endpoints. Attention requests carry the manual origin pin without identity guessing and retain cancellation/ownership checks. Native widget-factory tests verify first-physical-row placement, idle footer exclusivity, bounded wide names, precedence and stable mobile rows. Existing navigation, paused code-preview, stale-context, opaque-handle and scroll tests remain passing.
+
+No live tmux/SSH/client session, hardware microphone/audio, inference or provider calls were used. The optional isolated real-SSH suite was not rerun: client changes only replace the identity wording with `Connected as`. Logs: `/tmp/voice-final-tests-2.log`, `/tmp/voice-final-native.log`. See [operator steps](installation.md#sticky-device-selection-and-selected-device-badge).
+
+## Persistent client-name validation (previous handoff)
+
 
 Latest clarification replaces environment/hostname naming with a first-interactive-run prompt and a local persisted file. `npm run check` passed; full `npm test`: **917 passed, 3 existing TUI compatibility skips, 0 failed (920 total)**. Isolated real SSH: **12/12 cases passed**; only the client receives `/work/device-config/pi-voice/device-name`, through a wrapper-scoped `XDG_CONFIG_HOME`. No UI/API changes or new native-TUI run.
 

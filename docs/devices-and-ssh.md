@@ -6,11 +6,37 @@
 
 With `input`/`output` set to `auto`, a new session pins its current connection's device. Reloading/resuming a session restores its saved pin; merely attaching another client does not change it. Pins are stored in the existing session device entry, never global configuration. A genuinely local, non-SSH/non-tmux connection can pin local I/O.
 
-`/voice reconnect` adopts the **current attachment** without starting playback. Replay, resume, playback-requesting navigation and `/voice test` also adopt the current connection before speaking, except when the session explicitly selects `local` or `output` is non-`auto`. Forced reconnect and attention-origin adoption use their separate paths. Cross-project `/voice attention` sends the origin terminal's freshly resolved identity to the waiting session, which adopts that pin instead of resolving its possibly detached pane. Unavailable or ambiguous origin identity fails closed; old tmux environment identity is never guessed. Pause-only and paused navigation do not look up or change identity; navigation previews remain immediate. Automatic narration, dictation and automatic attention retries use the existing pin. An active old transport is terminated before rebinding; reconnect leaves playback paused.
+In **auto mode**, `/voice reconnect` adopts the current attachment without starting playback. Replay, resume, playback-requesting navigation and `/voice test` also adopt the current connection before speaking (unless `output` is non-`auto`). Automatic narration and dictation retain the pin. Pause-only and paused navigation do not resolve identity; navigation previews remain immediate. Ambiguous or unavailable identity fails closed, never guessing from old tmux environment values.
+
+**Manual selection is sticky for this Pi session, including reload.** F4/mic, F5/replay, F6–F10 and ordinary activity do not resolve tmux attachment identity or repin it. `/voice reconnect` (or the existing `/voice device auto`) explicitly returns to auto mode **only on successful adoption**; failures retain the previous mode/pin. No endpoint settings change.
+
+Cross-project `/voice attention` carries the origin session's manual selection, or freshly resolves its attachment in auto mode. The receiving session adopts that origin identity when in auto mode; a receiver's own manual selection remains sticky. Request freshness, cancellation, session ownership and confirmed-stop checks still apply; a detached receiver need not resolve its own attachment.
 
 There is **no fallback** to another client or host I/O when the pin is missing or the connection identity is unavailable/ambiguous. Transport failures stop the affected operation: reconnect/fix the client and explicitly retry. `/voice device`, `/voice output` and `/voice input` without arguments are read-only metadata reports: a listed registration or endpoint does **not** mean connected or ready. Routing never opens a test socket (even an empty connection can kill an existing client player); SSH accepting a reverse connection does not prove client readiness.
 
-Explicit `/voice device local` selects local I/O; `/voice device <id>` selects a registered client until an eligible explicit playback action repins it (non-`auto` output bypasses ordinary adoption). Explicit `local`, `disabled`, `tcp://…`, and `unix:///…` endpoint settings bypass automatic routing for that direction. `/voice reconnect` resets the device selection to auto with the new pin, but does not change endpoint settings.
+### Explicit selection in a shared terminal
+
+```text
+/voice device                  # read-only current selection and registered candidates
+/voice device <exact-id>
+/voice device "Linux Mint PC"  # unique exact name; spaces inside quotes preserved
+/voice device next
+/voice device prev
+/voice device local
+/voice reconnect               # return to auto using fresh attachment identity
+```
+
+The entire argument is a name or ID, not just its first word. Single/double outer quotes are accepted; escape embedded quotes/backslashes with a backslash. Exact IDs win over names; duplicate names are rejected with matching IDs, never guessed. ID-prefix input is not supported. The reserved unquoted words are `auto`, `local`, `next`, `prev`.
+
+Cycling wraps in stable, case-sensitive ID order, not activity order. With no candidates it reports an error and changes nothing; one candidate selects that device; a missing current ID (including local) selects the first for `next`, last for `prev`. Only valid registered metadata with at least one apparently available endpoint participates. Removed registrations/closed forwards are excluded where detectable. Registration lifetime follows the wrapper/forward, **not a timestamp TTL**: long-lived idle connections do not expire from inactivity. No readiness probes are made; on hosts hiding procfs, TCP availability remains unknown until actual use. Local and synthesized legacy-loopback entries are not inserted into the cycle.
+
+A switch supersedes obsolete replay/capture acquisition, finalizes an active recording into the draft **without submitting**, and preserves manual editor changes. Unlike `/voice stop`, it does not cancel/discard that dictation. The old player and recorder must actually stop before committing the new pin. Failure keeps the old pin, badge and unconfirmed ownership; restore the original route and retry, never delete leases/tickets/receipts. Successful switching preserves the playback cursor, leaves selected playback paused (idle stays idle), and sends no audio to the new device until explicit playback. F8 resumes; F5 replays.
+
+`local` means the machine running Pi, not the client issuing the command. Explicit `local`, `disabled`, `tcp://…`, and `unix:///…` endpoint settings still override the device selection **per direction**; only `auto` follows the selected device. Selection notices identify unchanged overrides, without guessing which physical host a custom endpoint represents.
+
+Any attached client able to issue commands in this shared terminal may select a device. This is an explicit shared-terminal trust decision, **not identification/authentication of the key sender**. There is no key interception, new credential or control channel.
+
+The selected device name appears once in brackets at the end of the first existing progress row (input, then playback, descriptions, timing). If there is no progress row, the existing Voice footer carries it; no extra work row is invented. Names are width-bounded; missing metadata uses a short ID, local is `[local]`, and no adopted identity is `[no device]`. This is selection feedback, not physical readiness, and endpoint URLs/credentials are never used as badges.
 
 ## Managed SSH topology
 
@@ -54,13 +80,13 @@ Copy this file when migrating a client if it should retain the same explicit dev
 
 The human-readable name is saved beside the ID at `${XDG_CONFIG_HOME:-$HOME/.config}/pi-voice/device-name`. Both desktop and Termux wrappers prompt on the first interactive connection when it is missing, then reuse the saved name. Existing installs prompt on their next interactive connection without changing their ID. There is no name environment override or hostname fallback, even for inherited obsolete variables. Use `pi-voice-ssh --set-device-name "My device"` for headless setup or rename, or omit the name for a visible prompt even when already named. This is strictly standalone (no SSH target/options), local-only, and preserves the ID. Normal first-connection prompts are visible too. Noninteractive first connections must run the setter or fail with instructions. See [validation and limits](environment.md#device-name-validation) and [install/upgrade instructions](installation.md#upgrade-device-name-support).
 
-Names are display metadata, **not authentication or routing identity**. Duplicate names never select or redirect a device: routing uses stable IDs and fresh verified connection/SSH-attachment identity at the existing adoption boundaries, not an arbitrary newest registry entry. An unrelated control sender/registry label is not attachment proof. Automatic narration retains its pin; changing a file or attaching a client never automatically repins mid-playback or bypasses confirmed-stop barriers.
+Names are display metadata, **not authentication or routing identity**. An explicit unique-name command resolves to a stable ID; duplicate names never select or redirect a device. Auto mode uses fresh verified connection/SSH-attachment identity at its adoption boundaries, not an arbitrary newest registry entry. An unrelated control sender/registry label is not attachment proof. Automatic narration retains its pin; changing a file or attaching a client never automatically repins mid-playback or bypasses confirmed-stop barriers.
 
 `pi-voice-client` and the older `pi-voice-phone` bridge do not register devices or choose names; the SSH wrappers alone publish metadata. Internal per-stream helpers never prompt.
 
-Changing the label leaves the stable device ID and `<id>.json` registry filename unchanged; do not delete `device-id` to rename a client. Platform is recorded separately. The wrapper's `Connected to <name>` message confirms registration identity, and Pi's corresponding message confirms selected identity; neither proves microphone/output readiness. Before editing the local name file, confirm playback/capture stopped and close all wrappers on that client; then reconnect from an updated wrapper to register the changed name. Preserve connections/state if stop remains unconfirmed.
+Changing the label leaves the stable device ID and `<id>.json` registry filename unchanged; do not delete `device-id` to rename a client. Platform is recorded separately. The wrapper's `Connected as <name>` message confirms the client's registration identity, and Pi's `Connected to <name> · identity selected` notice confirms selected identity; neither proves microphone/output readiness. Before editing the local name file, confirm playback/capture stopped and close all wrappers on that client; then reconnect from an updated wrapper to register the changed name. Preserve connections/state if stop remains unconfirmed.
 
-The wrapper exports `PI_VOICE_DEVICE_ID` and target identity into the remote shell. Direct SSH uses that connection's environment. For tmux, Pi reads the current attached client's identity using the pane/socket and checks that the attachment did not change during lookup; it does not trust the long-lived Pi process's startup device ID. Multiple clients, no attached client, unreadable identity, or unresolved nested tmux fail closed rather than guessing.
+The wrapper exports `PI_VOICE_DEVICE_ID` and target identity into the remote shell. Direct SSH uses that connection's environment. For tmux, Pi reads the current attached client's identity using the pane/socket and checks that the attachment did not change during lookup; it does not trust the long-lived Pi process's startup device ID. In auto mode, multiple clients, no attached client, unreadable identity, or unresolved nested tmux fail closed rather than guessing. Explicit manual selection is the supported alternative when several clients share the terminal.
 
 ## Wrapper syntax
 
@@ -87,7 +113,7 @@ Set `PI_VOICE_SSH_DRY_RUN=1` to print resolved identity/platform/target informat
 
 ## Legacy bridge compatibility
 
-If loopback listeners are present on ports 8765 and 8766, the device menu can expose a `legacy-loopback` Termux candidate for explicit selection. Automatic routing never falls back to this candidate. New installations use managed per-device dynamic TCP forwards. Existing Unix-socket registrations remain readable for compatibility; exit all old wrappers before upgrading.
+Saved `legacy-loopback` pins remain readable, but menus/cycling no longer synthesize an unregistered device from ports 8765/8766. For an unregistered legacy bridge, use explicit input/output endpoint settings; automatic routing never falls back to it. New installations use managed per-device dynamic TCP forwards. Existing Unix-socket registrations remain readable for compatibility; exit all old wrappers before upgrading.
 
 ## Multiple Pi sessions
 

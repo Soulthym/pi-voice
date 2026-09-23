@@ -23,7 +23,7 @@ Action commands (`on`, `off`, `toggle`, `stop`, `setup`, `test`, `talk`, `attent
 | `/voice setup` | Explicitly warms Kokoro and Wav2Vec2 alignment. Whisper still loads on first transcription. |
 | `/voice test [text]` | Speaks test text or a default readiness phrase. |
 | `/voice talk` | Starts/stops microphone dictation. |
-| `/voice attention` | Explicitly attend the oldest eligible waiting session using the origin terminal's fresh device pin; replay this project if current/none waiting. Requires enabled voice. F5 remains own-project replay. |
+| `/voice attention` | Explicitly attend the oldest eligible waiting session using the origin session's sticky manual pin (fresh attachment identity in auto mode); replay this project if current/none waiting. Requires enabled voice. F5 remains own-project replay. |
 | `/voice timing` | Shows selected timing quality and recent audio-to-highlight/highlight-to-render diagnostic latency. |
 
 ## Speech and narration
@@ -78,12 +78,16 @@ Shortcut names follow Pi's format, for example `alt+m`, `ctrl+shift+m`, or `f8`.
 ## Output and devices
 
 ```text
-/voice device [auto|local|<device-id>]
+/voice device [auto|local|next|prev|<exact-device-id>|"unique device name"]
 /voice reconnect
 /voice output [auto|local|tcp://host:port|unix:///path]
 ```
 
-`device` without a value reports the session preference and pinned device metadata, without probing or claiming readiness. Completion lists registered candidates, not proven working devices. With a value, `device` stores a per-session routing preference. `output` controls the global endpoint policy. `/voice reconnect` adopts fresh current-attachment identity without playback; explicit replay/resume and playback-requesting navigation also repin unless the session selects `local` or `output` is non-`auto`. Automatic narration and dictation use the saved pin, with no automatic fallback. See [Devices and SSH](devices-and-ssh.md).
+`device` without a value lists registered candidates and the current selection, read-only and without readiness probes. Exact IDs or unique exact names select a **sticky session pin**, preserved by reload and ordinary controls; ambiguous names report IDs. Quotes preserve spaces. `next`/`prev` wrap in stable ID order over valid, apparently available registrations, excluding unregistered local/legacy entries. Zero candidates changes nothing; one selects itself; missing current selects first/last respectively.
+
+Selection waits for actual old-player/recorder stop, finalizes recording into the draft without submission or overwriting manual edits, and preserves the playback cursor paused. It does not start the new device. Failed handoff retains the old selection and ownership. F8 resumes; F5 replays. The bracketed name/short-ID appears once at the end of the first existing progress row, or the Voice footer if none.
+
+`/voice reconnect` and `/voice device auto` return to auto mode after successful fresh-attachment adoption; failure leaves the old pin/mode. Only in auto mode can ordinary replay/resume repin (non-`auto` output bypasses ordinary adoption). `input`/`output` explicit local/disabled/custom settings retain precedence and are never rewritten by device selection. Anyone sharing the terminal may issue this command; names are not authentication and no key sender is identified. See [Devices and SSH](devices-and-ssh.md).
 
 ## Timeline, preprocessing, and cache
 

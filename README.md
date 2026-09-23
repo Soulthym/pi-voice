@@ -153,16 +153,20 @@ Speak after pressing the microphone key. Recording normally stops after about 1.
 /voice attention
 /voice scroll-to
 /voice bottom
-/voice device auto|local|<device-id>
-/voice reconnect  # adopt current attachment for this session; no playback
+/voice device                       # read-only selection + candidates
+/voice device "Linux Mint PC"        # unique exact name (or exact ID)
+/voice device next|prev|local|auto
+/voice reconnect                    # return to auto attachment mode; no playback
 /voice setup
 ```
+
+Manual device selection is session-sticky, including reload and shared tmux controls. Switching waits for confirmed stop, preserves the draft/cursor, and leaves playback paused; F8 resumes. The first existing progress row (or idle footer) ends with `[device name]`. Explicit endpoint overrides still win. See [routing and trust](docs/devices-and-ssh.md).
 
 `/voice stop` must start the editor input to be recognized as a command. Nonempty-draft access remains a usability gap; no Escape/Stop shortcut discards your draft. Explicit playback finalizes microphone capture and preserves manual edits.
 
 ### Termux extended keyboard
 
-`/voice attention` explicitly attends the oldest eligible waiting session using the requesting terminal's fresh device pin, falling back to this project's replay when current/none waiting. F5 always stays in this project. Handoff waits for confirmed stop; stop/newer playback actions cancel pending requests.
+`/voice attention` explicitly attends the oldest eligible waiting session using the requesting session's manual pin (fresh attachment identity in auto mode), falling back to this project's replay when current/none waiting. F5 always stays in this project. Handoff waits for confirmed stop; stop/newer playback actions cancel pending requests.
 
 Termux can expose one-tap microphone, message navigation, sentence/newline navigation, pause/resume, and replay controls through an optional F4–F10 extra-key row.
 

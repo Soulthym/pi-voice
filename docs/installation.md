@@ -45,7 +45,7 @@ Setup never queries SSH configuration, connects, starts bridges or creates a dev
 
 **Rename safely:** explicitly stop playback/capture and confirm actual stop, then close **all** wrappers on that client. Run `pi-voice-ssh --set-device-name "New label"` locally, then open a fresh connection. Existing bridges/registrations pick up the name on the next connection; the setter never implicitly restarts anything. Never regenerate/delete `device-id` to customize the label. If stop is unconfirmed, retain the old connection/state and follow [recovery](troubleshooting.md#unconfirmed-stop) first.
 
-After registration, `Connected to <name>` confirms the selected identity, **not audio readiness**. Renaming does not change the persistent device ID or registry filename.
+After registration, `Connected as <name>` confirms the **client's** identity, **not audio readiness**. Renaming does not change the persistent device ID or registry filename.
 
 ## Linux SSH client
 
@@ -124,6 +124,12 @@ Validate with `sshd -t`, then reload `sshd` after changing its configuration. Th
 
 ## Upgrading
 
+### Sticky device selection and selected-device badge
+
+Update the host extension and run `/reload` when ready. Existing clients already publishing names/IDs need **no protocol upgrade or reconnect for manual routing**: `/voice device "Linux Mint PC"`, an exact ID, or `next`/`prev` selects a sticky session pin, usable even with multiple attached tmux clients. `/voice device` is read-only; successful `/voice reconnect` returns to auto mode. Selection honors explicit input/output overrides and does not itself play audio. See [handoff and shared-terminal trust](devices-and-ssh.md#explicit-selection-in-a-shared-terminal).
+
+Only the wrapper identity wording changed on clients (`Connected to` → `Connected as`). Recopy both installed wrapper variants using the commands below to get that wording on future connections; no live connection needs restarting merely for the text. Never discard unconfirmed stop state to apply an update.
+
 ### Upgrade device-name support
 
 For visible prompts and standalone setup/rename, or first-save failure after an older hidden prompt (including on Termux): update both installed wrapper variants from this checkout using the commands below, then retry interactively. Publication now uses a short, bounded `flock` plus a private temporary file and atomic rename, not hard links. Linux/Termux already require `flock` (`util-linux`); it is now needed for first-time identity saving even on playback-only clients. Experimental macOS setups also need a `flock` implementation supporting `-x -w` (native macOS support remains unimplemented), or pre-provision both identity files. No lock is held during the prompt. The empty `.device.lock` fence remains intentionally; the kernel releases its lock on exit. Do not delete that fence while wrappers may be saving.
@@ -154,7 +160,7 @@ scp 'YOUR_HOST:/path/to/pi-voice/termux/pi-voice-ssh' /absolute/custom/path/pi-v
 chmod 755 /absolute/custom/path/pi-voice-ssh
 ```
 
-Substitute the actual host checkout and installed paths. Update the underlying wrapper custom launchers execute. Reconnect interactively, answer the first-run name prompt if the file is missing, and run `/reload` in Pi. Check the `Connected to <name>` identity message; it is not a playback or microphone test. Do not delete `device-id`, registrations, or runtime state to rename a device.
+Substitute the actual host checkout and installed paths. Update the underlying wrapper custom launchers execute. Reconnect interactively, answer the first-run name prompt if the file is missing, and run `/reload` in Pi. Check the `Connected as <name>` client identity message; it is not a playback or microphone test. Do not delete `device-id`, registrations, or runtime state to rename a device.
 
 ### Earlier upgrades and protocol migration
 

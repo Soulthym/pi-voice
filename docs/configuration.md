@@ -68,7 +68,7 @@ Use `/voice voice` to report the current voice, or `/voice voice <id>` to set it
 
 `auto` uses the session's saved current-connection pin. New sessions resolve fresh attachment identity; ambiguous or unavailable identity fails closed, never falling back to the newest registered client or host audio. Genuinely local connections can pin local I/O. Explicit `local`, `disabled`, TCP, and Unix values bypass automatic endpoint selection.
 
-`/voice device <selection>` sets a per-session preference persisted as a non-context-injecting Pi custom entry; `/voice device` reports the effective selection and route without claiming it. It does not change the global JSON endpoint settings. See [Devices and SSH](devices-and-ssh.md).
+`/voice device <exact-id>`, `/voice device "unique name"`, `next`, `prev`, and `local` set a sticky per-session selection persisted in the existing non-context-injecting Pi custom entry. Reload and ordinary controls retain that manual mode; successful `/voice reconnect` or `/voice device auto` returns to automatic attachment adoption. Failed handoff retains the old pin/mode. `/voice device` lists candidates and the effective selection read-only. Names are labels, not credentials. These commands do not change global JSON settings: explicit per-direction endpoint overrides keep precedence, and custom endpoints are not mapped to a guessed host. See [Devices and SSH](devices-and-ssh.md).
 
 ## Model-assisted features
 
