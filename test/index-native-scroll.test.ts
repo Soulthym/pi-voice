@@ -89,7 +89,7 @@ for (const action of ["auto tail start", "auto tail small", "auto tail resize", 
 		return;
 	}
 	const cached = action.endsWith("cached");
-	const width = action === "narrow cached" ? 28 : action === "current cached" ? 120 : 100;
+	const width = action === "device picker" ? 40 : action === "narrow cached" ? 28 : action === "current cached" ? 120 : 100;
 	const terminal = { columns: width, rows: action === "current cached" ? 50 : 40, write() {}, hideCursor() {} };
 	const tui: any = new native.TuiAltScreen(terminal, false, undefined,
 		{ scrollToEndIndicator: () => "↓ Jump to latest message (End)" });
@@ -317,6 +317,14 @@ for (const action of ["auto tail start", "auto tail small", "auto tail resize", 
 	assert.equal(view.scrollTop, 92, "programmatic motion does not cancel the ongoing 20–80% follow band");
 
 	if (action === "device picker") {
+		const ids = ["same-prefix-123-A", "same-prefix-123-B"];
+		await fs.mkdir(process.env.PI_VOICE_DEVICE_DIR!, { recursive: true });
+		for (const id of ids) {
+			await fs.writeFile(path.join(root, id), "");
+			await fs.writeFile(path.join(process.env.PI_VOICE_DEVICE_DIR!, `${id}.json`), JSON.stringify({ version: 1, id,
+				name: "手机 é 👩‍💻 duplicate device name that exceeds the picker width", platform: "linux",
+				audioEndpoint: `unix://${root}/${id}`, inputEndpoint: `unix://${root}/${id}`, connectedAt: 1, lastActive: 1 }));
+		}
 		const progress = host.widgetComponents.get("pi-voice-progress") as any;
 		assert.ok(progress instanceof native.MouseRegion);
 		tui.setLayoutRoot(new native.VStack([
@@ -332,7 +340,11 @@ for (const action of ["auto tail start", "auto tail small", "auto tail resize", 
 		tui.handleTerminalInput(`\x1b[<0;${x};${y}m`);
 		tui.doRender();
 		assert.equal(tui.hasOverlay(), true);
-		assert.ok(tui.previousScreen.some((row: string) => native.stripTerminalSequences(row).includes("1. Local (host audio)")), tui.previousScreen.join("\n"));
+		const pickerRows = tui.previousScreen.map((row: string) => native.stripTerminalSequences(row));
+		assert.ok(pickerRows.every((row: string) => native.visibleWidth(row) <= 40));
+		for (const label of ["1. current (local)", "2. (same-pref...)", "3. (same-pref...)"]) {
+			assert.ok(pickerRows.some((row: string) => row.includes(label)), `${label}\n${pickerRows.join("\n")}`);
+		}
 		assert.equal(view.scrollTop, before.top);
 		assert.equal(worker.sent.length, before.sent);
 		assert.deepEqual(worker.pauses, before.pauses);
@@ -341,6 +353,19 @@ for (const action of ["auto tail start", "auto tail small", "auto tail resize", 
 		assert.equal(host.entries.length, before.entries, "cancel cannot pin or claim");
 		marker = 180; await tick();
 		assert.ok(view.scrollTop > 140, "ordinary badge click does not unfollow narration");
+		// The rendered number maps to the full ID, never the clipped duplicate prefix/name.
+		let choosing = host.shortcut("alt+d");
+		tui.doRender();
+		const optionY = tui.previousScreen.findIndex((row: string) => native.stripTerminalSequences(row).includes("3. (same-pref...)"));
+		tui.handleTerminalInput(`\x1b[<0;8;${optionY + 1}M`);
+		tui.handleTerminalInput(`\x1b[<0;8;${optionY + 1}m`);
+		await choosing;
+		assert.equal(host.entries.filter(entry => entry.customType === "pi-voice.device-selection").at(-1)!.data.pin, ids[1]);
+		choosing = host.shortcut("alt+d");
+		tui.doRender();
+		assert.ok(tui.previousScreen.some((row: string) => native.stripTerminalSequences(row).includes("3. current (same-pref...)")), "selected duplicate's current marker and ID stay visible at 40 columns");
+		tui.handleTerminalInput("\r"); await choosing;
+		assert.equal(host.entries.filter(entry => entry.customType === "pi-voice.device-selection").at(-1)!.data.pin, "local", "default keyboard choice remains local");
 		for (const command of ["stop", "device local"]) {
 			const opening = host.shortcut("alt+d");
 			assert.equal(tui.hasOverlay(), true);

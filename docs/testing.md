@@ -2,11 +2,13 @@
 
 ## Native device badge picker
 
-`npm run check` passed; full `npm test`: **928 passed, 5 compatibility skips, 0 failed (933 total)**. Installed-native inert-terminal key/scroll/marker/picker suite: **310 passed, no skips/failures**. No LSP server is configured; TypeScript and diff checks passed. Logs: `/tmp/voice-picker-full-final.log`, `/tmp/voice-picker-native-final-2.log`.
+Final integration after `e44775d`: `npm run check` passed; full `npm test`: **939 passed, 29 compatibility skips, 0 failed (968 total)**. The **full installed-native `npm test`** passed **968 tests, no skips/failures**, including all optionally gated cases, not only the 27 picker tests. No LSP server is configured; TypeScript and diff checks passed. Logs: `/tmp/pi-voice-integration-full.log`, `/tmp/pi-voice-integration-native.log`.
+
+The actual `index.ts` picker is exercised in a mounted 40-column native screen: long duplicate Unicode names, colliding short IDs, visible current marker before the name, pointer selection persisting the full ID, and Enter's default local choice. Streaming route-switch checks retain the exact suffix through paused same-route reconnect; input-only switching finalizes review-only dictation without pausing the next manually submitted turn's automatic narration.
 
 Picker tests cover read-only open/cancel, duplicate names/short-ID prefixes, invalid names, current marking, expiry both before choice and during stop, actual stop barriers/failure, sticky silent selection, retained draft/viewport, newer controls, dynamic session replacement and shutdown. Native tests send SGR press/release bytes through `handleTerminalInput`, including Unicode/truncated badges, changing input/progress rows and the real built-in footer; both badge opening and option selection use mounted SGR press/release, and arrows/Enter/Escape use Pi's native SelectList overlay. Installed InteractiveMode/ExtensionSelector integration covers pending select/confirm preservation, cancel/commit/abort focus restoration, nested overlays, prompt expiry, and 40-column Unicode footer badges. These tests use the real installed lifecycle methods and renderer without starting a live session or inference. A playing-host test verifies badge clicks do not pause, start audio or disable narration following. Alt+D default deletion semantics and configured microphone/follow-shortcut conflicts are checked.
 
-The checkout's older TUI skips the two new mouse cases plus three existing compatibility cases; the installed newer TUI executes all five. Touch uses the same SGR path, but physical phone gestures were not tested. No live SSH/client/audio session, inference, provider calls, personal keybinding changes or client upgrades were used. Only the host extension needs `/reload`; see [operator steps](installation.md#sticky-device-selection-and-selected-device-badge).
+The checkout's older TUI skips 25 optional picker/lifecycle cases and four viewport mouse/banner cases (29 total); the installed newer TUI executes all 29. Touch uses the same SGR path, but physical phone gestures were not tested. This latest picker/routing feature has not been live-validated; earlier positive user reports apply only to their earlier features. No live SSH/client/audio session, inference, provider calls, personal keybinding changes or client upgrades were used. Only the host extension needs `/reload`; see [operator steps](installation.md#sticky-device-selection-and-selected-device-badge).
 
 ## Explicit device routing and first-row selection badge
 
@@ -171,14 +173,13 @@ Automatic-bottom tests cover exact arrival, in-band suppression, growth, resize 
 
 These fixture tests use inert terminals, temporary files, subprocesses and some loopback sockets, not live phone sessions, real inference or end-to-end latency measurements. The user now reports the newest batch “seems fixed” and confirms native bottom-follow/banner behavior, supplementing earlier windowed-follow, ASR, fast-UI and no-flicker feedback. This is limited live confirmation, not all-device/error-cause validation.
 
-Installed-native rerun (adjust the global installation path on other hosts; unlike `npm test`, this direct command does not remove arbitrary `PI_VOICE_*` variables—use a clean environment, retaining only the test override):
+Full installed-native rerun (adjust the global installation path on other hosts; `npm test` sanitizes inherited connection/voice variables while retaining test overrides):
 
 ```sh
 env -u SSH_CONNECTION -u SSH_CLIENT -u SSH_TTY -u TMUX -u TMUX_PANE \
   PI_VOICE_TEST_TUI_MODULE=/home/curiosithy/.nvm/versions/node/v26.7.0/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui/dist/index.js \
   PI_VOICE_TEST_KEYBINDINGS_MODULE=/home/curiosithy/.nvm/versions/node/v26.7.0/lib/node_modules/@earendil-works/pi-coding-agent/dist/core/keybindings.js \
-  node --import tsx --test --experimental-test-module-mocks --test-concurrency=4 \
-  test/native-keys.test.ts test/index-native-scroll.test.ts test/narration-marker-native.test.ts test/device-picker-native.test.ts
+  npm test
 ```
 
 Node test options are forwarded before the test glob, for example:

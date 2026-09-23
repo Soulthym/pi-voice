@@ -61,7 +61,7 @@ import {
 import { PhoneInputClient } from "./phone-input.js";
 import { prioritizeFromCurrent, processConcurrently, resolveTimingConcurrency } from "./preprocessing.js";
 import { SpeakableStream, type FencedCodeBlock, type SpeakableSourceRange } from "./speakable.js";
-import { deviceFooterText, notifyVoice, pendingPlaybackTiming, playbackStateLabel, playbackTimingStatus, voiceProgressLines, type ReadyProgress } from "./status-text.js";
+import { deviceFooterText, devicePickerLabels, notifyVoice, pendingPlaybackTiming, playbackStateLabel, playbackTimingStatus, voiceProgressLines, type ReadyProgress } from "./status-text.js";
 import { anchorLineForMessage, computeAutoScrollTop, isManualScrollAway } from "./auto-scroll.js";
 import { applySpokenEdit, parseEditModelSelector, resolveDictationCandidates } from "./prompt-editor.js";
 import { formatAsrDisplay } from "./asr-display.js";
@@ -2273,8 +2273,8 @@ export default async function (pi: ExtensionAPI) {
 		const devices = deviceRouter.connected().filter(device => device.id !== "local" && device.id !== "auto");
 		// Numbered snapshot labels remain unique even with duplicate names/short IDs.
 		const choices = [{ id: "local", name: "Local (host audio)", device: undefined as typeof devices[number] | undefined },
-			...devices.map(device => ({ id: device.id, name: `${device.name} (${device.id.slice(0, 12)})`, device }))];
-		const labels = choices.map((choice, i) => `${i + 1}. ${choice.name}${choice.id === selected ? " · current" : ""}`);
+			...devices.map(device => ({ id: device.id, name: device.name, device }))];
+		const labels = devicePickerLabels(choices, selected);
 		try {
 			const choice = await selectDeviceOverlay(ctx, labels, controller.signal, narrationTui ?? undefined);
 			if (controller.signal.aborted || context !== contextEpoch || session !== activeContext?.sessionManager.getSessionId() ||
