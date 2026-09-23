@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { mock, test } from "node:test";
 import { PhoneInputClient, type PhoneCapture } from "../src/phone-input.js";
+import { DeviceRouter, type ConnectionDevice } from "../src/device-router.js";
 import { SessionCoordinator } from "../src/session-coordinator.js";
 import { FakeVoiceHost, MockedVoiceWorkerClient, assistant } from "./helpers/fake-voice-host.js";
 
@@ -69,6 +70,31 @@ test("playback finalizes capture into a review draft; Stop and second microphone
 	editor = "New draft after Stop";
 	transcript.resolve(["Obsolete transcript."]); await settle();
 	assert.equal(editor, "New draft after Stop"); assert.equal(worker.sent.length, before);
+
+	const lookup = mock.method(DeviceRouter.prototype, "resolveCurrentConnection");
+	for (const action of ["device auto", "reconnect"]) {
+		for (const fail of [false, true]) {
+			lookup.mock.mockImplementation(async () => ({ kind: "intentional_local" }));
+			capture = Promise.withResolvers<PhoneCapture>();
+			transcript = Promise.withResolvers<string[]>();
+			await host.command("talk"); await settle();
+			const attachment = Promise.withResolvers<ConnectionDevice>();
+			lookup.mock.mockImplementation(() => attachment.promise);
+			const switching = host.command(action); await settle();
+			assert.equal(recording, true, "lookup alone must not stop capture");
+			if (fail) editor = "Manual draft during lookup";
+			capture.resolve({ type: "text", data: "Natural finish during lookup." });
+			await settle();
+			assert.equal(submissions, 0, "explicit switch intent prevents natural-finish auto-submit before lookup completes");
+			if (fail) assert.equal(editor, "Manual draft during lookup");
+			else assert.match(editor, /Captured dictation/);
+			if (fail) attachment.reject(new Error("ambiguous attachment"));
+			else attachment.resolve({ kind: "intentional_local" });
+			await switching; await settle();
+			assert.equal(submissions, 0);
+		}
+	}
+	lookup.mock.restore();
 
 	const other = new SessionCoordinator(path.join(root, "other"), "other"); other.start(); other.tryAcquireSpeech();
 	try {

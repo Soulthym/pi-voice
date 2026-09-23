@@ -1764,7 +1764,7 @@ export default async function (pi: ExtensionAPI) {
 	let inputStopBarrier = Promise.resolve();
 	let inputStopPending = false;
 	let cancelPendingDictation: (() => void) | undefined;
-	let finishPendingDictation: (() => Promise<void>) | undefined;
+	let finishPendingDictation: ((stopCapture?: boolean) => Promise<void>) | undefined;
 	const finishInputForPlayback = async (): Promise<void> => {
 		if (inputPhase === "acquiring") {
 			coordinator?.cancelSpeechAcquisition();
@@ -2128,6 +2128,9 @@ export default async function (pi: ExtensionAPI) {
 			deviceRetryRequired = false;
 			return Promise.resolve(true);
 		}
+		// Explicit intent makes existing dictation review-only before identity lookup can yield.
+		// Keep recording until route validation and old-device stop proof begin.
+		if (force) void finishPendingDictation?.(false);
 		const ctx = activeContext;
 		const previous = deviceRebind;
 		let stopUnconfirmed = false;
@@ -3124,8 +3127,9 @@ export default async function (pi: ExtensionAPI) {
 		cancelPendingDictation = cancel;
 		let reviewOnly = false;
 		const finished = Promise.withResolvers<void>();
-		const finishForPlayback = async (): Promise<void> => {
+		const finishForPlayback = async (stopCapture = true): Promise<void> => {
 			reviewOnly = true;
+			if (!stopCapture) return;
 			if (inputPhase === "recording") await phoneInput.stop(activeInputEndpoint ?? routed.input);
 			await finished.promise;
 		};
