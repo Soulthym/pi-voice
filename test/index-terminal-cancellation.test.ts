@@ -22,7 +22,7 @@ for (const stopReason of ["aborted", "error"]) {
 			};
 			const previous = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
 			await fs.writeFile(env.PI_VOICE_CONFIG, JSON.stringify({
-				enabled: true, mode: "assistant", input: "disabled", audioCache: false,
+				enabled: true, mode: "assistant", input: "disabled", output: "local", audioCache: false,
 				timingPreprocessConcurrency: 0, codeDescriptionPreprocessConcurrency: 0,
 			}));
 			Object.assign(process.env, env);
@@ -46,6 +46,11 @@ for (const stopReason of ["aborted", "error"]) {
 				type: "message_update", message: partial,
 				assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "An interrupted response. ", partial },
 			});
+			for (let i = 0; i < 16; i++) await tick();
+			const segment = worker.sent.at(-1) as { utterance: number; segmentId: number };
+			worker.emit({ type: "idle", utterance: segment.utterance });
+			await new Promise(resolve => setTimeout(resolve, 100));
+			assert.match(host.widgetLines()![0]!, /Waiting/, "IDLE between chunks is still a live source");
 			const leasePath = path.join(env.PI_VOICE_COORDINATOR_DIR, "speech.lock", "lease.json");
 			const originalLease = await fs.readFile(leasePath, "utf8");
 			const cancelId = 71;
@@ -58,6 +63,20 @@ for (const stopReason of ["aborted", "error"]) {
 			assert.equal(cancel.mock.callCount(), 1, "terminal message must cancel the transport");
 			assert.equal(ended, true, "message_end must settle without waiting for transport acknowledgement");
 			await ending;
+			assert.match(host.widgetLines()![0]!, /Idle/, "logical cancellation repaints before ACK");
+			const sent = worker.sent.length;
+			await host.emit("message_update", {
+				message: partial, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Late cancelled sentence. " },
+			});
+			for (const event of [
+				{ type: "speaking" }, { type: "playback", utterance: segment.utterance, position: 2 },
+				{ type: "idle", utterance: segment.utterance }, { type: "ready" },
+			] as const) {
+				worker.emit(event);
+				await new Promise(resolve => setTimeout(resolve, 90));
+				assert.match(host.widgetLines()![0]!, /Idle/, "late events cannot revive cancelled playback");
+			}
+			assert.equal(worker.sent.length, sent, "late source delta cannot restart cancelled speech");
 			assert.equal(await fs.readFile(leasePath, "utf8"), originalLease, "retain ownership until cancellation is acknowledged");
 			cancel.mock.restore();
 
@@ -84,6 +103,10 @@ for (const stopReason of ["aborted", "error"]) {
 			await tick();
 			if (replacement === "none") {
 				await assert.rejects(fs.stat(leasePath), { code: "ENOENT" });
+				worker.emit({ type: "speaking" });
+				worker.emit({ type: "playback", utterance: segment.utterance, position: 3 });
+				await new Promise(resolve => setTimeout(resolve, 90));
+				assert.match(host.widgetLines()![0]!, /Idle/, "ACK must not revive the cancelled source");
 			} else {
 				assert.equal(await fs.readFile(leasePath, "utf8"), currentLease, "late terminal ack must not release replacement ownership");
 				// The replacement really owns speech, rather than leaving an orphan lock.

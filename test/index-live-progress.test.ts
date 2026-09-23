@@ -6,6 +6,8 @@ import { mock, test } from "node:test";
 import { FakeVoiceHost, MockedVoiceWorkerClient, assistant } from "./helpers/fake-voice-host.js";
 
 mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: MockedVoiceWorkerClient } });
+const native = await import(process.env.PI_VOICE_TEST_TUI_MODULE ?? "@earendil-works/pi-tui");
+if (process.env.PI_VOICE_TEST_TUI_MODULE) mock.module("@earendil-works/pi-tui", { namedExports: { ...native } });
 const settle = async () => {
 	for (let i = 0; i < 16; i++) await new Promise(resolve => setImmediate(resolve));
 	await new Promise(resolve => setTimeout(resolve, 100));
@@ -20,21 +22,54 @@ test("mounted playbar keeps a queued live target through background preparation 
 	process.env.PI_VOICE_DEVICE_DIR = path.join(root, "devices");
 	await fs.writeFile(process.env.PI_VOICE_CONFIG, JSON.stringify({ enabled: true, mode: "assistant", output: "local", audioCache: false }));
 	const host = new FakeVoiceHost(root, "live-progress");
-	// Mount via Pi's actual widget callback/replacement path, without a live session.
-	const { InteractiveMode } = await import("@earendil-works/pi-coding-agent");
-	const { Container } = await import("@earendil-works/pi-tui");
+	// Actual Pi replacement + container + fullscreen layout, on an inert terminal.
+	const { InteractiveMode, initTheme } = await import(process.env.PI_VOICE_TEST_AGENT_MODULE ?? "@earendil-works/pi-coding-agent");
+	initTheme("dark");
+	const terminal = { columns: 100, rows: 24, write() {}, hideCursor() {} };
+	const tui: any = new native.TuiAltScreen(terminal, false);
+	tui.altScreenActive = true; // Never start a terminal or live session.
 	const mountedRows: string[][] = [];
+	const frames: string[][] = [];
 	const nativeUI = Object.assign(Object.create(InteractiveMode.prototype), {
 		extensionWidgetsAbove: new Map(), extensionWidgetsBelow: new Map(),
-		widgetContainerAbove: new Container(), widgetContainerBelow: new Container(),
-		ui: { requestRender: () => {
-			mountedRows.push(nativeUI.extensionWidgetsBelow.get("pi-voice-progress")?.render(160) ?? []);
-		} },
+		widgetContainerAbove: new native.Container(), widgetContainerBelow: new native.Container(), ui: tui,
 	});
-	const setWidget = host.ctx.ui.setWidget;
+	const transcript = new native.ScrollView(new native.Text("history\n".repeat(100), 0, 0), { primary: true, follow: "end" });
+	// Match InteractiveMode's dock ordering and shrink/minSize policy.
+	const dock = new native.VStack([
+		{ component: new native.Container(), shrink: 1, minSize: 0 }, // pending messages
+		{ component: new native.Container(), shrink: 1, minSize: 0 }, // working status
+		{ component: nativeUI.widgetContainerAbove, shrink: 1, minSize: 0 },
+		{ component: new native.Text("editor\n\n", 0, 0), shrink: 1, minSize: 3 },
+		{ component: nativeUI.widgetContainerBelow, shrink: 1, minSize: 0 },
+		{ component: new native.Text("footer", 0, 0), shrink: 1, minSize: 1 },
+	]);
+	tui.setLayoutRoot(new native.VStack([
+		{ component: transcript, basis: 0, grow: 1, shrink: 1, minSize: 1 },
+		{ component: dock, basis: "auto", grow: 0, shrink: 1, minSize: 1 },
+	]));
+	const requestRender = tui.requestRender.bind(tui);
+	let painting = false;
+	tui.requestRender = (force?: boolean) => {
+		requestRender(force);
+		if (painting) return;
+		painting = true;
+		try {
+			tui.doRender();
+			frames.push(tui.previousScreen.map(native.stripTerminalSequences));
+		} finally { painting = false; }
+	};
 	host.ctx.ui.setWidget = (name: string, value: any, options: any) => {
-		setWidget(name, value, options);
-		if (name === "pi-voice-progress") nativeUI.setExtensionWidget(name, value, options);
+		nativeUI.setExtensionWidget(name, value, options);
+		const component = nativeUI.extensionWidgetsBelow.get(name) ?? nativeUI.extensionWidgetsAbove.get(name);
+		const normalized = component ? { lines: component.render(160).map((line: string) => line.trimStart()), placement: options?.placement } : undefined;
+		host.widgets.set(name, normalized);
+		host.widgetOperations.push({ name, value: normalized });
+		mountedRows.push(nativeUI.widgetContainerBelow.render(160));
+	};
+	const assertFrame = (label: string) => {
+		tui.requestRender();
+		assert.match(frames.at(-1)!.join("\n"), /(?:Paused|Waiting|Playing|Idle).*message /, label);
 	};
 	const workerIndex = MockedVoiceWorkerClient.instances.length;
 	t.after(async () => {
@@ -59,6 +94,7 @@ test("mounted playbar keeps a queued live target through background preparation 
 	assert.ok(segment, JSON.stringify(worker.sent));
 	const firstOperation = host.widgetOperations.length;
 	const firstMount = mountedRows.length;
+	const firstFrame = frames.length;
 	for (const type of ["loading", "ready", "idle"] as const) {
 		worker.emit({ type }); await settle();
 		assert.match(host.widgetLines()![0]!, /Paused.*message 2\/2.*timing pending/);
@@ -85,6 +121,9 @@ test("mounted playbar keeps a queued live target through background preparation 
 		.every(operation => operation.value?.lines?.length), "mounted UI never removes the live playback row");
 	assert.ok(mountedRows.slice(firstMount).every(rows => rows.some(line => /message 2\/2/.test(line))),
 		"Pi's mounted component keeps the selected live target through replacements");
+	assert.ok(frames.slice(firstFrame).length > 0);
+	assert.ok(frames.slice(firstFrame).every(rows => rows.some(line => /message 2\/2/.test(line))),
+		"actual native screens retain the playbar, not merely the widget map");
 	await host.command("stop");
 	assert.doesNotMatch(host.widgetLines()![0]!, /Paused|Waiting|Playing/);
 	await settle();
@@ -93,10 +132,12 @@ test("mounted playbar keeps a queued live target through background preparation 
 	const streaming = assistant(""); delete streaming.stopReason;
 	streaming.content = [{ type: "text", text: "" }];
 	await host.emit("message_start", { message: streaming });
+	const streamingFrames = frames.length;
 	assert.match(host.widgetLines()![0]!, /Waiting.*timing pending/);
 	for (const type of ["loading", "ready", "idle"] as const) {
 		worker.emit({ type }); await settle();
 		assert.match(host.widgetLines()![0]!, /Waiting.*timing pending/);
+		assertFrame(`initial ${type} preparation gap`);
 	}
 	streaming.content[0].text = "First block sentence. ";
 	await host.emit("message_update", { message: streaming, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: streaming.content[0].text } });
@@ -111,6 +152,7 @@ test("mounted playbar keeps a queued live target through background preparation 
 	await settle();
 	worker.emit({ type: "idle", utterance: first.utterance }); await settle();
 	assert.match(host.widgetLines()![0]!, /Waiting.*0:03 \/ 0:03/);
+	assertFrame("source-block handoff");
 	const second = worker.sent.at(-1) as { utterance: number; segmentId: number };
 	assert.notEqual(second.utterance, first.utterance);
 	worker.emit({ type: "segment-audio", segmentId: second.segmentId, utterance: second.utterance, start: 0, duration: 2 });
@@ -123,6 +165,32 @@ test("mounted playbar keeps a queued live target through background preparation 
 	await host.emit("turn_end", { message: finished });
 	worker.emit({ type: "idle", utterance: second.utterance }); await settle();
 	assert.match(host.widgetLines()![0]!, /Idle.*0:02 \/ 0:02/);
+	assertFrame("canonicalized completion");
+	// A tool boundary and delayed session insertion must not unmount the row.
+	const toolMessage = assistant("Before reading a file. ", "toolUse");
+	toolMessage.content.push({ type: "toolCall", id: "call", name: "read", arguments: {} });
+	await host.emit("message_start", { message: toolMessage });
+	await host.emit("message_update", { message: toolMessage, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: toolMessage.content[0].text } });
+	await host.emit("message_end", { message: toolMessage });
+	assertFrame("message_end before session insertion");
+	host.addMessage("tool-call", "last", toolMessage);
+	await host.emit("tool_execution_start", { toolCallId: "call", toolName: "read", args: {} });
+	await host.emit("tool_execution_end", { toolCallId: "call", toolName: "read", result: { content: [{ type: "text", text: "file contents" }] }, isError: false });
+	await host.emit("turn_end", { message: toolMessage, toolResults: [] });
+	await settle();
+	assertFrame("tool boundary / delayed canonicalization");
+	const afterTool = assistant("After reading the file. "); delete afterTool.stopReason;
+	await host.emit("message_start", { message: afterTool });
+	await host.emit("message_update", { message: afterTool, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: afterTool.content[0].text } });
+	await settle();
+	assertFrame("next assistant after tool");
+	assert.ok(frames.slice(streamingFrames).every(rows => rows.some(line => /(?:Waiting|Playing|Idle).*message /.test(line))),
+		"no native frame loses the playback row across chunks, preparation gaps, completion and tools");
+	for (const columns of [40, 100]) {
+		terminal.columns = columns;
+		tui.requestRender(true);
+		assertFrame(`resized ${columns}-column dock`);
+	}
 	await host.shutdown();
 	assert.equal(host.widgetLines(), undefined);
 	assert.deepEqual(mountedRows.at(-1), []);

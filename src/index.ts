@@ -1569,6 +1569,7 @@ export default async function (pi: ExtensionAPI) {
 				if (event.utterance !== undefined && activeContext) scheduleMissingTimings(activeContext);
 				break;
 			case "speaking":
+				if (attentionSuppressed && !playbackPaused) return;
 				state = "speaking";
 				// Coordinator project/attention prompts are separate from the selected
 				// message transport and must not turn a paused message back into playing.
@@ -3693,9 +3694,13 @@ export default async function (pi: ExtensionAPI) {
 			queueIncomingWhilePaused = false;
 			queuedPausedMessages.length = 0;
 			liveTurnNarrationActive = false;
+			ownerTurnEnded = true;
+			attentionSuppressed = true;
 			const cancelId = clearPlaybackTransport();
 			narration.finish();
 			livePlaybackId = undefined;
+			if (!inputInProgress) state = "idle";
+			refreshProgressWidget();
 			if (!speechReservedForInput && !inputInProgress) releaseAfterTransportCancellation(cancelId, true);
 			return;
 		}
@@ -3731,10 +3736,15 @@ export default async function (pi: ExtensionAPI) {
 		}
 		if (!config.enabled || attentionSuppressed || deviceRebind || transportStopPending || stopReason === undefined || !ownsSpeech || speechPurpose !== "turn") return;
 		if (stopReason === "aborted" || stopReason === "error") {
+			// End logical playback now; keep the lease until the sink proves it stopped.
 			liveTurnNarrationActive = false;
+			ownerTurnEnded = true;
+			attentionSuppressed = true;
 			const cancelId = clearPlaybackTransport();
 			narration.finish();
 			livePlaybackId = undefined;
+			if (!inputInProgress) state = "idle";
+			refreshProgressWidget();
 			releaseAfterTransportCancellation(cancelId, true);
 		} else if (config.mode !== "yield") {
 			ownerContentExpected = ownerContentExpected || hasSpeakableAudio(completedText);
