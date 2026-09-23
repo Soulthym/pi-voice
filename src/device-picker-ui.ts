@@ -1,5 +1,71 @@
 import * as tui from "@earendil-works/pi-tui";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { deviceBadge, deviceProgressLines } from "./status-text.js";
+
+/** A capturing overlay leaves Pi's active ExtensionSelector and its promise intact. */
+export async function selectDeviceOverlay(ctx: ExtensionContext, labels: string[], signal: AbortSignal, screen?: tui.TUI): Promise<string | undefined> {
+	if (signal.aborted) return;
+	if (ctx.mode !== "tui") return ctx.ui.select("Voice device · registered candidates, not audio readiness", labels, { signal });
+	// Pi custom overlays close the topmost entry, so never stack above somebody else's overlay.
+	if (!screen || screen.hasOverlay()) return;
+	const theme = ctx.ui.theme;
+	return new Promise(resolve => {
+		let closed = false;
+		const done = (value: string | undefined) => {
+			if (closed) return;
+			closed = true;
+			handle.hide(); // Hide this overlay, never Pi custom()'s topmost overlay.
+			signal.removeEventListener("abort", cancel);
+			unsubscribe();
+			resolve(value);
+		};
+		const list = new tui.SelectList(labels.map(value => ({ value, label: value })), Math.max(1, Math.min(labels.length, screen.terminal.rows - 3)), {
+			selectedPrefix: text => theme.fg("accent", text), selectedText: text => theme.fg("accent", text),
+			description: text => theme.fg("muted", text), scrollInfo: text => theme.fg("dim", text), noMatch: text => text,
+		});
+		list.onSelect = item => done(screen.terminal.rows === rows ? item.value : undefined);
+		list.onCancel = () => done(undefined);
+		const cancel = () => done(undefined);
+		signal.addEventListener("abort", cancel, { once: true });
+		const container = new tui.Container();
+		container.addChild({ render: width => [tui.truncateToWidth("Voice device · candidates, not audio readiness", width)], invalidate() {} });
+		container.addChild(list);
+		container.addChild({ render: width => [tui.truncateToWidth("↑↓ / Enter · click select · Esc cancel", width)], invalidate() {} });
+		const rows = screen.terminal.rows;
+		const getFocus = (screen as tui.TUI & { getFocusedComponent?: () => tui.Component | null }).getFocusedComponent;
+		let focused = false;
+		Object.defineProperty(container, "focused", {
+			get: () => focused,
+			set(value: boolean) {
+				focused = value;
+				if (!value) queueMicrotask(() => {
+					const target = getFocus?.call(screen);
+					if (target !== container && target !== list) cancel();
+				});
+			},
+		});
+		const render = container.render.bind(container);
+		// Keep the real container so native layout discovers the SelectList mouse target.
+		Object.assign(container, {
+			render(width: number) {
+				// Reopen after height changes rather than allowing Enter on an offscreen item.
+				if (screen.terminal.rows !== rows) { queueMicrotask(cancel); return []; }
+				return render(width);
+			},
+			handleInput(data: string) { list.handleInput(data); screen.requestRender(); },
+		});
+		const handle = screen.showOverlay(container, { width: "90%", maxHeight: "100%" });
+		const unsubscribe = ctx.ui.onTerminalInput(() => {
+			if (!getFocus) return; // Older Pi keeps the keyboard-only overlay fallback.
+			const focus = getFocus.call(screen);
+			// A prior prompt can time out and focus the editor. Never type through this visible picker.
+			if (screen.terminal.rows !== rows || (focus !== container && focus !== list)) {
+				cancel();
+				return { consume: true };
+			}
+		});
+	});
+}
 
 type MouseEvent = { type: string; button: string; x: number; y: number };
 type MouseComponent = tui.Component & { handleMouse?: (event: MouseEvent) => { handled?: boolean } | undefined };
@@ -36,7 +102,7 @@ export function deviceProgressComponent(lines: string[], name: string, open: () 
 /** Preserve Pi's built-in footer and other extensions' statuses; add only native mouse handling.
  * Custom/older footers without the standard mounted component keep the keyboard fallback.
  */
-export function attachDeviceFooter(tuiRoot: unknown, status: () => { text: string; badge: string } | undefined, open: () => void): () => void {
+export function attachDeviceFooter(tuiRoot: unknown, status: (width?: number) => { text: string; badge: string } | undefined, open: () => void): () => void {
 	if (!MouseRegion) return () => {};
 	const root = tuiRoot as { getMountedRoots?: () => unknown[]; children?: unknown[] };
 	const pending = [...(root.getMountedRoots?.() ?? root.children ?? [])];
@@ -51,8 +117,16 @@ export function attachDeviceFooter(tuiRoot: unknown, status: () => { text: strin
 		if (node.constructor.name !== "FooterComponent") continue;
 		const render = node.render;
 		const mouse = node.handleMouse;
-		const region = badgeRegion({ render: width => render.call(node, width), invalidate() {} }, lines => {
-			const current = status();
+		let current: ReturnType<typeof status>;
+		const region = badgeRegion({ render: width => {
+			current = status();
+			if (current) {
+				const text = tui.stripTerminalSequences(current.text).replace(/ +/g, " ").trim();
+				const row = render.call(node, 10000).map(tui.stripTerminalSequences).find(line => line.includes(text));
+				if (row) current = status(Math.max(2, width - tui.visibleWidth(row) + tui.visibleWidth(text)));
+			}
+			return render.call(node, width);
+		}, invalidate() {} }, lines => {
 			if (!current) return;
 			// Pi's standard footer collapses spaces in extension statuses.
 			const text = tui.stripTerminalSequences(current.text).replace(/ +/g, " ").trim();
@@ -60,7 +134,8 @@ export function attachDeviceFooter(tuiRoot: unknown, status: () => { text: strin
 			for (let row = 0; row < lines.length; row++) {
 				const plain = tui.stripTerminalSequences(lines[row]);
 				const at = plain.indexOf(text);
-				if (at >= 0) return { row, start: tui.visibleWidth(plain.slice(0, at + text.length - badge.length)), end: tui.visibleWidth(plain.slice(0, at + text.length)) };
+				const badgeAt = text.indexOf(badge);
+				if (at >= 0 && badgeAt >= 0) return { row, start: tui.visibleWidth(plain.slice(0, at + badgeAt)), end: tui.visibleWidth(plain.slice(0, at + badgeAt + badge.length)) };
 			}
 		}, open);
 		const wrappedRender = (width: number) => region.render(width);

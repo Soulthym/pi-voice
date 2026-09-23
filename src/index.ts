@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { hostname } from "node:os";
 import type { Message, Tool } from "@earendil-works/pi-ai";
 import { getMarkdownTheme, highlightCode, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Markdown, truncateToWidth } from "@earendil-works/pi-tui";
+import { Markdown, truncateToWidth, type TUI } from "@earendil-works/pi-tui";
 import { hasSpeakableAudio, requiresVoiceAttention } from "./attention.js";
 import {
 	assistantCodeContext,
@@ -45,7 +45,7 @@ import {
 	type VoiceSubmitMode,
 } from "./config.js";
 import { chunkCodeNarration, plainCodeNarration, type CodeNarrationPlan } from "./code-narration.js";
-import { attachDeviceFooter, deviceProgressComponent } from "./device-picker-ui.js";
+import { attachDeviceFooter, deviceProgressComponent, selectDeviceOverlay } from "./device-picker-ui.js";
 import { DeviceRouter, validDeviceName, type ConnectionDevice, type VoiceDeviceSelection } from "./device-router.js";
 import { LiveTranscriptionSession } from "./live-transcription.js";
 import {
@@ -61,7 +61,7 @@ import {
 import { PhoneInputClient } from "./phone-input.js";
 import { prioritizeFromCurrent, processConcurrently, resolveTimingConcurrency } from "./preprocessing.js";
 import { SpeakableStream, type FencedCodeBlock, type SpeakableSourceRange } from "./speakable.js";
-import { notifyVoice, pendingPlaybackTiming, playbackStateLabel, playbackTimingStatus, voiceProgressLines, type ReadyProgress } from "./status-text.js";
+import { deviceFooterText, notifyVoice, pendingPlaybackTiming, playbackStateLabel, playbackTimingStatus, voiceProgressLines, type ReadyProgress } from "./status-text.js";
 import { anchorLineForMessage, computeAutoScrollTop, isManualScrollAway } from "./auto-scroll.js";
 import { applySpokenEdit, parseEditModelSelector, resolveDictationCandidates } from "./prompt-editor.js";
 import { formatAsrDisplay } from "./asr-display.js";
@@ -432,7 +432,7 @@ export default async function (pi: ExtensionAPI) {
 	let inputProgressMessage: string | undefined;
 	let inputStartedAt = 0;
 	let contextEpoch = 0;
-	let narrationTui: { invalidate(): void; requestRender(force?: boolean): void } | null = null;
+	let narrationTui: TUI | null = null;
 	let narrationRenderTimer: NodeJS.Timeout | null = null;
 	let livePlaybackId: string | undefined;
 	let liveTurnNarrationActive = false;
@@ -1471,6 +1471,7 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	let footerDeviceStatus: { text: string; badge: string } | undefined;
+	let footerWidth = process.stdout.columns || 80;
 	const refreshStatus = (): void => {
 		footerDeviceStatus = undefined;
 		const ctx = activeContext;
@@ -1514,9 +1515,9 @@ export default async function (pi: ExtensionAPI) {
 		} else {
 			color = "success";
 		}
-		const badge = `[${truncateToWidth(selectedDeviceLabel, 24)}]`;
-		const text = `${label}${progressWidgetVisible ? "" : ` · ${devicePickerConflict ? "/voice devices" : "Alt+D devices"} ${badge}`}`;
-		if (!progressWidgetVisible) footerDeviceStatus = { text, badge };
+		if (!progressWidgetVisible) footerDeviceStatus = deviceFooterText(label, selectedDeviceLabel, footerWidth,
+			devicePickerConflict ? "/voice devices" : "Alt+D devices");
+		const text = footerDeviceStatus?.text ?? label;
 		ctx.ui.setStatus("pi-voice", ctx.ui.theme.fg(color, text));
 	};
 
@@ -1698,6 +1699,7 @@ export default async function (pi: ExtensionAPI) {
 		utterance => playbackHistory.finishTimingGeneration(utterance),
 	);
 	const clearPlaybackTransport = (): number | undefined => {
+		devicePicker?.abort();
 		playbackUtterances.clear();
 		lastPlaybackTick = undefined;
 		playbackRequestEpoch += 1;
@@ -1774,6 +1776,7 @@ export default async function (pi: ExtensionAPI) {
 		}
 	};
 	const cancelActiveInput = (): Promise<void> => {
+		devicePicker?.abort();
 		if (inputPhase === "acquiring" && !ownsSpeech) coordinator?.releaseSpeech();
 		inputEpoch += 1;
 		cancelPendingDictation?.();
@@ -2226,6 +2229,7 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	const selectDevice = async (ctx: ExtensionContext, requested: VoiceDeviceSelection, available = () => true): Promise<void> => {
+		devicePicker?.abort();
 		const sessionId = ctx.sessionManager.getSessionId();
 		const sessionEpoch = contextEpoch;
 		const current = () => sessionEpoch === contextEpoch && sessionId === activeContext?.sessionManager.getSessionId() && available();
@@ -2271,7 +2275,7 @@ export default async function (pi: ExtensionAPI) {
 			...devices.map(device => ({ id: device.id, name: `${device.name} (${device.id.slice(0, 12)})`, device }))];
 		const labels = choices.map((choice, i) => `${i + 1}. ${choice.name}${choice.id === selected ? " · current" : ""}`);
 		try {
-			const choice = await ctx.ui.select("Voice device · registered candidates, not audio readiness", labels, { signal: controller.signal });
+			const choice = await selectDeviceOverlay(ctx, labels, controller.signal, narrationTui ?? undefined);
 			if (controller.signal.aborted || context !== contextEpoch || session !== activeContext?.sessionManager.getSessionId() ||
 				request !== playbackRequestEpoch || setting !== deviceSettingEpoch || input !== inputEpoch ||
 				framing !== framingIntent || settings !== config || !interactiveVoiceSession) return;
@@ -2291,6 +2295,7 @@ export default async function (pi: ExtensionAPI) {
 	let deviceSettingEpoch = 0;
 	// Metadata lookup failures do not block overrides; unconfirmed stops always do.
 	const prepareDeviceSetting = async (ctx: ExtensionContext, stopOutput: boolean): Promise<boolean> => {
+		devicePicker?.abort();
 		const settingEpoch = ++deviceSettingEpoch;
 		const sessionEpoch = contextEpoch;
 		// SDK command/event contexts are distinct facades with dynamic session getters.
@@ -3348,7 +3353,10 @@ export default async function (pi: ExtensionAPI) {
 			ctx.ui.setWidget("pi-voice-render-driver", tui => {
 				narrationTui = tui;
 				const uiEpoch = contextEpoch;
-				const restoreDeviceFooter = attachDeviceFooter(tui, () => footerDeviceStatus, () => {
+				const restoreDeviceFooter = attachDeviceFooter(tui, width => {
+					if (width !== undefined && width !== footerWidth) { footerWidth = width; refreshStatus(); }
+					return footerDeviceStatus;
+				}, () => {
 					if (uiEpoch === contextEpoch && interactiveVoiceSession) void pickDevice(ctx);
 				});
 				// Native End (including remapped keys) and the mouse banner both route
@@ -3847,6 +3855,7 @@ export default async function (pi: ExtensionAPI) {
 
 	// Resolve identity after preview, never in this shared scroll/control path.
 	const preparePlaybackAction = async (ctx: ExtensionContext, pauseResume = false, deferInput = false): Promise<number | undefined> => {
+		devicePicker?.abort();
 		if (!requireEnabledVoice(ctx)) return;
 		// Pause/resume edits the pending replay without invalidating its preparation.
 		const epoch = pauseResume && pendingReplay ? playbackRequestEpoch : ++playbackRequestEpoch;

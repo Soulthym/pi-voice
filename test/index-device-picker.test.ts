@@ -7,6 +7,11 @@ import { DeviceRouter } from "../src/device-router.js";
 import { FakeVoiceHost, MockedVoiceWorkerClient, assistant } from "./helpers/fake-voice-host.js";
 
 mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: MockedVoiceWorkerClient } });
+const pickerUI = await import("../src/device-picker-ui.js");
+// This suite checks routing transactions; mounted native overlay/lifecycle coverage lives separately.
+mock.module("../src/device-picker-ui.js", { namedExports: { ...pickerUI,
+	selectDeviceOverlay: (ctx: any, labels: string[], signal: AbortSignal) => ctx.ui.select("Voice device", labels, { signal }),
+} });
 const settle = async () => { for (let i = 0; i < 30; i++) await new Promise(resolve => setImmediate(resolve)); };
 
 test("picker snapshots unique labels, cancels read-only, revalidates and uses the safe sticky transition", async t => {

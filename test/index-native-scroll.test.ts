@@ -323,23 +323,36 @@ for (const action of ["auto tail start", "auto tail small", "auto tail resize", 
 			{ component: transcript, basis: 0, grow: 1 }, { component: progress, shrink: 0 },
 		]));
 		tui.doRender();
-		const answer = Promise.withResolvers<string | undefined>();
-		let labels: string[] = [];
-		host.ctx.ui.select = (_title: string, options: string[]) => { labels = options; return answer.promise; };
+		host.ctx.ui.onTerminalInput = (handler: (data: string) => any) => tui.addInputListener(handler);
 		const before = { top: view.scrollTop, sent: worker.sent.length, pauses: [...worker.pauses], entries: host.entries.length };
 		const rows = progress.render(width);
 		const x = native.visibleWidth(rows[0]);
 		const y = terminal.rows - rows.length + 1;
 		tui.handleTerminalInput(`\x1b[<0;${x};${y}M`);
 		tui.handleTerminalInput(`\x1b[<0;${x};${y}m`);
-		assert.deepEqual(labels, ["1. Local (host audio) · current"]);
+		tui.doRender();
+		assert.equal(tui.hasOverlay(), true);
+		assert.ok(tui.previousScreen.some((row: string) => native.stripTerminalSequences(row).includes("1. Local (host audio)")), tui.previousScreen.join("\n"));
 		assert.equal(view.scrollTop, before.top);
 		assert.equal(worker.sent.length, before.sent);
 		assert.deepEqual(worker.pauses, before.pauses);
-		answer.resolve(undefined); await settle();
+		tui.handleTerminalInput("\x1b"); await settle();
+		assert.equal(tui.hasOverlay(), false);
 		assert.equal(host.entries.length, before.entries, "cancel cannot pin or claim");
 		marker = 180; await tick();
 		assert.ok(view.scrollTop > 140, "ordinary badge click does not unfollow narration");
+		for (const command of ["stop", "device local"]) {
+			const opening = host.shortcut("alt+d");
+			assert.equal(tui.hasOverlay(), true);
+			await host.command(command);
+			await opening;
+			assert.equal(tui.hasOverlay(), false, `${command} cancels the mounted picker`);
+		}
+		const opening = host.shortcut("alt+d");
+		assert.equal(tui.hasOverlay(), true);
+		await host.shutdown();
+		await opening;
+		assert.equal(tui.hasOverlay(), false, "shutdown cancels the mounted picker");
 		return;
 	}
 

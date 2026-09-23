@@ -69,11 +69,13 @@ From Tail, the first F6 selects the last eligible message (not its predecessor);
 
 ## Device picker
 
-Click the existing `[device]` badge on the **first** Voice progress line (or the built-in idle Voice footer), or press **Alt+D**. Both open Pi's native selector: arrows navigate, Enter chooses, Escape cancels. `/voice devices` is the command alternative; `/voice device` remains a read-only report.
+Click the existing `[device]` badge on the **first** Voice progress line (or the built-in idle Voice footer), or press **Alt+D**. Both open a native SelectList overlay: click/tap an option to choose, or use arrows and Enter; Escape cancels. An existing extension select/confirm remains underneath with its promise and focus intact. If another floating overlay is already open, dismiss it before opening the picker. Changing terminal height cancels the picker; reopen at the new size. Stop, newer playback/device controls, and session shutdown cancel the picker. If the underlying prompt expires or another overlay takes focus, the picker dismisses without typing through to the draft. `/voice devices` is the command alternative; `/voice device` remains a read-only report.
 
 The snapshot lists valid, apparently available registered devices plus **Local (host audio)**. The current candidate is marked; numbered labels and short IDs distinguish duplicate names without interpreting display text as an ID. Missing/disconnected pins are not inserted as available choices. Registration and endpoint availability are not audio-readiness proof. Reopen to see newly connected devices. Choice revalidates identity/generation/endpoints, including after stop; stale sessions, shutdown and newer controls cannot apply an old choice.
 
 Opening/cancelling does not stop capture/playback, claim ownership, change pins, or explicitly move the viewport. Choosing uses the same confirmed-stop, sticky, silent-paused transition as `/voice device <id>` and preserves the draft/playback cursor. Explicit endpoint overrides still win.
+
+The idle footer reserves room for primary activity and a closed, width-bounded device badge before optional voice information and key hints; other extension statuses and Pi's footer remain in place.
 
 Mouse/touch needs fullscreen Pi with native `MouseRegion` support and a terminal emitting SGR mouse events. Regular/older TTYs retain the plain label and Alt+D hint (space permitting), not an emulated button. Custom footers that replace Pi's built-in footer use Alt+D. Touch follows the same terminal protocol; physical phone gestures have not been validated. No SSH-wrapper key interception or client upgrade is needed.
 
