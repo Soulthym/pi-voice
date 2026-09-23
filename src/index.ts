@@ -45,6 +45,7 @@ import {
 	type VoiceSubmitMode,
 } from "./config.js";
 import { chunkCodeNarration, plainCodeNarration, type CodeNarrationPlan } from "./code-narration.js";
+import { attachDeviceFooter, deviceProgressComponent } from "./device-picker-ui.js";
 import { DeviceRouter, validDeviceName, type ConnectionDevice, type VoiceDeviceSelection } from "./device-router.js";
 import { LiveTranscriptionSession } from "./live-transcription.js";
 import {
@@ -60,7 +61,7 @@ import {
 import { PhoneInputClient } from "./phone-input.js";
 import { prioritizeFromCurrent, processConcurrently, resolveTimingConcurrency } from "./preprocessing.js";
 import { SpeakableStream, type FencedCodeBlock, type SpeakableSourceRange } from "./speakable.js";
-import { deviceProgressLines, notifyVoice, pendingPlaybackTiming, playbackStateLabel, playbackTimingStatus, voiceProgressLines, type ReadyProgress } from "./status-text.js";
+import { notifyVoice, pendingPlaybackTiming, playbackStateLabel, playbackTimingStatus, voiceProgressLines, type ReadyProgress } from "./status-text.js";
 import { anchorLineForMessage, computeAutoScrollTop, isManualScrollAway } from "./auto-scroll.js";
 import { applySpokenEdit, parseEditModelSelector, resolveDictationCandidates } from "./prompt-editor.js";
 import { formatAsrDisplay } from "./asr-display.js";
@@ -615,10 +616,10 @@ export default async function (pi: ExtensionAPI) {
 			const key = JSON.stringify([contextEpoch, lines, selectedDeviceLabel]);
 			if (key === progressWidgetKey) return;
 			const name = selectedDeviceLabel;
-			ctx.ui.setWidget("pi-voice-progress", lines.length > 0 ? () => ({
-				render: width => deviceProgressLines(lines, name, Math.max(0, width - 2)).map(line => ` ${line}`),
-				invalidate() {},
-			}) : undefined, { placement: "belowEditor" });
+			const uiEpoch = contextEpoch;
+			ctx.ui.setWidget("pi-voice-progress", lines.length > 0 ? () => deviceProgressComponent(lines, name, () => {
+				if (uiEpoch === contextEpoch && interactiveVoiceSession) void pickDevice(ctx);
+			}, devicePickerConflict ? "/voice devices" : "Alt+D") : undefined, { placement: "belowEditor" });
 			progressWidgetVisible = lines.length > 0;
 			progressWidgetKey = key;
 			refreshStatus();
@@ -1469,7 +1470,9 @@ export default async function (pi: ExtensionAPI) {
 		inputProgressTimer.unref?.();
 	};
 
+	let footerDeviceStatus: { text: string; badge: string } | undefined;
 	const refreshStatus = (): void => {
+		footerDeviceStatus = undefined;
 		const ctx = activeContext;
 		if (!ctx) return;
 		if (!config.enabled) {
@@ -1511,7 +1514,10 @@ export default async function (pi: ExtensionAPI) {
 		} else {
 			color = "success";
 		}
-		ctx.ui.setStatus("pi-voice", ctx.ui.theme.fg(color, `${label}${progressWidgetVisible ? "" : ` [${truncateToWidth(selectedDeviceLabel, 24)}]`}`));
+		const badge = `[${truncateToWidth(selectedDeviceLabel, 24)}]`;
+		const text = `${label}${progressWidgetVisible ? "" : ` · ${devicePickerConflict ? "/voice devices" : "Alt+D devices"} ${badge}`}`;
+		if (!progressWidgetVisible) footerDeviceStatus = { text, badge };
+		ctx.ui.setStatus("pi-voice", ctx.ui.theme.fg(color, text));
 	};
 
 	const persistSegmentTiming = (segmentId: number): void => {
@@ -2210,6 +2216,68 @@ export default async function (pi: ExtensionAPI) {
 			else clearBarrier();
 		});
 		return adoption.catch(() => false);
+	};
+
+	const selectDevice = async (ctx: ExtensionContext, requested: VoiceDeviceSelection, available = () => true): Promise<void> => {
+		const sessionId = ctx.sessionManager.getSessionId();
+		const sessionEpoch = contextEpoch;
+		const current = () => sessionEpoch === contextEpoch && sessionId === activeContext?.sessionManager.getSessionId() && available();
+		const epoch = ++playbackRequestEpoch;
+		pendingReplay = undefined;
+		coordinator?.cancelSpeechAcquisition();
+		const paused = !!playbackHistory.selected();
+		playbackPaused = paused;
+		narration.setPaused(paused);
+		vocalizer.setPlaybackPaused(true);
+		const origin: ConnectionDevice | undefined = requested === "auto" ? undefined
+			: requested === "local" ? { kind: "intentional_local" } : { kind: "device", id: requested };
+		if (!await adoptCurrentConnection(epoch, true, origin, current, requested) ||
+			epoch !== playbackRequestEpoch || !current() || !interactiveVoiceSession) return;
+		playbackUtterances.clear();
+		queueIncomingWhilePaused = paused;
+		attentionSuppressed = true;
+		coordinator?.setAttentionEnabled(false);
+		playbackPaused = paused;
+		narration.setPaused(paused);
+		vocalizer.setPlaybackPaused(paused);
+		state = "idle";
+		refreshStatus();
+		refreshPlaybackTimeline();
+	};
+
+	let devicePicker: AbortController | undefined;
+	const pickDevice = async (ctx: ExtensionContext): Promise<void> => {
+		if (!interactiveVoiceSession || devicePicker) return;
+		const session = ctx.sessionManager.getSessionId();
+		const context = contextEpoch;
+		const request = playbackRequestEpoch;
+		const setting = deviceSettingEpoch;
+		const input = inputEpoch;
+		const framing = framingIntent;
+		const settings = config;
+		const controller = devicePicker = new AbortController();
+		const selected = activeDeviceId ?? deviceSelection;
+		const devices = deviceRouter.connected().filter(device => device.id !== "local" && device.id !== "auto");
+		// Numbered snapshot labels remain unique even with duplicate names/short IDs.
+		const choices = [{ id: "local", name: "Local (host audio)", device: undefined as typeof devices[number] | undefined },
+			...devices.map(device => ({ id: device.id, name: `${device.name} (${device.id.slice(0, 12)})`, device }))];
+		const labels = choices.map((choice, i) => `${i + 1}. ${choice.name}${choice.id === selected ? " · current" : ""}`);
+		try {
+			const choice = await ctx.ui.select("Voice device · registered candidates, not audio readiness", labels, { signal: controller.signal });
+			if (controller.signal.aborted || context !== contextEpoch || session !== activeContext?.sessionManager.getSessionId() ||
+				request !== playbackRequestEpoch || setting !== deviceSettingEpoch || input !== inputEpoch ||
+				framing !== framingIntent || settings !== config || !interactiveVoiceSession) return;
+			const target = choice === undefined ? undefined : choices[labels.indexOf(choice)];
+			if (!target) return;
+			const available = () => !target.device || deviceRouter.connected().some(device => device.id === target.id &&
+				device.connectedAt === target.device!.connectedAt && device.audioEndpoint === target.device!.audioEndpoint && device.inputEndpoint === target.device!.inputEndpoint);
+			if (!available()) { notifyVoice(ctx, "Device is no longer available; reopen the picker", "warning"); return; }
+			await selectDevice(ctx, target.id, available);
+		} catch (error) {
+			if (context === contextEpoch && interactiveVoiceSession) notifyVoice(ctx, `Device picker: ${String(error)}`, "error");
+		} finally {
+			if (devicePicker === controller) devicePicker = undefined;
+		}
 	};
 
 	let deviceSettingEpoch = 0;
@@ -3269,6 +3337,10 @@ export default async function (pi: ExtensionAPI) {
 		if (ctx.mode === "tui") {
 			ctx.ui.setWidget("pi-voice-render-driver", tui => {
 				narrationTui = tui;
+				const uiEpoch = contextEpoch;
+				const restoreDeviceFooter = attachDeviceFooter(tui, () => footerDeviceStatus, () => {
+					if (uiEpoch === contextEpoch && interactiveVoiceSession) void pickDevice(ctx);
+				});
 				// Native End (including remapped keys) and the mouse banner both route
 				// through this method, after Pi has handled overlays/key releases/hit tests.
 				// Observing the accepted action avoids mistaking wheel/search/layout motion for a pin.
@@ -3314,6 +3386,7 @@ export default async function (pi: ExtensionAPI) {
 					dispose: () => {
 						if (native.scrollToBottom === onBottom) native.scrollToBottom = originalBottom;
 						restoreGestures.forEach(restore => restore());
+						restoreDeviceFooter();
 						nativeGestureTracking = false;
 						if (narrationTui === tui) narrationTui = null;
 					},
@@ -3324,6 +3397,8 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
+		devicePicker?.abort();
+		devicePicker = undefined;
 		if (preprocessingPaint) clearTimeout(preprocessingPaint);
 		preprocessingPaint = undefined;
 		displayedCodeProgress = displayedTimingProgress = undefined;
@@ -4196,6 +4271,16 @@ export default async function (pi: ExtensionAPI) {
 		effectiveTalkShortcuts.delete(config.scrollBottomShortcut);
 	}
 
+	const devicePickerConflict = [config.talkShortcut, config.scrollToShortcut, config.scrollBottomShortcut].includes("alt+d");
+	if (!devicePickerConflict) pi.registerShortcut("alt+d", {
+		description: "Choose voice device (replaces forward-delete-word; Alt+Delete still deletes)",
+		handler: pickDevice,
+	});
+	pi.on("session_start", (_event, ctx) => {
+		if (devicePickerConflict && supportsInteractiveVoice(ctx.mode)) notifyVoice(ctx,
+			"Alt+D device picker not bound: a configured voice control already uses it; use /voice devices", "warning");
+	});
+
 	pi.registerCommand("voice", {
 		description: "Voice playback and dictation · /voice help",
 		getArgumentCompletions: prefix => {
@@ -4232,6 +4317,7 @@ export default async function (pi: ExtensionAPI) {
 				"bottom",
 				"timing",
 				"help",
+				"devices",
 				"code-narration",
 				"code-budget",
 				"code-retry",
@@ -4460,7 +4546,7 @@ export default async function (pi: ExtensionAPI) {
 					return;
 				}
 			}
-			if (!["", "status", "timing", "help", "bottom", "tts-workers", "tts-worker", "device"].includes(normalizedAction)) {
+			if (!["", "status", "timing", "help", "bottom", "tts-workers", "tts-worker", "device", "devices"].includes(normalizedAction)) {
 				restoreBottomAfterSpeech = false;
 				bottomPinned = false;
 			}
@@ -4566,33 +4652,14 @@ export default async function (pi: ExtensionAPI) {
 					}
 					return;
 				}
+				case "devices":
+					await pickDevice(ctx);
+					return;
 				case "device": {
 					let requested: VoiceDeviceSelection;
 					try { requested = deviceRouter.select(args.slice(action.length), activeDeviceId ?? deviceSelection); }
 					catch (error) { notifyVoice(ctx, String(error), "error"); return; }
-					const sessionId = ctx.sessionManager.getSessionId();
-					const sessionEpoch = contextEpoch;
-					const current = () => sessionEpoch === contextEpoch && sessionId === activeContext?.sessionManager.getSessionId();
-					const epoch = ++playbackRequestEpoch;
-					pendingReplay = undefined;
-					coordinator?.cancelSpeechAcquisition();
-					const paused = !!playbackHistory.selected();
-					playbackPaused = paused;
-					narration.setPaused(paused);
-					vocalizer.setPlaybackPaused(true);
-					const origin: ConnectionDevice | undefined = requested === "auto" ? undefined
-						: requested === "local" ? { kind: "intentional_local" } : { kind: "device", id: requested };
-					if (!await adoptCurrentConnection(epoch, true, origin, current, requested)) return;
-					playbackUtterances.clear();
-					queueIncomingWhilePaused = paused;
-					attentionSuppressed = true;
-					coordinator?.setAttentionEnabled(false);
-					playbackPaused = paused;
-					narration.setPaused(paused);
-					vocalizer.setPlaybackPaused(paused);
-					state = "idle";
-					refreshStatus();
-					refreshPlaybackTimeline();
+					await selectDevice(ctx, requested);
 					return;
 				}
 				case "audio-cache": {
@@ -4983,6 +5050,7 @@ export default async function (pi: ExtensionAPI) {
 						"Playback · mode | voice | speed | device | output | highlight | autoscroll | scroll-to | bottom",
 						"Models · tts-model | tts-dtype | tts-workers | alignment-model | alignment-dtype",
 						"Input · input | shortcut | stt-model | stt-dtype | stt-candidates | edit | edit-model | submit",
+						`Devices · /voice devices picker · ${devicePickerConflict ? "Alt+D reserved by configured voice control" : "Alt+D (forward-delete-word remains Alt+Delete)"} · click existing [device] in supported fullscreen Pi`,
 						"Cache · code-narration | code-preprocess | code-budget | code-retry current|historical | timing-preprocess | audio-cache | audio-bitrate",
 						"Inspect · status | timing | help",
 					].join("\n"),

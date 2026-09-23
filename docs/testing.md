@@ -1,5 +1,13 @@
 # Tests
 
+## Native device badge picker
+
+`npm run check` passed; full `npm test`: **928 passed, 5 compatibility skips, 0 failed (933 total)**. Installed-native inert-terminal key/scroll/marker/picker suite: **310 passed, no skips/failures**. No LSP server is configured; TypeScript and diff checks passed. Logs: `/tmp/voice-picker-full-final.log`, `/tmp/voice-picker-native-final-2.log`.
+
+Picker tests cover read-only open/cancel, duplicate names/short-ID prefixes, invalid names, current marking, expiry both before choice and during stop, actual stop barriers/failure, sticky silent selection, retained draft/viewport, newer controls, dynamic session replacement and shutdown. Native tests send SGR press/release bytes through `handleTerminalInput`, including Unicode/truncated badges, changing input/progress rows and the real built-in footer; arrows/Enter/Escape use Pi's selector. A playing-host test verifies badge clicks do not pause, start audio or disable narration following. Alt+D default deletion semantics and configured microphone/follow-shortcut conflicts are checked.
+
+The checkout's older TUI skips the two new mouse cases plus three existing compatibility cases; the installed newer TUI executes all five. Touch uses the same SGR path, but physical phone gestures were not tested. No live SSH/client/audio session, inference, provider calls, personal keybinding changes or client upgrades were used. Only the host extension needs `/reload`; see [operator steps](installation.md#sticky-device-selection-and-selected-device-badge).
+
 ## Explicit device routing and first-row selection badge
 
 Final `npm run check` passed; full `npm test`: **923 passed, 3 existing compatibility skips, 0 failed (926 total)**. Installed-native inert-terminal key/scroll/marker tests: **307 passed, no skips/failures**. Shell syntax/diff checks passed; no LSP configured.
@@ -170,7 +178,7 @@ env -u SSH_CONNECTION -u SSH_CLIENT -u SSH_TTY -u TMUX -u TMUX_PANE \
   PI_VOICE_TEST_TUI_MODULE=/home/curiosithy/.nvm/versions/node/v26.7.0/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui/dist/index.js \
   PI_VOICE_TEST_KEYBINDINGS_MODULE=/home/curiosithy/.nvm/versions/node/v26.7.0/lib/node_modules/@earendil-works/pi-coding-agent/dist/core/keybindings.js \
   node --import tsx --test --experimental-test-module-mocks --test-concurrency=4 \
-  test/native-keys.test.ts test/index-native-scroll.test.ts test/narration-marker-native.test.ts
+  test/native-keys.test.ts test/index-native-scroll.test.ts test/narration-marker-native.test.ts test/device-picker-native.test.ts
 ```
 
 Node test options are forwarded before the test glob, for example:

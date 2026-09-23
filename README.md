@@ -134,6 +134,7 @@ See [Configuration](docs/configuration.md) for valid values and setting behavior
 | `F10` | Next assistant message; after the latest, enter playback Tail |
 | `Alt+V` | Re-anchor the current narrated position |
 | `Alt+T` | Pin to and follow the transcript tail |
+| `Alt+D` | Choose a voice device (also click the existing `[device]` badge in supported fullscreen Pi) |
 | `Ctrl+Shift+V` | Toggle spoken output |
 
 Live and completed content share one playback cursor. Navigation preserves playing/paused intent, including at Tail; from Tail, F6 selects the last message and F7 its last available unit. Alt+T moves only the viewport, not this cursor. Playback/navigation re-arm follow and frame immediately; paused navigation stays silent. Alt+V or **Jump to voice location** re-arms follow without resuming. Later manual scrolling wins again.
@@ -153,6 +154,7 @@ Speak after pressing the microphone key. Recording normally stops after about 1.
 /voice attention
 /voice scroll-to
 /voice bottom
+/voice devices                      # native picker; arrows/Enter/Escape
 /voice device                       # read-only selection + candidates
 /voice device "Linux Mint PC"        # unique exact name (or exact ID)
 /voice device next|prev|local|auto
@@ -160,7 +162,7 @@ Speak after pressing the microphone key. Recording normally stops after about 1.
 /voice setup
 ```
 
-Manual device selection is session-sticky, including reload and shared tmux controls. Switching waits for confirmed stop, preserves the draft/cursor, and leaves playback paused; F8 resumes. The first existing progress row (or idle footer) ends with `[device name]`. Explicit endpoint overrides still win. See [routing and trust](docs/devices-and-ssh.md).
+Manual device selection is session-sticky, including reload and shared tmux controls. Switching waits for confirmed stop, preserves the draft/cursor, and leaves playback paused; F8 resumes. The first existing progress row (or idle footer) ends with `[device name]`; click it in mouse-capable fullscreen Pi or press Alt+D for the same native picker. Open/cancel is read-only. Regular/older TTYs keep a plain label and keyboard hint. Alt+D replaces Pi's forward-delete-word binding (Alt+Delete remains); configured voice-control conflicts retain their binding with a warning. See [picker controls and limitations](docs/usage.md#device-picker). Explicit endpoint overrides still win. See [routing and trust](docs/devices-and-ssh.md).
 
 `/voice stop` must start the editor input to be recognized as a command. Nonempty-draft access remains a usability gap; no Escape/Stop shortcut discards your draft. Explicit playback finalizes microphone capture and preserves manual edits.
 

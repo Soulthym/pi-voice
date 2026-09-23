@@ -83,8 +83,8 @@ for (const messageType of ["assistant", "assistant-thinking"] as const) test(`mo
 	assert.equal(host.modelRequests.length, 0);
 });
 
-for (const action of ["auto tail start", "auto tail small", "auto tail resize", "auto tail long", "auto tail in band", "auto tail navigation", "paused anchor", "button", "button playing", "End", "banner", "controls", "search", "search forced render", "drag", "PageDown bottom", "wheel bottom", "scrollbar bottom", "narrow cached", "wide cached", "current cached"]) test(`native viewport: ${action}`, async t => {
-	if (action.startsWith("button") && !native.MouseRegion) {
+for (const action of ["auto tail start", "auto tail small", "auto tail resize", "auto tail long", "auto tail in band", "auto tail navigation", "paused anchor", "button", "button playing", "device picker", "End", "banner", "controls", "search", "search forced render", "drag", "PageDown bottom", "wheel bottom", "scrollbar bottom", "narrow cached", "wide cached", "current cached"]) test(`native viewport: ${action}`, async t => {
+	if ((action.startsWith("button") || action === "device picker") && !native.MouseRegion) {
 		t.skip("older Pi has no MouseRegion; Alt+V remains available");
 		return;
 	}
@@ -315,6 +315,33 @@ for (const action of ["auto tail start", "auto tail small", "auto tail resize", 
 	const tick = async () => { worker.emit({ type: "playback", utterance: last.utterance, position: 0 }); await settle(); };
 	await tick();
 	assert.equal(view.scrollTop, 92, "programmatic motion does not cancel the ongoing 20–80% follow band");
+
+	if (action === "device picker") {
+		const progress = host.widgetComponents.get("pi-voice-progress") as any;
+		assert.ok(progress instanceof native.MouseRegion);
+		tui.setLayoutRoot(new native.VStack([
+			{ component: transcript, basis: 0, grow: 1 }, { component: progress, shrink: 0 },
+		]));
+		tui.doRender();
+		const answer = Promise.withResolvers<string | undefined>();
+		let labels: string[] = [];
+		host.ctx.ui.select = (_title: string, options: string[]) => { labels = options; return answer.promise; };
+		const before = { top: view.scrollTop, sent: worker.sent.length, pauses: [...worker.pauses], entries: host.entries.length };
+		const rows = progress.render(width);
+		const x = native.visibleWidth(rows[0]);
+		const y = terminal.rows - rows.length + 1;
+		tui.handleTerminalInput(`\x1b[<0;${x};${y}M`);
+		tui.handleTerminalInput(`\x1b[<0;${x};${y}m`);
+		assert.deepEqual(labels, ["1. Local (host audio) · current"]);
+		assert.equal(view.scrollTop, before.top);
+		assert.equal(worker.sent.length, before.sent);
+		assert.deepEqual(worker.pauses, before.pauses);
+		answer.resolve(undefined); await settle();
+		assert.equal(host.entries.length, before.entries, "cancel cannot pin or claim");
+		marker = 180; await tick();
+		assert.ok(view.scrollTop > 140, "ordinary badge click does not unfollow narration");
+		return;
+	}
 
 	if (action.startsWith("auto tail")) {
 		terminal.rows = action === "auto tail small" ? 12 : 60;

@@ -5,6 +5,12 @@ const native = await import(process.env.PI_VOICE_TEST_TUI_MODULE ?? "@earendil-w
 const { KeybindingsManager } = await import(process.env.PI_VOICE_TEST_KEYBINDINGS_MODULE ??
 	"../node_modules/@earendil-works/pi-coding-agent/dist/core/keybindings.js");
 
+test("native Alt+D is forward-delete-word, Alt+Delete remains its alternative", () => {
+	const defaults = new KeybindingsManager().getEffectiveConfig();
+	assert.deepEqual(defaults["tui.editor.deleteWordForward"], ["alt+d", "alt+delete"]);
+	assert.ok(native.matchesKey("\x1bd", "alt+d"));
+});
+
 test("native F4/F5 decoding and default bindings leave Voice keys available", () => {
 	// No create(): it would read personal keybindings.json.
 	const defaults = new KeybindingsManager().getEffectiveConfig();

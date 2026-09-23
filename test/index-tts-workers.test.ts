@@ -79,7 +79,7 @@ test("real tts-workers command persists and reaches the worker protocol without 
 	assert.equal(spawned, 0, "idle setting must not spawn models");
 	assert.equal(JSON.parse(await fs.readFile(env.PI_VOICE_CONFIG, "utf8")).ttsWorkers, 2);
 	const command = host.commands.get("voice") as any;
-	const actionsAndReports = ["on", "off", "toggle", "status", "stop", "setup", "test", "talk", "attention", "reconnect", "scroll-to", "bottom", "timing", "help", "code-retry"];
+	const actionsAndReports = ["on", "off", "toggle", "status", "stop", "setup", "test", "talk", "attention", "reconnect", "scroll-to", "bottom", "timing", "help", "code-retry", "devices"];
 	assert.deepEqual(
 		command.getArgumentCompletions("").map((item: any) => item.value).sort(),
 		[...voiceQueryCases.map(([name]) => name).filter(name => name !== "tts-worker"), ...actionsAndReports].sort(),

@@ -51,6 +51,7 @@ Desktop order: **F4 microphone, F5 replay, F6 previous message, F7 previous sent
 | `F10` (⏭) | Select the next eligible live or completed transcript target; after the latest, enter playback Tail |
 | `Alt+V` | Re-anchor the current narrated position (`/voice scroll-to`) |
 | `Alt+T` | Pin to transcript end and follow new output (`/voice bottom`) |
+| `Alt+D` | Open the native device picker (`/voice devices`) |
 
 F7/F9 use source sentences and actual newlines, never terminal soft wraps. They work before durations are known and retain pause intent. Code-description sentences are separate steps, with existing focus cues preserved; terminal omissions are skipped. F7 from playback Tail selects the final available unit of the last eligible message.
 
@@ -65,6 +66,18 @@ F7/F9 select sentence/newline source units independently of timing availability;
 **Playback Tail** is the cursor position after the latest eligible target, including an active stream. F10 beyond that target or F9 beyond its last available unit enters Tail and pins the viewport. It preserves playing/paused intent, not necessarily the old sink: historical playback/preparation is retired; an active source continues from the captured tail boundary, retaining unfinished text and future deltas in order. Paused Tail queues silently until explicit resume. Closed source blocks do not retain an unfinished suffix.
 
 From Tail, the first F6 selects the last eligible message (not its predecessor); F7 selects its last available sentence/newline unit. Subsequent movement follows transcript order. Rapid mixed controls preserve the provisional selection and pause intent through asynchronous cancellation/acquisition and canonical message finalization. **Alt+T / `/voice bottom` is viewport-only**: it does not select playback Tail, seek, pause or resume audio.
+
+## Device picker
+
+Click the existing `[device]` badge on the **first** Voice progress line (or the built-in idle Voice footer), or press **Alt+D**. Both open Pi's native selector: arrows navigate, Enter chooses, Escape cancels. `/voice devices` is the command alternative; `/voice device` remains a read-only report.
+
+The snapshot lists valid, apparently available registered devices plus **Local (host audio)**. The current candidate is marked; numbered labels and short IDs distinguish duplicate names without interpreting display text as an ID. Missing/disconnected pins are not inserted as available choices. Registration and endpoint availability are not audio-readiness proof. Reopen to see newly connected devices. Choice revalidates identity/generation/endpoints, including after stop; stale sessions, shutdown and newer controls cannot apply an old choice.
+
+Opening/cancelling does not stop capture/playback, claim ownership, change pins, or explicitly move the viewport. Choosing uses the same confirmed-stop, sticky, silent-paused transition as `/voice device <id>` and preserves the draft/playback cursor. Explicit endpoint overrides still win.
+
+Mouse/touch needs fullscreen Pi with native `MouseRegion` support and a terminal emitting SGR mouse events. Regular/older TTYs retain the plain label and Alt+D hint (space permitting), not an emulated button. Custom footers that replace Pi's built-in footer use Alt+D. Touch follows the same terminal protocol; physical phone gestures have not been validated. No SSH-wrapper key interception or client upgrade is needed.
+
+**Shortcut conflict:** Pi actually defaults Alt+D to `tui.editor.deleteWordForward`; this extension deliberately replaces it, while **Alt+Delete** remains the default deletion alternative. Pi reports built-in/other-extension shortcut conflicts and may skip a reserved custom binding. If `talkShortcut`, `scrollToShortcut`, or `scrollBottomShortcut` is already Alt+D, Voice preserves that control, warns, and leaves `/voice devices` and supported mouse clicks available. Change bindings only if desired, then `/reload`.
 
 ## Highlighting and status
 
