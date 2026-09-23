@@ -14,6 +14,10 @@ export async function selectDeviceOverlay(ctx: ExtensionContext, labels: string[
 		const done = (value: string | undefined) => {
 			if (closed) return;
 			closed = true;
+			// Native mouse layouts (and an in-flight press target) survive hide until paint.
+			// Retire both targets without requesting focus, even when a stale SGR click arrives.
+			Object.assign(container, { handleMouse: () => ({ handled: true }) });
+			Object.assign(list, { handleMouse: () => ({ handled: true }) });
 			handle.hide(); // Hide this overlay, never Pi custom()'s topmost overlay.
 			signal.removeEventListener("abort", cancel);
 			unsubscribe();

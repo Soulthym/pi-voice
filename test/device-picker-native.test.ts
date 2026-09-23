@@ -18,7 +18,7 @@ const { FooterComponent, initTheme } = await import(agentURL);
 const themes = await import(new URL("./modes/interactive/theme/theme.js", agentURL).href);
 const { getEditorTheme } = themes;
 const { deviceProgressComponent, attachDeviceFooter, selectDeviceOverlay } = await import("../src/device-picker-ui.js");
-const { deviceProgressLines, deviceFooterText } = await import("../src/status-text.js");
+const { deviceProgressLines, deviceFooterText, devicePickerLabels } = await import("../src/status-text.js");
 initTheme("dark");
 
 const labels = ["1. Local", "2. 手机 👩‍💻 é"];
@@ -158,6 +158,65 @@ for (const width of [40, 90]) {
 		h.screen();
 		h.click(x, y);
 		assert.equal(opened, 1, "disposed footer cannot open stale UI");
+	});
+}
+
+for (const underlying of ["editor", "prompt", "newer overlay"] as const) {
+	for (const pressed of [false, true]) {
+		test(`stale picker mouse target cannot steal ${underlying} focus (pressed=${pressed})`, nativeOptions, async t => {
+			const h = mounted(t, 40);
+			h.mount(new native.Text("status", 0, 0));
+			const pending = underlying === "prompt"
+				? h.mode.showExtensionSelector("Old prompt", ["Keep", "Other"]) : undefined;
+			const controller = new AbortController();
+			const result = selectDeviceOverlay(h.ctx, labels, controller.signal, h.tui);
+			const { x, y } = h.locate(labels[1]);
+			if (pressed) h.input(`\x1b[<0;${x + 1};${y + 1}M`);
+			let newerInput = "";
+			const newer = { render: () => ["New overlay"], invalidate() {}, handleInput: (data: string) => { newerInput += data; } };
+			const handle = underlying === "newer overlay" ? h.tui.showOverlay(newer) : undefined;
+			controller.abort();
+			// Deliberately no render, tick, or await between abort and stale terminal events.
+			if (pressed) h.input(`\x1b[<0;${x + 1};${y + 1}m`);
+			else h.click(x, y);
+			assert.equal(h.tui.getFocusedComponent(), underlying === "prompt" ? h.mode.extensionSelector : handle ? newer : h.editor);
+			h.input("!");
+			h.input("\x1b");
+			assert.equal(await result, undefined);
+			if (pending) {
+				assert.equal(await pending, undefined, "Escape still cancels the original prompt");
+				assert.equal(h.editor.getText(), "draft 手机");
+			} else if (handle) {
+				assert.equal(newerInput, "!\x1b");
+				handle.hide();
+			} else assert.equal(h.editor.getText(), "draft 手机!");
+		});
+	}
+}
+
+for (const name of ["Meeting room laptop speakers", "手机 👩‍💻 é ".repeat(20)]) {
+	test(`40-column picker preserves IDs and current owner: ${name.slice(0, 30)}`, nativeOptions, async t => {
+		const h = mounted(t, 40);
+		h.mount(new native.Text("status", 0, 0));
+		const choices = [{ id: "local", name: "Local (host audio)" }, { id: "phone-A", name }, { id: "phone-B", name }];
+		const items = devicePickerLabels(choices, "phone-A");
+		const result = selectDeviceOverlay(h.ctx, items, new AbortController().signal, h.tui);
+		const current = () => {
+			const rows = h.screen();
+			assert.ok(rows.some(row => row.includes("current (phone-A)")));
+			assert.ok(rows.some(row => row.includes("(phone-B)") && !row.includes("current")));
+			assert.ok(rows.every(row => native.visibleWidth(row) <= 40));
+		};
+		current();
+		h.input("\x1b[B");
+		h.input("\x1b[B"); // Cursor is on B; ownership must stay on A.
+		current();
+		h.clickText("(phone-B)");
+		assert.equal(await result, items[2]);
+		const keyboard = selectDeviceOverlay(h.ctx, items, new AbortController().signal, h.tui);
+		h.input("\x1b[B");
+		h.input("\r");
+		assert.equal(await keyboard, items[1]);
 	});
 }
 

@@ -44,6 +44,11 @@ export function pendingPlaybackTiming(messageIndex: number, messageCount: number
 	return `${message} · timing pending`;
 }
 
+/** Identity and ownership precede the name so native SelectList truncation keeps them visible. */
+export function devicePickerLabels(choices: readonly { id: string; name: string }[], current: string): string[] {
+	return choices.map((choice, index) => `${index + 1}. ${choice.id === current ? "current " : ""}(${truncateToWidth(choice.id, 12)}) ${choice.name}`);
+}
+
 export function deviceBadge(name: string, width: number): string {
 	return `[${truncateToWidth(name, Math.max(0, Math.min(24, Math.floor(width / 2) - 2)))}]`;
 }
