@@ -2130,7 +2130,10 @@ export default async function (pi: ExtensionAPI) {
 		}
 		// Explicit intent makes existing dictation review-only before identity lookup can yield.
 		// Keep recording until route validation and old-device stop proof begin.
-		if (force) void finishPendingDictation?.(false);
+		if (force) {
+			void finishPendingDictation?.(false);
+			if (playbackPaused) queueIncomingWhilePaused = true;
+		}
 		const ctx = activeContext;
 		const previous = deviceRebind;
 		let stopUnconfirmed = false;
@@ -2171,6 +2174,7 @@ export default async function (pi: ExtensionAPI) {
 					stopUnconfirmed = true;
 					if (force && inputInProgress) await finishInputForPlayback();
 					await Promise.all([trackStop("output", vocalizer.shutdown()), cancelActiveInput()]);
+					liveTurnNarrationActive = false;
 					stopUnconfirmed = false;
 					for (const resolve of transportCancelWaiters.values()) resolve();
 					transportCancelWaiters.clear();
@@ -3609,7 +3613,7 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	pi.on("message_update", event => {
-		if (!interactiveVoiceSession || !config.enabled || attentionSuppressed || config.mode === "yield") return;
+		if (!interactiveVoiceSession || !config.enabled || config.mode === "yield") return;
 		speechAssistantMessage = event.message;
 		if (liveSource) {
 			liveSource.assistant = event.message;
@@ -3620,11 +3624,6 @@ export default async function (pi: ExtensionAPI) {
 			delta.type === "text_delta" || (delta.type === "thinking_delta" && config.mode === "all")
 				? delta.delta
 				: undefined;
-		if (deviceRebind || transportStopPending || (pendingReplay && !queueIncomingWhilePaused)) {
-			speechBlocked = true;
-			if (speakableDelta !== undefined) blockedSpeechText += speakableDelta;
-			return;
-		}
 		if (playbackPaused && liveBlockIndex !== undefined && speakableDelta !== undefined &&
 			"contentIndex" in delta && delta.contentIndex !== liveBlockIndex && !queueIncomingWhilePaused) {
 			vocalizer.flush();
@@ -3641,6 +3640,12 @@ export default async function (pi: ExtensionAPI) {
 				liveDisplayOffset = source?.displayOffset ?? 0;
 				playbackHistory.updateText(livePlaybackId, ownedSpeechText, source);
 			}
+			return;
+		}
+		if (attentionSuppressed) return;
+		if (deviceRebind || transportStopPending || pendingReplay) {
+			speechBlocked = true;
+			if (speakableDelta !== undefined) blockedSpeechText += speakableDelta;
 			return;
 		}
 		if (!ownsSpeech || speechPurpose !== "turn") {
@@ -3681,7 +3686,7 @@ export default async function (pi: ExtensionAPI) {
 			return;
 		}
 		if (queueIncomingWhilePaused) {
-			if (config.enabled && !attentionSuppressed && stopReason !== "aborted" && stopReason !== "error" && !(config.mode === "yield" && stopReason === "toolUse")) {
+			if (config.enabled && stopReason !== "aborted" && stopReason !== "error" && !(config.mode === "yield" && stopReason === "toolUse")) {
 				const targets = eligible.map(block => {
 					const id = liveBlockIds.get(block.contentIndex);
 					if (id) return { ...block, id };
@@ -3727,7 +3732,8 @@ export default async function (pi: ExtensionAPI) {
 	pi.on("turn_end", (event, ctx) => {
 		if (!interactiveVoiceSession) return;
 		if (queueIncomingWhilePaused) {
-			queueIncomingWhilePaused = false;
+			queueIncomingWhilePaused = playbackPaused;
+			ownerTurnEnded = true;
 			completeOwnerSpeech();
 			return;
 		}
@@ -4176,7 +4182,7 @@ export default async function (pi: ExtensionAPI) {
 					completeOwnerSpeech();
 					return;
 				}
-				if (ownsSpeech && speechPurpose === "turn" && !ownerTurnEnded && !queueIncomingWhilePaused) {
+				if (liveTurnNarrationActive && ownsSpeech && speechPurpose === "turn" && !ownerTurnEnded && !queueIncomingWhilePaused) {
 					vocalizer.setPlaybackPaused(false);
 					pausedOwnerUtterance = undefined;
 					refreshStatus();
