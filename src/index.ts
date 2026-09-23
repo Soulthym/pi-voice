@@ -2135,6 +2135,7 @@ export default async function (pi: ExtensionAPI) {
 		// Keep recording until route validation and old-device stop proof begin.
 		if (force) {
 			void finishPendingDictation?.(false);
+			// Once deltas are captured instead of fed, retire even an unchanged paused sink.
 			if (playbackPaused) queueIncomingWhilePaused = true;
 		}
 		const ctx = activeContext;
@@ -2172,7 +2173,7 @@ export default async function (pi: ExtensionAPI) {
 					changed ||= inputInProgress && (inputRoute.endpoint !== inputEndpoint ||
 						(inputRoute.kind === "device" ? inputRoute.device.connectedAt : undefined) !== inputGeneration);
 				} catch (error) { if ((!identityChanged && inputInProgress) || (manual !== undefined && manual !== "auto")) throw error; }
-				if (manual !== undefined || previous || transportStopPending || inputStopPending || (force && (deviceRetryRequired || inputInProgress)) || (changed && (ownsSpeech || inputInProgress))) {
+				if (manual !== undefined || previous || transportStopPending || inputStopPending || (force && (deviceRetryRequired || inputInProgress || playbackPaused)) || (changed && (ownsSpeech || inputInProgress))) {
 					// Termination, not a TCP accept or a cancellation timeout, proves the old sink is gone.
 					stopUnconfirmed = true;
 					if (force && inputInProgress) await finishInputForPlayback();
@@ -2235,7 +2236,7 @@ export default async function (pi: ExtensionAPI) {
 		const current = () => sessionEpoch === contextEpoch && sessionId === activeContext?.sessionManager.getSessionId() && available();
 		const epoch = ++playbackRequestEpoch;
 		const paused = playbackPaused || !!pendingReplay || (ownsSpeech &&
-			(lastOwnerUtterance !== undefined || (speechPurpose === "turn" && !ownerTurnEnded)));
+			(lastOwnerUtterance !== undefined || (speechPurpose === "turn" && liveTurnNarrationActive && !ownerTurnEnded)));
 		pendingReplay = undefined;
 		coordinator?.cancelSpeechAcquisition();
 		playbackPaused = paused;
