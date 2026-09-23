@@ -145,7 +145,7 @@ export class FakeVoiceHost {
 		},
 		requestRender: () => {},
 	};
-	readonly widgetComponents = new Map<string, { dispose?: () => void }>();
+	readonly widgetComponents = new Map<string, { dispose?: () => void; render?: (width: number) => string[] }>();
 	/** Latest value per widget name, in update order. */
 	readonly styleCalls: Array<{ style: string; text: string }> = [];
 	readonly widgets = new Map<string, { lines?: string[]; placement?: string } | undefined>();	readonly widgetOperations: Array<{ name: string; value: { lines?: string[]; placement?: string } | undefined }> = [];
@@ -211,7 +211,9 @@ export class FakeVoiceHost {
 					let normalized: { lines?: string[]; placement?: string } | undefined;
 					if (typeof value === "function") {
 						this.widgetComponents.set(name, value(this.tui, theme));
-						normalized = {};
+						normalized = name === "pi-voice-progress"
+							? { lines: this.widgetComponents.get(name)?.render?.(160).map(line => line.trimStart()), ...(options ? { placement: options.placement } : {}) }
+							: {};
 					} else {
 						normalized = Array.isArray(value)
 							? { lines: value, ...(options ? { placement: options.placement } : {}) }

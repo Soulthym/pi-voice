@@ -522,7 +522,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # Registration confirms identity, not audio readiness.
-printf 'Connected to %s\n' "$device_name" >&2
+printf 'Connected as %s\n' "$device_name" >&2
 export PI_VOICE_DEVICE_ID=$device_id
 export PI_VOICE_DEVICE_TARGET=$target_hash
 remote_env="PI_VOICE_DEVICE_ID=$(shell_quote "$device_id") PI_VOICE_DEVICE_TARGET=$(shell_quote "$target_hash")"

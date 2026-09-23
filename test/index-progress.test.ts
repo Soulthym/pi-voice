@@ -132,8 +132,11 @@ test("timing batch replaces its visible row without holes between fast adjacent 
 		widgetContainerAbove: new Container(), widgetContainerBelow: new Container(),
 		ui: { requestRender: () => {
 			widgetRows.push(nativeUI.widgetContainerBelow.render(160).length);
-			const wordRow = nativeUI.extensionWidgetsBelow.get("pi-voice-progress")?.children.at(-1);
-			if (wordRow && host.widgetLines()?.at(-1)?.startsWith("Word timing:")) mobileWordRows.push(wordRow.render(32).length);
+			const rendered = nativeUI.extensionWidgetsBelow.get("pi-voice-progress")?.render(32);
+			if (rendered && host.widgetLines()?.at(-1)?.startsWith("Word timing:")) {
+				assert.match(rendered[0], / \[local\]$/);
+				mobileWordRows.push(rendered.length - rendered.findIndex((line: string) => line.trimStart().startsWith("Word timing:")));
+			}
 		} },
 	});
 	const setWidget = host.ctx.ui.setWidget;
@@ -152,7 +155,7 @@ test("timing batch replaces its visible row without holes between fast adjacent 
 	for (let i = 0; i < 3; i++) host.addMessage(`m${i}`, i ? `m${i - 1}` : null, assistant(`Sentence ${i}.`));
 	await host.start();
 	const startup = await waitForWidgetLines(host, lines => lines.some(line => line.includes("Recovering speech timing")));
-	assert.match(startup[0], /^○ Idle · message 3\/3 · timing pending$/);
+	assert.match(startup[0], /^○ Idle · message 3\/3 · timing pending \[local\]$/);
 	assert.equal(startup.at(-1), "Word timing: unknown/pending");
 	while (!jobs) await settle();
 	const start = host.widgetOperations.length - 1;
@@ -216,7 +219,7 @@ test("unified progress widget orders input, playback, and preprocessing and clea
 	await settle();
 
 	let lines = await waitForWidgetLines(host, candidate => candidate.length >= 2);
-	assert.match(lines[0], /^○ Idle · message 1\/1 · timing pending$/);
+	assert.match(lines[0], /^○ Idle · message 1\/1 · timing pending \[local\]$/);
 	assert.equal(lines[1], "Word timing: unknown/pending");
 	assert.equal(lines.some(line => line.includes("Preparing code descriptions")), false,
 		"background descriptions must not contend with the deferred foreground utterance");

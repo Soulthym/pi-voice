@@ -230,7 +230,7 @@ test("device names come only from validated local files before any connection", 
 				assert.equal(fs.existsSync(activity), false, "invalid names must not start SSH or bridge activity");
 				assert.match(result.stderr, /Device name must|Invalid device-name file/);
 				assert.ok(!result.stderr.includes("\x1b"));
-				assert.doesNotMatch(result.stderr + result.stdout, /Connected to/);
+				assert.doesNotMatch(result.stderr + result.stdout, /Connected as/);
 			}
 			for (const bytes of [[0xff], [0xc0, 0xaf], [0xed, 0xa0, 0x80], [0xf4, 0x90, 0x80, 0x80]]) {
 				fs.writeFileSync(path.join(config, "pi-voice", "device-name"), Buffer.from(bytes));
@@ -270,11 +270,11 @@ test("registration preserves names, confirms identity, and keeps the ID across r
 				assert.equal(registration.name, name);
 				assert.equal(registration.id, id ?? registration.id);
 				id = registration.id;
-				assert.equal(result.stderr, `Connected to ${name}\n`);
+				assert.equal(result.stderr, `Connected as ${name}\n`);
 			}
 			const failed = await scenario(root, wrapper, ["u@h"], { FAKE_REGISTRATION_FAIL: "1", PI_VOICE_AUDIO_PORT: "24501" });
 			assert.notEqual(failed.code, 0);
-			assert.doesNotMatch(failed.stdout + failed.stderr, /Connected to/);
+			assert.doesNotMatch(failed.stdout + failed.stderr, /Connected as/);
 			assert.match(failed.log(), /-O exit/);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
@@ -582,7 +582,7 @@ test("allocation failures never publish a device and close newly created masters
 				const result = await scenario(root, wrapper, ["u@h"], failure);
 				assert.notEqual(result.code, 0);
 				assert.match(result.stderr, /forwarding denied|valid remote audio forwarding port/);
-				assert.doesNotMatch(result.stdout + result.stderr, /Connected to/);
+				assert.doesNotMatch(result.stdout + result.stderr, /Connected as/);
 				assert.equal(fs.existsSync(path.join(root, "registration.json")), false);
 				assert.match(result.log(), /-O exit/);
 			} finally {

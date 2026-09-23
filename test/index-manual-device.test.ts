@@ -28,8 +28,9 @@ test("manual names/IDs and cycles are sticky across ambiguous attachments, contr
 	await fs.mkdir(process.env.PI_VOICE_DEVICE_DIR);
 	const endpoint = `unix://${root}/available`;
 	await fs.writeFile(path.join(root, "available"), "");
+	await fs.writeFile(path.join(root, "availableB"), "");
 	const register = async (id: string, name: string) => fs.writeFile(path.join(process.env.PI_VOICE_DEVICE_DIR!, `${id}.json`), JSON.stringify({
-		version: 1, id, name, platform: "linux", audioEndpoint: endpoint, inputEndpoint: endpoint, connectedAt: 1, lastActive: 1,
+		version: 1, id, name, platform: "linux", audioEndpoint: id === "B" ? `${endpoint}B` : endpoint, inputEndpoint: endpoint, connectedAt: 1, lastActive: 1,
 	}));
 	await register("A", "Linux Mint PC");
 	await register("B", "Phone B");
@@ -37,7 +38,8 @@ test("manual names/IDs and cycles are sticky across ambiguous attachments, contr
 	await fs.writeFile(process.env.PI_VOICE_CONFIG, config);
 	const lookup = t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", async () => { throw new Error("Multiple tmux clients can access this pane"); });
 	const host = new FakeVoiceHost(root, "manual");
-	host.addMessage("a", null, assistant("First sentence. Second sentence."));
+	let footer = "";
+	host.ctx.ui.setStatus = (_key: string, value?: string) => { footer = value ?? ""; };
 	const index = Worker.instances.length;
 	let editor = "Existing draft";
 	host.ctx.ui.getEditorText = () => editor;
@@ -58,19 +60,37 @@ test("manual names/IDs and cycles are sticky across ambiguous attachments, contr
 	await host.command('device "Linux Mint PC"');
 	assert.deepEqual(pin(), { version: 1, selection: "A", pin: "A" });
 	assert.equal(worker.sent.length, 0, "selection is silent");
+	await new Promise(resolve => setTimeout(resolve, 100));
+	assert.match(footer, /\[Linux Mint PC\]$/);
+	assert.equal(host.widgets.get("pi-voice-progress"), undefined, "idle badge uses the existing footer, not another widget row");
+	host.addMessage("a", null, assistant("First sentence. Second sentence."));
 	await host.command("device");
 	assert.match(host.notices.at(-2)!.message, /Linux Mint PC \(A\).*Phone B \(B\)/);
 	assert.equal(lookup.mock.callCount(), calls);
 	await host.shortcut("f5"); await settle();
 	assert.ok(worker.sent.length);
 	assert.equal(worker.outputs.at(-1), endpoint);
+	assert.match(host.widgetComponents.get("pi-voice-progress")!.render!(80)[0], /\[Linux Mint PC\]$/);
+	assert.equal(footer.includes("[Linux Mint PC]"), false, "only the widget carries the tag while present");
+	const segments = worker.sent as Array<{ utterance: number; segmentId: number; text: string }>;
+	const first = segments.find(segment => segment.text === "First sentence.")!;
+	const second = segments.find(segment => segment.text === "Second sentence.")!;
+	worker.emit({ ...first, type: "segment-audio", start: 0, duration: 2 });
+	worker.emit({ ...second, type: "segment-audio", start: 2, duration: 2 });
+	worker.emit({ type: "playback", utterance: second.utterance, position: 2.5 });
+	host.scrollView.setDocument(Array.from({ length: 100 }, (_, i) => `line ${i}`));
+	host.scrollView.manualScrollTo(20);
 	await host.command("device next");
+	assert.equal(host.scrollView.scrollTop, 20, "device switching preserves the manual viewport");
 	assert.equal(pin().selection, "B");
+	assert.match(host.widgetComponents.get("pi-voice-progress")!.render!(80)[0], /^ ⏯ Paused.*\[Phone B\]$/);
 	const count = worker.sent.length;
 	await settle();
 	assert.equal(worker.sent.length, count, "handoff does not start the new sink");
 	await host.shortcut("f8"); await settle();
 	assert.ok(worker.sent.length > count, "explicit resume restarts the stopped sink");
+	assert.equal(worker.outputs.at(-1), `${endpoint}B`);
+	assert.equal((worker.sent[count] as { text: string }).text, "Second sentence.", "resume retains the canonical sentence cursor");
 	await host.command("device prev");
 	assert.equal(pin().selection, "A");
 	await host.emit("session_start", {});
@@ -80,6 +100,7 @@ test("manual names/IDs and cycles are sticky across ambiguous attachments, contr
 	await host.command("device B");
 	assert.equal(pin().selection, "A");
 	assert.match(host.notices.at(-1)!.message, /Stop unconfirmed/);
+	assert.match(host.widgetComponents.get("pi-voice-progress")!.render!(80)[0], /\[Linux Mint PC\]$/, "failed handoff keeps the old badge");
 	await fs.stat(path.join(root, "coordinator", "speech.lock", "lease.json"));
 	terminate.mock.restore();
 	await host.command("device B");

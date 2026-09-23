@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Text, visibleWidth } from "@earendil-works/pi-tui";
-import { notifyVoice, pendingPlaybackTiming, playbackStateLabel, playbackTimingStatus, preprocessingStatus, voiceProgressLines } from "../src/status-text.js";
+import { deviceProgressLines, notifyVoice, pendingPlaybackTiming, playbackStateLabel, playbackTimingStatus, preprocessingStatus, voiceProgressLines } from "../src/status-text.js";
 
 test("check, recovery and processing counters describe targets, not forced alignment or percent", () => {
 	assert.equal(preprocessingStatus({ label: "Checking saved timing", processed: 109, total: 605, unit: "checked" }),
@@ -48,6 +48,25 @@ test("native word timing rows keep their height as four-digit counts refine", ()
 		assert.equal(pending, "Word timing: unknown/pending");
 		assert.equal(new Text(pending, 1, 0).render(width).length, pendingRows);
 	}
+});
+
+test("device badge ends only the first native row in every progress precedence, without adding rows", () => {
+	const lines = voiceProgressLines("🎙 Input · waiting for speech", "⏯ Paused", [
+		{ label: "Preparing code descriptions", processed: 2, total: 5 },
+		{ label: "Recovering speech timing", processed: 3, total: 8 },
+	], "Word timing: unknown/pending").map(line => line.text);
+	for (let offset = 0; offset < lines.length; offset++) {
+		for (const width of [20, 28, 40, 80, 160]) {
+			const plain = deviceProgressLines(lines.slice(offset), "Linux Mint PC", width);
+			assert.match(plain[0], / \[[^\]]+\]$/);
+			assert.equal(plain.slice(1).some(line => line.includes("[")), false);
+			assert.ok(plain.every(line => visibleWidth(line) <= width));
+			const wide = deviceProgressLines(lines.slice(offset), "雪📱".repeat(64), width);
+			assert.equal(wide.length, plain.length, "name width cannot change widget height");
+			assert.ok(wide.every(line => visibleWidth(line) <= width));
+		}
+	}
+	assert.deepEqual(deviceProgressLines([], "local", 80), [], "no invented progress work");
 });
 
 test("notices use one Voice label and native Pi severity, without ANSI or duplicate severity icons", () => {

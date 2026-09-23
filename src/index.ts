@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { hostname } from "node:os";
 import type { Message, Tool } from "@earendil-works/pi-ai";
 import { getMarkdownTheme, highlightCode, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Markdown } from "@earendil-works/pi-tui";
+import { Markdown, truncateToWidth } from "@earendil-works/pi-tui";
 import { hasSpeakableAudio, requiresVoiceAttention } from "./attention.js";
 import {
 	assistantCodeContext,
@@ -60,7 +60,7 @@ import {
 import { PhoneInputClient } from "./phone-input.js";
 import { prioritizeFromCurrent, processConcurrently, resolveTimingConcurrency } from "./preprocessing.js";
 import { SpeakableStream, type FencedCodeBlock, type SpeakableSourceRange } from "./speakable.js";
-import { notifyVoice, pendingPlaybackTiming, playbackStateLabel, playbackTimingStatus, voiceProgressLines, type ReadyProgress } from "./status-text.js";
+import { deviceProgressLines, notifyVoice, pendingPlaybackTiming, playbackStateLabel, playbackTimingStatus, voiceProgressLines, type ReadyProgress } from "./status-text.js";
 import { anchorLineForMessage, computeAutoScrollTop, isManualScrollAway } from "./auto-scroll.js";
 import { applySpokenEdit, parseEditModelSelector, resolveDictationCandidates } from "./prompt-editor.js";
 import { formatAsrDisplay } from "./asr-display.js";
@@ -563,6 +563,8 @@ export default async function (pi: ExtensionAPI) {
 		return routed;
 	};
 
+	let selectedDeviceLabel = "no device";
+	let progressWidgetVisible = false;
 	let progressWidgetKey: string | undefined;
 	let jumpWidgetVisible = false;
 	let displayedCodeProgress: PreprocessingProgress | undefined;
@@ -610,10 +612,16 @@ export default async function (pi: ExtensionAPI) {
 					{ placement: "belowEditor" });
 				jumpWidgetVisible = canJump;
 			}
-			const key = JSON.stringify([contextEpoch, lines]);
+			const key = JSON.stringify([contextEpoch, lines, selectedDeviceLabel]);
 			if (key === progressWidgetKey) return;
-			ctx.ui.setWidget("pi-voice-progress", lines.length > 0 ? lines : undefined, { placement: "belowEditor" });
+			const name = selectedDeviceLabel;
+			ctx.ui.setWidget("pi-voice-progress", lines.length > 0 ? () => ({
+				render: width => deviceProgressLines(lines, name, Math.max(0, width - 2)).map(line => ` ${line}`),
+				invalidate() {},
+			}) : undefined, { placement: "belowEditor" });
+			progressWidgetVisible = lines.length > 0;
 			progressWidgetKey = key;
+			refreshStatus();
 		} catch {
 			// The active context can become stale just before session shutdown runs.
 		}
@@ -1503,7 +1511,7 @@ export default async function (pi: ExtensionAPI) {
 		} else {
 			color = "success";
 		}
-		ctx.ui.setStatus("pi-voice", ctx.ui.theme.fg(color, label));
+		ctx.ui.setStatus("pi-voice", ctx.ui.theme.fg(color, `${label}${progressWidgetVisible ? "" : ` [${truncateToWidth(selectedDeviceLabel, 24)}]`}`));
 	};
 
 	const persistSegmentTiming = (segmentId: number): void => {
@@ -2068,6 +2076,16 @@ export default async function (pi: ExtensionAPI) {
 		speakAttentionNotification(waiting);
 	};
 
+	const refreshDeviceLabel = (): void => {
+		const selection = activeDeviceId ?? deviceSelection;
+		selectedDeviceLabel = selection === "auto" ? "no device" : selection === "local" ? "local" : selection.slice(0, 12);
+		if (selection !== "auto" && selection !== "local") {
+			try { selectedDeviceLabel = deviceRouter.resolve(selection)?.name ?? selectedDeviceLabel; } catch { /* Keep an unavailable pin truthful. */ }
+		}
+		refreshProgressWidget();
+		refreshStatus();
+	};
+
 	// Identity feedback only: registration and pinning do not prove audio readiness.
 	const notifyConnectedDevice = (ctx: ExtensionContext | null, direction?: "input" | "output"): void => {
 		if (inputStopPending || transportStopPending) return;
@@ -2087,7 +2105,10 @@ export default async function (pi: ExtensionAPI) {
 				}
 			}
 			const device = deviceRouter.resolve(selection);
-			notifyVoice(ctx, `Connected to ${device?.name ?? localName} · identity selected; audio readiness not checked`, "info");
+			const overrides = deviceSelection === "auto" ? [] : (["input", "output"] as const)
+				.filter(key => config[key] !== "auto")
+				.map(key => `${key}: ${["local", "disabled"].includes(config[key]) ? config[key] : "custom endpoint"}`);
+			notifyVoice(ctx, `Connected to ${device?.name ?? localName} · identity selected; audio readiness not checked${overrides.length ? ` · overrides unchanged (${overrides.join(", ")})` : ""}`, "info");
 		} catch (error) {
 			notifyVoice(ctx, `Device: ${error instanceof Error ? error.message : String(error)}`, "warning");
 		}
@@ -2169,6 +2190,7 @@ export default async function (pi: ExtensionAPI) {
 				}
 				if (force || changed || deviceRetryRequired) notifyConnectedDevice(ctx);
 				deviceRetryRequired = false;
+				refreshDeviceLabel();
 				return true;
 			} catch (error) {
 				if (epoch === playbackRequestEpoch && ctx === activeContext) {
@@ -3185,6 +3207,7 @@ export default async function (pi: ExtensionAPI) {
 		deviceSelection = savedDevice.selection;
 		activeDeviceId = savedDevice.pin ?? (deviceSelection === "auto" || deviceSelection === "local" ? undefined : deviceSelection);
 		deviceRouter.setEnvironmentDevice(undefined);
+		refreshDeviceLabel();
 		if (deviceSelection === "auto" && !activeDeviceId) {
 			const epoch = playbackRequestEpoch;
 			await adoptCurrentConnection(epoch, true);

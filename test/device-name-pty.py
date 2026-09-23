@@ -272,7 +272,7 @@ for wrapper in [Path("client/pi-voice-ssh").resolve(), Path("termux/pi-voice-ssh
                 assert not name_file.exists() and not id_file.exists()
         for answer in [b"\x04", b"\n", b"   \n", b"bad\x1b[31m\n", b"bad\0name\n", b"x" * 129 + b"\n", ("é" * 129 + "\n").encode(), ("😀" * 129 + "\n").encode()]:
             output = terminal(wrapper, env, answer, 2)
-            assert b"Connected to" not in output and b"\x1b[31m" not in output, output
+            assert b"Connected as" not in output and b"\x1b[31m" not in output, output
             assert not name_file.exists() and not id_file.exists()
         # Bash read may receive Ctrl-C as a byte rather than a terminal signal.
         output = terminal(wrapper, env, b"\x03", (-signal.SIGINT, 2))
