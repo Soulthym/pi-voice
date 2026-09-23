@@ -2230,9 +2230,10 @@ export default async function (pi: ExtensionAPI) {
 		const sessionEpoch = contextEpoch;
 		const current = () => sessionEpoch === contextEpoch && sessionId === activeContext?.sessionManager.getSessionId() && available();
 		const epoch = ++playbackRequestEpoch;
+		const paused = playbackPaused || !!pendingReplay || (ownsSpeech &&
+			(lastOwnerUtterance !== undefined || (speechPurpose === "turn" && !ownerTurnEnded)));
 		pendingReplay = undefined;
 		coordinator?.cancelSpeechAcquisition();
-		const paused = !!playbackHistory.selected();
 		playbackPaused = paused;
 		narration.setPaused(paused);
 		vocalizer.setPlaybackPaused(true);
@@ -2242,8 +2243,8 @@ export default async function (pi: ExtensionAPI) {
 			epoch !== playbackRequestEpoch || !current() || !interactiveVoiceSession) return;
 		playbackUtterances.clear();
 		queueIncomingWhilePaused = paused;
-		attentionSuppressed = true;
-		coordinator?.setAttentionEnabled(false);
+		attentionSuppressed = paused;
+		coordinator?.setAttentionEnabled(config.enabled && !paused);
 		playbackPaused = paused;
 		narration.setPaused(paused);
 		vocalizer.setPlaybackPaused(paused);
@@ -2539,6 +2540,7 @@ export default async function (pi: ExtensionAPI) {
 			}
 			queueIncomingWhilePaused = false;
 		}
+		if (liveSource?.final) queueIncomingWhilePaused = false;
 		if (!queued) {
 			queueIncomingWhilePaused = false;
 			// Only discard this request's source; later tool responses must drain normally.

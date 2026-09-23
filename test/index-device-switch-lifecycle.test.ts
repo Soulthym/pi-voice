@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { mock, test } from "node:test";
 import { DeviceRouter } from "../src/device-router.js";
-import { FakeVoiceHost, MockedVoiceWorkerClient, assistant } from "./helpers/fake-voice-host.js";
+import { FakeVoiceHost, MockedVoiceWorkerClient, assistant, streamCompletedResponse } from "./helpers/fake-voice-host.js";
 
 mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: MockedVoiceWorkerClient } });
 const settle = async () => { for (let i = 0; i < 30; i++) await new Promise(resolve => setImmediate(resolve)); };
@@ -44,6 +44,7 @@ for (const action of ["device local", "reconnect"]) for (const finishBeforeResum
 		worker.emit({ ...second, type: "segment-audio", start: 2, duration: 2 });
 		worker.emit({ type: "playback", utterance: second.utterance, position: 2.5 });
 		await host.command(action);
+		await host.command(action); // Switching again while paused must remain silent and resumable.
 		const count = worker.sent.length;
 		text += "Future sentence. ";
 		await delta("Future sentence. ");
@@ -66,5 +67,13 @@ for (const action of ["device local", "reconnect"]) for (const finishBeforeResum
 			await finish(); await settle();
 			assert.ok(segments.slice(count).some(s => s.text === "After resume."), "live continuation survives retirement");
 		}
+		worker.emit({ type: "idle", utterance: segments.at(-1)!.utterance });
+		await settle();
+		const idleCount = worker.sent.length;
+		await host.command(action); await settle();
+		assert.equal(worker.sent.length, idleCount, "idle switch itself is silent despite selected history");
+		await streamCompletedResponse(host, "next", "complete", "Automatic narration after an idle switch.");
+		await settle();
+		assert.ok(segments.slice(idleCount).some(s => s.text === "Automatic narration after an idle switch."), "historical selection must not pause future automatic responses");
 	});
 }
