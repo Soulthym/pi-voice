@@ -136,12 +136,14 @@ test("failed input stop blocks every device setter until reconnect proves cleanu
 	cancel.mock.mockImplementation(async () => { throw new Error("input stop unconfirmed"); });
 	const snapshot = await fs.readFile(process.env.PI_VOICE_CONFIG, "utf8");
 	const notices = host.notices.length;
-	for (const command of ["input disabled", "device local", "output local", "input local"]) {
-		await assert.rejects(host.command(command), /input stop unconfirmed/);
-	}
-	await host.command("reconnect");
-	for (const command of ["device local", "input disabled", "output local"]) {
-		await assert.rejects(host.command(command), /input stop unconfirmed/);
+	for (const commands of [["input disabled", "device local", "output local", "input local"], ["device local", "input disabled", "output local"]]) {
+		for (const command of commands) {
+			if (command.startsWith("device")) {
+				await host.command(command);
+				assert.match(host.notices.at(-1)!.message, /input stop unconfirmed/);
+			} else await assert.rejects(host.command(command), /input stop unconfirmed/);
+		}
+		await host.command("reconnect");
 	}
 	assert.equal(await fs.readFile(process.env.PI_VOICE_CONFIG, "utf8"), snapshot);
 	assert.equal(host.notices.slice(notices).some(n => n.message.includes("Connected to")), false);

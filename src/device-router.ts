@@ -125,20 +125,41 @@ export class DeviceRouter {
 		} catch {
 			// A legacy TCP bridge may still be connected without a registry directory.
 		}
-		const devices = names
+		return names
 			.filter(name => name.endsWith(".json"))
-			.map(name => readRegistration(path.join(this.directory, name)))
+			.map(name => {
+				const device = readRegistration(path.join(this.directory, name));
+				return device?.id + ".json" === name ? device : undefined;
+			})
 			.filter((device): device is VoiceDeviceRegistration => device !== undefined)
+			.filter(device => validDeviceEndpoint(device.audioEndpoint) && validDeviceEndpoint(device.inputEndpoint))
 			.filter(device => endpointIsAvailable(device.audioEndpoint) || endpointIsAvailable(device.inputEndpoint))
-			.sort((left, right) => right.lastActive - left.lastActive || right.connectedAt - left.connectedAt);
-		if (devices.length === 0) {
-			const audioPort = Number(process.env.PI_VOICE_AUDIO_PORT ?? 8765);
-			const inputPort = Number(process.env.PI_VOICE_CONTROL_PORT ?? 8766);
-			if (loopbackPortIsListening(audioPort) || loopbackPortIsListening(inputPort)) {
-				devices.push(this.legacyDevice());
-			}
+			.sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
+	}
+
+	/** Whole command argument, not whitespace tokens. Names are labels, never authentication. */
+	select(argument: string, current: string): VoiceDeviceSelection {
+		let requested = argument.trim();
+		const quoted = requested.startsWith('"') || requested.startsWith("'");
+		if (quoted) {
+			const quote = requested[0];
+			if (requested.length < 2 || !requested.endsWith(quote)) throw new Error("Unclosed device name quote");
+			requested = requested.slice(1, -1).replace(/\\([\\"'])/g, "$1");
 		}
-		return devices;
+		if (!quoted && (requested === "auto" || requested === "local")) return requested;
+		const devices = this.connected();
+		if (!quoted && (requested === "next" || requested === "prev")) {
+			if (!devices.length) throw new Error("No registered voice devices available");
+			const index = devices.findIndex(device => device.id === current);
+			return devices[index < 0 ? (requested === "next" ? 0 : devices.length - 1)
+				: (index + (requested === "next" ? 1 : devices.length - 1)) % devices.length].id;
+		}
+		const exact = devices.find(device => device.id === requested);
+		if (exact) return exact.id;
+		const matches = devices.filter(device => device.name === requested);
+		if (matches.length === 1) return matches[0].id;
+		if (matches.length > 1) throw new DeviceRoutingError("ambiguous_device", `Ambiguous device name; use an ID: ${matches.map(device => device.id).join(", ")}`);
+		throw new DeviceRoutingError("device_unavailable", "Device unavailable; /voice device lists available names and exact IDs");
 	}
 
 	/** Metadata lookup only for pinned IDs: no registry enumeration or procfs scans.

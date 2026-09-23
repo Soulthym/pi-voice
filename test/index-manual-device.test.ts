@@ -1,0 +1,128 @@
+import assert from "node:assert/strict";
+import * as fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { mock, test } from "node:test";
+import { DeviceRouter } from "../src/device-router.js";
+import { PhoneInputClient, type PhoneCapture } from "../src/phone-input.js";
+import { FakeVoiceHost, MockedVoiceWorkerClient, assistant } from "./helpers/fake-voice-host.js";
+import type { VoiceConfig } from "../src/config.js";
+
+class Worker extends MockedVoiceWorkerClient {
+	outputs: string[] = [];
+	override sendSegment(utterance: number, id: number, text: string, config?: VoiceConfig) {
+		this.outputs.push(config!.output);
+		super.sendSegment(utterance, id, text);
+	}
+}
+mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: Worker } });
+const settle = async () => { for (let i = 0; i < 30; i++) await new Promise(resolve => setImmediate(resolve)); };
+
+test("manual names/IDs and cycles are sticky across ambiguous attachments, controls and reload; failed stop retains pin", async t => {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-manual-"));
+	const keys = ["PI_VOICE_CONFIG", "PI_VOICE_COORDINATOR_DIR", "PI_VOICE_DEVICE_DIR"];
+	const old = keys.map(key => process.env[key]);
+	process.env.PI_VOICE_CONFIG = path.join(root, "config.json");
+	process.env.PI_VOICE_COORDINATOR_DIR = path.join(root, "coordinator");
+	process.env.PI_VOICE_DEVICE_DIR = path.join(root, "devices");
+	await fs.mkdir(process.env.PI_VOICE_DEVICE_DIR);
+	const endpoint = `unix://${root}/available`;
+	await fs.writeFile(path.join(root, "available"), "");
+	const register = async (id: string, name: string) => fs.writeFile(path.join(process.env.PI_VOICE_DEVICE_DIR!, `${id}.json`), JSON.stringify({
+		version: 1, id, name, platform: "linux", audioEndpoint: endpoint, inputEndpoint: endpoint, connectedAt: 1, lastActive: 1,
+	}));
+	await register("A", "Linux Mint PC");
+	await register("B", "Phone B");
+	const config = JSON.stringify({ enabled: true, input: "auto", audioCache: false, timingPreprocessConcurrency: 0 });
+	await fs.writeFile(process.env.PI_VOICE_CONFIG, config);
+	const lookup = t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", async () => { throw new Error("Multiple tmux clients can access this pane"); });
+	const host = new FakeVoiceHost(root, "manual");
+	host.addMessage("a", null, assistant("First sentence. Second sentence."));
+	const index = Worker.instances.length;
+	let editor = "Existing draft";
+	host.ctx.ui.getEditorText = () => editor;
+	host.ctx.ui.setEditorText = (text: string) => { editor = text; };
+	const capture = Promise.withResolvers<PhoneCapture>();
+	const record = t.mock.method(PhoneInputClient.prototype, "capture", () => capture.promise);
+	t.mock.method(PhoneInputClient.prototype, "stop", async () => { capture.resolve({ type: "text", data: "dictated words" }); });
+	t.mock.method(PhoneInputClient.prototype, "cancel", async () => {});
+	t.after(async () => {
+		await host.shutdown();
+		keys.forEach((key, i) => { if (old[i] === undefined) delete process.env[key]; else process.env[key] = old[i]; });
+		await fs.rm(root, { recursive: true, force: true });
+	});
+	await host.start();
+	const worker = Worker.instances[index] as Worker;
+	const pin = () => host.entries.filter(e => e.customType === "pi-voice.device-selection").at(-1)?.data;
+	const calls = lookup.mock.callCount();
+	await host.command('device "Linux Mint PC"');
+	assert.deepEqual(pin(), { version: 1, selection: "A", pin: "A" });
+	assert.equal(worker.sent.length, 0, "selection is silent");
+	await host.command("device");
+	assert.match(host.notices.at(-2)!.message, /Linux Mint PC \(A\).*Phone B \(B\)/);
+	assert.equal(lookup.mock.callCount(), calls);
+	await host.shortcut("f5"); await settle();
+	assert.ok(worker.sent.length);
+	assert.equal(worker.outputs.at(-1), endpoint);
+	await host.command("device next");
+	assert.equal(pin().selection, "B");
+	const count = worker.sent.length;
+	await settle();
+	assert.equal(worker.sent.length, count, "handoff does not start the new sink");
+	await host.shortcut("f8"); await settle();
+	assert.ok(worker.sent.length > count, "explicit resume restarts the stopped sink");
+	await host.command("device prev");
+	assert.equal(pin().selection, "A");
+	await host.emit("session_start", {});
+	assert.equal(pin().selection, "A");
+	await host.shortcut("f5"); await settle();
+	const terminate = t.mock.method(worker, "terminate", async () => { throw new Error("old player stop unconfirmed"); });
+	await host.command("device B");
+	assert.equal(pin().selection, "A");
+	assert.match(host.notices.at(-1)!.message, /Stop unconfirmed/);
+	await fs.stat(path.join(root, "coordinator", "speech.lock", "lease.json"));
+	terminate.mock.restore();
+	await host.command("device B");
+	assert.equal(pin().selection, "B", "retry stops the original sink before committing");
+	await host.shortcut("f4"); await settle();
+	assert.equal(record.mock.callCount(), 1);
+	editor = "Manual edit during recording";
+	await host.command("device A");
+	assert.equal(editor, "Manual edit during recording");
+	assert.equal(host.modelRequests.length, 0, "manual edits bypass resolution");
+	assert.equal(pin().selection, "A");
+	assert.equal(lookup.mock.callCount(), calls, "ordinary controls never inspect ambiguous attachments after manual selection");
+	assert.equal(await fs.readFile(process.env.PI_VOICE_CONFIG, "utf8"), config);
+	await host.command("reconnect");
+	assert.equal(lookup.mock.callCount(), calls + 1);
+	assert.equal(pin().selection, "A", "failed auto lookup leaves the old manual pin");
+});
+
+test("registered cycle is stable, wraps, skips missing/invalid entries and rejects ambiguous names without probes", async t => {
+	const directory = await fs.mkdtemp(path.join(os.tmpdir(), "voice-cycle-"));
+	t.after(() => fs.rm(directory, { recursive: true, force: true }));
+	const router = new DeviceRouter(directory, "", {});
+	assert.throws(() => router.select("next", "local"), /No registered/);
+	const endpoint = `unix://${directory}/available`;
+	await fs.writeFile(path.join(directory, "available"), "");
+	const register = async (id: string, name: string, audioEndpoint = endpoint) => fs.writeFile(path.join(directory, `${id}.json`), JSON.stringify({
+		version: 1, id, name, platform: "linux", audioEndpoint, inputEndpoint: audioEndpoint, connectedAt: 1, lastActive: id === "B" ? 999 : 1,
+	}));
+	await register("B", "Same name");
+	assert.equal(router.select("next", "B"), "B");
+	assert.equal(router.select("prev", "absent"), "B");
+	await register("A", "Same name");
+	await register("invalid", "Bad endpoint", "tcp://secret@example.com:9999");
+	await register("gone", "Expired forward", "unix:///nonexistent/voice-forward");
+	assert.deepEqual(router.connected().map(d => d.id), ["A", "B"]);
+	assert.equal(router.select("next", "B"), "A");
+	assert.equal(router.select("prev", "A"), "B");
+	assert.equal(router.select("next", "missing"), "A");
+	assert.equal(router.select("prev", "local"), "B");
+	assert.throws(() => router.select('"Same name"', "A"), /Ambiguous.*A, B/);
+	assert.equal(router.select("B", "A"), "B");
+	await register("A", 'Linux  Mint "PC"');
+	assert.equal(router.select('"Linux  Mint \\"PC\\""', "B"), "A");
+	assert.equal(router.select("'Linux  Mint \"PC\"'", "B"), "A");
+	assert.throws(() => router.select('"Linux', "A"), /Unclosed/);
+});

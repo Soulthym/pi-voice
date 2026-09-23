@@ -2096,8 +2096,8 @@ export default async function (pi: ExtensionAPI) {
 	let deviceRebind: Promise<void> | undefined;
 	const unconfirmedDeviceStops = new WeakSet<Promise<void>>();
 	// Persist only session metadata. Reattachment alone never changes an existing pin.
-	const adoptCurrentConnection = (epoch: number, force = false, origin?: ConnectionDevice, current = () => true): Promise<boolean> => {
-		if (!force && !origin && (deviceSelection === "local" || config.output !== "auto")) {
+	const adoptCurrentConnection = (epoch: number, force = false, origin?: ConnectionDevice, current = () => true, manual?: VoiceDeviceSelection): Promise<boolean> => {
+		if (!force && (deviceSelection !== "auto" || (!origin && config.output !== "auto"))) {
 			deviceRetryRequired = false;
 			return Promise.resolve(true);
 		}
@@ -2130,15 +2130,16 @@ export default async function (pi: ExtensionAPI) {
 					outputRoute = deviceRouter.routeMetadata(selection, "output", config.output);
 					changed ||= outputRoute.endpoint !== outputEndpoint ||
 						(outputRoute.kind === "device" ? outputRoute.device.connectedAt : undefined) !== outputGeneration;
-				} catch (error) { if (!identityChanged) throw error; }
+				} catch (error) { if (!identityChanged || (manual !== undefined && manual !== "auto")) throw error; }
 				try {
 					inputRoute = deviceRouter.routeMetadata(selection, "input", config.input);
 					changed ||= inputInProgress && (inputRoute.endpoint !== inputEndpoint ||
 						(inputRoute.kind === "device" ? inputRoute.device.connectedAt : undefined) !== inputGeneration);
-				} catch (error) { if (!identityChanged && inputInProgress) throw error; }
-				if (previous || transportStopPending || inputStopPending || (force && deviceRetryRequired) || (changed && (ownsSpeech || inputInProgress))) {
+				} catch (error) { if ((!identityChanged && inputInProgress) || (manual !== undefined && manual !== "auto")) throw error; }
+				if (manual !== undefined || previous || transportStopPending || inputStopPending || (force && deviceRetryRequired) || (changed && (ownsSpeech || inputInProgress))) {
 					// Termination, not a TCP accept or a cancellation timeout, proves the old sink is gone.
 					stopUnconfirmed = true;
+					if (manual !== undefined && inputInProgress) await finishInputForPlayback();
 					await Promise.all([trackStop("output", vocalizer.shutdown()), cancelActiveInput()]);
 					stopUnconfirmed = false;
 					for (const resolve of transportCancelWaiters.values()) resolve();
@@ -2153,7 +2154,8 @@ export default async function (pi: ExtensionAPI) {
 				}
 				if (!force && selection !== "local") await deviceRouter.route(selection, "output", config.output);
 				if (!current() || epoch !== playbackRequestEpoch || ctx !== activeContext) return false;
-				if (force || origin) deviceSelection = "auto";
+				if (manual !== undefined) deviceSelection = manual;
+				else if (force || origin) deviceSelection = "auto";
 				activeDeviceId = selection;
 				deviceRouter.setEnvironmentDevice(connection.kind === "device" ? connection.id : undefined);
 				pi.appendEntry(DEVICE_SELECTION_ENTRY, { version: 1, selection: deviceSelection, pin: selection });
@@ -3874,7 +3876,8 @@ export default async function (pi: ExtensionAPI) {
 			if (inputStopPending) await inputStopBarrier;
 			if (deviceRebind) await deviceRebind;
 			if (!current()) return;
-			const connection = await deviceRouter.resolveCurrentConnection();
+			const connection: ConnectionDevice = deviceSelection === "auto" ? await deviceRouter.resolveCurrentConnection()
+				: deviceSelection === "local" ? { kind: "intentional_local" } : { kind: "device", id: deviceSelection };
 			if (!current()) return;
 			const cancelId = clearPlaybackTransport();
 			epoch = playbackRequestEpoch;
@@ -4251,6 +4254,8 @@ export default async function (pi: ExtensionAPI) {
 				return [
 					{ value: "device auto", label: "auto", description: "Pin the current connection; never fall back to another device" },
 					{ value: "device local", label: "local", description: "Use devices on the machine running Pi" },
+					{ value: "device next", label: "next", description: "Select the next registered device (stable ID order)" },
+					{ value: "device prev", label: "prev", description: "Select the previous registered device" },
 					...deviceRouter.connected().map(device => ({
 						value: `device ${device.id}`,
 						label: device.name,
@@ -4403,6 +4408,10 @@ export default async function (pi: ExtensionAPI) {
 				};
 				if (normalizedAction === "device" || normalizedAction === "output" || normalizedAction === "input") {
 					// Metadata only: no attachment lookup, claim, transport, or selection mutation.
+					if (normalizedAction === "device") {
+						const devices = deviceRouter.connected();
+						notifyVoice(ctx, `Available devices (metadata only): ${devices.length ? devices.map(device => `${device.name} (${device.id})`).join("; ") : "none"}`, "info");
+					}
 					const selection = activeDeviceId ?? deviceSelection;
 					if (normalizedAction !== "device" && config[normalizedAction] !== "auto") {
 						notifyVoice(ctx, `${normalizedAction}: ${config[normalizedAction]} (explicit)`, "info");
@@ -4428,7 +4437,7 @@ export default async function (pi: ExtensionAPI) {
 					return;
 				}
 			}
-			if (!["", "status", "timing", "help", "bottom", "tts-workers", "tts-worker"].includes(normalizedAction)) {
+			if (!["", "status", "timing", "help", "bottom", "tts-workers", "tts-worker", "device"].includes(normalizedAction)) {
 				restoreBottomAfterSpeech = false;
 				bottomPinned = false;
 			}
@@ -4535,22 +4544,32 @@ export default async function (pi: ExtensionAPI) {
 					return;
 				}
 				case "device": {
-					const requested = value.trim();
-					if (
-						requested !== "auto" &&
-						requested !== "local" &&
-						!deviceRouter.connected().some(device => device.id === requested)
-					) {
-						notifyVoice(ctx, "Usage: /voice device auto|local|<connected-device-id>", "error");
-						return;
-					}
-					if (!await prepareDeviceSetting(ctx, true)) return;
-					deviceSelection = requested;
-					pi.appendEntry(DEVICE_SELECTION_ENTRY, { version: 1, selection: requested });
-					activeDeviceId = undefined;
-					if (requested === "auto" && !await adoptCurrentConnection(playbackRequestEpoch, true)) return;
-					if (requested !== "auto") notifyConnectedDevice(ctx);
+					let requested: VoiceDeviceSelection;
+					try { requested = deviceRouter.select(args.slice(action.length), activeDeviceId ?? deviceSelection); }
+					catch (error) { notifyVoice(ctx, String(error), "error"); return; }
+					const sessionId = ctx.sessionManager.getSessionId();
+					const sessionEpoch = contextEpoch;
+					const current = () => sessionEpoch === contextEpoch && sessionId === activeContext?.sessionManager.getSessionId();
+					const epoch = ++playbackRequestEpoch;
+					pendingReplay = undefined;
+					coordinator?.cancelSpeechAcquisition();
+					const paused = !!playbackHistory.selected();
+					playbackPaused = paused;
+					narration.setPaused(paused);
+					vocalizer.setPlaybackPaused(true);
+					const origin: ConnectionDevice | undefined = requested === "auto" ? undefined
+						: requested === "local" ? { kind: "intentional_local" } : { kind: "device", id: requested };
+					if (!await adoptCurrentConnection(epoch, true, origin, current, requested)) return;
+					playbackUtterances.clear();
+					queueIncomingWhilePaused = paused;
+					attentionSuppressed = true;
+					coordinator?.setAttentionEnabled(false);
+					playbackPaused = paused;
+					narration.setPaused(paused);
+					vocalizer.setPlaybackPaused(paused);
+					state = "idle";
 					refreshStatus();
+					refreshPlaybackTimeline();
 					return;
 				}
 				case "audio-cache": {
