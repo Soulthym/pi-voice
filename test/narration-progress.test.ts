@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { NARRATION_ACTIVE_MARKER, NarrationProgress } from "../src/narration-progress.js";
+import { NARRATION_ACTIVE_MARKER, NarrationProgress, type NarrationSegment } from "../src/narration-progress.js";
+import { CodeDescriptionCache } from "../src/code-description-cache.js";
+import { plainCodeNarration } from "../src/code-narration.js";
+import { DEFAULT_VOICE_CONFIG } from "../src/config.js";
+import { Vocalizer } from "../src/vocalizer.js";
 
 const dim = (text: string): string => `<dim>${text}</dim>`;
 const background = (text: string): string => `<bg>${text}</bg>`;
@@ -15,6 +19,83 @@ test("speakable frontier ignores silent tails but retains buffered prose and des
 		progress.setCompletedText(fence + (fence.endsWith("\n") ? "---\n" : ""));
 		assert.equal(progress.sourceEnd, fence.endsWith("\n") ? fence.length : fence.trimEnd().length);
 		assert.ok(progress.cursor < progress.sourceEnd, "unsynthesized descriptions cannot look consumed");
+	}
+});
+
+test("description consumption advances only the separate frontier after the final unit", () => {
+	const progress = new NarrationProgress();
+	const raw = "Earlier prose.\n```ts\nconst value = 1;\n```\n";
+	const start = raw.indexOf("```");
+	const texts = ["Declares a value.", "Initializes it to one."];
+	for (const skipUnits of [0, 1]) for (const idle of [false, true]) {
+		progress.setCompletedText(raw);
+		assert.equal(progress.consumedSourceEnd, 0, "pending description is not consumed");
+		const segments = texts.map((text, index) => ({ id: index + 1, utterance: 1, text,
+			source: { start, end: start }, revealAtEnd: true,
+			codeDescription: { blockSource: { start, end: raw.length }, text: texts.join(" "),
+				offset: index ? texts[0].length + 1 : 0 } }));
+		for (const segment of segments.slice(skipUnits)) progress.registerSegment(segment);
+		assert.ok(progress.consumedSourceEnd < progress.sourceEnd, "pending TTS is not consumed");
+		if (!skipUnits) {
+			progress.setSegmentAudio(1, 0, 1);
+			progress.setPlayback(1, 1);
+			assert.equal(progress.consumedSourceEnd, start, "earlier unit cannot consume the fence");
+		}
+		progress.setSegmentAudio(2, 1 - skipUnits, 1);
+		progress.setPlayback(1, 1.5 - skipUnits);
+		assert.ok(progress.consumedSourceEnd < progress.sourceEnd, "unplayed remainder is not consumed");
+		const timings = progress.sourceWordTimings(2);
+		const rendered = progress.transform(raw.trim(), "assistant", dim, background);
+		progress.setPaused(true);
+		progress.setPlayback(1, 2 - skipUnits);
+		assert.ok(progress.consumedSourceEnd < progress.sourceEnd, "paused clock cannot consume the fence");
+		assert.equal(progress.transform(raw.trim(), "assistant", dim, background), rendered);
+		progress.setPlayback(1, 1.5 - skipUnits);
+		progress.setPaused(false);
+		if (idle) progress.finishUtterance(1);
+		else progress.setPlayback(1, 2 - skipUnits);
+		assert.equal(progress.consumedSourceEnd, raw.length);
+		assert.ok(progress.consumedSourceEnd >= progress.sourceEnd);
+		assert.equal(progress.cursor, start, "consumption never stretches source highlights");
+		assert.deepEqual(progress.sourceWordTimings(2), timings, "description word offsets stay unchanged");
+		assert.deepEqual(segments[1].source, { start, end: start });
+	}
+});
+
+test("cached and persisted descriptions preserve final-unit consumption through skipUnits", async () => {
+	const key = "a".repeat(64);
+	const plan = plainCodeNarration("Declares a value. Initializes it to one.");
+	const cache = new CodeDescriptionCache();
+	await cache.getOrCreate(key, async () => plan);
+	const restored = new CodeDescriptionCache();
+	restored.restore(JSON.parse(JSON.stringify([{ version: 1, key, plan }])));
+	for (const descriptions of [cache, restored]) for (const skipUnits of [0, 1]) {
+		const progress = new NarrationProgress();
+		const raw = "Earlier prose.\n```ts\nconst value = 1;\n```\n";
+		const start = raw.indexOf("```");
+		progress.setCompletedText(raw);
+		const segments: NarrationSegment[] = [];
+		const worker = {
+			sendSegment() {}, endUtterance() {}, cancel() {},
+			async measureSegment() { return 1; }, async transcribe() { return []; },
+			async transcribePcm() { return ""; }, async preload() {}, async preloadAlignment() {}, async terminate() {},
+		};
+		const vocalizer = new Vocalizer(() => ({ ...DEFAULT_VOICE_CONFIG, enabled: true }), () => {},
+			async () => descriptions.get(key)!, segment => { segments.push(segment); progress.registerSegment(segment); }, worker);
+		vocalizer.speakFrom(raw.slice(start), start, skipUnits);
+		await new Promise(resolve => setImmediate(resolve));
+		assert.equal(segments.length, 2 - skipUnits);
+		for (const [index, segment] of segments.entries()) {
+			assert.deepEqual(segment.source, { start, end: start });
+			assert.equal(segment.codeDescription?.blockSource.end, raw.length);
+			progress.setSegmentAudio(segment.id, index, 1);
+			progress.setPlayback(segment.utterance, index + 0.5);
+			assert.ok(progress.consumedSourceEnd < progress.sourceEnd);
+			progress.setPlayback(segment.utterance, index + 1);
+			assert.equal(progress.consumedSourceEnd >= progress.sourceEnd, index === segments.length - 1);
+		}
+		assert.equal(progress.cursor, start);
+		vocalizer.clear();
 	}
 });
 

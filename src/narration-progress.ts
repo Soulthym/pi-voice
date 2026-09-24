@@ -610,6 +610,7 @@ export class NarrationProgress {
 	#raw = "";
 	#sourceEnd: number | undefined;
 	#cursor = 0;
+	#consumedSourceEnd = 0;
 	#active = false;
 	#paused = false;
 	#activeSource: NarrationSourceRange | undefined;
@@ -631,6 +632,7 @@ export class NarrationProgress {
 		this.#raw = "";
 		this.#sourceEnd = undefined;
 		this.#cursor = 0;
+		this.#consumedSourceEnd = 0;
 		this.#active = true;
 		this.#paused = false;
 		this.#activeSource = undefined;
@@ -797,6 +799,7 @@ export class NarrationProgress {
 		const completed = [...this.#segments.values()].filter(segment => segment.utterance === utterance);
 		if (completed.length === 0) return;
 		for (const segment of completed) {
+			this.#consumeSegment(segment);
 			this.#cursor = Math.max(this.#cursor, segment.source.end);
 			if (segment.code) {
 				const block = this.#codeBlocks.get(this.#codeKey(segment.code.blockSource));
@@ -938,6 +941,21 @@ export class NarrationProgress {
 
 	get cursor(): number {
 		return this.#cursor;
+	}
+
+	/** Playback frontier, separate from source/word ranges used for highlighting. */
+	get consumedSourceEnd(): number {
+		return Math.max(this.#cursor, this.#consumedSourceEnd);
+	}
+
+	#consumeSegment(segment: NarrationSegment): void {
+		if (this.#paused) return;
+		const description = segment.codeDescription;
+		// Only the final spoken unit consumes the fence, also when replay skips
+		// earlier units: text and offset still describe the complete cached plan.
+		const end = description && description.offset + segment.text.length >= description.text.length
+			? description.blockSource.end : segment.source.end;
+		this.#consumedSourceEnd = Math.max(this.#consumedSourceEnd, end);
 	}
 
 	/** Last speakable source, including buffered prose and code awaiting description. */
@@ -1162,6 +1180,7 @@ export class NarrationProgress {
 		const playback = this.#playback.get(utterance);
 		if (playback === undefined) return;
 		let cursor = this.#cursor;
+		const consumedSourceEnd = this.#consumedSourceEnd;
 		let activeSource: NarrationSourceRange | undefined;
 		let activeWord: NarrationSourceRange | undefined;
 		let codeChanged = false;
@@ -1172,6 +1191,7 @@ export class NarrationProgress {
 			const relative = playback - (segment.audioStart as number);
 			if (relative < 0) break;
 			if (relative >= (segment.duration as number)) {
+				this.#consumeSegment(segment);
 				cursor = Math.max(cursor, segment.source.end);
 				codeChanged = this.#applyCodeCues(segment, Number.POSITIVE_INFINITY) || codeChanged;
 				continue;
@@ -1197,7 +1217,7 @@ export class NarrationProgress {
 		const activeWordChanged =
 			activeWord?.start !== this.#activeWord?.start || activeWord?.end !== this.#activeWord?.end;
 		const descriptionChanged = this.#recomputeCodeDescriptions(segments, playback);
-		if (cursor === this.#cursor && !activeChanged && !activeWordChanged && !codeChanged && !descriptionChanged) return;
+		if (cursor === this.#cursor && consumedSourceEnd === this.#consumedSourceEnd && !activeChanged && !activeWordChanged && !codeChanged && !descriptionChanged) return;
 		this.#cursor = cursor;
 		this.#activeSource = activeSource;
 		this.#activeWord = activeWord;

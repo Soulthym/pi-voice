@@ -608,7 +608,7 @@ export default async function (pi: ExtensionAPI) {
 				const live = activePlayback && !playbackPaused && !pendingReplay?.paused &&
 					(!latest || playback.messageId === latest || !playback.messageId) &&
 					!pendingReplay && playbackPhase === "idle" && (waitingAtTail || ((playbackTailIntent || (liveTurnNarrationActive && !ownerTurnEnded)) &&
-						Math.max(narration.cursor, playbackTailIntent ? playbackTailSourceEnd : 0) >= narration.sourceEnd)) && playback.position >= playback.duration;
+						Math.max(narration.consumedSourceEnd, playbackTailIntent ? playbackTailSourceEnd : 0) >= narration.sourceEnd)) && playback.position >= playback.duration;
 				const known = playback.hasTimings && playback.duration > 0;
 				const time = live ? ctx.ui.theme.fg("error", "● live")
 					: known ? `${formatPlaybackTime(playback.position)} / ${formatPlaybackTime(playback.duration)}` : "--:-- / --:--";
