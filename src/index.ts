@@ -2466,7 +2466,7 @@ export default async function (pi: ExtensionAPI) {
 			restoreTail,
 			paused: explicitPlay ? false : pendingReplay?.paused ?? playbackPaused,
 			waiting: true,
-			phase: (prepareContext ? "describing" : "connecting") as PlaybackPhase,
+			phase: (prepareContext ? "queued" : "connecting") as PlaybackPhase,
 			continueLiveTurn,
 			source: replaySource,
 			blockIds: replayBlockIds,
