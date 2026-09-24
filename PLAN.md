@@ -321,6 +321,12 @@ Read `docs/installation.md` and `docs/endpoint-protocol.md` for migration/recove
 - Fixed formatted/marker-adjacent sentence endings in the shared synthesis/navigation splitter, preserving ordered prefixes, abbreviations, numeric decimals/versions, inline code and UTF-16 offsets. Plain reported text already split correctly. Boundary identity bumped only for affected narration timing compatibility; description/audio-content assets unchanged.
 - Offline validation: typecheck, 506 passing tests (one native-banner compatibility skip), installed native TUI 10/10. See latest `FINDINGS.md` evidence and `docs/testing.md`. No live restart or provider/hardware validation performed.
 
+## Recovery-start timing preservation (task 4)
+
+- Background recovery now hydrates only missing compatible timing units from persisted snapshots; newer live checkpoints, unit timing and word coverage survive startup, not just completion.
+- Offline regression: an unimproved retry saves an estimated partial, original CTC improves live, then a new recovery pass preserves that improvement and reloads with **2/4 estimated**, not 4/4. Missing-unit hydration and changed-identity rejection are covered separately.
+- Validation: typecheck and 37 focused tests passed; the new integration regression fails with the old recovery-start restore. No live/model/provider validation or runtime-setting changes.
+
 ## Evidence and outstanding verification
 
 - Initial production-pool concurrency benchmark selected **3**, not the earlier standalone experiment's 4: ~1.76× sequential synthesis throughput at ~1.75× ordered latency; 4 exceeded 2×. This is not a live phone throughput claim.

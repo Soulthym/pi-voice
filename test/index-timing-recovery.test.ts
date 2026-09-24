@@ -125,7 +125,9 @@ test("same-transport resume cancels paused background timing before unpausing", 
 	assert.equal(host.entries.some(entry => entry.data?.version === 3), false, "cancelled recovery cannot persist a late result");
 });
 
-for (const sameMissingUnit of [false, true]) test(`background completion merges a concurrent paused retry and persists all unit coverage (same missing unit: ${sameMissingUnit})`, async t => {
+for (const scenario of ["other unit", "same unit", "late CTC before restart"]) test(`background recovery preserves retry/live coverage (${scenario})`, async t => {
+	const sameMissingUnit = scenario === "same unit";
+	const restart = scenario === "late CTC before restart";
 	mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: MeasuringWorker } });
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-recovery-retry-"));
 	const keys = ["PI_VOICE_CONFIG", "PI_VOICE_COORDINATOR_DIR", "PI_VOICE_DEVICE_DIR"];
@@ -136,6 +138,10 @@ for (const sameMissingUnit of [false, true]) test(`background completion merges 
 	const host = new FakeVoiceHost(root, "recovery-retry");
 	let finish: ((duration: number) => void) | undefined;
 	const measurements: string[] = [];
+	if (restart) mock.method(MeasuringWorker.prototype, "retryTiming", () => Promise.resolve({ status: "timing", duration: 2, quality: "estimated", words: [
+		{ text: "Alpha", start: 0, end: 0.5, quality: "estimated" },
+		{ text: "beta", start: 1, end: 1.5, quality: "estimated" },
+	] }));
 	mock.method(MeasuringWorker.prototype, "measureSegment", (text: string) => {
 		measurements.push(text);
 		if (sameMissingUnit && text === "Gamma delta.") return Promise.resolve(2);
@@ -167,8 +173,23 @@ for (const sameMissingUnit of [false, true]) test(`background completion merges 
 	const snapshots = () => host.entries.filter(entry => entry.customType === "pi-voice.playback-timing");
 	await host.command("timing retry current");
 	for (let i = 0; i < 100 && !snapshots().length; i++) await new Promise(resolve => setTimeout(resolve, 10));
-	assert.equal(snapshots().at(-1)?.data.units[0].checkpoints[0].quality, "ctc-refined");
+	assert.equal(snapshots().at(-1)?.data.units[0].checkpoints[0].quality, restart ? "estimated" : "ctc-refined");
 	assert.equal(snapshots().at(-1)?.data.complete, false);
+	if (restart) {
+		worker.emit({ type: "alignment", segmentId: first.segmentId, quality: "ctc-refined", words: [
+			{ text: "Alpha", start: 0, end: 0.5, quality: "ctc-refined" },
+			{ text: "beta", start: 1, end: 1.5, quality: "ctc-refined" },
+		] });
+		// Fail this pass so the next pass starts with a stale estimated partial on disk.
+		finish!(0);
+		await new Promise(resolve => setTimeout(resolve, 30));
+		finish = undefined;
+		worker.emit({ type: "idle", utterance: first.utterance });
+		for (let i = 0; i < 100 && !finish; i++) await new Promise(resolve => setTimeout(resolve, 10));
+		assert.ok(finish, "a new recovery pass starts");
+		assert.equal(snapshots().at(-1)?.data.units[0].checkpoints[0].quality, "estimated", "persisted partial is still stale at recovery start");
+		assert.deepEqual(measurements, ["Gamma delta.", "Gamma delta."]);
+	}
 	finish!(2);
 	for (let i = 0; i < 100 && snapshots().at(-1)?.data.complete === false; i++) await new Promise(resolve => setTimeout(resolve, 10));
 	const saved = snapshots().at(-1)!.data;

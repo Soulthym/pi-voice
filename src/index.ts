@@ -3212,7 +3212,7 @@ export default async function (pi: ExtensionAPI) {
 						playbackHistory.syncMessage({ ...message, renderKey: measuredRenderKey });
 						if (!playbackHistory.hasCompleteTimingFor(message.id)) {
 							const saved = persistedTimingSnapshots.get(message.id)?.get(measuredRenderKey);
-							if (saved) playbackHistory.restore([saved]);
+							if (saved) playbackHistory.restore([saved], true);
 						}
 						if (playbackHistory.hasCompleteTimingFor(message.id)) {
 							processedMessages += 1;

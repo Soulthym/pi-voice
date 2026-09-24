@@ -157,7 +157,7 @@ export class PlaybackHistory {
 		if (saved && hydrateSnapshot && !record.checkpoints.length && !record.units?.size) this.restore([saved]);
 	}
 
-	restore(snapshots: readonly PlaybackTimingSnapshot[]): void {
+	restore(snapshots: readonly PlaybackTimingSnapshot[], missingOnly = false): void {
 		for (const snapshot of snapshots) {
 			if (snapshot.version !== 3 || !Number.isFinite(snapshot.duration) || snapshot.duration < 0) continue;
 			if (!snapshot.renderKey || !Array.isArray(snapshot.checkpoints) || snapshot.checkpoints.length > 100_000) continue;
@@ -186,21 +186,27 @@ export class PlaybackHistory {
 					checkpoint.sourceOffset < record.text.length,
 			);
 			if (checkpoints.length === 0 && !(snapshot.complete === false && snapshot.units?.length)) continue;
-			record.checkpoints = checkpoints.map(checkpoint => ({ ...checkpoint })).sort((left, right) => left.time - right.time);
-			record.duration = snapshot.duration;
-			record.timingsComplete = snapshot.complete !== false;
+			// Recovery may start after live CTC has improved an older persisted partial.
+			// Keep its absolute clock; missing relative units are joined at completion.
+			const restoreClock = !missingOnly || (!record.checkpoints.length && !record.units?.size);
 			for (const saved of snapshot.units ?? []) {
 				if (!Number.isInteger(saved.unit?.sourceOffset) || saved.unit.sourceOffset < 0 || saved.unit.sourceOffset >= record.text.length ||
 					!Number.isInteger(saved.unit.skipUnits) || saved.unit.skipUnits < 0 || !Array.isArray(saved.checkpoints) ||
 					!saved.checkpoints.length || saved.checkpoints.length > 100_000 || saved.checkpoints.some(point =>
 						!point || !Number.isFinite(point.time) || point.time < 0 || !Number.isFinite(point.duration) || point.duration < 0 ||
 						!Number.isInteger(point.sourceOffset) || point.sourceOffset < 0 || point.sourceOffset >= record.text.length)) continue;
+				if (missingOnly && this.timingForUnit(record.id, snapshot.renderKey, saved.unit)) continue;
 				this.retainTimingUnit(record.id, snapshot.renderKey, saved.unit, saved.checkpoints);
 				const counts = saved.coverage;
 				if (counts && Number.isSafeInteger(counts.total) && Number.isSafeInteger(counts.estimated) && counts.estimated >= 0 && counts.total >= counts.estimated) {
 					record.wordTimingCoverage ??= new Map();
 					record.wordTimingCoverage.set(`${saved.unit.sourceOffset}:${saved.unit.skipUnits}`, { ...counts });
 				}
+			}
+			if (restoreClock) {
+				record.checkpoints = checkpoints.map(checkpoint => ({ ...checkpoint })).sort((left, right) => left.time - right.time);
+				record.duration = snapshot.duration;
+				record.timingsComplete = snapshot.complete !== false;
 			}
 		}
 	}
