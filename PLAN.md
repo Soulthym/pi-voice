@@ -6,7 +6,8 @@
 - Point 1 approved: use Queued for active narration awaiting complete source/context or ownership/resources; retain genuine Idle, explicit Paused precedence, and unpaused chronological Playing/live. Display changes must not force incomplete synthesis or acquire ownership early. Implementation pending.
 - Requested addition: a silent command to retry estimated word alignment, using cached audio where available. Preserve playing/paused state, selection, cursor, viewport and drafts; do not start audible playback. Command spelling and scope remain to be settled. This is a requirement, not an available command.
 - Current workaround: optionally `/voice setup`, then select a message and replay with F5 to attempt alignment again; `/voice timing` reports results. Refinement is not guaranteed. Background timing recovery produces estimates, not forced alignment.
-- Next decision: point 2, truthful progress for unknown or incomplete totals. The remaining audit findings are still proposals.
+- Point 2 approved: unknown totals use a neutral bar without a false zero-position marker; streaming/incomplete totals show reliable elapsed time only, not a completion fraction. Complete totals show normal progress and elapsed/total. Unpaused caught-up live shows red `● live` instead of time. Never substitute the previous message's clock for unavailable current timing. Implementation pending.
+- Next decision: point 3, consistent source identity for status, time and message index. The remaining audit findings are still proposals.
 
 ## Previous handoff — completed chronological live follow
 
