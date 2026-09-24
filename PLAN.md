@@ -15,7 +15,8 @@
 - Point 6 approved: preserve lease-free live-follow intent between responses and through normal prompt submission; unread output blocked on ownership is Queued, not live. Preserve intent across temporary-to-persisted source identity changes. Pause, Stop and backward navigation exit live display appropriately; viewport scrolling alone does not change chronological intent. Implementation pending.
 - Additional user observation for the deferred dimming investigation: loss of dimming appears limited to the first displayed line of each sentence; in a multi-line comment, lines after the first still dim/highlight correctly. Treat this as a reproduction clue, not a confirmed cause; compare first versus continuation lines during streaming and final rendering.
 - Terminal queue-failure cleanup approved: recognize terminal failure of any utterance in the current playback queue, cancel that queue and update the UI promptly. Release ownership only after confirmed stop. Ignore ordinary retired-playback errors without discarding unresolved stop evidence. Implementation pending.
-- Next decision: cancellation of paused sources (the remaining safety finding). All implementation remains deferred until the point-by-point discussion is complete.
+- Paused-source cancellation approved: process abort/error cancellation before paused-source queueing returns; F8 must not revive cancelled playback. Preserve unrelated paused historical playback and position, retain ownership until affected transport stop is confirmed, and do not delete the saved transcript. Implementation pending.
+- Next decision: persistent microphone-stop warnings, another audit finding. Internal handoff pause presentation and timing-retry command details also remain to be settled. All implementation remains deferred until the point-by-point discussion is complete.
 
 ## Previous handoff — completed chronological live follow
 
