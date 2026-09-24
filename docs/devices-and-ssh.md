@@ -17,7 +17,7 @@ There is **no fallback** to another client or host I/O when the pin is missing o
 ### Explicit selection in a shared terminal
 
 ```text
-/voice devices                 # native picker (also Alt+D / supported badge click)
+/voice devices                 # native picker (also Alt+S / supported badge click)
 /voice device                  # read-only current selection and registered candidates
 /voice device <exact-id>
 /voice device "Linux Mint PC"  # unique exact name; spaces inside quotes preserved
@@ -39,7 +39,7 @@ Any attached client able to issue commands in this shared terminal may select a 
 
 The selected device name appears once in brackets at the end of the first existing progress row (input, then playback, descriptions, timing). If there is no progress row, the existing Voice footer carries it; no extra work row is invented. Names are width-bounded; missing metadata uses a short ID, local is `[local]`, and no adopted identity is `[no device]`. This is selection feedback, not physical readiness, and endpoint URLs/credentials are never used as badges.
 
-The same badge opens the [native device picker](usage.md#device-picker) in supported fullscreen Pi; Alt+D or `/voice devices` also works without mouse support. Opening/cancelling is read-only. Candidates are snapshots, revalidated by stable ID, registration generation and endpoints when chosen and before committing after stop. No disconnected pin or synthesized legacy entry is advertised as available; explicit Local is host audio, not a fallback. New controls/session replacement invalidate pending choices.
+The same badge opens the [native device picker](usage.md#device-picker) in supported fullscreen Pi; Alt+S or `/voice devices` also works without mouse support. Opening/cancelling is read-only. Candidates are snapshots, revalidated by stable ID, registration generation and endpoints when chosen and before committing after stop. No disconnected pin or synthesized legacy entry is advertised as available; explicit Local is host audio, not a fallback. New controls/session replacement invalidate pending choices.
 
 ## Managed SSH topology
 

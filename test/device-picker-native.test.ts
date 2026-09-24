@@ -81,6 +81,29 @@ test("keyboard-only native overlay fallback", async t => {
 	assert.equal(await cancelled, undefined);
 });
 
+test("native current selection is visible offscreen, Enter and arrows start there", async t => {
+	const h = mounted(t, 40);
+	h.mount(new native.Text("status", 0, 0));
+	const choices = Array.from({ length: 50 }, (_, i) => ({ id: `id-${i}`, name: "current duplicate" }));
+	const items = devicePickerLabels(choices, "id-49");
+	for (const [keys, expected] of [["\r", 49], ["\x1b[A\r", 48]] as const) {
+		const result = selectDeviceOverlay(h.ctx, items, new AbortController().signal, h.tui, 49);
+		h.locate("50.");
+		for (const key of keys === "\r" ? [keys] : ["\x1b[A", "\r"]) h.input(key);
+		assert.equal(await result, items[expected]);
+	}
+});
+
+test("non-TUI select puts current first without changing unique option values", async () => {
+	const items = ["1. Local", "2. duplicate", "3. duplicate"];
+	const ctx = { mode: "rpc", ui: { select: async (_title: string, options: string[]) => {
+		assert.deepEqual(options, [items[2], items[0], items[1]]);
+		return options[0];
+	} } } as any;
+	assert.equal(await selectDeviceOverlay(ctx, items, new AbortController().signal, undefined, 2), items[2]);
+	assert.deepEqual(items, ["1. Local", "2. duplicate", "3. duplicate"]);
+});
+
 for (const width of [40, 90]) {
 	test(`mounted native progress badge and SelectList mouse/keyboard at ${width} columns`, nativeOptions, async t => {
 		const h = mounted(t, width);

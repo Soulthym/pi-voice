@@ -3,9 +3,14 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { deviceBadge, deviceProgressLines } from "./status-text.js";
 
 /** A capturing overlay leaves Pi's active ExtensionSelector and its promise intact. */
-export async function selectDeviceOverlay(ctx: ExtensionContext, labels: string[], signal: AbortSignal, screen?: tui.TUI): Promise<string | undefined> {
+export async function selectDeviceOverlay(ctx: ExtensionContext, labels: string[], signal: AbortSignal, screen?: tui.TUI, initialIndex = 0): Promise<string | undefined> {
 	if (signal.aborted) return;
-	if (ctx.mode !== "tui") return ctx.ui.select("Voice device · registered candidates, not audio readiness", labels, { signal });
+	if (ctx.mode !== "tui") {
+		// ui.select has no initial-index option; reorder display only, retaining unique values.
+		const options = [...labels];
+		if (initialIndex > 0 && initialIndex < options.length) options.unshift(...options.splice(initialIndex, 1));
+		return ctx.ui.select("Voice device · registered candidates, not audio readiness", options, { signal });
+	}
 	// Pi custom overlays close the topmost entry, so never stack above somebody else's overlay.
 	if (!screen || screen.hasOverlay()) return;
 	const theme = ctx.ui.theme;
@@ -27,6 +32,7 @@ export async function selectDeviceOverlay(ctx: ExtensionContext, labels: string[
 			selectedPrefix: text => theme.fg("accent", text), selectedText: text => theme.fg("accent", text),
 			description: text => theme.fg("muted", text), scrollInfo: text => theme.fg("dim", text), noMatch: text => text,
 		});
+		list.setSelectedIndex(initialIndex);
 		list.onSelect = item => done(screen.terminal.rows === rows ? item.value : undefined);
 		list.onCancel = () => done(undefined);
 		const cancel = () => done(undefined);

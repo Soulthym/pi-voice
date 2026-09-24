@@ -10,7 +10,10 @@ mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: Mock
 const pickerUI = await import("../src/device-picker-ui.js");
 // This suite checks routing transactions; mounted native overlay/lifecycle coverage lives separately.
 mock.module("../src/device-picker-ui.js", { namedExports: { ...pickerUI,
-	selectDeviceOverlay: (ctx: any, labels: string[], signal: AbortSignal) => ctx.ui.select("Voice device", labels, { signal }),
+	selectDeviceOverlay: (ctx: any, labels: string[], signal: AbortSignal, _screen: unknown, initialIndex: number) => {
+		assert.match(labels[initialIndex], /current|Local/);
+		return ctx.ui.select("Voice device", labels, { signal });
+	},
 } });
 const settle = async () => { for (let i = 0; i < 30; i++) await new Promise(resolve => setImmediate(resolve)); };
 
@@ -52,7 +55,7 @@ test("picker snapshots unique labels, cancels read-only, revalidates and uses th
 	const before = { pins: pins().length, pauses: worker.pauses.length, sent: worker.sent.length };
 	host.scrollView.setDocument(Array.from({ length: 100 }, (_, i) => `${i}`));
 	host.scrollView.manualScrollTo(20);
-	let opening = host.shortcut("alt+d");
+	let opening = host.shortcut("alt+s");
 	assert.equal(options.length, 3, "only local and valid available registrations");
 	assert.equal(new Set(options).size, 3, "duplicate names and short-ID prefixes remain distinct");
 	assert.match(options[1], /current/);
@@ -63,17 +66,25 @@ test("picker snapshots unique labels, cancels read-only, revalidates and uses th
 	assert.equal(host.scrollView.scrollTop, 20);
 	assert.equal(editor, "Keep my draft");
 	assert.equal(worker.pauses.length, before.pauses);
+	answer = Promise.withResolvers(); opening = host.shortcut("alt+s");
+	const terminateCurrent = t.mock.method(worker, "terminate");
+	answer.resolve(options[1]); await opening;
+	assert.equal(terminateCurrent.mock.callCount(), 0, "confirming current does not stop audio");
+	terminateCurrent.mock.restore();
+	assert.equal(worker.pauses.length, before.pauses, "confirming current does not pause");
+	assert.equal(pins().at(-1).data.selection, ids[0], "confirming auto current makes the pin manual");
+	before.pins = pins().length;
 	answer = Promise.withResolvers(); opening = host.command("devices");
 	await fs.rm(path.join(root, ids[1]));
 	answer.resolve(options[2]); await opening;
 	assert.equal(pins().length, before.pins, "expired endpoint cannot commit");
 	assert.equal(worker.pauses.length, before.pauses, "expiration before choose is read-only");
 	await register(ids[1]);
-	answer = Promise.withResolvers(); opening = host.shortcut("alt+d");
+	answer = Promise.withResolvers(); opening = host.shortcut("alt+s");
 	await host.command("device local");
 	answer.resolve(options[2]); await opening;
 	assert.equal(pins().at(-1).data.pin, "local", "newer explicit control supersedes the picker");
-	answer = Promise.withResolvers(); opening = host.shortcut("alt+d");
+	answer = Promise.withResolvers(); opening = host.shortcut("alt+s");
 	const stop = Promise.withResolvers<void>();
 	const terminate = t.mock.method(worker, "terminate", () => stop.promise);
 	answer.resolve(options[2]); await settle();
@@ -87,7 +98,7 @@ test("picker snapshots unique labels, cancels read-only, revalidates and uses th
 	assert.equal(worker.sent.length, before.sent, "choosing stays silent");
 	assert.match(host.widgetComponents.get("pi-voice-progress")!.render!(80)[0], /Paused/);
 	// A registration can expire while the old player is stopping, not just while choosing.
-	answer = Promise.withResolvers(); opening = host.shortcut("alt+d");
+	answer = Promise.withResolvers(); opening = host.shortcut("alt+s");
 	const delayedStop = Promise.withResolvers<void>();
 	const delayed = t.mock.method(worker, "terminate", () => delayedStop.promise);
 	answer.resolve(options[1]); await settle();
@@ -95,18 +106,24 @@ test("picker snapshots unique labels, cancels read-only, revalidates and uses th
 	delayedStop.resolve(); await opening; delayed.mock.restore();
 	assert.equal(pins().at(-1).data.pin, ids[1], "post-stop revalidation rejects expired endpoints");
 	await register(ids[0]);
-	answer = Promise.withResolvers(); opening = host.shortcut("alt+d");
+	answer = Promise.withResolvers(); opening = host.shortcut("alt+s");
 	const failed = t.mock.method(worker, "terminate", async () => { throw new Error("stop unconfirmed"); });
 	answer.resolve(options[1]); await opening; failed.mock.restore();
 	assert.equal(pins().at(-1).data.pin, ids[1], "failed stop cannot commit picker choice");
 	await host.command(`device ${ids[1]}`);
-	answer = Promise.withResolvers(); opening = host.shortcut("alt+d");
+	answer = Promise.withResolvers(); opening = host.shortcut("alt+s");
 	const sessionId = host.sessionManager.getSessionId;
 	host.sessionManager.getSessionId = () => "replacement";
 	answer.resolve(options[0]); await opening;
 	assert.equal(pins().at(-1).data.pin, ids[1], "dynamic session replacement fences an old choice");
 	host.sessionManager.getSessionId = sessionId;
-	answer = Promise.withResolvers(); opening = host.shortcut("alt+d");
+	await fs.rm(path.join(root, ids[1]));
+	answer = Promise.withResolvers(); opening = host.shortcut("alt+s");
+	assert.ok(options.every(label => !label.includes("current")), "unavailable current is never advertised");
+	assert.match(options[0], /Local/);
+	answer.resolve(undefined); await opening;
+	await register(ids[1]);
+	answer = Promise.withResolvers(); opening = host.shortcut("alt+s");
 	const count = pins().length;
 	await host.shutdown();
 	answer.resolve(options[0]); await opening;

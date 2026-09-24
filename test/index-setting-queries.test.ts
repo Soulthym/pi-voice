@@ -121,9 +121,9 @@ test("setter queries reflect live settings, automatic routing and reload-only sh
 		[{}, "alt+m (also f4)", ["alt+m", "f4"]],
 		[{ talkShortcut: "ctrl+shift+m" }, "ctrl+shift+m (also f4)", ["ctrl+shift+m", "f4"]],
 		[{ talkShortcut: "f11" }, "f11 (also f4)", ["f11", "f4"]],
-		[{ talkShortcut: "alt+d" }, "alt+d (also f4)", ["alt+d", "f4"]],
-		[{ scrollToShortcut: "alt+d" }, "alt+m (also f4)", ["alt+m", "f4"]],
-		[{ scrollBottomShortcut: "alt+d" }, "alt+m (also f4)", ["alt+m", "f4"]],
+		[{ talkShortcut: "alt+s" }, "alt+s (also f4)", ["alt+s", "f4"]],
+		[{ scrollToShortcut: "alt+s" }, "alt+m (also f4)", ["alt+m", "f4"]],
+		[{ scrollBottomShortcut: "alt+s" }, "alt+m (also f4)", ["alt+m", "f4"]],
 		[{ talkShortcut: "f5" }, "f5 (also f4)", ["f5", "f4"]],
 		[{ talkShortcut: "alt+t" }, "f4", ["f4"]],
 		[{ talkShortcut: "f4" }, "f4", ["f4"]],
@@ -138,10 +138,11 @@ test("setter queries reflect live settings, automatic routing and reload-only sh
 			const registrations = mock.method(collisionHost.api, "registerShortcut");
 			try {
 				await collisionHost.start();
-				assert.equal(registrations.mock.calls.filter((call: { arguments: unknown[] }) => call.arguments[0] === "alt+d").length, 1,
+				assert.equal(collisionHost.shortcuts.has("alt+d"), false, "native forward-delete-word is not registered by Voice");
+				assert.equal(registrations.mock.calls.filter((call: { arguments: unknown[] }) => call.arguments[0] === "alt+s").length, 1,
 					"picker never overwrites an existing voice control");
-				assert.equal(collisionHost.notices.some(notice => notice.message.includes("Alt+D device picker not bound")),
-					Object.values(settings).includes("alt+d"));
+				assert.equal(collisionHost.notices.some(notice => notice.message.includes("Alt+S device picker not bound")),
+					Object.values(settings).includes("alt+s"));
 				assert.equal(registrations.mock.calls.filter((call: { arguments: unknown[] }) => call.arguments[0] === "f4").length,
 					settings.talkShortcut === "disabled" ? 0 : settings.scrollToShortcut === "f4" || settings.scrollBottomShortcut === "f4" ? 2 : 1);
 				assert.equal(collisionHost.shortcuts.has("f11"), settings.talkShortcut === "f11");

@@ -9,12 +9,13 @@ test("native Alt+D is forward-delete-word, Alt+Delete remains its alternative", 
 	const defaults = new KeybindingsManager().getEffectiveConfig();
 	assert.deepEqual(defaults["tui.editor.deleteWordForward"], ["alt+d", "alt+delete"]);
 	assert.ok(native.matchesKey("\x1bd", "alt+d"));
+	assert.ok(native.matchesKey("\x1bs", "alt+s"));
 });
 
 test("native F4/F5 decoding and default bindings leave Voice keys available", () => {
 	// No create(): it would read personal keybindings.json.
 	const defaults = new KeybindingsManager().getEffectiveConfig();
-	for (const key of ["f4", "f5"]) {
+	for (const key of ["f4", "f5", "alt+s"]) {
 		assert.ok(!Object.values(defaults).flat().includes(key), `${key} conflicts with a native default`);
 	}
 	for (const [key, sequences] of [

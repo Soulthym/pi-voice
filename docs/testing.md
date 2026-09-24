@@ -1,5 +1,13 @@
 # Tests
 
+## Current checkpoint — Alt+S/current selection after `7a63f7e`
+
+`npm run check` passed. Full checkout: **942 passed, 29 compatibility skips, 0 failures (971 total)**. Full installed-native: **971 passed, no skips/failures**. Logs: `/tmp/pi-voice-alts-full.log`, `/tmp/pi-voice-alts-native.log`. No LSP server configured.
+
+Alt+S replaces the picker shortcut, not native Alt+D deletion; configured Voice collisions retain precedence. Exact current ID initializes native selection, including the visible window for a 50-item list; mounted tests exercise Enter/arrows near the final item, duplicate-name ID mapping and unchanged mouse hitboxes. Non-TUI display ordering preserves values. Routing tests cover unavailable current and same-current confirmation (manual sticky pin without stopping/pausing). Badge hints remain absent. Earlier shortcut/default-selection statements below are historical.
+
+Validation iterations caught the old Local-default assertion. Concurrent full suites collided on their fixed test port, so final suites ran serially. One serial checkout run hit the existing render-cost timing assertion (4 widget builds versus 3); the full rerun passed without changing that test. No live inference/provider/audio/SSH/session/config changes; untracked ISSUES/demo assets preserved. Operator action: host extension `/reload` only; no client update/restart. Physical terminal/mobile behavior remains unvalidated.
+
 ## Native device badge picker
 
 Streaming progress follow-up after `36d9b3b`: `npm run check` passed; full checkout suite **940 passed, 29 compatibility skips**, full installed-native suite **969 passed, no skips**, no failures. `test/index-live-progress.test.ts` mounts the extension widget callback/replacement path with mocked transport: pending/live text growth, warm-state events, block boundaries, ticks, pause, Stop, finish and shutdown. It reproduces premature Idle labeling, **not the reported literal disappearance**; live cause remains unconfirmed. Progress/footer badges no longer display shortcut hints; Alt+D binding/help remain unchanged. Logs: `/tmp/pi-voice-live-progress-tests.log`, `/tmp/pi-voice-live-progress-native.log`.

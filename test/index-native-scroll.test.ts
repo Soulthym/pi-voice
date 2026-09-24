@@ -354,26 +354,26 @@ for (const action of ["auto tail start", "auto tail small", "auto tail resize", 
 		marker = 180; await tick();
 		assert.ok(view.scrollTop > 140, "ordinary badge click does not unfollow narration");
 		// The rendered number maps to the full ID, never the clipped duplicate prefix/name.
-		let choosing = host.shortcut("alt+d");
+		let choosing = host.shortcut("alt+s");
 		tui.doRender();
 		const optionY = tui.previousScreen.findIndex((row: string) => native.stripTerminalSequences(row).includes("3. (same-pref...)"));
 		tui.handleTerminalInput(`\x1b[<0;8;${optionY + 1}M`);
 		tui.handleTerminalInput(`\x1b[<0;8;${optionY + 1}m`);
 		await choosing;
 		assert.equal(host.entries.filter(entry => entry.customType === "pi-voice.device-selection").at(-1)!.data.pin, ids[1]);
-		choosing = host.shortcut("alt+d");
+		choosing = host.shortcut("alt+s");
 		tui.doRender();
 		assert.ok(tui.previousScreen.some((row: string) => native.stripTerminalSequences(row).includes("3. current (same-pref...)")), "selected duplicate's current marker and ID stay visible at 40 columns");
 		tui.handleTerminalInput("\r"); await choosing;
-		assert.equal(host.entries.filter(entry => entry.customType === "pi-voice.device-selection").at(-1)!.data.pin, "local", "default keyboard choice remains local");
+		assert.equal(host.entries.filter(entry => entry.customType === "pi-voice.device-selection").at(-1)!.data.pin, ids[1], "default keyboard choice retains the exact current ID");
 		for (const command of ["stop", "device local"]) {
-			const opening = host.shortcut("alt+d");
+			const opening = host.shortcut("alt+s");
 			assert.equal(tui.hasOverlay(), true);
 			await host.command(command);
 			await opening;
 			assert.equal(tui.hasOverlay(), false, `${command} cancels the mounted picker`);
 		}
-		const opening = host.shortcut("alt+d");
+		const opening = host.shortcut("alt+s");
 		assert.equal(tui.hasOverlay(), true);
 		await host.shutdown();
 		await opening;

@@ -126,7 +126,7 @@ Validate with `sshd -t`, then reload `sshd` after changing its configuration. Th
 
 ### Sticky device selection and selected-device badge
 
-The badge picker is **host-only**: update this extension and run `/reload` when ready. Alt+D and `/voice devices` open Pi's native selector; fullscreen Pi with native `MouseRegion` also accepts clicks/taps on the existing first-line or built-in idle-footer badge. Older/regular TTYs retain keyboard access; custom footers may not be clickable. No wrapper recopy, reconnect, runtime-settings change, or live-session restart is needed for this picker. See [actual Alt+D conflict and usage](usage.md#device-picker).
+The badge picker is **host-only**: update this extension and run `/reload` when ready. Alt+S and `/voice devices` open Pi's native selector; fullscreen Pi with native `MouseRegion` also accepts clicks/taps on the existing first-line or built-in idle-footer badge. Older/regular TTYs retain keyboard access; custom footers may not be clickable. No wrapper recopy, reconnect, runtime-settings change, or live-session restart is needed for this picker. See [Alt+S conflicts and usage](usage.md#device-picker).
 
 Update the host extension and run `/reload` when ready. Existing clients already publishing names/IDs need **no protocol upgrade or reconnect for manual routing**: `/voice device "Linux Mint PC"`, an exact ID, or `next`/`prev` selects a sticky session pin, usable even with multiple attached tmux clients. `/voice device` is read-only; successful `/voice reconnect` returns to auto mode. Selection honors explicit input/output overrides and does not itself play audio. See [handoff and shared-terminal trust](devices-and-ssh.md#explicit-selection-in-a-shared-terminal).
 

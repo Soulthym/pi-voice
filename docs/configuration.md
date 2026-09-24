@@ -45,7 +45,7 @@ For playback concurrency, a valid persisted `ttsWorkers` wins over legacy `PI_VO
 
 The three shortcut settings are registered when the extension loads, so edit their JSON values and run `/reload`. The old `ctrl+e` and `alt+end` bottom defaults are migrated because Pi reserves Ctrl+E for editor line-end and compact Termux keyboards may have no End key. The current defaults avoid Ctrl, Shift, and an End key.
 
-The device picker uses fixed **Alt+D** and `/voice devices`; there is no new JSON setting. Alt+D deliberately overrides Pi's default forward-delete-word (Alt+Delete remains). A loaded voice shortcut already using Alt+D wins instead, with a warning; Pi also diagnoses its own/custom-extension conflicts. See [picker controls](usage.md#device-picker). Open/cancel never saves settings; choosing persists only the session pin and leaves endpoint overrides unchanged.
+The device picker uses fixed **Alt+S** and `/voice devices`; there is no new JSON setting. Alt+S is unused by checked Pi/Voice defaults; Alt+D remains native forward-delete-word. A loaded voice shortcut already using Alt+S wins instead, with a warning; Pi also diagnoses its own/custom-extension conflicts. See [picker controls](usage.md#device-picker). Open/cancel never saves settings; choosing persists only the session pin and leaves endpoint overrides unchanged.
 
 ## Voice catalog
 

@@ -2,6 +2,12 @@
 
 Updated incrementally. Companion: `PLAN.md`. Reorganize freely while preserving evidence and disposition.
 
+## Current checkpoint — Alt+S and current-device selection after `7a63f7e`
+
+- Fixed picker shortcut is now Alt+S; native Alt+D forward-delete-word is untouched. Configured Voice Alt+S controls still win with a warning. No badge hint, new setting or client interception.
+- Exact current ID initializes native selection and its visible window; non-TUI display puts current first. Missing current falls back to the first available choice, not a fabricated candidate. Same healthy picker choice pins automatic selection manually without audio changes; explicit device commands keep their existing transition.
+- Historical shortcut/default-selection statements below describe their original checkpoints, not current behavior. Validation and operator limits: see `docs/testing.md`; host `/reload` only.
+
 ## User LIVE report — streaming playbar / hint removal after `36d9b3b`
 
 - User reports the playbar randomly disappears while assistant text streams. **Literal disappearance and its live root remain unconfirmed**; do not treat the narrower reproduced bug as proof of that report's cause.

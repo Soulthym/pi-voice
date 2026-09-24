@@ -84,7 +84,7 @@ Shortcut names follow Pi's format, for example `alt+m`, `ctrl+shift+m`, or `f8`.
 /voice output [auto|local|tcp://host:port|unix:///path]
 ```
 
-`devices` opens the same native picker as Alt+D or the existing badge click; click an option or use arrows/Enter/Escape to select/cancel; the overlay preserves an underlying select/confirm prompt. Opening/cancelling is read-only; only choosing runs the explicit safe transition. See [mouse support and shortcut conflicts](usage.md#device-picker).
+`devices` opens the same native picker as Alt+S or the existing badge click; click an option or use arrows/Enter/Escape to select/cancel; the overlay preserves an underlying select/confirm prompt. Opening/cancelling is read-only; only choosing runs the explicit safe transition. See [mouse support and shortcut conflicts](usage.md#device-picker).
 
 `device` without a value lists registered candidates and the current selection, read-only and without readiness probes. Exact IDs or unique exact names select a **sticky session pin**, preserved by reload and ordinary controls; ambiguous names report IDs. Quotes preserve spaces. `next`/`prev` wrap in stable ID order over valid, apparently available registrations, excluding unregistered local/legacy entries. Zero candidates changes nothing; one selects itself; missing current selects first/last respectively.
 

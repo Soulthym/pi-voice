@@ -2233,11 +2233,28 @@ export default async function (pi: ExtensionAPI) {
 		return adoption.catch(() => false);
 	};
 
-	const selectDevice = async (ctx: ExtensionContext, requested: VoiceDeviceSelection, available = () => true): Promise<void> => {
+	const selectDevice = async (ctx: ExtensionContext, requested: VoiceDeviceSelection, available = () => true, confirmCurrent = false): Promise<void> => {
 		devicePicker?.abort();
 		const sessionId = ctx.sessionManager.getSessionId();
 		const sessionEpoch = contextEpoch;
 		const current = () => sessionEpoch === contextEpoch && sessionId === activeContext?.sessionManager.getSessionId() && available();
+		// Confirming the same healthy route may pin auto selection, but must not interrupt audio.
+		if (confirmCurrent && requested !== "auto" && requested === (activeDeviceId ?? deviceSelection) && current() &&
+			!deviceRetryRequired && !deviceRebind && !transportStopPending && !inputStopPending) {
+			try {
+				const output = deviceRouter.routeMetadata(requested, "output", config.output);
+				const input = deviceRouter.routeMetadata(requested, "input", config.input);
+				if (output.endpoint === outputEndpoint && input.endpoint === inputEndpoint &&
+					(output.kind === "device" ? output.device.connectedAt : undefined) === outputGeneration &&
+					(input.kind === "device" ? input.device.connectedAt : undefined) === inputGeneration) {
+					if (deviceSelection !== requested) {
+						deviceSelection = requested;
+						pi.appendEntry(DEVICE_SELECTION_ENTRY, { version: 1, selection: requested, pin: requested });
+					}
+					return;
+				}
+			} catch { /* Unavailable routes retain the normal validated transition. */ }
+		}
 		const epoch = ++playbackRequestEpoch;
 		const paused = playbackPaused || !!pendingReplay || (ownsSpeech &&
 			(lastOwnerUtterance !== undefined || (speechPurpose === "turn" && liveTurnNarrationActive && !ownerTurnEnded)));
@@ -2280,7 +2297,8 @@ export default async function (pi: ExtensionAPI) {
 			...devices.map(device => ({ id: device.id, name: device.name, device }))];
 		const labels = devicePickerLabels(choices, selected);
 		try {
-			const choice = await selectDeviceOverlay(ctx, labels, controller.signal, narrationTui ?? undefined);
+			const choice = await selectDeviceOverlay(ctx, labels, controller.signal, narrationTui ?? undefined,
+				Math.max(0, choices.findIndex(choice => choice.id === selected)));
 			if (controller.signal.aborted || context !== contextEpoch || session !== activeContext?.sessionManager.getSessionId() ||
 				request !== playbackRequestEpoch || setting !== deviceSettingEpoch || input !== inputEpoch ||
 				framing !== framingIntent || settings !== config || !interactiveVoiceSession) return;
@@ -2289,7 +2307,7 @@ export default async function (pi: ExtensionAPI) {
 			const available = () => !target.device || deviceRouter.connected().some(device => device.id === target.id &&
 				device.connectedAt === target.device!.connectedAt && device.audioEndpoint === target.device!.audioEndpoint && device.inputEndpoint === target.device!.inputEndpoint);
 			if (!available()) { notifyVoice(ctx, "Device is no longer available; reopen the picker", "warning"); return; }
-			await selectDevice(ctx, target.id, available);
+			await selectDevice(ctx, target.id, available, true);
 		} catch (error) {
 			if (context === contextEpoch && interactiveVoiceSession) notifyVoice(ctx, `Device picker: ${String(error)}`, "error");
 		} finally {
@@ -4306,14 +4324,14 @@ export default async function (pi: ExtensionAPI) {
 		effectiveTalkShortcuts.delete(config.scrollBottomShortcut);
 	}
 
-	const devicePickerConflict = [config.talkShortcut, config.scrollToShortcut, config.scrollBottomShortcut].includes("alt+d");
-	if (!devicePickerConflict) pi.registerShortcut("alt+d", {
-		description: "Choose voice device (replaces forward-delete-word; Alt+Delete still deletes)",
+	const devicePickerConflict = [config.talkShortcut, config.scrollToShortcut, config.scrollBottomShortcut].includes("alt+s");
+	if (!devicePickerConflict) pi.registerShortcut("alt+s", {
+		description: "Choose voice device",
 		handler: pickDevice,
 	});
 	pi.on("session_start", (_event, ctx) => {
 		if (devicePickerConflict && supportsInteractiveVoice(ctx.mode)) notifyVoice(ctx,
-			"Alt+D device picker not bound: a configured voice control already uses it; use /voice devices", "warning");
+			"Alt+S device picker not bound: a configured voice control already uses it; use /voice devices", "warning");
 	});
 
 	pi.registerCommand("voice", {
@@ -5086,7 +5104,7 @@ export default async function (pi: ExtensionAPI) {
 						"Playback · mode | voice | speed | device | output | highlight | autoscroll | scroll-to | bottom",
 						"Models · tts-model | tts-dtype | tts-workers | alignment-model | alignment-dtype",
 						"Input · input | shortcut | stt-model | stt-dtype | stt-candidates | edit | edit-model | submit",
-						`Devices · /voice devices picker · ${devicePickerConflict ? "Alt+D reserved by configured voice control" : "Alt+D (forward-delete-word remains Alt+Delete)"} · click existing [device] in supported fullscreen Pi`,
+						`Devices · /voice devices picker · ${devicePickerConflict ? "Alt+S reserved by configured voice control" : "Alt+S"} · click existing [device] in supported fullscreen Pi`,
 						"Cache · code-narration | code-preprocess | code-budget | code-retry current|historical | timing-preprocess | audio-cache | audio-bitrate",
 						"Inspect · status | timing | help",
 					].join("\n"),
