@@ -119,6 +119,8 @@ Pi Voice reads `~/.pi/agent/pi-voice.json`. Missing settings use these defaults;
 
 See [Configuration](docs/configuration.md) for valid values and setting behavior, or copy [`pi-voice.example.json`](pi-voice.example.json), which deliberately enables spoken output.
 
+Timing commands: `/voice timing` reports quality, latency and worker limits; `/voice timing workers` queries the limit read-only. `/voice timing workers 2` sets it; `/voice timing workers auto` restores automatic sizing (maximum four). Explicit limits are 1–8; the JSON key remains `timingPreprocessConcurrency`. Silent cached-audio alignment retry is not implemented yet.
+
 ## Controls
 
 ### Everyday shortcuts

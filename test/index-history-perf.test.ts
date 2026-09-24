@@ -131,7 +131,7 @@ for (const scenario of ["f6", "f9", "timing", "aborted", "error", "prefix", "col
 		mock.method(performance, "now", () => clock += 5);
 		if (scenario === "timing") {
 			const measure = mock.method(MockedVoiceWorkerClient.prototype, "measureSegment", async () => 1);
-			await host.command("timing-preprocess 1");
+			await host.command("timing workers 1");
 			await host.emit("message_start", { message: assistant("New live response.", "pending") });
 			for (let i = 0; i < 80; i++) await tick();
 			assert.equal(measure.mock.callCount(), 0, "cancelled history preparation must not start timing workers");

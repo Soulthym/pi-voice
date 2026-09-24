@@ -6,7 +6,7 @@ Bare `/voice` is an alias for `/voice status`.
 
 Every value-setting command below accepts an omitted value to report its **current effective value**, without saving configuration, starting/reconfiguring workers, changing playback/ownership/transcript following, resetting budgets, or calling a provider. Brackets mark optional values. Explicit values retain their normal validation and setting behavior.
 
-Automatic input/output and device queries show the resolved route (including an active device pin); `edit-model current` shows Pi's current model or `unavailable`. `timing-preprocess` shows the currently resolved limit and, when running, the active batch limit. `shortcut` shows the loaded binding (and F4 alias), plus any configured change awaiting `/reload`. `code-budget` retains its scope/allowance/usage report.
+Automatic input/output and device queries show the resolved route (including an active device pin); `edit-model current` shows Pi's current model or `unavailable`. `timing workers` shows the currently resolved limit and, when running, the active batch limit. `shortcut` shows the loaded binding (and F4 alias), plus any configured change awaiting `/reload`. `code-budget` retains its scope/allowance/usage report.
 
 Action commands (`on`, `off`, `toggle`, `stop`, `setup`, `test`, `talk`, `attention`, `reconnect`, `scroll-to`, `bottom`, and `code-retry`) retain their intentional behavior; they are not setting queries. `status`, `timing` and `help` are read-only reports.
 
@@ -24,7 +24,7 @@ Action commands (`on`, `off`, `toggle`, `stop`, `setup`, `test`, `talk`, `attent
 | `/voice test [text]` | Speaks test text or a default readiness phrase. |
 | `/voice talk` | Starts/stops microphone dictation. |
 | `/voice attention` | Explicitly attend the oldest eligible waiting session using the origin session's sticky manual pin (fresh attachment identity in auto mode); replay this project if current/none waiting. Requires enabled voice. F5 remains own-project replay. |
-| `/voice timing` | Shows selected timing quality and recent audio-to-highlight/highlight-to-render diagnostic latency. |
+| `/voice timing` | Shows selected timing quality, recent audio-to-highlight/highlight-to-render diagnostic latency, and configured/resolved timing worker limits. |
 
 ## Speech and narration
 
@@ -101,7 +101,7 @@ Selection waits for actual old-player/recorder stop, finalizes recording into th
 /voice code-budget [unlimited|<n>]
 /voice code-retry current
 /voice code-retry historical [all|<message-id>]
-/voice timing-preprocess [auto|<1..8>]
+/voice timing workers [auto|<1..8>]
 /voice audio-cache [on|off]
 /voice audio-bitrate [12..128]
 ```
@@ -109,5 +109,7 @@ Selection waits for actual old-player/recorder stop, finalizes recording into th
 `scroll-to` re-anchors the current narrated position at 20% without changing play/pause state; its default shortcut is `Alt+V`. `bottom` pins the transcript to its end and restores normal transcript-end following, including while narration remains active; its default shortcut is `Alt+T`.
 
 `code-budget` reports or explicitly resets the session-only historical backfill allowance (`scope` and default budget come from the config) and resumes skipped blocks. `code-retry current` retries recoverable omitted descriptions on the selected playback message when it remains in the configured historical scope. `code-retry historical` opens a picker; pass `all` or a message-ID substring to select non-interactively. Retries still respect the session backfill allowance. Richer regeneration selection is not implemented; this basic picker and these explicit retry commands are the available controls.
+
+`/voice timing` and `/voice timing workers` are read-only. For example, `/voice timing workers 2` persists a two-worker limit; `/voice timing workers auto` restores automatic sizing. The JSON setting remains `timingPreprocessConcurrency`. Silent cached-audio alignment retry is not available yet.
 
 Code concurrency controls parallel `editModel` requests and is explicit. Timing `auto` derives a CPU worker limit from available RAM and CPU, capped at four. Disabling audio caching does not delete existing Opus files.

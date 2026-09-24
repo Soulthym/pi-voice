@@ -79,12 +79,17 @@ test("real tts-workers command persists and reaches the worker protocol without 
 	assert.equal(spawned, 0, "idle setting must not spawn models");
 	assert.equal(JSON.parse(await fs.readFile(env.PI_VOICE_CONFIG, "utf8")).ttsWorkers, 2);
 	const command = host.commands.get("voice") as any;
-	const actionsAndReports = ["on", "off", "toggle", "status", "stop", "setup", "test", "talk", "attention", "reconnect", "scroll-to", "bottom", "timing", "help", "code-retry", "devices"];
+	const actionsAndReports = ["on", "off", "toggle", "status", "stop", "setup", "test", "talk", "attention", "reconnect", "scroll-to", "bottom", "help", "code-retry", "devices"];
 	assert.deepEqual(
 		command.getArgumentCompletions("").map((item: any) => item.value).sort(),
-		[...voiceQueryCases.map(([name]) => name).filter(name => name !== "tts-worker"), ...actionsAndReports].sort(),
+		[...voiceQueryCases.map(([name]) => name).filter(name => name !== "tts-worker" && !name.includes(" ")), ...actionsAndReports].sort(),
 		"every advertised command must be audited as a setting query or an intentional action/report",
 	);
+	assert.deepEqual(command.getArgumentCompletions("timing ").map((item: any) => item.value), ["timing workers"]);
+	assert.deepEqual(command.getArgumentCompletions("timing workers ").map((item: any) => item.label), ["auto", "1", "2", "3", "4", "5", "6", "7", "8"]);
+	assert.equal(command.getArgumentCompletions("timing workers 2 "), null);
+	assert.equal(command.getArgumentCompletions("timing unknown "), null);
+	assert.deepEqual(command.getArgumentCompletions("timing-preprocess"), []);
 	assert.deepEqual(command.getArgumentCompletions("tts-workers ").map((item: any) => item.label), ["1", "2", "3", "4", "5", "6", "7", "8"]);
 	for (const prefix of ["tts-w", "tts-worker"]) {
 		assert.deepEqual(command.getArgumentCompletions(prefix).map((item: any) => item.value), ["tts-workers"], "aliases must not duplicate command suggestions");

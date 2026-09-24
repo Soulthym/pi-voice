@@ -64,7 +64,7 @@ test("setter queries reflect live settings, automatic routing and reload-only sh
 		["alignment-model", "test/alignment", "test/alignment"], ["alignment-dtype", "fp32", "fp32"],
 		["edit-model", "test/model", "test/model → test/model"],
 		["highlight", "off", "off"], ["autoscroll", "off", "off"], ["code-narration", "summary", "summary"],
-		["code-preprocess", "2", "2"], ["timing-preprocess", "2", "2 → 2"],
+		["code-preprocess", "2", "2"], ["timing workers", "2", "2 → 2"],
 		["audio-cache", "off", "off"], ["audio-bitrate", "64", "64 kbps"],
 		["output", "tcp://example.invalid:1234", "tcp://example.invalid:1234 (explicit)"],
 		["input", "disabled", "disabled (explicit)"],
@@ -76,6 +76,27 @@ test("setter queries reflect live settings, automatic routing and reload-only sh
 		await host.command(`${command} ${value}`);
 		assert.equal(host.notices.at(-1)?.level, "info", `${command} setter`);
 		await query(command, `${command}: ${expected}`);
+	}
+	for (const value of ["0", "9", "1.5", "NaN", "2 extra", "auto extra", "1e0", "0x2", "+2", "02"]) {
+		const before = await fs.readFile(env.PI_VOICE_CONFIG, "utf8");
+		const widgets = host.widgetOperations.length;
+		await host.command(`timing workers ${value}`);
+		assert.equal(host.notices.at(-1)?.level, "error", value);
+		assert.equal(await fs.readFile(env.PI_VOICE_CONFIG, "utf8"), before);
+		assert.equal(host.widgetOperations.length, widgets);
+	}
+	for (const value of ["1", "8", "auto"]) {
+		await host.command(`timing workers ${value}`);
+		assert.equal(host.notices.at(-1)?.level, "info");
+		const saved = JSON.parse(await fs.readFile(env.PI_VOICE_CONFIG, "utf8"));
+		assert.equal(saved.timingPreprocessConcurrency, value === "auto" ? "auto" : Number(value));
+		assert.equal("timingWorkers" in saved, false, "no config migration");
+	}
+	for (const command of ["timing-preprocess", "timing-preprocess 2", "timing unknown", "timing workers auto extra"]) {
+		const before = await fs.readFile(env.PI_VOICE_CONFIG, "utf8");
+		await host.command(command);
+		assert.equal(host.notices.at(-1)?.level, "error", command);
+		assert.equal(await fs.readFile(env.PI_VOICE_CONFIG, "utf8"), before);
 	}
 	const unchanged = await fs.readFile(env.PI_VOICE_CONFIG, "utf8");
 	const widgetsBeforeReports = host.widgetOperations.length;
@@ -93,6 +114,8 @@ test("setter queries reflect live settings, automatic routing and reload-only sh
 			assert.match(notice.message, /alt\+t: transcript tail/);
 		}
 		if (command === "status") assert.match(notice.message, /measures audio; new word timing is estimated/);
+		if (command === "timing") assert.match(notice.message, /Timing workers: auto → [1-4]/);
+		assert.ok(!notice.message.includes("timing-preprocess"));
 	}
 	assert.equal(await fs.readFile(env.PI_VOICE_CONFIG, "utf8"), unchanged);
 	assert.equal(host.widgetOperations.length, widgetsBeforeReports);

@@ -62,9 +62,9 @@ for (const context of ["block-only", "conversation"] as const) test(`${context} 
 	assert.equal(host.modelRequests.length, 0);
 	// The 200ms ownership poll must not repeatedly rescan a settled session.
 	host.entries.length = 0;
-	await host.command("timing-preprocess 1");
+	await host.command("timing workers 1");
 	const widgetWrites = host.widgetOperations.filter(operation => operation.name === "pi-voice-progress").length;
-	await host.command("timing-preprocess 1");
+	await host.command("timing workers 1");
 	assert.equal(host.widgetOperations.filter(operation => operation.name === "pi-voice-progress").length, widgetWrites,
 		"identical progress refreshes must not recreate the widget");
 	// Enabling preprocessing schedules asynchronous history preparation.

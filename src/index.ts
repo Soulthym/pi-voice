@@ -4611,7 +4611,6 @@ export default async function (pi: ExtensionAPI) {
 				"code-budget",
 				"code-retry",
 				"code-preprocess",
-				"timing-preprocess",
 				"audio-cache",
 				"audio-bitrate",
 				"device",
@@ -4686,9 +4685,17 @@ export default async function (pi: ExtensionAPI) {
 					.filter(value => value.startsWith(parts[1] ?? ""))
 					.map(value => ({ value: `code-retry ${value}`, label: value }));
 			}
-			if (parts[0] === "code-preprocess" || parts[0] === "timing-preprocess" || parts[0] === "tts-workers" || parts[0] === "tts-worker") {
+			if (parts[0] === "timing") {
+				if (parts.length === 2) return ["workers"]
+					.filter(value => value.startsWith(parts[1]))
+					.map(value => ({ value: `timing ${value}`, label: value }));
+				if (parts[1] === "workers" && parts.length === 3) return ["auto", "1", "2", "3", "4", "5", "6", "7", "8"]
+					.filter(value => value.startsWith(parts[2]))
+					.map(value => ({ value: `timing workers ${value}`, label: value }));
+				return null;
+			}
+			if (parts[0] === "code-preprocess" || parts[0] === "tts-workers" || parts[0] === "tts-worker") {
 				const choices = ["1", "2", "3", "4", "5", "6", "7", "8"];
-				if (parts[0] === "timing-preprocess") choices.unshift("auto");
 				return choices
 					.filter(value => value.startsWith(parts[1] ?? ""))
 					.map(value => ({ value: `${parts[0]} ${value}`, label: value }));
@@ -4769,6 +4776,26 @@ export default async function (pi: ExtensionAPI) {
 			const args = rawArgs.trim();
 			const [action = "status", value = "", ...restArgs] = args.split(/\s+/);
 			const normalizedAction = action.toLowerCase();
+			// Timing queries and invalid arguments must not touch playback, recording or follow state.
+			if (normalizedAction === "timing") {
+				const workers = () => `${config.timingPreprocessConcurrency} → ${resolveTimingConcurrency(config.timingPreprocessConcurrency, config.ttsDtype)}${timingPreprocessing ? `; active batch=${timingWorkers.length}` : ""}`;
+				if (!value) {
+					notifyVoice(ctx, `${playbackTimingStatus(playbackHistory.status()?.wordTimingCoverage)}\n${narration.timingSummary()}\nTiming workers: ${workers()}`, "info");
+					return;
+				}
+				if (value.toLowerCase() === "workers" && restArgs.length === 0) {
+					notifyVoice(ctx, `timing workers: ${workers()}`, "info");
+					return;
+				}
+				if (value.toLowerCase() === "workers" && restArgs.length === 1 && /^(auto|[1-8])$/i.test(restArgs[0])) {
+					const concurrency = normalizePreprocessConcurrency(restArgs[0].toLowerCase() === "auto" ? "auto" : Number(restArgs[0]))!;
+					await updateConfig({ ...config, timingPreprocessConcurrency: concurrency });
+					notifyVoice(ctx, `timing workers: ${workers()}`, "info");
+					return;
+				}
+				notifyVoice(ctx, "Usage: /voice timing [workers [auto|<1..8>]]", "error");
+				return;
+			}
 			// Queries must return before even the transcript-follow reset below.
 			if (!value && restArgs.length === 0) {
 				const queries: Record<string, () => string | number | boolean> = {
@@ -4794,7 +4821,6 @@ export default async function (pi: ExtensionAPI) {
 					"code-narration": () => config.codeNarration,
 					"code-preprocess": () => config.codeDescriptionPreprocessConcurrency,
 					"code-budget": () => `scope=${config.codeDescriptionPreprocessScope}; budget=${backfillAllowance}; used=${backfillUsed}; set /voice code-budget <0..n|unlimited> for this session`,
-					"timing-preprocess": () => `${config.timingPreprocessConcurrency} → ${resolveTimingConcurrency(config.timingPreprocessConcurrency, config.ttsDtype)}${timingPreprocessing ? `; active batch=${timingWorkers.length}` : ""}`,
 					"audio-cache": () => config.audioCache,
 					"audio-bitrate": () => `${config.audioCacheBitrate} kbps`,
 					shortcut: () => {
@@ -5139,16 +5165,6 @@ export default async function (pi: ExtensionAPI) {
 					notifyVoice(ctx, `↺ Retrying ${retryKeys(keys)} descriptions`, "info");
 					return;
 				}
-				case "timing-preprocess": {
-					const concurrency = normalizePreprocessConcurrency(value.toLowerCase() === "auto" ? "auto" : Number(value));
-					if (concurrency === undefined) {
-						notifyVoice(ctx, "Usage: /voice timing-preprocess auto|<1..8>", "error");
-						return;
-					}
-					await updateConfig({ ...config, timingPreprocessConcurrency: concurrency });
-					notifyVoice(ctx, `timing-preprocess: ${concurrency} workers`, "info");
-					return;
-				}
 				case "code-narration": {
 					const narrationMode = value.toLowerCase();
 					if (narrationMode !== "guided" && narrationMode !== "summary") {
@@ -5313,9 +5329,6 @@ export default async function (pi: ExtensionAPI) {
 					completeOwnerSpeech();
 					return;
 				}
-				case "timing":
-					notifyVoice(ctx, `${playbackTimingStatus(playbackHistory.status()?.wordTimingCoverage)}\n${narration.timingSummary()}`, "info");
-					return;
 				case "status":
 				case "":
 					notifyVoice(ctx, [
@@ -5344,8 +5357,9 @@ export default async function (pi: ExtensionAPI) {
 						"Models · tts-model | tts-dtype | tts-workers | alignment-model | alignment-dtype",
 						"Input · input | shortcut | stt-model | stt-dtype | stt-candidates | edit | edit-model | submit",
 						`Devices · /voice devices picker · ${devicePickerConflict ? "Alt+S reserved by configured voice control" : "Alt+S"} · click existing [device] in supported fullscreen Pi`,
-						"Cache · code-narration | code-preprocess | code-budget | code-retry current|historical | timing-preprocess | audio-cache | audio-bitrate",
-						"Inspect · status | timing | help",
+						"Cache · code-narration | code-preprocess | code-budget | code-retry current|historical | audio-cache | audio-bitrate",
+						"Timing · timing (quality, latency, workers) | timing workers [auto|<1..8>]",
+						"Inspect · status | help",
 					].join("\n"),
 						normalizedAction === "help" ? "info" : "error",
 					);

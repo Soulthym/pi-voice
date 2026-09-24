@@ -98,7 +98,7 @@ Background status intentionally separates session work from selected-message sta
 
 Checks restore compatible saved maps without inference. Actual recovery uses a separate `Recovering speech timing` line naming cached-audio decoding, synthesis or word-timing estimates. `/voice help` lists controls; `/voice status` groups settings by task. Notices use `Voice · …` with Pi's native severity styling; icons supplement readable words.
 
-Current timing commands remain `/voice timing` and `/voice timing-preprocess [auto|<1..8>]`. Phase 3's approved `timing workers` and silent `timing retry` commands are not implemented yet.
+`/voice timing` reports quality, latency and worker limits; `/voice timing workers` queries the limit without changing state. Set it with `/voice timing workers 2` or `/voice timing workers auto`. Phase 3's approved silent `timing retry` command is not implemented yet.
 
 See [Narration and highlighting](narration-and-highlighting.md) and [Preprocessing and cache](preprocessing-and-cache.md).
 
