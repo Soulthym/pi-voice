@@ -1,6 +1,17 @@
 # Tests
 
-## Current checkpoint — compact phases and native-frame history gap
+## Current checkpoint — playback clock and truthful live/work frontiers
+
+`npm run check` passed. Full checkout: **971 passed, 33 compatibility skips, no failures**; full installed-native: **1004 passed, no skips/failures**. Logs: `/tmp/pi-voice-review-fixed-full.log`, `/tmp/pi-voice-review-native-final2.log`. No LSP server configured; TypeScript and diff checks used instead.
+
+- Shared worker-clock fake-time regression: 1 second consumed, 9 seconds starved, append 2 seconds, then 125 ms reports **1.125 seconds**, not 3. New PCM cannot inherit empty-buffer wall time; fallback reanchors to real device feedback. Pause/drain/seek and estimated-not-stop-proof tests remain passing.
+- Production host tests distinguish canonical-context/coordinator waits (Queued), actual description API dependencies (Describing), active coalesced joins, cancellation, cache replay and rejected attempt budgets. Context-only replay no longer flashes Describing.
+- Separate consumption tracks final description-unit completion, including cached/persisted replay with skipped units, without changing zero-length highlight ranges. Earlier/unplayed/pending units and paused playback remain non-live. Terminal omissions consume silence; closed empty text/code fences use the same parser state as speech, while unfinished fences remain pending.
+- Initial full runs exposed a backfill test synchronization assumption: the added activity-cleanup promise turn can send live work through the coordinator's existing 100 ms retry. Clean baseline passed; the test now boundedly awaits both expected requests instead of only immediate turns. Final full runs above pass.
+
+All evidence is offline synthetic clock/transport or inert native UI. No providers, real inference, hardware, live Pi/SSH/client restart or runtime settings were used. Headphone badge/mouse behavior and short phase labels remain unchanged. Host `/reload` is left to the user; no client update is needed.
+
+## Previous checkpoint — compact phases and native-frame history gap
 
 Final serial reruns: `npm run check` passed; full checkout `npm test` **956 passed, 33 compatibility skips, no failures**; full installed-native `npm test` **989 passed, no skips/failures**. Logs: `/tmp/pi-voice-ui-final.log`, `/tmp/pi-voice-ui-native-final.log`. Native run sets `PI_VOICE_TEST_TUI_MODULE`, `PI_VOICE_TEST_AGENT_MODULE` and `PI_VOICE_TEST_KEYBINDINGS_MODULE` to the installed Pi modules (command pattern below). LSP diagnostics were unavailable (no server); TypeScript and whitespace checks passed. Direct focused runs without the test runner's environment sanitization failed route/style assertions; the sanitized focused and both final full runs passed.
 

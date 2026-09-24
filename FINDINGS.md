@@ -2,7 +2,15 @@
 
 Updated incrementally. Companion: `PLAN.md`. Reorganize freely while preserving evidence and disposition.
 
-## Current checkpoint — compact phases, chronological live edge and VoiceUI badge
+## Current checkpoint — four review fixes before user reload
+
+- Shared estimated clock settles against the old submitted-audio limit before append; starvation is not playback. Fake clock: 1 second played + 9 seconds empty + 2 seconds appended + 125 ms = **1.125 seconds**. Real feedback reanchors fallback; estimates never prove a device stopped.
+- Describing is only an actual foreground API dependency, including an already-active shared producer. Canonical context/next-fence, replay preparation and resource waits are Queued; cache hits charge no attempt and never report Describing. Consumer cancellation and generation guards remain intact.
+- Live checks use a separate consumed source frontier: final description completion (including persisted/cached skipped-unit replay) or terminal omission consumes the block without stretching word/highlight ranges. Pending/unplayed units and paused state remain non-live. Closed silent fences no longer extend pending source; unfinished fences use shared speech-parser state.
+- Typecheck passed; full checkout **971 passed / 33 compatibility skips**, installed-native **1004 passed / no skips**, no failures. Initial backfill failure was a test timing assumption exposed by added promise cleanup, not established pre-existing failure: clean baseline passed. Bounded waiting for both actual requests fixed the test. See `docs/testing.md` for logs and scope.
+- Atomic topic commits start with `97b7008`, `3d031f9`, `c5323f2`, `36ec214`; follow-ups cover omissions, production phase tests, replay context, parser reuse and bounded test synchronization. Badge/mouse, ISSUES/demo assets and runtime settings untouched. No live/provider/hardware validation or reload performed.
+
+## Previous checkpoint — compact phases, chronological live edge and VoiceUI badge
 
 - Current compact phases are Idle, Playing, Paused, Synthesizing, Loading, Describing, Connecting and Queued, with paused intent taking precedence. `● live` is separate, uses native Pi `error` red, and occupies the time field only at the unpaused chronological playback edge, including caught-up next-output waits. It does not mean simply Playing or viewport-bottom follow. End/Alt+T cannot make old replay live; unknown timing stays `--:-- / --:--` rather than a fabricated duration.
 - `[🎧:device]` is reserved at the right edge of the first VoiceUI line, including idle status; status/hints truncate before identity. A too-narrow badge is omitted rather than left open. The host widget replaces the old idle Voice footer placement; Alt+S and supported first-line clicks open the picker, not footer clicks. Other extension statuses/Pi's footer remain intact.

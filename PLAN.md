@@ -1,6 +1,14 @@
 # Pi Voice — implemented agreements and live-validation handoff
 
-## Current handoff — compact playback phases and first-line VoiceUI
+## Current handoff — four review fixes ready for user reload
+
+- Root shared clock excludes starvation before new PCM submission; real feedback anchors fallback and estimated positions never establish stop proof.
+- Describing means actual foreground description API work (including active shared producers); context/next-fence/resource waits are Queued, cached plans are free. Other compact labels and paused precedence remain unchanged.
+- Separate consumed-code frontier handles final description units, cached/persisted skipUnits and terminal omissions without moving highlights. Closed silent fences are excluded by shared parser state; genuinely unfinished/pending work stays non-live. Red `● live` remains time-only, unpaused and chronological, never viewport-derived.
+- Final validation: typecheck; checkout **971 passed / 33 skips**; installed-native **1004 passed / no skips**, no failures. Details and initial backfill-test synchronization correction: [testing](docs/testing.md).
+- Host `/reload` only when the user is ready; not performed here. No providers/inference/hardware/session restarts/config changes. Headphones/mouse, ISSUES/demo assets and prior discussion notes preserved. No new live reliability claim.
+
+## Previous handoff — compact playback phases and first-line VoiceUI
 
 - Playback phases: Idle, Playing, Paused, Synthesizing, Loading, Describing, Connecting, Queued; paused intent wins. Separate native error-red `● live` replaces time only at the unpaused chronological playback edge, including caught-up next-output wait. Older replay, unread/queued audio and paused playback are not live; End/Alt+T only control the viewport. Unknown times stay `--:-- / --:--`, not invented durations.
 - `[🎧:device]` sits at the right end of the first VoiceUI line, including idle status. Identity is reserved before status/hints; narrow names truncate with a closed badge (omitted below six available columns). Alt+S and supported widget clicks open the picker; no idle-footer click claim. Pi's footer and other extension statuses remain intact.
