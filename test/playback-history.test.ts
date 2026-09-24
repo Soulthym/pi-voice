@@ -163,6 +163,9 @@ test("quality includes estimated suffix units after seeking beyond a refined pre
 	history.setTimingQuality(2, "ctc-refined");
 	assert.deepEqual(history.status(), { ...before, timingQuality: "ctc-refined" },
 		"late refinement changes quality only, not position or completeness");
+	history.setPlayback(2, 6);
+	assert.equal(history.status()?.position, target.time + 6, "incomplete suffix elapsed is not clamped to the known prefix duration");
+	assert.equal(history.status()?.timingsComplete, false);
 });
 
 test("quality reports suffix-only timings before absolute checkpoints exist", () => {

@@ -96,12 +96,18 @@ export class Vocalizer {
 		this.#onUtteranceEnded = onUtteranceEnded;
 	}
 
+	get playbackUtterance(): number | undefined {
+		const entries = [...this.#phases];
+		return (entries.find(([, entry]) => entry.audioEnd !== undefined && entry.position < entry.audioEnd) ??
+			entries.find(([, entry]) => entry.pending.size > 0 || entry.descriptions > 0 || entry.deferred > 0))?.[0];
+	}
+
 	/** Foreground only; pause intent wins even during description/model/transport startup. */
 	get playbackPhase(): PlaybackPhase {
 		if (this.#paused) return "paused";
 		// An open utterance is not pending work once all submitted audio is consumed.
-		const current = Array.from(this.#phases.values()).find(entry => entry.pending.size > 0 || entry.descriptions > 0 ||
-			entry.deferred > 0 || (entry.audioEnd !== undefined && entry.position < entry.audioEnd));
+		const utterance = this.playbackUtterance;
+		const current = utterance === undefined ? undefined : this.#phases.get(utterance);
 		if (!current) return "idle";
 		if (current.audioEnd !== undefined && current.position < current.audioEnd) return "playing";
 		if (current.pending.size === 0) return current.descriptions > 0 ? "describing" : current.deferred > 0 ? "queued" : "idle";

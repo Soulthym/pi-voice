@@ -3,6 +3,37 @@ import test from "node:test";
 import { Text, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import { deviceBadge, deviceFooterText, deviceProgressLines, notifyVoice, pendingPlaybackTiming, playbackTimingStatus, preprocessingStatus, stopUnconfirmedStatus, voiceProgressLines } from "../src/status-text.js";
 
+test("responsive playback retains status, time/live and a closed grapheme-safe badge", () => {
+	for (const width of [40, 80, 120]) for (const time of ["0:35 / 1:20", "0:35", "\x1b[31m● live\x1b[39m", "--:--"]) {
+		const line = `\x1b[2m◷ Synthesizing · [━━━━━━━━━━━━━━━━━━━━━━━━] ${time} · message 671/671 · timing pending\x1b[22m`;
+		const result = deviceFooterText(line, "👩🏽‍💻é".repeat(30), width);
+		const plain = stripTerminalSequences(result.text);
+		assert.equal(visibleWidth(result.text), width);
+		assert.match(plain, /Synthesizing/);
+		assert.ok(plain.includes(stripTerminalSequences(time)), plain);
+		assert.match(plain, /\[🎧:.*\]$/);
+		assert.doesNotMatch(plain, /message …|F8|Alt/);
+	}
+});
+
+test("playback survives tiny widths and keeps timing before decoration at 32 columns", () => {
+	const label = "◷ Synthesizing · [━━━━━━━━━━━━━━━━━━━━━━━━] 0:35 / 1:20 · message 671/671";
+	for (let width = 0; width <= 5; width++) {
+		const result = deviceFooterText(label, "Local", width);
+		assert.equal(result.badge, "");
+		assert.equal(visibleWidth(result.text), width);
+	}
+	for (const width of [31, 32]) {
+		const rows = deviceProgressLines([label], "Local", width);
+		assert.equal(rows.length, 1);
+		assert.match(rows[0], /Synthesizing.*0:35 \/ 1:20/);
+		assert.ok(rows.every(row => visibleWidth(row) <= width));
+	}
+	const wrapped = deviceProgressLines([label], "Local", 20);
+	assert.match(wrapped.join(" "), /Synthesizing.*0:35 \/ 1:20/);
+	assert.ok(wrapped.every(row => visibleWidth(row) <= 20));
+});
+
 test("check, recovery and processing counters describe targets, not forced alignment or percent", () => {
 	assert.equal(preprocessingStatus({ label: "Checking saved timing", processed: 109, total: 605, unit: "checked" }),
 		"↺ Checking saved timing · 109/605 targets checked");

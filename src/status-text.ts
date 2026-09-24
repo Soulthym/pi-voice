@@ -62,7 +62,23 @@ export function deviceBadge(name: string, width: number): string {
 /** Reserve identity before truncating status/hints, then pad to the right edge. */
 export function deviceFooterText(label: string, name: string, width: number): { text: string; badge: string } {
 	width = Math.max(0, width);
-	const badge = deviceBadge(name, width);
+	const closing = label.match(/(?:\x1b\[[\d;]*m)+$/)?.[0] ?? "";
+	const playback = /^(.*?) · \[([━●]+)\] (.*?)(?: · (?:message )?(\d+\/\d+)| · current response)?(?: · timing pending)?$/.exec(closing ? label.slice(0, -closing.length) : label);
+	let badge = deviceBadge(name, width);
+	if (playback && visibleWidth(label) + visibleWidth(badge) + 1 > width) {
+		const [, status, bar, time, counter] = playback;
+		const essentials = `${status} ${time}`;
+		badge = deviceBadge(name, Math.min(width - visibleWidth(essentials) - 1, Math.max(6, width - visibleWidth(essentials) - 7)));
+		if (width >= 6 && visibleWidth(essentials) > width) {
+			return { text: wrapTextWithAnsi(essentials + closing, width).join("\n"), badge: "" };
+		}
+		const room = Math.max(0, width - visibleWidth(badge) - (badge ? 1 : 0));
+		const count = counter && visibleWidth(essentials) + counter.length + 7 <= room ? ` · ${counter}` : "";
+		const size = Math.min(bar.length, room - visibleWidth(essentials + count) - 5);
+		const cursor = bar.indexOf("●");
+		const scaled = size > 0 ? Array.from({ length: size }, (_, i) => cursor >= 0 && i === Math.round(cursor / Math.max(1, bar.length - 1) * (size - 1)) ? "●" : "━").join("") : "";
+		label = (scaled ? `${status} · [${scaled}] ${time}${count}` : essentials + count) + closing;
+	}
 	const room = Math.max(0, width - visibleWidth(badge) - (badge ? 1 : 0));
 	const text = truncateToWidth(label, room, "…");
 	return { text: text + " ".repeat(width - visibleWidth(text) - visibleWidth(badge)) + badge, badge };
@@ -72,7 +88,7 @@ export function deviceFooterText(label: string, name: string, width: number): { 
 export function deviceProgressLines(lines: readonly string[], name: string, width: number): string[] {
 	if (!lines.length || width < 1) return [];
 	const first = deviceFooterText(lines[0], name, width).text;
-	return [first, ...(lines.length > 1 ? wrapTextWithAnsi(lines.slice(1).join("\n"), width) : [])];
+	return [...first.split("\n"), ...(lines.length > 1 ? wrapTextWithAnsi(lines.slice(1).join("\n"), width) : [])];
 }
 
 /** Keeps foreground activity nearest the editor and background work last. */

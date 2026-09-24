@@ -144,9 +144,9 @@ for (const width of [28, 40, 90]) {
 		const controller = new AbortController();
 		t.after(() => controller.abort());
 		const open = () => { opened++; result = selectDeviceOverlay(h.ctx, labels, controller.signal, h.tui); };
-		for (const name of ["手机 [a [b]", "👩‍💻 é", "same-prefix-123", ""]) {
+		for (const name of ["手机 [a [b]", "👩‍💻 é".repeat(20), "same-prefix-123", ""]) {
 			for (const recording of [false, true]) {
-				const lines = [...(recording ? ["🎙 Recording"] : []), "⏯ Paused · sentence", "Word timing: pending"];
+				const lines = [...(recording ? ["🎙 Recording"] : []), "⏯ Paused · [━━━━━━━━━━━━━━━━━━━━━━━━] 0:35 / 1:20 · message 671/671", "Word timing: pending"];
 				const component = deviceProgressComponent(lines, name, open);
 				const rendered = component.render(width);
 				assert.deepEqual(rendered, deviceProgressLines(lines, name, width - 1).map(line => ` ${line}`));

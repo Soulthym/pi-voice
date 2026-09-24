@@ -155,16 +155,16 @@ test("timing batch replaces its visible row without holes between fast adjacent 
 	for (let i = 0; i < 3; i++) host.addMessage(`m${i}`, i ? `m${i - 1}` : null, assistant(`Sentence ${i}.`));
 	await host.start();
 	const startup = await waitForWidgetLines(host, lines => lines.some(line => line.includes("Recovering speech timing")));
-	assert.match(startup[0], /^○ Idle · \[●━+\] --:-- \/ --:-- · message 3\/3 · timing pending\s+\[🎧:/);
+	assert.match(startup[0], /^○ Idle · \[━+\] --:-- · message 3\/3 · timing pending\s+\[🎧:/);
 	assert.equal(startup.at(-1), "Word timing: unknown/pending");
 	while (!jobs) await settle();
-	const start = host.widgetOperations.length - 1;
+	const start = host.widgetOperations.length;
 	const firstRow = widgetRows.length - 1;
 	gates[0].resolve();
 	while (jobs < 3) await settle();
 	await new Promise(resolve => setTimeout(resolve, 120));
 	const operations = host.widgetOperations.slice(start).filter(operation => operation.name === "pi-voice-progress");
-	assert.ok(operations.length > 0);
+	assert.equal(operations.length, 0, "content changes request native renders without re-registering widgets");
 	assert.ok(widgetRows.slice(firstRow).every(rows => rows === 3), "native Pi widget layout has no removed/reinserted row between jobs");
 	assert.ok(operations.every(operation => operation.value?.lines?.length === 3), "playback + stable recovery + word timing rows, including the fast middle job");
 	assert.ok(operations.every(operation => operation.value?.lines?.at(-1) === "Word timing: unknown/pending"));
@@ -220,7 +220,7 @@ test("unified progress widget orders input, playback, and preprocessing and clea
 	await settle();
 
 	let lines = await waitForWidgetLines(host, candidate => /Queued|Describing/.test(candidate[0] ?? ""));
-	assert.match(lines[0], /^◷ (?:Queued|Describing) · \[●━+\] --:-- \/ --:-- · message 1\/1 · timing pending\s+\[🎧:/);
+	assert.match(lines[0], /^◷ (?:Queued|Describing) · \[━+\] --:-- · message 2\/2 · timing pending\s+\[🎧:/);
 	assert.equal(lines[1], "Word timing: unknown/pending");
 	assert.equal(lines.some(line => line.includes("Preparing code descriptions")), false,
 		"background descriptions must not contend with the deferred foreground utterance");

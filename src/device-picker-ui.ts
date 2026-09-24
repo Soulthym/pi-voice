@@ -1,6 +1,6 @@
 import * as tui from "@earendil-works/pi-tui";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { deviceBadge, deviceProgressLines } from "./status-text.js";
+import { deviceProgressLines } from "./status-text.js";
 
 /** A capturing overlay leaves Pi's active ExtensionSelector and its promise intact. */
 export async function selectDeviceOverlay(ctx: ExtensionContext, labels: string[], signal: AbortSignal, screen?: tui.TUI, initialIndex = 0): Promise<string | undefined> {
@@ -101,11 +101,10 @@ export function deviceProgressComponent(lines: string[], name: string, open: () 
 	const component = badgeRegion({
 		render: width => deviceProgressLines(lines, name, Math.max(0, width - 1)).map(line => ` ${line}`),
 		invalidate() {},
-	}, (rows, width) => {
+	}, rows => {
 		const row = tui.stripTerminalSequences(rows[0] ?? "");
-		const badge = tui.stripTerminalSequences(deviceBadge(name, Math.max(0, width - 1)));
-		const end = tui.visibleWidth(row);
-		return !badge || !row.endsWith(badge) ? undefined : { row: 0, start: end - tui.visibleWidth(badge), end };
+		const at = row.indexOf("[🎧:");
+		return at < 0 || !row.endsWith("]") ? undefined : { row: 0, start: tui.visibleWidth(row.slice(0, at)), end: tui.visibleWidth(row) };
 	}, open);
 	return Object.assign(component, { update(nextLines: string[], nextName: string) {
 		lines = nextLines;

@@ -195,12 +195,17 @@ function completedBranch(ctx: ExtensionContext) {
 	let cache = completedMessagesCache.get(ctx.sessionManager);
 	if (cache?.session === session && cache.leaf !== leaf) {
 		let ancestor = leaf;
+		let userAdded = false;
 		while (ancestor && ancestor !== cache.leaf) {
 			const entry = ctx.sessionManager.getEntry?.(ancestor);
-			if (entry?.type !== "custom") break;
+			if (entry?.type !== "custom" && !(entry?.type === "message" && entry.message.role === "user")) break;
+			userAdded ||= entry.type === "message";
 			ancestor = entry.parentId;
 		}
-		if (ancestor === cache.leaf) cache.leaf = leaf;
+		if (ancestor === cache.leaf) {
+			cache.leaf = leaf;
+			if (userAdded) cache.branch = undefined;
+		}
 	}
 	if (cache?.session !== session || cache.leaf !== leaf) {
 		cache = { session, leaf, messages: new Map() };
@@ -306,7 +311,7 @@ function formatPlaybackTime(seconds: number): string {
 function playbackBar(position: number, duration: number, width = 24): string {
 	const ratio = duration > 0 ? Math.max(0, Math.min(1, position / duration)) : 0;
 	const cursor = Math.min(width - 1, Math.round(ratio * (width - 1)));
-	return `[${Array.from({ length: width }, (_value, index) => (index === cursor ? "●" : "━")).join("")}]`;
+	return `[${Array.from({ length: width }, (_value, index) => (duration > 0 && index === cursor ? "●" : "━")).join("")}]`;
 }
 
 export default async function (pi: ExtensionAPI) {
@@ -640,6 +645,8 @@ export default async function (pi: ExtensionAPI) {
 	let progressComponentEpoch: number | undefined;
 	let voiceStatusLine: string | undefined;
 	let progressWidgetKey: string | undefined;
+	let progressRender: (() => void) | undefined;
+	let handoffConnecting = false;
 	let jumpWidgetVisible = false;
 	let displayedCodeProgress: PreprocessingProgress | undefined;
 	let displayedTimingProgress: PreprocessingProgress | undefined;
@@ -648,40 +655,54 @@ export default async function (pi: ExtensionAPI) {
 		const ctx = activeContext;
 		if (!ctx) return;
 		try {
-			const activePlayback = !attentionSuppressed && (playbackPaused || !!pendingReplay || playbackTailIntent ||
+			// Rendering must not synchronously prepare a cold branch; replay warms it in bounded slices.
+			completedBranch(ctx);
+			const completed = completedMessagesCache.get(ctx.sessionManager)!.messages.get(`${config.mode}:false`) ?? [];
+			const unreadWaiting = (speechBlocked && blockedMessageHasSpeech) || (pausedForAttention && !!waitingSource);
+			const activePlayback = handoffConnecting || playbackPaused || (!inputInProgress && !attentionSuppressed && (unreadWaiting || !!pendingReplay || playbackTailIntent ||
 				(ownsSpeech && (speechPurpose === "turn" || speechPurpose === "replay") &&
-					(!ownerTurnEnded || (lastOwnerUtterance !== undefined && completedOwnerUtterance !== lastOwnerUtterance))));
-			const waitingAtTail = playbackTailIntent && !liveTurnNarrationActive && lastOwnerUtterance === undefined && !pendingReplay;
-			const tailMessages = waitingAtTail ? completedAssistantMessages(ctx, config.mode) : [];
-			const historyStatus = playbackHistory.status();
-			const playback = config.enabled ? (waitingAtTail && historyStatus && (historyStatus.messageId !== tailMessages.at(-1)?.id || historyStatus.position < historyStatus.duration) ? undefined : historyStatus) ?? (activePlayback ? {
-				messageId: waitingAtTail ? tailMessages.at(-1)?.id ?? "" : pendingReplay?.target.id ?? playbackHistory.selected()?.id ?? livePlaybackId ?? "", position: 0, duration: 0,
-				messageIndex: tailMessages.length - 1, messageCount: tailMessages.length, hasTimings: false, wordTimingCoverage: undefined,
+					(!ownerTurnEnded || (lastOwnerUtterance !== undefined && completedOwnerUtterance !== lastOwnerUtterance)))));
+			const waitingAtTail = playbackTailIntent && !speechBlocked && !unreadWaiting && !liveTurnNarrationActive && lastOwnerUtterance === undefined && !pendingReplay;
+			const tailMessages = waitingAtTail ? completed : [];
+			const tailId = waitingAtTail && pendingCanonicalizations.size > 0 ? [...liveBlockIds.values()].at(-1) : tailMessages.at(-1)?.id;
+			const blockedUnread = unreadWaiting && vocalizer.playbackUtterance === undefined && !playbackPaused && !pendingReplay && !inputInProgress;
+			if (liveTurnNarrationActive && !playbackPaused && !pendingReplay && !blockedUnread) {
+				playbackHistory.selectCapture(vocalizer.playbackUtterance);
+			}
+			const historyStatus = blockedUnread ? undefined : playbackHistory.status(playbackPaused || pendingReplay ? undefined : vocalizer.playbackUtterance);
+			const playback = config.enabled ? (waitingAtTail && historyStatus && ((!playbackPaused && historyStatus.messageId !== tailId) || historyStatus.position < historyStatus.duration) ? undefined : historyStatus) ?? (activePlayback ? {
+				messageId: blockedUnread ? livePlaybackId ?? (liveSource?.final ? completed.at(-1)?.id : undefined) ?? "" : waitingAtTail ? tailId ?? "" : pendingReplay?.target.id ?? playbackHistory.selected()?.id ?? livePlaybackId ?? "", position: 0, duration: 0,
+				messageIndex: tailId?.startsWith("live:") ? -1 : tailMessages.length - 1, messageCount: tailMessages.length, hasTimings: false, timingsComplete: false, wordTimingCoverage: undefined,
 			} : undefined) : undefined;
 			let playbackLine: string | undefined;
 			if (playback) {
-				if (playback.messageIndex < 0 && playback.messageId.startsWith("live:")) {
-					const completed = completedAssistantMessages(ctx, config.mode).length;
-					const liveIds = [...liveBlockIds.values()];
-					playback.messageIndex = completed + Math.max(0, liveIds.indexOf(playback.messageId));
-					playback.messageCount = completed + Math.max(1, liveIds.length);
+				if (playback.messageIndex < 0 && playback.messageId && !playback.messageId.startsWith("live:")) {
+					playback.messageIndex = completed.findIndex(message => message.id === playback.messageId);
+					playback.messageCount = completed.length;
 				}
-				const phase = playbackPaused || pendingReplay?.paused ? "paused"
-					: pendingReplay?.waiting ? pendingReplay.phase : activePlayback ? playbackPhase : "idle";
+				if (playback.messageIndex < 0 && playback.messageId.startsWith("live:")) {
+					const liveIds = [...liveBlockIds.values()];
+					playback.messageIndex = completed.length + Math.max(0, liveIds.indexOf(playback.messageId));
+					playback.messageCount = completed.length + Math.max(1, liveIds.length);
+				}
+				const phase = handoffConnecting ? "connecting" : playbackPaused || pendingReplay?.paused ? "paused"
+					: pendingReplay?.waiting ? pendingReplay.phase : activePlayback ? (blockedUnread || playbackPhase === "idle" || playbackPhase === "paused" ? "queued" : playbackPhase) : "idle";
 				const labels: Record<PlaybackPhase, string> = { idle: "○ Idle", playing: "▶ Playing", paused: "⏯ Paused",
 					synthesizing: "◷ Synthesizing", loading: "◷ Loading", describing: "◷ Describing", connecting: "◷ Connecting", queued: "◷ Queued" };
 				const latest = liveSource && !liveSource.final ? [...liveBlockIds.values()].at(-1) ?? livePlaybackId
-					: completedAssistantMessages(ctx, config.mode).at(-1)?.id;
+					: completed.at(-1)?.id;
 				// Playback chronology, never the transcript viewport or Alt+T follow setting.
-				const live = activePlayback && !playbackPaused && !pendingReplay?.paused &&
-					(!latest || playback.messageId === latest || !playback.messageId) &&
+				const live = activePlayback && !handoffConnecting && !speechBlocked && !unreadWaiting && !playbackPaused && !pendingReplay?.paused &&
+					(!latest || playback.messageId === latest || !playback.messageId || (pendingCanonicalizations.size > 0 && [...liveBlockIds.values()].at(-1) === playback.messageId)) &&
 					!pendingReplay && playbackPhase === "idle" && (waitingAtTail || ((playbackTailIntent || (liveTurnNarrationActive && !ownerTurnEnded)) &&
 						Math.max(narration.consumedSourceEnd, playbackTailIntent ? playbackTailSourceEnd : 0) >= narration.sourceEnd)) && playback.position >= playback.duration;
-				const known = playback.hasTimings && playback.duration > 0;
+				const known = playback.hasTimings && playback.timingsComplete && playback.duration > 0 &&
+					!(liveSource && !liveSource.final && [...liveBlockIds.values()].includes(playback.messageId));
 				const time = live ? ctx.ui.theme.fg("error", "● live")
-					: known ? `${formatPlaybackTime(playback.position)} / ${formatPlaybackTime(playback.duration)}` : "--:-- / --:--";
+					: known ? `${formatPlaybackTime(playback.position)} / ${formatPlaybackTime(playback.duration)}`
+					: playback.hasTimings || playback.position > 0 ? formatPlaybackTime(playback.position) : "--:--";
 				const message = playback.messageIndex >= 0 ? `message ${playback.messageIndex + 1}/${playback.messageCount}` : "current response";
-				playbackLine = `${labels[live ? "playing" : phase]} · ${playbackBar(playback.position, playback.duration)} ${time} · ${message}${!known && !live ? " · timing pending" : ""}`;
+				playbackLine = `${labels[live ? "playing" : phase]} · ${playbackBar(playback.position, known ? playback.duration : 0)} ${time} · ${message}${!known && !live ? " · timing pending" : ""}`;
 			}
 			if (paintPreprocessing) {
 				displayedCodeProgress = codePreprocessingProgress ?? (codeDescriptionPreprocessing ? displayedCodeProgress : undefined);
@@ -713,15 +734,20 @@ export default async function (pi: ExtensionAPI) {
 			if (progressComponentEpoch !== uiEpoch) {
 				progressComponent?.invalidate();
 				progressComponent = undefined;
+				progressRender = undefined;
 			}
 			progressComponentEpoch = uiEpoch;
-			if (!lines.length) progressComponent?.invalidate();
-			else progressComponent?.update(lines, name);
-			const component = lines.length > 0 ? progressComponent ?? deviceProgressComponent(lines, name, () => {
+			progressComponent?.update(lines, name);
+			const component = progressComponent ?? deviceProgressComponent(lines, name, () => {
 				if (uiEpoch === contextEpoch && interactiveVoiceSession) void pickDevice(ctx);
-			}) : undefined;
+			});
 			progressComponent = component;
-			ctx.ui.setWidget("pi-voice-progress", component ? () => component : undefined, { placement: "belowEditor" });
+			if (!progressRender && component) {
+				ctx.ui.setWidget("pi-voice-progress", tui => {
+					progressRender = () => tui.requestRender();
+					return component;
+				}, { placement: "belowEditor" });
+			} else progressRender?.();
 			progressWidgetKey = key;
 		} catch {
 			// The active context can become stale just before session shutdown runs.
@@ -1036,6 +1062,15 @@ export default async function (pi: ExtensionAPI) {
 		codeDescriptionPreprocessing = (async () => {
 			await new Promise<void>(resolve => setImmediate(resolve));
 			let sliceStart = performance.now();
+			// Warm raw history in bounded slices too, without resetting resolved render identities.
+			for (const entry of completedBranch(ctx)) {
+				if (performance.now() - sliceStart >= 8) {
+					await new Promise<void>(resolve => setImmediate(resolve));
+					sliceStart = performance.now();
+				}
+				if (epoch !== contextEpoch || workEpoch !== codeWorkEpoch || !isCurrentContext(ctx)) return;
+				completedEntryMessages(ctx, entry, config.mode, config.codeDescriptionContext === "conversation");
+			}
 			const currentId = playbackHistory.status()?.messageId;
 			for (const message of prioritizeFromCurrent(scopedCompletedMessages(ctx, config.mode), currentId)) {
 				if (performance.now() - sliceStart >= 8) {
@@ -2015,7 +2050,10 @@ export default async function (pi: ExtensionAPI) {
 		if (!queueIncomingWhilePaused) {
 			// Completion advances chronology, not the viewport; waiting never retains the audio lease.
 			const latest = activeContext && completedAssistantMessages(activeContext, config.mode, false).at(-1);
-			if (latest && (speechPurpose === "turn" || speechPurpose === "replay") && latest?.id === playbackHistory.selected()?.id) {
+			const selected = playbackHistory.selected()?.id;
+			const pendingLiveEnd = liveTurnNarrationActive && pendingCanonicalizations.size > 0 && selected !== undefined &&
+				selected === [...liveBlockIds.values()].at(-1);
+			if ((latest && (speechPurpose === "turn" || speechPurpose === "replay") && latest.id === selected) || pendingLiveEnd) {
 				navigationAtTail = true;
 				playbackTailIntent = true;
 			}
@@ -2272,6 +2310,8 @@ export default async function (pi: ExtensionAPI) {
 		}
 		const ctx = activeContext;
 		const previous = deviceRebind;
+		handoffConnecting = true;
+		refreshProgressWidget();
 		let stopUnconfirmed = false;
 		const adoption = (async () => {
 			try {
@@ -2363,6 +2403,12 @@ export default async function (pi: ExtensionAPI) {
 		});
 		deviceRebind = barrier;
 		const clearBarrier = () => { if (deviceRebind === barrier) deviceRebind = undefined; };
+		void adoption.finally(() => {
+			if (deviceRebind === barrier || !deviceRebind) {
+				handoffConnecting = false;
+				refreshProgressWidget();
+			}
+		}).catch(() => {});
 		void barrier.then(clearBarrier, () => {
 			if (stopUnconfirmed) unconfirmedDeviceStops.add(barrier);
 			else clearBarrier();
@@ -2860,7 +2906,9 @@ export default async function (pi: ExtensionAPI) {
 				onChecked?.();
 			}
 		}
-		return epoch === contextEpoch && request === playbackRequestEpoch && isCurrentContext(ctx);
+		if (epoch !== contextEpoch || request !== playbackRequestEpoch || !isCurrentContext(ctx)) return false;
+		completedAssistantMessages(ctx, config.mode);
+		return true;
 	};
 
 	const pendingCanonicalizations = new Set<(messages: PlaybackMessage[]) => boolean>();
@@ -2899,6 +2947,7 @@ export default async function (pi: ExtensionAPI) {
 				const completed = messages.find(message => message.id === (target.contentIndex === 0 ? entry.id : `${entry.id}:${target.contentIndex}`));
 				if (!completed) continue;
 				playbackHistory.rename(target.id, completed);
+				if (livePlaybackId === target.id) livePlaybackId = completed.id;
 				if (pendingReplay?.target.id === target.id) Object.assign(pendingReplay.target, completed);
 				if (blockIds.get(target.contentIndex) === target.id) blockIds.set(target.contentIndex, completed.id);
 				const queued = queuedPausedMessages.find(message => message.id === target.id);
@@ -3631,6 +3680,8 @@ export default async function (pi: ExtensionAPI) {
 		progressComponent?.invalidate();
 		progressComponent = undefined;
 		progressWidgetKey = undefined;
+		progressRender = undefined;
+		handoffConnecting = false;
 		ctx.ui.setWidget("pi-voice-progress", undefined);
 		ctx.ui.setWidget("pi-voice-input", undefined);
 		ctx.ui.setWidget("pi-voice-playback", undefined);
@@ -3688,7 +3739,7 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	pi.on("input", async () => {
-		if (!interactiveVoiceSession || playbackPaused) return;
+		if (!interactiveVoiceSession || playbackPaused || (playbackTailIntent && !ownsSpeech && !pendingReplay && !attentionSuppressed)) return;
 		disabledAttentionPending = false;
 		queuedPausedMessages.length = 0;
 		restoreBottomAfterSpeech = false;
@@ -4297,6 +4348,9 @@ export default async function (pi: ExtensionAPI) {
 		if (!playbackHistory.selected() || !ownsSpeech || (lastOwnerUtterance === undefined && ownerTurnEnded)) return false;
 		const pausedScrollTop = preserveViewport ? activeScrollView()?.scrollTop : undefined;
 		pausedOwnerUtterance = lastOwnerUtterance;
+		if (!liveTurnNarrationActive && speechPurpose === "turn" && !pendingReplay && vocalizer.playbackUtterance !== undefined) {
+			playbackHistory.selectCapture(vocalizer.playbackUtterance);
+		}
 		vocalizer.setPlaybackPaused(true);
 		playbackPaused = true;
 		narration.setPaused(playbackPaused);
@@ -4875,16 +4929,19 @@ export default async function (pi: ExtensionAPI) {
 				}
 				case "reconnect": {
 					const epoch = ++playbackRequestEpoch;
+					const paused = playbackPaused || !!pendingReplay || (ownsSpeech &&
+						(lastOwnerUtterance !== undefined || (speechPurpose === "turn" && liveTurnNarrationActive && !ownerTurnEnded)));
 					pendingReplay = undefined;
-					if (ownsSpeech) {
+					if (paused) {
 						playbackPaused = true;
 						narration.setPaused(playbackPaused);
 						vocalizer.setPlaybackPaused(true);
 					}
 					if (await adoptCurrentConnection(epoch, true, undefined, undefined, undefined, true)) {
-						playbackPaused = ownsSpeech;
+						playbackPaused = paused;
 						narration.setPaused(playbackPaused);
 						vocalizer.setPlaybackPaused(playbackPaused);
+						refreshStatus();
 					}
 					return;
 				}

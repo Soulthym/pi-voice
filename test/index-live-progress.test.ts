@@ -15,6 +15,56 @@ const settle = async () => {
 	await new Promise(resolve => setTimeout(resolve, 100));
 };
 
+test("lease-free live intent cannot hide unread output blocked by another owner", async t => {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-blocked-live-"));
+	const keys = ["PI_VOICE_CONFIG", "PI_VOICE_COORDINATOR_DIR", "PI_VOICE_DEVICE_DIR"] as const;
+	const old = keys.map(key => process.env[key]);
+	process.env.PI_VOICE_CONFIG = path.join(root, "voice.json");
+	process.env.PI_VOICE_COORDINATOR_DIR = path.join(root, "coordinator");
+	process.env.PI_VOICE_DEVICE_DIR = path.join(root, "devices");
+	await fs.writeFile(process.env.PI_VOICE_CONFIG, JSON.stringify({ enabled: true, mode: "assistant", output: "local", audioCache: false, timingPreprocessConcurrency: 0 }));
+	const host = new FakeVoiceHost(root, "blocked-live");
+	const owner = new SessionCoordinator(path.join(root, "other"), "other");
+	owner.start();
+	t.after(async () => {
+		owner.releaseSpeech(); owner.shutdown(); await host.shutdown();
+		keys.forEach((key, i) => { if (old[i] === undefined) delete process.env[key]; else process.env[key] = old[i]; });
+		await fs.rm(root, { recursive: true, force: true });
+	});
+	await host.start();
+	host.idle = false;
+	const first = assistant("First complete sentence. ");
+	await host.emit("message_start", { message: first });
+	await host.emit("message_update", { message: first, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: first.content[0].text } });
+	await host.emit("message_end", { message: first });
+	await host.emit("turn_end", { message: first });
+	await settle();
+	const worker = MockedVoiceWorkerClient.instances.at(-1)!;
+	const clip = worker.sent.at(-1) as { utterance: number; segmentId: number };
+	for (const prefix of worker.sent.slice(0, -1) as Array<{ utterance: number }>) worker.emit({ type: "idle", utterance: prefix.utterance });
+	worker.emit({ type: "segment-audio", utterance: clip.utterance, segmentId: clip.segmentId, start: 0, duration: 1 });
+	worker.emit({ type: "idle", utterance: clip.utterance }); await settle();
+	assert.match(host.widgetLines()![0], /Playing.*● live/, "completion retains intent before the source receives a persisted ID");
+	assert.equal(owner.speechOwner(), undefined);
+	host.addMessage("first", null, first);
+	await host.emit("agent_settled", {}); await settle();
+	assert.match(host.widgetLines()![0], /Playing.*● live/, "canonical source adoption preserves lease-free live");
+	assert.equal(owner.tryAcquireSpeech(), true);
+	await host.emit("input", { text: "Next prompt", source: "interactive" });
+	await host.emit("before_agent_start", {});
+	const blocked = assistant("Unread output blocked by ownership. ");
+	await host.emit("message_start", { message: blocked });
+	await host.emit("message_update", { message: blocked, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: blocked.content[0].text } });
+	await settle();
+	assert.match(host.widgetLines()![0], /Queued.*\[━+\] --:--/);
+	assert.doesNotMatch(host.widgetLines()![0], /● live|Paused|0:01/);
+	await host.emit("message_end", { message: blocked });
+	host.addMessage("blocked", "first", blocked);
+	await host.emit("turn_end", { message: blocked }); await settle();
+	assert.match(host.widgetLines()![0], /Queued/);
+	assert.doesNotMatch(host.widgetLines()![0], /● live|Paused/);
+});
+
 test("mounted playbar keeps a queued live target through background preparation and streaming", async t => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-live-progress-"));
 	const names = ["PI_VOICE_CONFIG", "PI_VOICE_COORDINATOR_DIR", "PI_VOICE_DEVICE_DIR"] as const;
@@ -71,7 +121,7 @@ test("mounted playbar keeps a queued live target through background preparation 
 	host.ctx.ui.setWidget = (name: string, value: any, options: any) => {
 		nativeUI.setExtensionWidget(name, value, options);
 		const component = nativeUI.extensionWidgetsBelow.get(name) ?? nativeUI.extensionWidgetsAbove.get(name);
-		const normalized = component ? { lines: component.render(160).map((line: string) => line.trimStart()), placement: options?.placement } : undefined;
+		const normalized = component ? { get lines() { return component.render(160).map((line: string) => line.trimStart()); }, placement: options?.placement } : undefined;
 		host.widgets.set(name, normalized);
 		host.widgetOperations.push({ name, value: normalized });
 		mountedRows.push(nativeUI.widgetContainerBelow.render(160));
@@ -99,6 +149,8 @@ test("mounted playbar keeps a queued live target through background preparation 
 	await host.shortcut("f8"); await settle();
 	assert.match(host.widgetLines()![0]!, /Paused/);
 	assert.equal(nativeUI.extensionWidgetsBelow.get("pi-voice-progress"), retired, "progress refresh retains native mouse identity");
+	const widgetOrder = [...nativeUI.extensionWidgetsBelow.keys()];
+	assert.ok(widgetOrder.indexOf("pi-voice-progress") < widgetOrder.indexOf("pi-voice-jump"), "Jump stays below the mounted progress row");
 	const partial = assistant("New response first sentence. ");
 	delete partial.stopReason;
 	host.idle = false;
@@ -141,14 +193,14 @@ test("mounted playbar keeps a queued live target through background preparation 
 	worker.emit({ type: "speaking" });
 	worker.emit({ type: "playback", utterance: segment.utterance, position: 1 });
 	await settle();
-	assert.match(host.widgetLines()![0]!, /Playing.*0:01 \/ 0:04.*message 2\/2/);
+	assert.match(host.widgetLines()![0]!, /Playing.*\[━+\] 0:01 · message 2\/2/);
 	assert.doesNotMatch(host.widgetLines()![0]!, /● live/);
 	await host.shortcut("alt+t"); await settle();
 	assert.doesNotMatch(host.widgetLines()![0]!, /● live/, "following the viewport is not chronological live playback");
 	partial.content[0].text += "Second sentence continues growing. ";
 	await host.emit("message_update", { message: partial, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Second sentence continues growing. " } });
 	await host.emit("agent_settled", {}); await settle();
-	assert.match(host.widgetLines()![0]!, /0:01 \/ 0:04.*message 2\/2/);
+	assert.match(host.widgetLines()![0]!, /\[━+\] 0:01 · message 2\/2/);
 	worker.emit({ type: "playback", utterance: segment.utterance, position: 4 }); await settle();
 	assert.doesNotMatch(host.widgetLines()![0]!, /● live/, "exhausted first clip is not live while second prose awaits audio");
 	assert.doesNotMatch(frames.at(-1)!.join("\n"), /● live/);
@@ -172,7 +224,7 @@ test("mounted playbar keeps a queued live target through background preparation 
 		"actual native screens retain the playbar, not merely the widget map");
 	assert.match(host.widgetLines()![0]!, /0:04 \/ 0:10/, "real retained history exists before Tail");
 	await host.shortcut("f10"); await settle();
-	assert.match(host.widgetLines()![0]!, /Paused.*--:-- \/ --:--/, "paused Tail discards abandoned history time");
+	assert.match(host.widgetLines()![0]!, /Paused.*\[━+\] --:--/, "paused Tail discards abandoned history time");
 	await host.shortcut("f8"); await settle();
 	await host.shortcut("f10"); await settle();
 	assert.match(host.widgetLines()![0]!, /● live/);
@@ -207,18 +259,28 @@ test("mounted playbar keeps a queued live target through background preparation 
 	worker.emit({ type: "speaking" });
 	worker.emit({ type: "playback", utterance: first.utterance, position: 1 });
 	await settle();
-	streaming.content.push({ type: "text", text: "Second block sentence. " });
+	streaming.content.push({ type: "text", text: "```\n" });
 	await host.emit("message_update", { message: streaming, assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: streaming.content[1].text } });
 	await settle();
+	assert.match(host.widgetLines()![0]!, /Playing.*0:01.*message 3\/4/, "preparing B cannot borrow A's phase or replace its audible context");
 	worker.emit({ type: "idle", utterance: first.utterance }); await settle();
-	assert.match(host.widgetLines()![0]!, /Queued.*0:03 \/ 0:03/);
-	assertFrame("source-block handoff");
+	assert.match(host.widgetLines()![0]!, /Queued.*\[━+\] --:--.*message 4\/4/);
+	assert.doesNotMatch(host.widgetLines()![0]!, /0:03/, "B never borrows A's completed clock");
+	assertFrame("source-block handoff without a B utterance");
+	const suffix = "```\nSecond block sentence. ";
+	streaming.content[1].text += suffix;
+	await host.emit("message_update", { message: streaming, assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: suffix } });
+	await settle();
+	assert.match(host.widgetLines()![0]!, /Queued.*--:--.*message 4\/4/);
+	await host.shortcut("f8"); await settle();
+	assert.match(host.widgetLines()![0]!, /Paused.*--:--.*message 4\/4/, "pause preserves queued B rather than returning to completed A");
+	await host.shortcut("f8"); await settle();
 	const second = worker.sent.at(-1) as { utterance: number; segmentId: number };
 	assert.notEqual(second.utterance, first.utterance);
 	worker.emit({ type: "segment-audio", segmentId: second.segmentId, utterance: second.utterance, start: 0, duration: 2 });
 	worker.emit({ type: "speaking" });
 	worker.emit({ type: "playback", utterance: second.utterance, position: 1 }); await settle();
-	assert.match(host.widgetLines()![0]!, /Playing.*0:01 \/ 0:02/);
+	assert.match(host.widgetLines()![0]!, /Playing.*\[━+\] 0:01 ·/);
 	const finished = { ...streaming, stopReason: "stop" };
 	host.addMessage("last", "new", finished);
 	await host.emit("message_end", { message: finished });
@@ -234,6 +296,14 @@ test("mounted playbar keeps a queued live target through background preparation 
 	finishedMissing.mock.restore();
 	worker.emit({ type: "ready" }); await settle();
 	const finishedGapEnd = frames.length;
+	const liveMount = nativeUI.extensionWidgetsBelow.get("pi-voice-progress");
+	const mountCount = host.widgetOperations.filter(operation => operation.name === "pi-voice-progress").length;
+	await host.emit("input", { text: "Normal next prompt", source: "interactive" }); await settle();
+	await host.emit("before_agent_start", {}); await settle();
+	assert.match(host.widgetLines()![0]!, /Playing.*● live/, "ordinary input preserves lease-free follow intent");
+	assert.equal(observer.speechOwner(), undefined, "prompt submission does not reserve a live-follow lease");
+	assert.equal(nativeUI.extensionWidgetsBelow.get("pi-voice-progress"), liveMount);
+	assert.equal(host.widgetOperations.filter(operation => operation.name === "pi-voice-progress").length, mountCount);
 	await host.shortcut("f8"); await settle();
 	assert.match(host.widgetLines()![0]!, /Paused.*0:02 \/ 0:02/);
 	assert.equal(observer.speechOwner(), undefined, "pausing live intent needs no transport");
@@ -246,6 +316,7 @@ test("mounted playbar keeps a queued live target through background preparation 
 	host.addMessage("queued-response", "last", queuedResponse);
 	await host.emit("turn_end", { message: queuedResponse }); await settle();
 	assert.equal(worker.sent.length, sentBeforePause, "paused live edge queues the next complete response");
+	assert.match(host.widgetLines()![0]!, /Paused.*0:02 \/ 0:02.*message 4\/5/, "incoming B cannot replace paused A's position with a tail placeholder");
 	await host.shortcut("f8"); await settle();
 	assert.ok(worker.sent.length > sentBeforePause, "one F8 resumes the queued response");
 	const resumed = worker.sent.at(-1) as { utterance: number; segmentId: number };
@@ -282,7 +353,7 @@ test("mounted playbar keeps a queued live target through background preparation 
 	assert.ok(frames.filter((_rows, index) => index >= streamingFrames && (index < finishedGapStart || index >= finishedGapEnd))
 		.every(rows => rows.some(line => /(?:Queued|Playing|Idle|Paused|Loading|Synthesizing|Connecting).*\[[●━]/.test(line))),
 		"native frames keep the bar across chunks, preparation gaps and tools; only finished idle can retire it");
-	for (const columns of [40, 100]) {
+	for (const columns of [40, 80, 120]) {
 		terminal.columns = columns;
 		tui.requestRender(true);
 		if (columns === 40) assert.match(frames.at(-1)!.join("\n"), /🎧/, "narrow dock retains device identity even with a long hostname");
@@ -318,6 +389,11 @@ test("mounted playbar keeps a queued live target through background preparation 
 		assert.equal(worker.sent.length, sent);
 		assert.doesNotMatch(frames.at(-1)!.join("\n"), /● live/, "buffered source immediately retires the mounted live badge");
 		assertFrame("buffered source retains the mounted playbar");
+		assert.match(host.widgetLines()![0]!, /Queued.*\[━+\]/);
+		const incompleteMissing = t.mock.method(PlaybackHistory.prototype, "status", () => undefined);
+		worker.emit({ type: "ready" }); await settle();
+		assert.match(host.widgetLines()![0]!, /Queued.*\[━+\] --:--/, "incomplete source remains Queued even without history");
+		incompleteMissing.mock.restore();
 	}
 	await host.command("stop"); await settle();
 	await host.emit("before_agent_start", {}); await settle();
@@ -348,7 +424,7 @@ test("mounted playbar keeps a queued live target through background preparation 
 	assert.doesNotMatch(host.widgetLines()?.join("\n") ?? "", /\[[●━]|● live/, "stop has no phantom transport without history");
 	await host.command("off");
 	for (let i = 0; i < 30 && host.widgetLines(); i++) await settle();
-	assert.equal(host.widgetLines(), undefined);
+	assert.deepEqual(host.widgetLines(), []);
 	stoppedMissing.mock.restore();
 	await host.shutdown();
 	assert.equal(host.widgetLines(), undefined);
@@ -356,4 +432,61 @@ test("mounted playbar keeps a queued live target through background preparation 
 	assert.equal(footer.render, originalFooterRender);
 	assert.equal(statuses.get("other"), "Other extension status");
 	assert.equal(host.modelRequests.length, 0);
+});
+
+for (const mode of ["assistant", "yield"] as const) test(`${mode} progress retains chronology across persisted input and foreground pause`, async t => {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-progress-chronology-"));
+	const keys = ["PI_VOICE_CONFIG", "PI_VOICE_COORDINATOR_DIR", "PI_VOICE_DEVICE_DIR"] as const;
+	const old = keys.map(key => process.env[key]);
+	process.env.PI_VOICE_CONFIG = path.join(root, "voice.json");
+	process.env.PI_VOICE_COORDINATOR_DIR = path.join(root, "coordinator");
+	process.env.PI_VOICE_DEVICE_DIR = path.join(root, "devices");
+	await fs.writeFile(process.env.PI_VOICE_CONFIG, JSON.stringify({ enabled: true, mode, output: "local", audioCache: false, timingPreprocessConcurrency: 0, codeDescriptionPreprocessConcurrency: 0 }));
+	const host = new FakeVoiceHost(root, "progress-chronology");
+	host.sessionManager.getEntry = (id: string) => host.entries.find(entry => entry.id === id);
+	t.after(async () => {
+		await host.shutdown();
+		keys.forEach((key, i) => { if (old[i] === undefined) delete process.env[key]; else process.env[key] = old[i]; });
+		await fs.rm(root, { recursive: true, force: true });
+	});
+	if (mode === "assistant") {
+		host.addMessage("old-a", null, assistant("Historical A."));
+		host.addMessage("old-b", "old-a", assistant("Historical B."));
+	}
+	await host.start();
+	host.idle = false;
+	await host.emit("input", { text: "Next prompt", source: "interactive" });
+	await host.emit("before_agent_start", {});
+	await settle();
+	host.addMessage("user", host.sessionManager.getLeafId(), { role: "user", content: "Next prompt", timestamp: Date.now() });
+	const response = assistant("First response sentence. ");
+	if (mode === "assistant") delete response.stopReason;
+	else response.content.push({ type: "text", text: "Second response sentence. " });
+	await host.emit("message_start", { message: response });
+	await host.emit("message_update", { message: response, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: response.content[0].text } });
+	if (mode === "assistant") assert.match(host.widgetLines()![0], /message 3\/3/, "first streaming paint retains the historical count without cold preparation");
+	if (mode === "yield") {
+		host.addMessage("response", "user", response);
+		await host.emit("message_end", { message: response });
+		await host.emit("turn_end", { message: response });
+	}
+	await settle();
+	const worker = MockedVoiceWorkerClient.instances.at(-1)!;
+	if (mode === "assistant") {
+		assert.match(host.widgetLines()![0], /message 3\/3/);
+	} else {
+		const first = worker.sent.find((event: any) => event.text.includes("First response")) as { utterance: number; segmentId: number };
+		const second = worker.sent.find((event: any) => event.text.includes("Second response")) as { utterance: number; segmentId: number };
+		assert.ok(first); assert.ok(second);
+		for (const clip of worker.sent as Array<{ utterance: number; segmentId: number }>) {
+			if (clip.utterance === second.utterance) break;
+			worker.emit({ type: "segment-audio", utterance: clip.utterance, segmentId: clip.segmentId, start: 0, duration: 1 });
+			worker.emit({ type: "idle", utterance: clip.utterance });
+		}
+		worker.emit({ type: "playback-phase", utterance: second.utterance, segmentId: second.segmentId, phase: "synthesizing" });
+		await settle();
+		assert.match(host.widgetLines()![0], /Synthesizing.*message 2\/2/);
+		await host.shortcut("f8"); await settle();
+		assert.match(host.widgetLines()![0], /Paused.*message 2\/2/);
+	}
 });

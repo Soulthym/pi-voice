@@ -31,8 +31,8 @@ test("worker quality reaches the widget independently of clock estimates and pre
 	const worker = MockedVoiceWorkerClient.instances[workerIndex]!;
 	const segment = worker.sent.at(-1) as { segmentId: number; utterance: number };
 	const { segmentId, utterance } = segment;
-	const widget = () => host.widgets.get("pi-voice-progress")?.lines?.join("\n") ?? "";
-	assert.match(widget(), /^◷ Queued ·.*--:-- \/ --:-- · message 1\/1 · timing pending\s+\[🎧:/);
+	const widget = () => host.widgetLines()?.join("\n") ?? "";
+	assert.match(widget(), /^◷ Queued ·.*--:-- · message 1\/1 · timing pending\s+\[🎧:/);
 	assert.equal(host.widgetLines()?.at(-1), "Word timing: unknown/pending");
 	worker.emit({ type: "loading" });
 	await settle();
@@ -41,9 +41,9 @@ test("worker quality reaches the widget independently of clock estimates and pre
 	worker.emit({ type: "playback-phase", utterance, segmentId, phase: "playing" });
 	worker.emit({ type: "speaking" });
 	await settle();
-	assert.match(widget(), /^▶ Playing ·.*--:-- \/ --:-- · message 1\/1 · timing pending\s+\[🎧:/);
+	assert.match(widget(), /^▶ Playing ·.*--:-- · message 1\/1 · timing pending\s+\[🎧:/);
 	await host.shortcut("f8");
-	assert.match(widget(), /^⏯ Paused ·.*--:-- \/ --:-- · message 1\/1 · timing pending\s+\[🎧:/);
+	assert.match(widget(), /^⏯ Paused ·.*--:-- · message 1\/1 · timing pending\s+\[🎧:/);
 	await host.shortcut("f8");
 	worker.emit({ type: "segment-audio", segmentId, utterance, start: 0, duration: 6, timingQuality: "estimated" });
 	worker.emit({ type: "playback", utterance, position: 1, estimated: false });
@@ -101,9 +101,9 @@ test("worker quality reaches the widget independently of clock estimates and pre
 	await restoredHost.start();
 	assert.equal(restoredHost.widgetLines()?.at(-1), "Word timing: unknown/pending", "sparse restored checkpoints cannot fabricate word coverage");
 	assert.match(restoredHost.widgetLines()![0], /^○ Idle ·/);
-	assert.ok(host.widgetOperations.every(operation => !operation.value?.lines?.some(line => /clock/i.test(line))));
+	assert.ok(host.widgetFrames.every(lines => !lines.some(line => /clock/i.test(line))));
 	const { Text } = await import("@earendil-works/pi-tui");
-	const wordRows = host.widgetOperations.flatMap(operation => operation.value?.lines?.filter(line => line.startsWith("Word timing:")) ?? []);
+	const wordRows = host.widgetFrames.flatMap(lines => lines.filter(line => line.startsWith("Word timing:")));
 	for (const count of [3, 1, 0]) assert.ok(wordRows.includes(`Word timing: ${count}/3 estimated`));
 	assert.ok(wordRows.every(line => new Text(line, 1, 0).render(32).length === 1), "native mobile word rows keep their height as quality changes");
 });

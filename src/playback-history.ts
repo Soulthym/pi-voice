@@ -500,13 +500,20 @@ export class PlaybackHistory {
 		if (segment) capture.record.cursor = { sourceOffset: segment.sourceOffset, skipUnits: segment.skipUnits };
 	}
 
+	/** Follow the foreground capture without inventing a playback tick or resetting its cursor. */
+	selectCapture(utterance?: number): void {
+		const capture = utterance === undefined ? this.#capture : this.#utterances.get(utterance);
+		if (capture?.valid) this.#selectedId = capture.record.id;
+	}
+
 	selected(includeIdentity = false): PlaybackMessage | undefined {
 		const record = this.#selectedId ? this.#records.get(this.#selectedId) : undefined;
 		return record ? { id: record.id, text: record.text, ...(includeIdentity ? { renderKey: record.renderKey } : {}), ...(record.messageType ? { messageType: record.messageType, contentIndex: record.contentIndex, displayOffset: record.displayOffset } : {}) } : undefined;
 	}
 
-	status(): PlaybackStatus | undefined {
-		const record = this.#selectedId ? this.#records.get(this.#selectedId) : undefined;
+	status(utterance?: number): PlaybackStatus | undefined {
+		const record = utterance !== undefined ? this.#utterances.get(utterance)?.record
+			: this.#selectedId ? this.#records.get(this.#selectedId) : undefined;
 		if (!record) return undefined;
 		const index = this.#order.indexOf(record.id);
 		const qualities = record.checkpoints.filter(point => point.duration > 0).map(point => point.quality);
@@ -533,7 +540,7 @@ export class PlaybackHistory {
 		if (!wordTimingCoverage?.total) wordTimingCoverage = undefined;
 		return {
 			messageId: record.id,
-			position: Math.max(0, Math.min(record.duration || record.position, record.position)),
+			position: Math.max(0, record.timingsComplete ? Math.min(record.duration, record.position) : record.position),
 			duration: record.duration,
 			messageIndex: index,
 			messageCount: this.#order.length,

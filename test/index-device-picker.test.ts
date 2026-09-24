@@ -82,7 +82,9 @@ test("picker snapshots unique labels, cancels read-only, revalidates and uses th
 	const before = { pins: pins().length, pauses: worker.pauses.length, sent: worker.sent.length };
 	host.scrollView.setDocument(Array.from({ length: 100 }, (_, i) => `${i}`));
 	host.scrollView.manualScrollTo(20);
+	const beforePicker = host.widgetLines()?.[0];
 	let opening = host.shortcut("alt+s");
+	assert.equal(host.widgetLines()?.[0], beforePicker, "opening the picker does not present a handoff");
 	assert.equal(options.length, 3, "only local and valid available registrations");
 	assert.equal(new Set(options).size, 3, "duplicate names and short-ID prefixes remain distinct");
 	assert.match(options[1], /current/);
@@ -90,6 +92,7 @@ test("picker snapshots unique labels, cancels read-only, revalidates and uses th
 	assert.equal(worker.pauses.length, before.pauses);
 	assert.equal(worker.sent.length, before.sent);
 	answer.resolve(undefined); await opening;
+	assert.equal(host.widgetLines()?.[0], beforePicker, "cancelling the picker preserves playback presentation");
 	assert.equal(host.scrollView.scrollTop, 20);
 	assert.equal(editor, "Keep my draft");
 	assert.equal(worker.pauses.length, before.pauses);
@@ -116,6 +119,8 @@ test("picker snapshots unique labels, cancels read-only, revalidates and uses th
 	const terminate = t.mock.method(worker, "terminate", () => stop.promise);
 	answer.resolve(options[2]); await settle();
 	assert.equal(pins().at(-1).data.pin, "local", "selection awaits actual stop proof");
+	assert.match(host.widgetLines()![0], /Connecting/);
+	assert.doesNotMatch(host.widgetLines()![0], /Paused/, "internal handoff transport pause is not user pause presentation");
 	stop.resolve(); await opening;
 	terminate.mock.restore();
 	assert.equal(pins().at(-1).data.pin, ids[1]);
@@ -150,6 +155,9 @@ test("picker snapshots unique labels, cancels read-only, revalidates and uses th
 	assert.match(options[0], /Local/);
 	answer.resolve(undefined); await opening;
 	await register(ids[1]);
+	await host.command("stop"); await settle();
+	await host.command("device local"); await settle();
+	assert.match(host.widgetLines()![0], /Idle/, "switching an idle session does not create pause intent");
 	answer = Promise.withResolvers(); opening = host.shortcut("alt+s");
 	const count = pins().length;
 	await host.shutdown();

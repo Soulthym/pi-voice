@@ -49,6 +49,29 @@ test("foreground phases follow lifecycle, pause intent, completion and cancellat
 	assert.deepEqual(phases, ["queued", "loading", "synthesizing", "paused", "playing", "queued", "connecting", "playing", "idle", "queued", "playing", "idle"]);
 });
 
+test("playback source and phase stay together across queued and audible utterances", () => {
+	const vocalizer = new Vocalizer(() => ({ ...DEFAULT_VOICE_CONFIG, enabled: true }), () => {},
+		undefined, undefined, worker);
+	vocalizer.speak("Source A.");
+	vocalizer.handleWorkerEvent({ type: "segment-audio", utterance: 1, segmentId: 1, start: 0, duration: 2 });
+	vocalizer.handleWorkerEvent({ type: "playback", utterance: 1, position: 1 });
+	vocalizer.speak("Source B.");
+	vocalizer.handleWorkerEvent({ type: "playback-phase", utterance: 2, segmentId: 2, phase: "synthesizing" });
+	assert.equal(vocalizer.playbackUtterance, 1);
+	assert.equal(vocalizer.playbackPhase, "playing");
+	vocalizer.handleWorkerEvent({ type: "playback", utterance: 1, position: 2 });
+	assert.equal(vocalizer.playbackUtterance, 2);
+	assert.equal(vocalizer.playbackPhase, "synthesizing");
+	vocalizer.handleWorkerEvent({ type: "idle", utterance: 1 });
+	vocalizer.speak("Source C.");
+	// Playback evidence outranks older pending work even if its completion event is missing.
+	vocalizer.handleWorkerEvent({ type: "segment-audio", utterance: 3, segmentId: 3, start: 0, duration: 2 });
+	vocalizer.handleWorkerEvent({ type: "playback", utterance: 3, position: 1 });
+	assert.equal(vocalizer.playbackUtterance, 3);
+	assert.equal(vocalizer.playbackPhase, "playing");
+	vocalizer.clear();
+});
+
 test("description phases are cancellation fenced and never override playing or paused intent", async () => {
 	let description = Promise.withResolvers<CodeNarrationPlan>();
 	const sent: number[] = [];

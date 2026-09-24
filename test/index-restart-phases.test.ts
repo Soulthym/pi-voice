@@ -8,7 +8,7 @@ import { PlaybackHistory } from "../src/playback-history.js";
 
 mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: MockedVoiceWorkerClient } });
 const settle = async () => { for (let i = 0; i < 30; i++) await new Promise(resolve => setImmediate(resolve)); };
-const lines = (host: FakeVoiceHost) => host.widgetOperations.flatMap(operation => operation.value?.lines ?? []);
+const lines = (host: FakeVoiceHost) => host.widgetFrames.flat();
 
 test("605 targets restore in a fresh host without provider, measurement, synthesis or alignment work", async t => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-restart-phases-"));

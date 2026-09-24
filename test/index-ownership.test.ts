@@ -34,8 +34,8 @@ test("sticky pause queues new responses; settings preserve ownership and dirty a
 	MockedVoiceWorkerClient.instances[workerIndex]!.emit({ type: "playback-phase", utterance: 999, segmentId: 999, phase: "loading" });
 	await settle();
 	assert.match(host.widgetLines()![0], /Queued/, "unrelated worker loading cannot replace ownership wait");
-	assert.ok(!host.widgetOperations.some(operation => operation.value?.lines?.some(line => /Describing/.test(line))), "context preparation without API work is never Describing");
-	assert.ok(host.widgetOperations.some(operation => operation.value?.lines?.some(line => /Connecting/.test(line))), "device handoff is Connecting");
+	assert.ok(!host.widgetFrames.some(lines => lines.some(line => /Describing/.test(line))), "context preparation without API work is never Describing");
+	assert.ok(host.widgetFrames.some(lines => lines.some(line => /Connecting/.test(line))), "device handoff is Connecting");
 	observer.releaseSpeech();
 	await replay;
 	await new Promise(resolve => setTimeout(resolve, 150)); await settle();

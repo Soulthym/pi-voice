@@ -143,8 +143,9 @@ export class FakeVoiceHost {
 			this.scrollView.invalidate();
 			this.implicitScrollView.invalidate();
 		},
-		requestRender: () => {},
+		requestRender: () => { this.widgetFrames.push(this.widgetLines() ?? []); },
 	};
+	readonly widgetFrames: string[][] = [];
 	readonly widgetComponents = new Map<string, { dispose?: () => void; render?: (width: number) => string[] }>();
 	/** Latest value per widget name, in update order. */
 	readonly styleCalls: Array<{ style: string; text: string }> = [];
@@ -207,7 +208,7 @@ export class FakeVoiceHost {
 					options?: { placement?: string },
 				) => {
 					if (this.snapScrollOnWidgetUpdate) this.scrollView.scrollToEnd();
-					if (value === undefined) this.widgetComponents.get(name)?.dispose?.();
+					if (value === undefined) { this.widgetComponents.get(name)?.dispose?.(); this.widgetComponents.delete(name); }
 					let normalized: { lines?: string[]; placement?: string } | undefined;
 					if (typeof value === "function") {
 						this.widgetComponents.set(name, value(this.tui, theme));
@@ -221,6 +222,7 @@ export class FakeVoiceHost {
 					}
 					this.widgets.set(name, normalized);
 					this.widgetOperations.push({ name, value: normalized });
+					this.tui.requestRender();
 				},
 
 				setEditorText: () => {},
@@ -313,7 +315,7 @@ export class FakeVoiceHost {
 	}
 
 	widgetLines(name = "pi-voice-progress"): string[] | undefined {
-		return this.widgets.get(name)?.lines;
+		return this.widgetComponents.get(name)?.render?.(160).map(line => line.trimStart()) ?? this.widgets.get(name)?.lines;
 	}
 
 	addMessage(id: string, parentId: string | null, message: unknown): void {
