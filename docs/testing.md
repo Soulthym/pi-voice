@@ -1,6 +1,12 @@
 # Tests
 
-## Current checkpoint — Alt+S/current selection after `7a63f7e`
+## Current checkpoint — restored-pin current confirmation
+
+`npm run check` passed. Full checkout: **949 passed, 29 compatibility skips, 0 failures (978 total)**. Full installed-native: **978 passed, no skips/failures**. Logs: `/tmp/pi-voice-restore-full.log`, `/tmp/pi-voice-restore-native.log`. No LSP server configured.
+
+Fresh extension-host/session-restore regressions cover same-current confirmation during fake playback and recording, changed endpoints/generations, unknown/unavailable registrations and failed cleanup. Restored route snapshots use metadata only, after startup cleanup succeeds; they neither start I/O nor claim readiness. Active current-selection descriptions were checked; the obsolete Local-default sentence in usage was removed. No live sessions, inference/providers, user configuration, ISSUES or demo assets changed.
+
+## Alt+S/current selection after `7a63f7e`
 
 `npm run check` passed. Full checkout: **942 passed, 29 compatibility skips, 0 failures (971 total)**. Full installed-native: **971 passed, no skips/failures**. Logs: `/tmp/pi-voice-alts-full.log`, `/tmp/pi-voice-alts-native.log`. No LSP server configured.
 

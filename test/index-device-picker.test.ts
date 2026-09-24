@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { mock, test } from "node:test";
 import { DeviceRouter } from "../src/device-router.js";
+import { PhoneInputClient, type PhoneCapture } from "../src/phone-input.js";
 import { FakeVoiceHost, MockedVoiceWorkerClient, assistant } from "./helpers/fake-voice-host.js";
 
 mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: MockedVoiceWorkerClient } });
@@ -129,3 +130,85 @@ test("picker snapshots unique labels, cancels read-only, revalidates and uses th
 	answer.resolve(options[0]); await opening;
 	assert.equal(pins().length, count, "shutdown fences delayed selection");
 });
+
+for (const scenario of ["playback", "recording", "endpoint", "generation", "unknown", "unavailable", "failed cleanup"]) {
+	test(`fresh restored manual pin: current confirmation during ${scenario}`, async t => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-picker-restore-"));
+		const keys = ["PI_VOICE_CONFIG", "PI_VOICE_COORDINATOR_DIR", "PI_VOICE_DEVICE_DIR"];
+		const old = keys.map(key => process.env[key]);
+		process.env.PI_VOICE_CONFIG = path.join(root, "config.json");
+		process.env.PI_VOICE_COORDINATOR_DIR = path.join(root, "coordinator");
+		process.env.PI_VOICE_DEVICE_DIR = path.join(root, "devices");
+		await fs.mkdir(process.env.PI_VOICE_DEVICE_DIR);
+		await fs.writeFile(process.env.PI_VOICE_CONFIG, JSON.stringify({ enabled: true, input: "auto", audioCache: false, timingPreprocessConcurrency: 0 }));
+		const endpoint = `unix://${root}/audio`;
+		await fs.writeFile(path.join(root, "audio"), "");
+		await fs.writeFile(path.join(root, "replacement"), "");
+		const registration = { version: 1, id: "A", name: "Restored device", platform: "linux", audioEndpoint: endpoint, inputEndpoint: endpoint, connectedAt: 1, lastActive: 1 };
+		const file = path.join(process.env.PI_VOICE_DEVICE_DIR, "A.json");
+		const register = () => fs.writeFile(file, JSON.stringify(registration));
+		if (scenario !== "unknown") await register();
+		const lookup = t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", async () => { throw new Error("must retain restored pin"); });
+		const capture = Promise.withResolvers<PhoneCapture>();
+		const record = t.mock.method(PhoneInputClient.prototype, "capture", () => capture.promise);
+		const stop = t.mock.method(PhoneInputClient.prototype, "stop", async () => { capture.resolve({ type: "text", data: "" }); });
+		const cancel = t.mock.method(PhoneInputClient.prototype, "cancel", async () => { if (record.mock.callCount()) capture.resolve({ type: "text", data: "" }); });
+		// A new extension closure, not session_start on an already initialized host.
+		const host = new FakeVoiceHost(root, `restore-${scenario}`);
+		host.entries.push({ type: "custom", customType: "pi-voice.device-selection", data: { version: 1, selection: "A", pin: "A" } });
+		let labels: string[] = [];
+		const answer = Promise.withResolvers<string | undefined>();
+		host.ctx.ui.select = (_title: string, options: string[]) => { labels = options; return answer.promise; };
+		t.after(async () => {
+			await host.shutdown();
+			keys.forEach((key, i) => { if (old[i] === undefined) delete process.env[key]; else process.env[key] = old[i]; });
+			await fs.rm(root, { recursive: true, force: true });
+		});
+		await host.start();
+		const worker = MockedVoiceWorkerClient.instances.at(-1)!;
+		assert.equal(worker.sent.length, 0, "restore performs no playback");
+		assert.equal(record.mock.callCount(), 0, "restore performs no capture");
+		assert.equal(lookup.mock.callCount(), 0, "restore does not adopt attachment identity");
+		if (scenario === "unknown") await register();
+		let recording: Promise<void> | undefined;
+		if (scenario === "recording") {
+			recording = host.shortcut("f4"); await settle();
+			assert.equal(record.mock.callCount(), 1);
+		} else {
+			host.addMessage("answer", null, assistant("First sentence. Second sentence."));
+			await host.shortcut("f5"); await settle();
+			assert.ok(worker.sent.length, "playback started");
+		}
+		if (scenario === "endpoint") registration.inputEndpoint = `unix://${root}/replacement`;
+		if (scenario === "generation") registration.connectedAt++;
+		await register();
+		if (scenario === "failed cleanup") {
+			const failed = t.mock.method(worker, "terminate", async () => { throw new Error("unconfirmed stop"); });
+			await host.command("device local");
+			failed.mock.restore();
+		}
+		if (scenario === "unavailable") await fs.rm(file);
+		const terminate = t.mock.method(worker, "terminate");
+		const pauses = worker.pauses.length;
+		const cancellations = cancel.mock.callCount();
+		const opening = host.shortcut("alt+s");
+		if (scenario === "unavailable") {
+			assert.ok(labels.every(label => !label.includes("current")), "unavailable pin cannot be confirmed");
+			answer.resolve(labels[0]);
+		} else {
+			assert.match(labels[1], /current/);
+			answer.resolve(labels[1]);
+		}
+		await opening;
+		if (scenario === "playback" || scenario === "recording") {
+			assert.equal(terminate.mock.callCount(), 0, "same restored route does not interrupt playback");
+			assert.equal(worker.pauses.length, pauses, "same restored route does not pause");
+			assert.equal(stop.mock.callCount(), 0, "same restored route does not finalize recording");
+			assert.equal(cancel.mock.callCount(), cancellations, "same restored route does not cancel recording");
+		} else {
+			assert.ok(terminate.mock.callCount() > 0, "unknown/changed route or failed cleanup requires stop proof");
+		}
+		terminate.mock.restore();
+		if (recording) { await host.command("stop"); await recording; }
+	});
+}

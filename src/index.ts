@@ -3313,12 +3313,27 @@ export default async function (pi: ExtensionAPI) {
 		deviceSelection = savedDevice.selection;
 		activeDeviceId = savedDevice.pin ?? (deviceSelection === "auto" || deviceSelection === "local" ? undefined : deviceSelection);
 		deviceRouter.setEnvironmentDevice(undefined);
+		// A new session must not inherit route snapshots from the previous pin.
+		outputEndpoint = inputEndpoint = "disabled";
+		outputGeneration = inputGeneration = undefined;
 		refreshDeviceLabel();
 		if (deviceSelection === "auto" && !activeDeviceId) {
 			const epoch = playbackRequestEpoch;
 			await adoptCurrentConnection(epoch, true);
 			if (epoch !== playbackRequestEpoch || activeContext !== ctx) return;
 		} else {
+			// Restored pins skip adoption. Seed both directions from metadata only,
+			// after startup stop proof; later endpoint/generation changes still require handoff.
+			try {
+				const route = deviceRouter.routeMetadata(activeDeviceId ?? deviceSelection, "output", config.output);
+				outputEndpoint = route.endpoint;
+				outputGeneration = route.kind === "device" ? route.device.connectedAt : undefined;
+			} catch { /* Unknown routes cannot match a later available endpoint. */ }
+			try {
+				const route = deviceRouter.routeMetadata(activeDeviceId ?? deviceSelection, "input", config.input);
+				inputEndpoint = route.endpoint;
+				inputGeneration = route.kind === "device" ? route.device.connectedAt : undefined;
+			} catch { /* Unknown routes cannot match a later available endpoint. */ }
 			notifyConnectedDevice(ctx);
 		}
 		inputProgressMessage = undefined;
