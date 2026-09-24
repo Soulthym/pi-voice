@@ -948,8 +948,17 @@ export class NarrationProgress {
 			const stream = new SpeakableStream();
 			const items = [...stream.push(block.text), ...stream.flush()];
 			const localEnd = Math.min(block.text.trimEnd().length, items.reduce((end, item) => Math.max(end, item.source.end), 0));
-			// An opening/empty fence may still acquire a body; it is not a consumed tail.
-			const pendingFence = stream.fenceStarts.some(start => start >= localEnd);
+			// Only an unfinished fence can acquire more speech. Closed fences omitted
+			// by SpeakableStream (empty code or normalized-silent text) are silent.
+			const fenceStart = stream.fenceStarts.at(-1);
+			const fenceLines = fenceStart === undefined ? [] : block.text.slice(fenceStart).split("\n");
+			const marker = fenceLines[0]?.[0];
+			// Match SpeakableStream's closing rule, including a closing line at EOF.
+			const closed = fenceLines.slice(1).some(line => {
+				const trimmed = line.trim();
+				return trimmed.length >= 3 && [...trimmed].every(character => character === marker);
+			});
+			const pendingFence = fenceStart !== undefined && !closed;
 			if (localEnd || pendingFence) end = block.start + (pendingFence ? block.text.trimEnd().length : localEnd);
 		}
 		return this.#sourceEnd = end;

@@ -18,6 +18,44 @@ test("speakable frontier ignores silent tails but retains buffered prose and des
 	}
 });
 
+test("closed silent fences leave completed speech at the live frontier", () => {
+	const progress = new NarrationProgress();
+	for (const fence of [
+		"```text\n\n```", "```ts\n \t\n```", "~~~\n\n~~~",
+		"```text\n<div></div>\n```", "```text\n***\n```",
+		"```text\n\n```\n---\n", "```text\n\n```\n```ts\n\n```",
+	]) {
+		progress.setCompletedText(`Done.\n${fence}`);
+		progress.registerSegment({ id: 1, utterance: 1, text: "Done.", source: { start: 0, end: 5 } });
+		progress.finishUtterance(1);
+		assert.equal(progress.cursor, 5);
+		assert.equal(progress.sourceEnd, progress.cursor, fence);
+	}
+});
+
+test("unfinished fences stay pending until a silent closure arrives", () => {
+	const progress = new NarrationProgress();
+	for (const fence of ["```", "```text", "```text\n\n", "~~~ts\n \t\n", "```text\nHello.\n", "```ts\n~~~\n"]) {
+		const text = `Done.\n${fence}`;
+		progress.setCompletedText(text);
+		assert.equal(progress.sourceEnd, text.trimEnd().length, fence);
+		assert.ok(progress.sourceEnd > 5, fence);
+	}
+	progress.setCompletedText("Done.\n```text\n\n");
+	assert.ok(progress.sourceEnd > 5);
+	progress.pushDelta("assistant", 0, "```");
+	assert.equal(progress.sourceEnd, 5, "closing a silent fence invalidates the pending frontier");
+	progress.pushDelta("assistant", 0, "\n```ts\nconst value = 1;\n```\n---\n");
+	assert.equal(progress.sourceEnd, "Done.\n```text\n\n```\n```ts\nconst value = 1;\n```\n".length,
+		"a later nonempty code block still awaits its description");
+
+	progress.setCompletedText("Done.\n```text\n\n");
+	const pendingEnd = progress.sourceEnd;
+	progress.startMessage();
+	progress.pushDelta("assistant", 0, "~~~text\n```\n~~~");
+	assert.equal(progress.sourceEnd, pendingEnd, "a future message cannot close an earlier fence");
+});
+
 test("dims unread prose and reveals words from playback progress", () => {
 	const progress = new NarrationProgress();
 	progress.begin();
