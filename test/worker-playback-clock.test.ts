@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { mock, test } from "node:test";
+import { DEFAULT_VOICE_CONFIG } from "../src/config.js";
+import { Vocalizer } from "../src/vocalizer.js";
 
 // Import the real clock without worker input, model loading, or subprocesses.
 mock.module("node:readline", { namedExports: { createInterface: () => new EventEmitter() } });
@@ -43,6 +45,18 @@ test("estimated clock excludes starvation, including feedback fallback, and pres
 		now += 125;
 		tick();
 		assert.deepEqual(latest(), { type: "playback", utterance: 7, position: 1.125, estimated: true });
+		const vocalizer = new Vocalizer(() => ({ ...DEFAULT_VOICE_CONFIG, enabled: true }), () => {}, undefined, undefined, {
+			sendSegment() {}, endUtterance() {}, cancel() {},
+			async measureSegment() { return 1; }, async transcribe() { return []; },
+			async transcribePcm() { return ""; }, async preload() {}, async preloadAlignment() {}, async terminate() {},
+		});
+		vocalizer.pushDelta("First sentence. Second sentence. ");
+		vocalizer.handleWorkerEvent({ type: "segment-audio", utterance: 1, segmentId: 1, start: 0, duration: 1 });
+		vocalizer.handleWorkerEvent({ type: "playback", utterance: 1, position: 1 });
+		vocalizer.handleWorkerEvent({ type: "segment-audio", utterance: 1, segmentId: 2, start: 1, duration: 2 });
+		vocalizer.handleWorkerEvent({ ...latest(), utterance: 1 });
+		assert.equal(vocalizer.playbackPhase, "playing", "starvation cannot make appended audible audio appear idle");
+		vocalizer.clear();
 
 		sink.setPlaybackClockPaused(true);
 		now += 9000;
