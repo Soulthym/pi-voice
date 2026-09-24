@@ -1,6 +1,10 @@
 # Tests
 
-## Current checkpoint — phase 2 and durable scoped recovery
+## Current checkpoint — phase 3 timing retry
+
+Timing reports, worker commands and silent cached-audio alignment retry are implemented. Documentation-pass validation: `npm run check` passed; the four targeted retry files (`index-timing-retry`, `playback-timing-retry`, `worker-client-timing-retry`, `worker-timing-retry`) passed **5/5 tests**, no skips (`/tmp/phase3-docs-retry-tests.log`). LSP is unavailable. These checks use mocked inference/transport and cover command scope, metadata persistence, paused-state preservation, cancellation, bounded cache reads and the no-synthesis path; no real alignment accuracy or live behavior is established. This documentation pass did not rerun the full suite. Earlier suite counts below are historical, not current validation.
+
+## Historical checkpoint — phase 2 and durable scoped recovery
 
 Final implementation validation: `npm run check` passed; full checkout `npm test` **1015 passed / 33 compatibility skips / zero failures (1048 total)**; full installed-native `npm test` **1048 passed / zero skips or failures**. Logs: `/tmp/phase2-final2-{check,test,native}.log`. Final regressions cover persisted user-entry count invalidation and paused yield-mode foreground selection. The separately staged recovery topic also passed typecheck and **78/78** targeted tests (`/tmp/phase2-recovery-staged-validation.log`). No LSP is configured; TypeScript supplies diagnostics.
 
@@ -8,7 +12,7 @@ Phase 2 points **1–6 plus handoff/off presentation** are implemented. Offline 
 
 Fresh-host recovery fixtures and synthetic socket receipts cover durable original input/output scopes, reconstructed warnings without startup stop I/O, explicit retry through original device identity after endpoint change, wrong-scope receipts, malformed/missing journals, changed configuration, matching retirement and newer-generation protection. **Phase 1 remains partial:** durable admission/local-child proof coverage is missing, and the orphan fence is never automatically reclaimed, even after every saved receipt succeeds. Broader protocol work is separate, not an unsafe unblock.
 
-Earlier repeated cold-history performance failures also reproduced on baseline. The minimal fix avoids synchronous cold preparation in progress rendering and adds bounded background yields; no performance limits were relaxed. Both final full suites above pass after that fix. Phase 3 timing commands are approved next, not implemented; existing commands remain unchanged.
+Earlier repeated cold-history performance failures also reproduced on baseline. The minimal fix avoids synchronous cold preparation in progress rendering and adds bounded background yields; no performance limits were relaxed. Both final full suites above pass after that fix. Phase 3 timing commands were still pending at that checkpoint; the current implementation is described above.
 
 No live/provider/inference/hardware validation, runtime configuration/private-data access, Pi/SSH/client/session restart or push. User clarification: the prior PC crash was user-caused, not product-attributed; `docs/assets/demo*` was explicitly removed by the user and stays removed. Untracked `ISSUES.md` remains untouched. Historical notes/counts below retain their original checkpoint scope.
 

@@ -39,6 +39,8 @@ export interface PlaybackTimingSnapshot {
 	renderKey: string;
 	duration: number;
 	checkpoints: TimingCheckpoint[];
+	complete?: boolean;
+	units?: Array<{ unit: PlaybackUnit; checkpoints: TimingCheckpoint[]; coverage?: { estimated: number; total: number } }>;
 }
 
 type TimingCheckpoint = {
@@ -74,6 +76,7 @@ type Capture = {
 type CapturedSegment = {
 	capture: Capture; utterance: number; sourceOffset: number; skipUnits: number;
 	audioStart?: number; wordOffsets: Set<number>; sourceBase: number; code: boolean;
+	timingSuperseded?: boolean;
 };
 
 /** Keeps only text-source timing metadata; replayed audio is always regenerated. */
@@ -97,7 +100,8 @@ export class PlaybackHistory {
 	/** Bound historical variants independently of transcript length (current records remain available). */
 	#trimVersions(): void {
 		const size = (version: MessageRecord | PlaybackTimingSnapshot): number => version.checkpoints.length +
-			("units" in version ? [...version.units?.values() ?? []].reduce((sum, points) => sum + points.length, 0) : 0);
+			(version.units instanceof Map ? [...version.units.values()].reduce((sum, points) => sum + points.length, 0)
+				: version.units?.reduce((sum, unit) => sum + unit.checkpoints.length, 0) ?? 0);
 		for (const cache of [this.#versions, this.#snapshots]) {
 			let points = 0;
 			for (const versions of cache.values()) for (const version of versions.values()) points += size(version);
@@ -120,6 +124,7 @@ export class PlaybackHistory {
 	/** Update one resolved identity without rebuilding order or disturbing selection. */
 	syncMessage(message: PlaybackMessage): void {
 		let existing = this.#records.get(message.id);
+		const hydrateSnapshot = !existing || (existing.text === message.text && existing.renderKey !== message.renderKey);
 		if (existing) {
 			if (existing.text !== message.text || existing.renderKey !== message.renderKey) {
 				this.invalidateCaptures(message.id);
@@ -147,13 +152,18 @@ export class PlaybackHistory {
 			existing.renderKey = message.renderKey;
 		} else this.#records.set(message.id, { ...message, checkpoints: [], duration: 0, position: 0, timingsComplete: false });
 		const saved = message.renderKey ? this.#snapshots.get(message.id)?.get(message.renderKey) : undefined;
-		if (saved && !this.hasCompleteTimingFor(message.id)) this.restore([saved]);
+		const record = this.#records.get(message.id)!;
+		// Snapshots hydrate empty records; in-memory partial captures can already be newer.
+		if (saved && hydrateSnapshot && !record.checkpoints.length && !record.units?.size) this.restore([saved]);
 	}
 
 	restore(snapshots: readonly PlaybackTimingSnapshot[]): void {
 		for (const snapshot of snapshots) {
 			if (snapshot.version !== 3 || !Number.isFinite(snapshot.duration) || snapshot.duration < 0) continue;
 			if (!snapshot.renderKey || !Array.isArray(snapshot.checkpoints) || snapshot.checkpoints.length > 100_000) continue;
+			if (snapshot.units !== undefined && (!Array.isArray(snapshot.units) || snapshot.units.length > 100_000 ||
+				snapshot.units.some(unit => !unit || !Array.isArray(unit.checkpoints)) ||
+				snapshot.units.reduce((sum, unit) => sum + unit.checkpoints.length, 0) > 100_000)) continue;
 			let versions = this.#snapshots.get(snapshot.messageId);
 			if (!versions) this.#snapshots.set(snapshot.messageId, versions = new Map());
 			versions.set(snapshot.renderKey, snapshot);
@@ -175,10 +185,23 @@ export class PlaybackHistory {
 					checkpoint.sourceOffset >= 0 &&
 					checkpoint.sourceOffset < record.text.length,
 			);
-			if (checkpoints.length === 0) continue;
+			if (checkpoints.length === 0 && !(snapshot.complete === false && snapshot.units?.length)) continue;
 			record.checkpoints = checkpoints.map(checkpoint => ({ ...checkpoint })).sort((left, right) => left.time - right.time);
 			record.duration = snapshot.duration;
-			record.timingsComplete = true;
+			record.timingsComplete = snapshot.complete !== false;
+			for (const saved of snapshot.units ?? []) {
+				if (!Number.isInteger(saved.unit?.sourceOffset) || saved.unit.sourceOffset < 0 || saved.unit.sourceOffset >= record.text.length ||
+					!Number.isInteger(saved.unit.skipUnits) || saved.unit.skipUnits < 0 || !Array.isArray(saved.checkpoints) ||
+					!saved.checkpoints.length || saved.checkpoints.length > 100_000 || saved.checkpoints.some(point =>
+						!point || !Number.isFinite(point.time) || point.time < 0 || !Number.isFinite(point.duration) || point.duration < 0 ||
+						!Number.isInteger(point.sourceOffset) || point.sourceOffset < 0 || point.sourceOffset >= record.text.length)) continue;
+				this.retainTimingUnit(record.id, snapshot.renderKey, saved.unit, saved.checkpoints);
+				const counts = saved.coverage;
+				if (counts && Number.isSafeInteger(counts.total) && Number.isSafeInteger(counts.estimated) && counts.estimated >= 0 && counts.total >= counts.estimated) {
+					record.wordTimingCoverage ??= new Map();
+					record.wordTimingCoverage.set(`${saved.unit.sourceOffset}:${saved.unit.skipUnits}`, { ...counts });
+				}
+			}
 		}
 	}
 
@@ -321,6 +344,7 @@ export class PlaybackHistory {
 		if (!tracked?.capture.valid || !Number.isFinite(start) || !Number.isFinite(duration) || duration <= 0) return;
 		const normalizedStart = Math.max(0, start);
 		tracked.audioStart = normalizedStart;
+		if (tracked.timingSuperseded) return;
 		const absoluteTime = tracked.capture.baseTime + normalizedStart;
 		const record = tracked.capture.record;
 		if (tracked.capture.recordTimings && !record.timingsComplete) {
@@ -350,7 +374,7 @@ export class PlaybackHistory {
 	/** Quality updates are metadata-only, including for code descriptions and paused captures. */
 	setTimingQuality(segmentId: number, quality: TimingQuality | undefined): void {
 		const tracked = this.#segments.get(segmentId);
-		if (!tracked?.capture.valid || tracked.audioStart === undefined || !quality) return;
+		if (!tracked?.capture.valid || tracked.timingSuperseded || tracked.audioStart === undefined || !quality) return;
 		const record = tracked.capture.record;
 		const unit = record.units?.get(`${tracked.sourceOffset}:${tracked.skipUnits}`);
 		if (unit?.[0]) unit[0].quality = quality;
@@ -364,7 +388,7 @@ export class PlaybackHistory {
 
 	setWordTimings(segmentId: number, words: Array<{ time: number; sourceOffset: number; quality?: TimingQuality }>): void {
 		const tracked = this.#segments.get(segmentId);
-		if (!tracked?.capture.valid || tracked.audioStart === undefined) return;
+		if (!tracked?.capture.valid || tracked.timingSuperseded || tracked.audioStart === undefined) return;
 		const record = tracked.capture.record;
 		const key = `${tracked.sourceOffset}:${tracked.skipUnits}`;
 		record.wordTimingCoverage ??= new Map();
@@ -415,7 +439,11 @@ export class PlaybackHistory {
 	timingForUnit(messageId: string, renderKey: string, unit: PlaybackUnit): TimingCheckpoint[] | undefined {
 		const record = this.#records.get(messageId);
 		if (record?.renderKey !== renderKey) return undefined;
-		return record.units?.get(`${unit.sourceOffset}:${unit.skipUnits}`)?.map(point => ({ ...point }));
+		const retained = record.units?.get(`${unit.sourceOffset}:${unit.skipUnits}`);
+		if (retained) return retained.map(point => ({ ...point }));
+		const anchor = record.checkpoints.filter(point => point.duration > 0 && point.sourceOffset === unit.sourceOffset)[unit.skipUnits];
+		return anchor && record.checkpoints.filter(point => point === anchor || (point.duration === 0 && point.time >= anchor.time && point.time < anchor.time + anchor.duration))
+			.map(point => ({ ...point, time: point.time - anchor.time }));
 	}
 
 	retainTimingUnit(messageId: string, renderKey: string, unit: PlaybackUnit, checkpoints: TimingCheckpoint[]): void {
@@ -423,6 +451,42 @@ export class PlaybackHistory {
 		if (!record || record.renderKey !== renderKey || !checkpoints.length) return;
 		record.units ??= new Map();
 		record.units.set(`${unit.sourceOffset}:${unit.skipUnits}`, checkpoints.map(point => ({ ...point })));
+	}
+
+	/** Cache-only refinement: never touches capture, selection or clocks. */
+	refineTimingUnit(messageId: string, renderKey: string, unit: PlaybackUnit, checkpoints: TimingCheckpoint[], coverage: { estimated: number; total: number }): PlaybackTimingSnapshot | undefined {
+		const record = this.#records.get(messageId);
+		const previous = this.timingForUnit(messageId, renderKey, unit);
+		// Unknown/mixed provenance cannot safely be replaced from sparse checkpoints.
+		if (!record || !previous?.length || !checkpoints.length || previous.some(point => point.quality !== "estimated") ||
+			previous[0].duration !== checkpoints[0].duration) return;
+		const anchor = record.checkpoints.filter(point => point.duration > 0 && point.sourceOffset === unit.sourceOffset)[unit.skipUnits];
+		if (anchor) {
+			record.checkpoints = record.checkpoints.filter(point => point !== anchor && !(point.duration === 0 && point.time >= anchor.time && point.time < anchor.time + anchor.duration));
+			record.checkpoints.push(...checkpoints.map(point => ({ ...point, time: anchor.time + point.time })));
+			record.checkpoints.sort((a, b) => a.time - b.time);
+		}
+		this.retainTimingUnit(messageId, renderKey, unit, checkpoints);
+		// Retire only these consumers' metadata, not their playback or other units.
+		for (const segment of this.#segments.values()) {
+			if (segment.capture.record === record && segment.sourceOffset === unit.sourceOffset && segment.skipUnits === unit.skipUnits) {
+				segment.timingSuperseded = true;
+			}
+		}
+		record.wordTimingCoverage ??= new Map();
+		record.wordTimingCoverage.set(`${unit.sourceOffset}:${unit.skipUnits}`, coverage);
+		const snapshot: PlaybackTimingSnapshot = { version: 3, messageId, renderKey, duration: record.duration, complete: record.timingsComplete,
+			checkpoints: record.checkpoints.map(point => ({ ...point })),
+			units: [...record.units ?? []].map(([key, points]) => {
+				const [sourceOffset, skipUnits] = key.split(":").map(Number);
+				return { unit: { sourceOffset, skipUnits }, checkpoints: points.map(point => ({ ...point })), coverage: record.wordTimingCoverage?.get(key) };
+			}) };
+		let versions = this.#snapshots.get(messageId);
+		if (!versions) this.#snapshots.set(messageId, versions = new Map());
+		versions.set(renderKey, snapshot);
+		if (versions.size > 4) versions.delete(versions.keys().next().value!);
+		this.#trimVersions();
+		return snapshot;
 	}
 
 	snapshotForSegment(segmentId: number): PlaybackTimingSnapshot | undefined {
@@ -449,6 +513,10 @@ export class PlaybackHistory {
 			renderKey: capture.renderKey,
 			duration: capture.record.duration,
 			checkpoints: persisted.map(checkpoint => ({ ...checkpoint })),
+			units: [...capture.record.units ?? []].map(([key, points]) => {
+				const [sourceOffset, skipUnits] = key.split(":").map(Number);
+				return { unit: { sourceOffset, skipUnits }, checkpoints: points.map(point => ({ ...point })), coverage: capture.record.wordTimingCoverage?.get(key) };
+			}),
 		};
 		// Compare the persisted content so duplicate events do not append duplicate revisions.
 		const revision = JSON.stringify(snapshot);

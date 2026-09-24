@@ -9,6 +9,10 @@ import type { AlignmentWord, TimingQuality } from "./narration-progress.js";
 
 export type MeasurementPhase = "cache-decode" | "synthesis";
 
+export type TimingRetryResult =
+	| { status: "cache-miss" }
+	| { status: "timing"; duration: number; words: AlignmentWord[]; quality: TimingQuality };
+
 export type PlaybackPhase = "idle" | "playing" | "paused" | "synthesizing" | "loading" | "describing" | "connecting" | "queued";
 export type WorkerPlaybackPhase = "playing" | "synthesizing" | "loading" | "connecting" | "queued";
 
@@ -23,6 +27,8 @@ export type WorkerEvent =
 	| { type: "preload-ready"; requestId: string }
 	| { type: "speaking" }
 	| { type: "segment-audio"; utterance: number; segmentId: number; start: number; duration: number; timingQuality?: TimingQuality }
+	| { type: "timing-retry"; requestId: string; result: TimingRetryResult }
+	| { type: "timing-retry-error"; requestId: string; message: string }
 	| { type: "measurement"; requestId: string; duration: number }
 	| { type: "measurement-progress"; requestId: string; phase: MeasurementPhase }
 	| { type: "alignment"; segmentId: number; words: AlignmentWord[]; quality?: TimingQuality }
@@ -59,6 +65,7 @@ export class VoiceWorkerClient {
 	#pendingPreloads = new Map<string, PendingPreload>();
 	#pendingTranscriptions = new Map<string, PendingTranscription>();
 	#pendingMeasurements = new Map<string, PendingMeasurement>();
+	#pendingTimingRetries = new Map<string, { resolve: (result: TimingRetryResult) => void; reject: (error: Error) => void }>();
 	#nextRequestId = 0;
 	#nextCancelId = 0;
 	#paused = false;
@@ -74,9 +81,11 @@ export class VoiceWorkerClient {
 	#ttsWorkers: number | undefined;
 	#activeUtterance: number | undefined;
 	#onEvent: (event: WorkerEvent) => void;
+	#retryConfig?: () => VoiceConfig;
 
-	constructor(onEvent: (event: WorkerEvent) => void) {
+	constructor(onEvent: (event: WorkerEvent) => void, retryConfig?: () => VoiceConfig) {
 		this.#onEvent = onEvent;
+		this.#retryConfig = retryConfig;
 	}
 
 	sendSegment(utterance: number, segmentId: number, text: string, config: VoiceConfig): void {
@@ -123,6 +132,7 @@ export class VoiceWorkerClient {
 	}
 
 	cancel(): number | undefined {
+		this.#rejectTimingRetries(new Error("Speech timing retry interrupted"));
 		this.#paused = false;
 		for (const pending of this.#pendingMeasurements.values()) {
 			clearTimeout(pending.timer);
@@ -134,6 +144,38 @@ export class VoiceWorkerClient {
 		this.#cancelGenerations.set(cancelId, this.#remoteGeneration);
 		this.#send({ type: "cancel", cancelId });
 		return cancelId;
+	}
+
+	/** Cache-only; configuration is snapshotted from the constructor callback. Never synthesizes. */
+	retryTiming(text: string, signal?: AbortSignal): Promise<TimingRetryResult> {
+		if (signal?.aborted) return Promise.reject(signal.reason);
+		if (!this.#retryConfig) return Promise.reject(new Error("Timing retry requires a configuration callback"));
+		const config = this.#retryConfig();
+		const requestId = String(++this.#nextRequestId);
+		const { promise, resolve, reject } = Promise.withResolvers<TimingRetryResult>();
+		const abort = () => {
+			this.#pendingTimingRetries.delete(requestId);
+			if (this.#child) this.#send({ type: "cancel-timing-retry", requestId });
+			reject(new Error("Speech timing retry interrupted"));
+		};
+		const timer = setTimeout(abort, 65_000);
+		timer.unref?.();
+		signal?.addEventListener("abort", abort, { once: true });
+		this.#pendingTimingRetries.set(requestId, { resolve, reject });
+		this.#send({ type: "retry-timing", requestId, text,
+			voice: config.voice, speed: config.speed, model: config.ttsModel, dtype: config.ttsDtype,
+			audioCacheBitrate: config.audioCacheBitrate,
+			alignmentModel: config.alignmentModel, alignmentDtype: config.alignmentDtype });
+		return promise.finally(() => {
+			clearTimeout(timer);
+			signal?.removeEventListener("abort", abort);
+			this.#pendingTimingRetries.delete(requestId);
+		});
+	}
+
+	#rejectTimingRetries(error: Error): void {
+		for (const pending of this.#pendingTimingRetries.values()) pending.reject(error);
+		this.#pendingTimingRetries.clear();
 	}
 
 	measureSegment(text: string, config: VoiceConfig, onPhase?: (phase: MeasurementPhase) => void): Promise<number> {
@@ -243,6 +285,7 @@ export class VoiceWorkerClient {
 	}
 
 	async #terminate(): Promise<void> {
+		this.#rejectTimingRetries(new Error("Voice worker stopped"));
 		const child = this.#child;
 		this.#child = null;
 		if (child) this.#retiring.add(child);
@@ -425,6 +468,13 @@ export class VoiceWorkerClient {
 				else pending.reject(new Error(event.message));
 			}
 		}
+		if (event.type === "timing-retry" || event.type === "timing-retry-error") {
+			const pending = this.#pendingTimingRetries.get(event.requestId);
+			this.#pendingTimingRetries.delete(event.requestId);
+			if (event.type === "timing-retry") pending?.resolve(event.result);
+			else pending?.reject(new Error(event.message));
+			return; // Silent metadata work must not change playback UI state.
+		}
 		// Pool warming completes a request, not playback. Keep it out of UI state.
 		if (event.type === "preload-ready") return;
 		if (event.type === "measurement-progress") {
@@ -463,6 +513,7 @@ export class VoiceWorkerClient {
 	}
 
 	#handleFailure(error: Error): void {
+		this.#rejectTimingRetries(error);
 		if (this.#remoteUnconfirmed && !(error instanceof RemotePlaybackUnconfirmedError)) {
 			error = new RemotePlaybackUnconfirmedError(error.message, { cause: error });
 		}

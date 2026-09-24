@@ -98,7 +98,7 @@ Background status intentionally separates session work from selected-message sta
 
 Checks restore compatible saved maps without inference. Actual recovery uses a separate `Recovering speech timing` line naming cached-audio decoding, synthesis or word-timing estimates. `/voice help` lists controls; `/voice status` groups settings by task. Notices use `Voice · …` with Pi's native severity styling; icons supplement readable words.
 
-`/voice timing` reports quality, latency and worker limits; `/voice timing workers` queries the limit without changing state. Set it with `/voice timing workers 2` or `/voice timing workers auto`. Phase 3's approved silent `timing retry` command is not implemented yet.
+`/voice timing` reports quality, latency and worker limits; `/voice timing workers` queries the limit without changing state. Set it with `/voice timing workers 2` or `/voice timing workers auto`. Use `/voice timing retry current` for the selected completed target, `all` for the current branch, an inclusive 1-based playback-message range such as `2-5`, or an exact message ID. Retry only uses existing audio and spoken plans; missing assets are reported, not generated. Only wholly estimated units are eligible; refined, mixed and unknown timing are skipped. Playback, selection, paused highlights, viewport and drafts stay unchanged. Stop, session replacement/shutdown or a newer valid retry cancels it; `/voice timing` reports progress. See [retry limits](preprocessing-and-cache.md#silent-timing-retry).
 
 See [Narration and highlighting](narration-and-highlighting.md) and [Preprocessing and cache](preprocessing-and-cache.md).
 

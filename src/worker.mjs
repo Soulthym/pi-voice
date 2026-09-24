@@ -48,6 +48,8 @@ const sentencePool = new SentencePool(synthesisWorkers, event => {
 	if (!playback.currentPlayer && !shuttingDown) send(event);
 });
 let activeOperation;
+let timingRetry;
+let playbackPaused = false;
 
 function send(message) {
 	if (synthesisChild) {
@@ -181,12 +183,19 @@ function audioCachePath(operation) {
 	return path.join(audioCacheDir, key.slice(0, 2), `${key}.opus`);
 }
 
-function runFfmpeg(args, input) {
+function runFfmpeg(args, input, { signal, maxBytes = Infinity } = {}) {
 	return new Promise((resolve, reject) => {
-		const child = spawn("ffmpeg", ["-v", "error", ...args], { stdio: ["pipe", "pipe", "pipe"] });
+		const child = spawn("ffmpeg", ["-v", "error", ...args], { stdio: ["pipe", "pipe", "pipe"], signal, killSignal: "SIGKILL" });
 		const stdout = [];
+		let size = 0;
 		let stderr = "";
-		child.stdout.on("data", chunk => stdout.push(chunk));
+		child.stdout.on("data", chunk => {
+			size += chunk.length;
+			if (size > maxBytes) {
+				child.kill("SIGKILL");
+				reject(new Error("Alignment resource limit"));
+			} else stdout.push(chunk);
+		});
 		child.stderr.on("data", chunk => {
 			stderr = `${stderr}${String(chunk)}`.slice(-4_096);
 		});
@@ -200,17 +209,82 @@ function runFfmpeg(args, input) {
 	});
 }
 
-async function readCachedAudio(file, onDecode) {
+async function readCachedAudio(file, onDecode, options) {
 	try {
 		await fs.promises.access(file, fs.constants.R_OK);
 		onDecode?.();
-		const bytes = await runFfmpeg(["-i", file, "-f", "f32le", "-ar", String(DEFAULT_SAMPLE_RATE), "-ac", "1", "pipe:1"]);
+		const bytes = await runFfmpeg(["-i", file, "-f", "f32le", "-ar", String(DEFAULT_SAMPLE_RATE), "-ac", "1", "pipe:1"], undefined, options);
 		if (bytes.length === 0 || bytes.length % Float32Array.BYTES_PER_ELEMENT !== 0) throw new Error("Empty audio cache entry");
 		const array = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-		return new Float32Array(array);
+		const pcm = new Float32Array(array);
+		if (options && !pcm.every(Number.isFinite)) throw new Error("Invalid cached PCM");
+		return pcm;
 	} catch {
-		await fs.promises.rm(file, { force: true }).catch(() => {});
+		if (!options) await fs.promises.rm(file, { force: true }).catch(() => {});
 		return undefined;
+	}
+}
+
+function cancelTimingRetry(requestId) {
+	if (timingRetry && (requestId === undefined || timingRetry.requestId === requestId)) timingRetry.controller.abort();
+}
+
+async function retryTiming(operation) {
+	cancelTimingRetry();
+	const controller = new AbortController();
+	const job = { requestId: operation.requestId, controller };
+	timingRetry = job;
+	const timer = setTimeout(() => controller.abort(), 60_000);
+	let child;
+	try {
+		if (typeof operation.text !== "string" || !operation.text.trim() || operation.text.length > MAX_ALIGNMENT_TEXT) {
+			throw new Error("Alignment text resource limit");
+		}
+		if (shuttingDown || (!playbackPaused && playback.currentPlayer) ||
+			(activeOperation && !(playbackPaused && activeOperation.type === "end")) || queue.length) {
+			throw new Error("Timing retry yielded to foreground work");
+		}
+		// Explicit retry reads existing assets even when normal cache use is disabled.
+		// Never route this operation through audioForOperation (which can synthesize).
+		const file = audioCachePath({ ...operation, audioCache: true,
+			model: operation.model ?? DEFAULT_TTS_MODEL, dtype: operation.dtype ?? DEFAULT_TTS_DTYPE });
+		const pcm = file && await readCachedAudio(file, undefined, { signal: controller.signal, maxBytes: MAX_ALIGNMENT_BYTES });
+		controller.signal.throwIfAborted();
+		if (!pcm) {
+			send({ type: "timing-retry", requestId: operation.requestId, result: { status: "cache-miss" } });
+			return;
+		}
+		const duration = pcm.length / DEFAULT_SAMPLE_RATE;
+		// Dedicated child: aborting this consumer must not cancel playback alignment.
+		child = spawn(process.execPath, [fileURLToPath(new URL("./alignment-worker.mjs", import.meta.url))], {
+			stdio: ["pipe", "pipe", "ignore"], signal: controller.signal, killSignal: "SIGKILL", env: { ...process.env },
+		});
+		const result = await new Promise((resolve, reject) => {
+			child.once("error", reject);
+			child.once("exit", () => reject(new Error("Timing retry alignment worker stopped")));
+			child.stdin.on("error", reject);
+			const lines = readline.createInterface({ input: child.stdout });
+			lines.on("line", line => {
+				try {
+					const event = JSON.parse(line);
+					if (event.type === "alignment") resolve({ status: "timing", duration, words: event.words, quality: event.quality });
+					else if (event.type === "alignment-error") reject(new Error(event.message));
+				} catch (error) { reject(error); }
+			});
+			child.stdin.write(`${JSON.stringify({ type: "align", epoch: 0, segmentId: 0,
+				text: operation.text, audio: Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength).toString("base64"),
+				sampleRate: DEFAULT_SAMPLE_RATE, duration,
+				model: operation.alignmentModel ?? DEFAULT_ALIGNMENT_MODEL,
+				dtype: operation.alignmentDtype ?? DEFAULT_ALIGNMENT_DTYPE })}\n`);
+		});
+		controller.signal.throwIfAborted();
+		send({ type: "timing-retry", requestId: operation.requestId, result });
+	} catch (error) {
+		send({ type: "timing-retry-error", requestId: operation.requestId, message: error instanceof Error ? error.message : String(error) });
+	} finally {
+		clearTimeout(timer);
+		child?.kill("SIGKILL");
+		if (timingRetry === job) timingRetry = undefined;
 	}
 }
 
@@ -729,6 +803,8 @@ function startPlayer(sampleRate, utterance, output) {
 }
 
 function setPlayerPaused(paused) {
+	playbackPaused = paused;
+	if (!paused) cancelTimingRetry();
 	playback.setPlayerPaused(paused);
 }
 
@@ -878,6 +954,7 @@ async function pump() {
 
 function enqueue(operation) {
 	if (shuttingDown) return;
+	cancelTimingRetry();
 	const queued = { ...operation, epoch };
 	if (operation.type === "measure") queue.push(queued);
 	else {
@@ -893,6 +970,8 @@ function scheduleCancel(cancelId) {
 	// Invalidate queued/current synthesis synchronously so segment messages that
 	// arrive in the same stdin chunk are stamped with the replacement epoch.
 	epoch += 1;
+	cancelTimingRetry();
+	playbackPaused = false;
 	sentencePool.cancel();
 	cancelAlignment();
 	playback.resetPlayerPaused();
@@ -947,6 +1026,12 @@ lines.on("line", line => {
 		return;
 	}
 	switch (message.type) {
+		case "retry-timing":
+			void retryTiming(message);
+			break;
+		case "cancel-timing-retry":
+			cancelTimingRetry(message.requestId);
+			break;
 		case "tts-workers":
 			if (Number.isInteger(message.workers) && message.workers >= 1 && message.workers <= 8) {
 				synthesisWorkers = message.workers;

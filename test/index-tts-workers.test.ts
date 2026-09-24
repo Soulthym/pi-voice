@@ -85,7 +85,8 @@ test("real tts-workers command persists and reaches the worker protocol without 
 		[...voiceQueryCases.map(([name]) => name).filter(name => name !== "tts-worker" && !name.includes(" ")), ...actionsAndReports].sort(),
 		"every advertised command must be audited as a setting query or an intentional action/report",
 	);
-	assert.deepEqual(command.getArgumentCompletions("timing ").map((item: any) => item.value), ["timing workers"]);
+	assert.deepEqual(command.getArgumentCompletions("timing ").map((item: any) => item.value), ["timing workers", "timing retry"]);
+	assert.deepEqual(command.getArgumentCompletions("timing retry ").map((item: any) => item.label), ["current", "all"]);
 	assert.deepEqual(command.getArgumentCompletions("timing workers ").map((item: any) => item.label), ["auto", "1", "2", "3", "4", "5", "6", "7", "8"]);
 	assert.equal(command.getArgumentCompletions("timing workers 2 "), null);
 	assert.equal(command.getArgumentCompletions("timing unknown "), null);

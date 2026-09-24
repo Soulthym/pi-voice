@@ -99,8 +99,17 @@ test("worker quality reaches the widget independently of clock estimates and pre
 	t.after(() => restoredHost.shutdown());
 	restoredHost.entries.push(...JSON.parse(JSON.stringify(host.entries)));
 	await restoredHost.start();
-	assert.equal(restoredHost.widgetLines()?.at(-1), "Word timing: unknown/pending", "sparse restored checkpoints cannot fabricate word coverage");
+	assert.equal(restoredHost.widgetLines()?.at(-1), "Word timing: 0/3 estimated", "persisted measured coverage survives reload");
 	assert.match(restoredHost.widgetLines()![0], /^○ Idle ·/);
+	await restoredHost.shutdown();
+	const legacyHost = new FakeVoiceHost(root, "quality-legacy");
+	t.after(() => legacyHost.shutdown());
+	legacyHost.entries.push(...JSON.parse(JSON.stringify(host.entries)));
+	for (const entry of legacyHost.entries) {
+		if (entry.customType === "pi-voice.playback-timing") delete (entry.data as PlaybackTimingSnapshot).units;
+	}
+	await legacyHost.start();
+	assert.equal(legacyHost.widgetLines()?.at(-1), "Word timing: unknown/pending", "legacy sparse checkpoints cannot fabricate word coverage");
 	assert.ok(host.widgetFrames.every(lines => !lines.some(line => /clock/i.test(line))));
 	const { Text } = await import("@earendil-works/pi-tui");
 	const wordRows = host.widgetFrames.flatMap(lines => lines.filter(line => line.startsWith("Word timing:")));

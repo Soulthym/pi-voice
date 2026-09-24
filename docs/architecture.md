@@ -63,13 +63,13 @@ Session routing uses a saved current-connection pin, never recent-activity fallb
 
 Background work captures a session epoch and checks it after asynchronous operations. Reload/session replacement invalidates Pi contexts; stale work returns local fallback or stops without touching the old context. Preprocessing promises absorb cancellation so a late worker rejection cannot become an uncaught exception.
 
-Code/audio caches retain completed dependencies. Message timing snapshots are atomic and only persisted after the complete message render succeeds.
+Code/audio caches retain completed dependencies. Complete message timing maps are persisted after the complete render succeeds. Explicit timing retry can also persist metadata-only partial unit refinements without marking the message complete.
 
 Original saved remote input/output scopes and device/cause diagnostics survive process loss in atomic, fsynced recovery journals. Startup reconstructs warnings without stop I/O; explicit `/voice reconnect` retries the original ticket/stream IDs via the original registered device identity (or exact custom endpoint), with configuration/metadata validation. Scoped receipts retire matching handles; generation checks prevent older cleanup from clearing newer scopes.
 
 This is partial recovery, not complete crash-safe admission: durable admission/local-child proof coverage is missing. An orphan speech fence is **never automatically reclaimed, even if all saved receipts succeed**. Missing or malformed journals fail closed. Broader admission/proof protocol work is separate from scoped retry and must not be replaced by an unsafe unblock.
 
-Progress rendering reuses the mounted widget and reads the foreground playback context without synchronously preparing cold history. Background history preparation yields in bounded slices; off renders no reserved rows. Timing-command unification/retry remains approved phase 3 work, not current architecture.
+Progress rendering reuses the mounted widget and reads the foreground playback context without synchronously preparing cold history. Background history preparation yields in bounded slices; off renders no reserved rows. `/voice timing` combines quality, latency, worker limits and active retry progress. Explicit timing retry snapshots current-branch targets and cached spoken plans, serially decodes bounded cached Opus and aligns it in a dedicated cancellable child; it never routes through synthesis, description providers or audio output. Only wholly estimated units are replaced, with session/source/render fences and persisted per-unit coverage; mixed, refined, unknown and missing timing are skipped. Foreground speech/input preempts retry; Stop, session replacement/shutdown and newer valid retries cancel it. See [retry details](preprocessing-and-cache.md#silent-timing-retry).
 
 ## Key modules
 

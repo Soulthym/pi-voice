@@ -50,9 +50,12 @@ test("quality survives snapshots, unit recovery and version switches without sel
 	assert.equal(history.status()?.timingQuality, undefined, "obsolete capture cannot relabel new assets");
 	history.sync([message]);
 	assert.equal(history.status()?.timingQuality, "mixed");
-	const legacy = { ...snapshot, checkpoints: snapshot.checkpoints.map(({ quality, ...point }) => point) };
-	restored.restore([legacy]);
-	assert.equal(restored.status()?.timingQuality, undefined, "unlabeled cached timing is not claimed as aligned");
+	const legacy = { ...snapshot, units: undefined, checkpoints: snapshot.checkpoints.map(({ quality, ...point }) => point) };
+	const legacyRestored = new PlaybackHistory();
+	legacyRestored.sync([message]);
+	legacyRestored.restore([legacy]);
+	assert.equal(legacyRestored.status()?.timingQuality, undefined, "unlabeled cached timing is not claimed as aligned");
+	assert.equal(legacyRestored.status()?.wordTimingCoverage, undefined, "legacy checkpoints have no measured coverage");
 });
 
 test("code-description quality is retained without inserting description offsets into source checkpoints", () => {

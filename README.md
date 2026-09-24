@@ -119,7 +119,7 @@ Pi Voice reads `~/.pi/agent/pi-voice.json`. Missing settings use these defaults;
 
 See [Configuration](docs/configuration.md) for valid values and setting behavior, or copy [`pi-voice.example.json`](pi-voice.example.json), which deliberately enables spoken output.
 
-Timing commands: `/voice timing` reports quality, latency and worker limits; `/voice timing workers` queries the limit read-only. `/voice timing workers 2` sets it; `/voice timing workers auto` restores automatic sizing (maximum four). Explicit limits are 1–8; the JSON key remains `timingPreprocessConcurrency`. Silent cached-audio alignment retry is not implemented yet.
+Timing commands: `/voice timing` reports quality, latency and worker limits; `/voice timing workers` queries the limit read-only. `/voice timing workers 2` sets it; `/voice timing workers auto` restores automatic sizing (maximum four). Explicit limits are 1–8; the JSON key remains `timingPreprocessConcurrency`. `/voice timing retry current|all|<min>-<max>|<message-id>` silently retries wholly estimated units from cached audio, without generating speech or descriptions. Ranges use inclusive 1-based playback-message numbers in the current branch; IDs must match exactly. Missing audio/plans and unknown/mixed timing are reported, not regenerated. Stop cancels retry; see [retry scope and limits](docs/preprocessing-and-cache.md#silent-timing-retry).
 
 ## Controls
 

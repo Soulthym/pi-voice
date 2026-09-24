@@ -51,7 +51,17 @@ A timing pass converts speakable text and persisted code narration into segments
 
 Timing follows the same narration-eligible transcript and content-block order as playback, including thinking when the selected narration mode permits it. Raw tool results and pure tool-call/edit messages are excluded.
 
-A complete message timing map is persisted only when all required segments complete. Valid partial timing after seeks remains available while bounded background recovery fills missing coverage, including while paused, without acquiring playback ownership, moving the highlight/viewport or resuming audio. Late results are fenced against newer navigation and asset identities. Interrupted segment files remain reusable, so retry decodes completed Opus files and synthesizes only misses.
+A complete message timing map is persisted only when all required segments complete. Valid partial timing after seeks remains available while bounded background recovery fills missing coverage, including while paused, without acquiring playback ownership, moving the highlight/viewport or resuming audio. Late results are fenced against newer navigation and asset identities. Interrupted segment files remain reusable, so automatic timing recovery decodes completed Opus files and synthesizes only misses. Explicit alignment retry below never synthesizes.
+
+## Silent timing retry
+
+`/voice timing retry current|all|<min>-<max>|<message-id>` explicitly retries alignment using cached audio. Targets are completed narration-eligible playback messages in the current session branch and current narration mode. `current` uses the selected target; `all` is never automatic. Ranges are inclusive 1-based displayed playback-message numbers, not raw transcript entries. IDs must match exactly; invalid/out-of-bounds ranges and unknown/ambiguous targets are rejected. Target IDs, source text, render identity and available spoken plans are captured when invoked.
+
+Only units whose retained checkpoints are all explicitly `estimated` are retried. Already-refined, mixed, unknown-provenance and missing timing units are conservatively skipped: sparse checkpoints cannot prove that replacing them would preserve refined words. Missing description plans skip the target; saved omissions remain omitted. Missing/unreadable audio is reported without synthesis. Retry never calls a description provider, generates speech, writes new audio or starts playback; it can read existing Opus even with normal audio caching disabled.
+
+One bounded cache decode/alignment runs at a time, with a per-unit timeout and text/PCM limits, independently of the automatic timing-worker count. Foreground speech/input gets priority and can interrupt the dedicated retry alignment child; retry waits until foreground work clears. Stop, session replacement/shutdown or a newer valid retry cancels pending work without cancelling another consumer's alignment. `/voice timing` reports active target progress; completion reports improved/still-estimated units, missing cached audio and skips. Refinement is not guaranteed.
+
+Results merge only while session, source and render identity still match and cached duration is compatible. Updates are metadata-only: selection, playback clocks, playing/paused state, highlights, viewport and drafts stay unchanged. Complete and partial timing snapshots retain their completeness and per-unit coverage; a retry does not turn sparse timing into a complete message map. Newly measured source-word coverage is persisted; unavailable coverage still reports unknown/pending.
 
 ## Render identity and invalidation
 
@@ -74,7 +84,7 @@ Audio caching is enabled by default under `~/.cache/pi-voice/audio`. Each synthe
 
 Cache keys include the audio-generation format version, TTS model, dtype, voice, speed, text, and bitrate. The whole-sentence upgrade changes timing identity and bumps audio format identity once: previous audio may have silently truncated long phoneme sequences, and clause-based durations no longer describe the same generation boundaries. This necessary one-time regeneration is separate from LLM selection, which does not invalidate descriptions or compatible assets. A cache hit avoids loading or running Kokoro. Newly encoded Opus is decoded before alignment/playback so first playback analyzes the same representation as later cache hits.
 
-No raw PCM is persisted. Disabling caching prevents new reads/writes but does not delete existing Opus files. Configure with:
+No raw PCM is persisted. Disabling caching prevents normal reads/writes but does not delete existing Opus files; explicit timing retry may still read them. Configure with:
 
 ```text
 /voice audio-cache on|off

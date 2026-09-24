@@ -102,6 +102,7 @@ Selection waits for actual old-player/recorder stop, finalizes recording into th
 /voice code-retry current
 /voice code-retry historical [all|<message-id>]
 /voice timing workers [auto|<1..8>]
+/voice timing retry current|all|<min>-<max>|<message-id>
 /voice audio-cache [on|off]
 /voice audio-bitrate [12..128]
 ```
@@ -110,6 +111,10 @@ Selection waits for actual old-player/recorder stop, finalizes recording into th
 
 `code-budget` reports or explicitly resets the session-only historical backfill allowance (`scope` and default budget come from the config) and resumes skipped blocks. `code-retry current` retries recoverable omitted descriptions on the selected playback message when it remains in the configured historical scope. `code-retry historical` opens a picker; pass `all` or a message-ID substring to select non-interactively. Retries still respect the session backfill allowance. Richer regeneration selection is not implemented; this basic picker and these explicit retry commands are the available controls.
 
-`/voice timing` and `/voice timing workers` are read-only. For example, `/voice timing workers 2` persists a two-worker limit; `/voice timing workers auto` restores automatic sizing. The JSON setting remains `timingPreprocessConcurrency`. Silent cached-audio alignment retry is not available yet.
+`/voice timing` and `/voice timing workers` are read-only. For example, `/voice timing workers 2` persists a two-worker limit; `/voice timing workers auto` restores automatic sizing. The JSON setting remains `timingPreprocessConcurrency`. `/voice timing` also reports retry progress while a batch is active.
+
+`timing retry` silently aligns existing cached audio for wholly estimated units. `current` means the selected completed playback target; `all` explicitly selects all eligible completed targets in the current session branch. Ranges (for example `2-5`) are inclusive, 1-based displayed playback-message numbers, not raw transcript entry numbers. IDs must match exactly; unknown/ambiguous IDs and invalid/out-of-bounds ranges are rejected. Targets and spoken plans are snapshotted at invocation.
+
+Missing cached audio or description plans are reported/skipped, never generated. Refined, mixed and unknown-provenance units are conservatively skipped. Retry preserves selection, playing/paused state, highlights, viewport and drafts; it does not start playback. Stop, session replacement/shutdown or a newer valid retry cancels pending work. See [retry limits](preprocessing-and-cache.md#silent-timing-retry).
 
 Code concurrency controls parallel `editModel` requests and is explicit. Timing `auto` derives a CPU worker limit from available RAM and CPU, capped at four. Disabling audio caching does not delete existing Opus files.

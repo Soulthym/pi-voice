@@ -62,8 +62,8 @@ test("unknown per-word provenance and sparse recovery never fabricate coverage",
 	const snapshot = history.snapshotForUtterance(1)!;
 	const restored = new PlaybackHistory();
 	restored.sync([message]);
-	restored.restore([snapshot]);
-	assert.equal(restored.status()?.wordTimingCoverage, undefined);
+	restored.restore([{ ...snapshot, units: undefined }]);
+	assert.equal(restored.status()?.wordTimingCoverage, undefined, "legacy sparse snapshots have no measured counts");
 	restored.retainTimingUnit(message.id, "A", { sourceOffset: 0, skipUnits: 0 }, snapshot.checkpoints);
 	assert.equal(restored.status()?.wordTimingCoverage, undefined);
 	history.retainTimingUnit(message.id, "A", { sourceOffset: 18, skipUnits: 0 }, [{ time: 0, duration: 3, sourceOffset: 18, quality: "estimated" }]);

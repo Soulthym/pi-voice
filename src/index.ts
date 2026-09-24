@@ -72,7 +72,7 @@ import { SessionCoordinator, type AttentionRequest, type WaitingSession } from "
 import { supportsInteractiveVoice } from "./session-mode.js";
 import { Vocalizer, type PlaybackPhase } from "./vocalizer.js";
 import { isVoice, VOICES } from "./voices.js";
-import { VoiceWorkerClient, type WorkerEvent } from "./worker-client.js";
+import { VoiceWorkerClient, type WorkerEvent, type TimingRetryResult } from "./worker-client.js";
 
 type VoiceState = "downloading" | "error" | "idle" | "listening" | "loading" | "speaking";
 type InputPhase = "idle" | "acquiring" | "recording" | "transcribing";
@@ -2974,6 +2974,137 @@ export default async function (pi: ExtensionAPI) {
 		retry();
 	};
 
+	let timingRetry: { controller: AbortController; worker: VoiceWorkerClient; progress: string } | undefined;
+	let timingRetryRetirement = Promise.resolve();
+	const cancelTimingRetry = (): void => {
+		const retry = timingRetry;
+		timingRetry = undefined;
+		retry?.controller.abort();
+		if (retry) timingRetryRetirement = Promise.all([timingRetryRetirement, retry.worker.terminate().catch(() => {})]).then(() => {});
+	};
+
+	// Snapshot the spoken plan synchronously; missing descriptions never invoke a provider.
+	const cachedTimingItems = (ctx: ExtensionContext, message: ContextualPlaybackMessage) => {
+		const stream = new SpeakableStream();
+		const items: Array<{ text: string; source: SpeakableSourceRange; wordTimings: boolean }> = [];
+		const dependencies: string[] = [];
+		for (const item of [...stream.push(message.text), ...stream.flush()]) {
+			if (item.kind === "speech") { items.push({ ...item, wordTimings: true }); continue; }
+			const block = completedCodeItems(message).find(block => block.sourceEnd === item.source.end)!;
+			let key: string;
+			try { key = descriptionCacheKey(ctx, block.block, block.identityContext); }
+			catch { return undefined; }
+			const plan = codeDescriptionCache.get(key) ?? codeDescriptionFallbacks.get(key);
+			const omitted = plan?.omitted || codeDescriptionOmissions.has(key);
+			if (!plan && !omitted) return undefined;
+			dependencies.push(JSON.stringify([key, omitted ? "omitted" : plan]));
+			if (omitted) continue;
+			let chunks = chunkCodeNarration(plan!);
+			if (!chunks.length) chunks = chunkCodeNarration(plainCodeNarration(fallbackCodeDescription(item.block)));
+			for (const chunk of chunks) items.push({ text: chunk.text, source: item.source, wordTimings: false });
+		}
+		return { items, renderKey: narrationRenderKey(message.text, config, dependencies) };
+	};
+
+	const retryMessageTimings = (ctx: ExtensionContext, scope: string): void => {
+		const messages = completedAssistantMessages(ctx, config.mode, config.codeDescriptionContext === "conversation");
+		let selected: ContextualPlaybackMessage[];
+		if (scope === "all") selected = messages;
+		else if (scope === "current") selected = messages.filter(message => message.id === playbackHistory.selected()?.id);
+		else if (/^[1-9]\d*-[1-9]\d*$/.test(scope)) {
+			const [min, max] = scope.split("-").map(Number);
+			if (!Number.isSafeInteger(min) || !Number.isSafeInteger(max) || min > max || max > messages.length) {
+				notifyVoice(ctx, "Invalid timing retry range", "error"); return;
+			}
+			selected = messages.slice(min - 1, max);
+		} else selected = messages.filter(message => message.id === scope);
+		if (!selected.length || (scope !== "all" && !/^[1-9]\d*-[1-9]\d*$/.test(scope) && selected.length !== 1)) {
+			notifyVoice(ctx, "Unknown or ambiguous timing retry target", "error"); return;
+		}
+		const targets = selected.map(message => ({ message, plan: cachedTimingItems(ctx, message) }));
+		cancelTimingRetry();
+		const settings = { ...config };
+		const epoch = contextEpoch;
+		const session = ctx.sessionManager.getSessionId();
+		const retry = timingRetry = { controller: new AbortController(), worker: new VoiceWorkerClient(() => {}, () => settings), progress: `queued ${targets.length} targets` };
+		const current = () => timingRetry === retry && !retry.controller.signal.aborted && epoch === contextEpoch &&
+			session === activeContext?.sessionManager.getSessionId();
+		const foregroundBusy = () => {
+			const owner = coordinator?.speechOwner();
+			return inputInProgress || (ownsSpeech && !playbackPaused) ||
+				!!owner && (owner.instanceId !== coordinator?.instanceId || !playbackPaused);
+		};
+		const compatible = (message: ContextualPlaybackMessage, key: string) => current() &&
+			completedAssistantMessages(ctx, config.mode, config.codeDescriptionContext === "conversation").some(candidate =>
+				candidate.id === message.id && candidate.text === message.text && cachedTimingItems(ctx, candidate)?.renderKey === key);
+		notifyVoice(ctx, `Timing retry · queued ${targets.length} targets`, "info");
+		void (async () => {
+			await timingRetryRetirement;
+			let improved = 0, missing = 0, skipped = 0, estimated = 0;
+			for (const [index, { message, plan }] of targets.entries()) {
+				await new Promise<void>(resolve => setImmediate(resolve));
+				if (!current()) return;
+				retry.progress = `target ${index + 1}/${targets.length} · ${improved} improved · ${missing} missing cached audio`;
+				if (!plan) { skipped++; continue; }
+				let previousSource = -1, skipUnits = 0;
+				for (const item of plan.items) {
+					skipUnits = previousSource === item.source.start ? skipUnits + 1 : 0;
+					previousSource = item.source.start;
+					const unit = { sourceOffset: item.source.start, skipUnits };
+					const old = playbackHistory.timingForUnit(message.id, plan.renderKey, unit);
+					if (!old?.length || old.some(point => point.quality !== "estimated")) { skipped++; continue; }
+					// One cache decode/alignment at a time; foreground owns the next slot.
+					await new Promise<void>(resolve => setImmediate(resolve));
+					let result: TimingRetryResult | undefined;
+					while (!result) {
+						while (current() && foregroundBusy()) {
+							await new Promise<void>(resolve => { const timer = setTimeout(resolve, 50); timer.unref?.(); });
+						}
+						if (!compatible(message, plan.renderKey)) return;
+						const preempt = new AbortController();
+						const signal = AbortSignal.any([retry.controller.signal, preempt.signal]);
+						const timer = setInterval(() => { if (foregroundBusy()) preempt.abort(); }, 50);
+						timer.unref?.();
+						try {
+							result = await retry.worker.retryTiming(item.text, signal);
+							if (preempt.signal.aborted) result = undefined;
+						}
+						catch (error) { if (!preempt.signal.aborted || !current()) throw error; }
+						finally { clearInterval(timer); }
+					}
+					if (!compatible(message, plan.renderKey)) return;
+					if (result.status === "cache-miss") { missing++; continue; }
+					if (!Number.isFinite(result.duration) || result.duration <= 0 || Math.abs(result.duration - old[0].duration) > 0.02) { skipped++; continue; }
+					const mapped = new NarrationProgress();
+					mapped.setCompletedText(message.text);
+					mapped.registerSegment({ id: 1, utterance: 1, text: item.text, source: item.source });
+					mapped.setSegmentAudio(1, 0, old[0].duration);
+					mapped.setAlignment(1, result.words, result.quality);
+					const words = item.wordTimings ? mapped.sourceWordTimings(1) : [];
+					const quality = item.wordTimings ? mapped.timingQuality(1) : result.quality;
+					const coverage = { total: words.length, estimated: words.filter(word => word.quality !== "ctc-refined").length };
+					const points = [{ ...old[0], quality }, ...words.filter(word => word.sourceOffset !== unit.sourceOffset)
+						.map(word => ({ ...word, duration: 0 }))];
+					const snapshot = playbackHistory.refineTimingUnit(message.id, plan.renderKey, unit, points, coverage);
+					if (snapshot) {
+						pi.appendEntry(PLAYBACK_TIMING_ENTRY, snapshot);
+						let versions = persistedTimingSnapshots.get(message.id);
+						if (!versions) persistedTimingSnapshots.set(message.id, versions = new Map());
+						versions.set(plan.renderKey, snapshot);
+						if (quality === "ctc-refined" || quality === "mixed") improved++;
+						if (quality !== "ctc-refined") estimated++;
+					}
+				}
+			}
+			if (current()) notifyVoice(ctx, `Timing retry · ${improved} improved · ${estimated} still estimated · ${missing} missing cached audio · ${skipped} skipped (missing plan, refined/mixed or unknown timing)`, "info");
+		})().catch(error => {
+			if (current()) notifyVoice(ctx, `Timing retry · ${String(error)}`, "error");
+		}).finally(() => {
+			if (timingRetry === retry) timingRetry = undefined;
+			void retry.worker.terminate().catch(() => {});
+		});
+	};
+
 	let timingPreprocessing: Promise<void> | undefined;
 	let lastTimingScan = "";
 	scheduleMissingTimings = (ctx: ExtensionContext, force = true): void => {
@@ -3474,6 +3605,7 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	pi.on("session_start", async (_event, ctx) => {
+		cancelTimingRetry();
 		const inputCancelled = cancelActiveInput();
 		clearPlaybackTransport();
 		try {
@@ -3647,6 +3779,7 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
+		cancelTimingRetry();
 		devicePicker?.abort();
 		devicePicker = undefined;
 		if (preprocessingPaint) clearTimeout(preprocessingPaint);
@@ -4688,9 +4821,12 @@ export default async function (pi: ExtensionAPI) {
 					.map(value => ({ value: `code-retry ${value}`, label: value }));
 			}
 			if (parts[0] === "timing") {
-				if (parts.length === 2) return ["workers"]
+				if (parts.length === 2) return ["workers", "retry"]
 					.filter(value => value.startsWith(parts[1]))
 					.map(value => ({ value: `timing ${value}`, label: value }));
+				if (parts[1] === "retry" && parts.length === 3) return ["current", "all"]
+					.filter(value => value.startsWith(parts[2]))
+					.map(value => ({ value: `timing retry ${value}`, label: value }));
 				if (parts[1] === "workers" && parts.length === 3) return ["auto", "1", "2", "3", "4", "5", "6", "7", "8"]
 					.filter(value => value.startsWith(parts[2]))
 					.map(value => ({ value: `timing workers ${value}`, label: value }));
@@ -4780,9 +4916,13 @@ export default async function (pi: ExtensionAPI) {
 			const normalizedAction = action.toLowerCase();
 			// Timing queries and invalid arguments must not touch playback, recording or follow state.
 			if (normalizedAction === "timing") {
+				if (value.toLowerCase() === "retry" && restArgs.length === 1) {
+					retryMessageTimings(ctx, restArgs[0]);
+					return;
+				}
 				const workers = () => `${config.timingPreprocessConcurrency} → ${resolveTimingConcurrency(config.timingPreprocessConcurrency, config.ttsDtype)}${timingPreprocessing ? `; active batch=${timingWorkers.length}` : ""}`;
 				if (!value) {
-					notifyVoice(ctx, `${playbackTimingStatus(playbackHistory.status()?.wordTimingCoverage)}\n${narration.timingSummary()}\nTiming workers: ${workers()}`, "info");
+					notifyVoice(ctx, `${playbackTimingStatus(playbackHistory.status()?.wordTimingCoverage)}\n${narration.timingSummary()}\nTiming workers: ${workers()}${timingRetry ? `\nTiming retry: ${timingRetry.progress}` : ""}`, "info");
 					return;
 				}
 				if (value.toLowerCase() === "workers" && restArgs.length === 0) {
@@ -4795,7 +4935,7 @@ export default async function (pi: ExtensionAPI) {
 					notifyVoice(ctx, `timing workers: ${workers()}`, "info");
 					return;
 				}
-				notifyVoice(ctx, "Usage: /voice timing [workers [auto|<1..8>]]", "error");
+				notifyVoice(ctx, "Usage: /voice timing [workers [auto|<1..8>]|retry current|all|<min>-<max>|<exact-id>]", "error");
 				return;
 			}
 			// Queries must return before even the transcript-follow reset below.
@@ -4880,6 +5020,7 @@ export default async function (pi: ExtensionAPI) {
 					await toggle(ctx);
 					return;
 				case "stop": {
+					cancelTimingRetry();
 					attentionSuppressed = true;
 					queueIncomingWhilePaused = false;
 					queuedPausedMessages.length = 0;
@@ -5360,7 +5501,7 @@ export default async function (pi: ExtensionAPI) {
 						"Input · input | shortcut | stt-model | stt-dtype | stt-candidates | edit | edit-model | submit",
 						`Devices · /voice devices picker · ${devicePickerConflict ? "Alt+S reserved by configured voice control" : "Alt+S"} · click existing [device] in supported fullscreen Pi`,
 						"Cache · code-narration | code-preprocess | code-budget | code-retry current|historical | audio-cache | audio-bitrate",
-						"Timing · timing (quality, latency, workers) | timing workers [auto|<1..8>]",
+						"Timing · timing (quality, latency, workers) | timing workers [auto|<1..8>] | timing retry current|all|<min>-<max>|<exact-id>",
 						"Inspect · status | help",
 					].join("\n"),
 						normalizedAction === "help" ? "info" : "error",

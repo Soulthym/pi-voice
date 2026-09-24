@@ -256,7 +256,8 @@ test("complete estimated timings are refined and persisted during replay without
 		history.registerSegment(segment(3, 2, 0));
 		history.setSegmentAudio(3, 0, 4);
 		const before = history.snapshotForSegment(3);
-		assert.deepEqual(before, estimated);
+		assert.deepEqual(before, { ...estimated, units: estimated.units?.map(saved =>
+			saved.unit.sourceOffset === offset ? { ...saved, coverage: undefined } : saved) });
 		const status = history.status();
 		history.setTimingQuality(3, "ctc-refined");
 		history.setWordTimings(3, [{ time: 2.5, sourceOffset: 20, quality: "ctc-refined" }]);
@@ -268,7 +269,7 @@ test("complete estimated timings are refined and persisted during replay without
 			{ time: start + 2.5, duration: 0, sourceOffset: offset + 20, quality: "ctc-refined" },
 		].sort((a, b) => a.time - b.time), "replace stale words, preserving other units and sentence boundaries");
 		assert.deepEqual(history.status(), { ...status, timingQuality: "mixed",
-			...(!reload ? { wordTimingCoverage: { estimated: 2, total: 3 } } : {}) });
+			wordTimingCoverage: { estimated: 2, total: 3 } });
 		assert.equal(history.seekTarget(start + 2.5)?.time, start + 2.5);
 		history.setWordTimings(3, [{ time: 2.5, sourceOffset: 20, quality: "ctc-refined" }]);
 		assert.equal(history.snapshotForSegment(3), undefined, "duplicate alignment does not persist again");
