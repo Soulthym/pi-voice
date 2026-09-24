@@ -9,7 +9,10 @@
 - Point 2 approved: unknown totals use a neutral bar without a false zero-position marker; streaming/incomplete totals show reliable elapsed time only, not a completion fraction. Complete totals show normal progress and elapsed/total. Unpaused caught-up live shows red `● live` instead of time. Never substitute the previous message's clock for unavailable current timing. Implementation pending.
 - Point 3 approved: derive status, timing and message index from one consistent playback context. While A plays, describe A regardless of preparation for B. After A finishes and playback awaits B, describe B's preparation with its own timing or unknown timing. Paused selection and position remain stable. Implementation pending.
 - Point 4 approved: keep widgets mounted in a consistent order and update their contents without removal/reinsertion. Show/hide controls only when availability actually changes; do not reserve unnecessary blank rows. This addresses reproduced row movement, not a proven cause of the original disappearance. Implementation pending.
-- Next decision: point 5, responsive width budgeting. The remaining audit findings are still proposals.
+- Point 5 approved: retain status, time/live and right-aligned `[🎧:device]`; shrink the bar on narrow terminals, shorten message numbering to `671/671` and omit it if necessary. Truncate long names while retaining emoji/brackets; prefer one row where feasible and no shortcut hints. Implementation pending.
+- New highlighting TODOs, to implement only after the point-by-point discussion: highest priority is retaining dimming/highlighting after the final model render while audio still plays; second is eliminating dimming/native-color flicker during streaming. Preserve syntax colors, layout and manual scrolling. These are user-reported symptoms, not yet diagnosed or fixed.
+- User explicitly clarified: no implementation yet, including these highlighting bugs. The interrupted investigation left no implementation changes.
+- Next decision: point 6, live-follow lifecycle consistency. The remaining audit findings are still proposals.
 
 ## Previous handoff — completed chronological live follow
 
