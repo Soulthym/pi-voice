@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { mock, test } from "node:test";
+import { PlaybackHistory } from "../src/playback-history.js";
 import { FakeVoiceHost, MockedVoiceWorkerClient, assistant } from "./helpers/fake-voice-host.js";
 
 mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: MockedVoiceWorkerClient } });
@@ -23,9 +24,9 @@ test("mounted playbar keeps a queued live target through background preparation 
 	await fs.writeFile(process.env.PI_VOICE_CONFIG, JSON.stringify({ enabled: true, mode: "assistant", output: "local", audioCache: false }));
 	const host = new FakeVoiceHost(root, "live-progress");
 	// Actual Pi replacement + container + fullscreen layout, on an inert terminal.
-	const { InteractiveMode, initTheme } = await import(process.env.PI_VOICE_TEST_AGENT_MODULE ?? "@earendil-works/pi-coding-agent");
+	const { InteractiveMode, FooterComponent, initTheme } = await import(process.env.PI_VOICE_TEST_AGENT_MODULE ?? "@earendil-works/pi-coding-agent");
 	initTheme("dark");
-	const terminal = { columns: 100, rows: 24, write() {}, hideCursor() {} };
+	const terminal = { columns: 160, rows: 24, write() {}, hideCursor() {} };
 	const tui: any = new native.TuiAltScreen(terminal, false);
 	tui.altScreenActive = true; // Never start a terminal or live session.
 	const mountedRows: string[][] = [];
@@ -34,6 +35,11 @@ test("mounted playbar keeps a queued live target through background preparation 
 		extensionWidgetsAbove: new Map(), extensionWidgetsBelow: new Map(),
 		widgetContainerAbove: new native.Container(), widgetContainerBelow: new native.Container(), ui: tui,
 	});
+	const statuses = new Map([["other", "Other extension status"]]);
+	host.ctx.ui.setStatus = (key: string, value?: string) => { if (value === undefined) statuses.delete(key); else statuses.set(key, value); };
+	const footer = new FooterComponent({ state: {}, sessionManager: { getEntries: () => [], getCwd: () => root, getSessionName: () => undefined }, getContextUsage: () => undefined } as any,
+		{ getGitBranch: () => undefined, getExtensionStatuses: () => statuses, getAvailableProviderCount: () => 0 } as any);
+	const originalFooterRender = footer.render;
 	const transcript = new native.ScrollView(new native.Text("history\n".repeat(100), 0, 0), { primary: true, follow: "end" });
 	// Match InteractiveMode's dock ordering and shrink/minSize policy.
 	const dock = new native.VStack([
@@ -42,7 +48,7 @@ test("mounted playbar keeps a queued live target through background preparation 
 		{ component: nativeUI.widgetContainerAbove, shrink: 1, minSize: 0 },
 		{ component: new native.Text("editor\n\n", 0, 0), shrink: 1, minSize: 3 },
 		{ component: nativeUI.widgetContainerBelow, shrink: 1, minSize: 0 },
-		{ component: new native.Text("footer", 0, 0), shrink: 1, minSize: 1 },
+		{ component: footer, shrink: 1, minSize: 1 },
 	]);
 	tui.setLayoutRoot(new native.VStack([
 		{ component: transcript, basis: 0, grow: 1, shrink: 1, minSize: 1 },
@@ -69,7 +75,8 @@ test("mounted playbar keeps a queued live target through background preparation 
 	};
 	const assertFrame = (label: string) => {
 		tui.requestRender();
-		assert.match(frames.at(-1)!.join("\n"), /(?:Paused|Waiting|Playing|Idle).*message /, label);
+		assert.match(frames.at(-1)!.join("\n"), /(?:Paused|Queued|Synthesizing|Loading|Connecting|Playing|Idle).*\[[●━]/, label);
+		assert.doesNotMatch(frames.at(-1)!.join("\n"), /Waiting|livewaiting/i);
 	};
 	const workerIndex = MockedVoiceWorkerClient.instances.length;
 	t.after(async () => {
@@ -79,9 +86,15 @@ test("mounted playbar keeps a queued live target through background preparation 
 	});
 	host.addMessage("old", null, assistant("Historical response."));
 	await host.start();
+	assert.equal(footer.render, originalFooterRender, "extension never patches native footer rendering or hitboxes");
+	tui.requestRender();
+	assert.match(frames.at(-1)!.join("\n"), /Other extension status/);
+	const retired: any = nativeUI.extensionWidgetsBelow.get("pi-voice-progress");
+	retired.render(100);
 	await host.shortcut("f5"); await settle();
 	await host.shortcut("f8"); await settle();
 	assert.match(host.widgetLines()![0]!, /Paused/);
+	assert.equal(nativeUI.extensionWidgetsBelow.get("pi-voice-progress"), retired, "progress refresh retains native mouse identity");
 	const partial = assistant("New response first sentence. ");
 	delete partial.stopReason;
 	host.idle = false;
@@ -92,6 +105,16 @@ test("mounted playbar keeps a queued live target through background preparation 
 	const worker = MockedVoiceWorkerClient.instances[workerIndex]!;
 	const segment = worker.sent.find((event: any) => event.text.includes("New response")) as { utterance: number; segmentId: number };
 	assert.ok(segment, JSON.stringify(worker.sent));
+	const pausedMissing = t.mock.method(PlaybackHistory.prototype, "status", () => undefined);
+	for (const phase of ["loading", "synthesizing", "connecting", "queued"] as const) {
+		worker.emit({ type: "playback-phase", utterance: segment.utterance, segmentId: segment.segmentId, phase });
+		await settle();
+		assert.match(host.widgetLines()![0]!, /Paused.*\[[●━]/, "paused intent wins even without a history status");
+		assert.doesNotMatch(host.widgetLines()![0]!, /● live/);
+		assertFrame(`paused ${phase} without history`);
+	}
+	pausedMissing.mock.restore();
+	worker.emit({ type: "ready" }); await settle();
 	const firstOperation = host.widgetOperations.length;
 	const firstMount = mountedRows.length;
 	const firstFrame = frames.length;
@@ -100,32 +123,59 @@ test("mounted playbar keeps a queued live target through background preparation 
 		assert.match(host.widgetLines()![0]!, /Paused.*message 2\/2.*timing pending/);
 	}
 	await host.shortcut("f8"); await settle();
-	assert.match(host.widgetLines()![0]!, /Waiting.*message 2\/2.*timing pending/);
+	assert.match(host.widgetLines()![0]!, /Queued.*message 2\/2.*timing pending/);
+	for (const phase of ["loading", "synthesizing", "connecting", "queued"] as const) {
+		worker.emit({ type: "playback-phase", utterance: segment.utterance, segmentId: segment.segmentId, phase });
+		await settle();
+		assert.match(host.widgetLines()![0]!, new RegExp(phase, "i"));
+		worker.emit({ type: "playback-phase", utterance: segment.utterance + 999, segmentId: 999, phase: "playing" });
+		worker.emit({ type: "ready" }); await settle();
+		assert.match(host.widgetLines()![0]!, new RegExp(phase, "i"), "unowned/background events cannot claim foreground playback");
+		assertFrame(`foreground ${phase}`);
+	}
 	worker.emit({ type: "segment-audio", segmentId: segment.segmentId, utterance: segment.utterance, start: 0, duration: 4, timingQuality: "estimated" });
 	worker.emit({ type: "speaking" });
 	worker.emit({ type: "playback", utterance: segment.utterance, position: 1 });
 	await settle();
 	assert.match(host.widgetLines()![0]!, /Playing.*0:01 \/ 0:04.*message 2\/2/);
+	assert.doesNotMatch(host.widgetLines()![0]!, /● live/);
+	await host.shortcut("alt+t"); await settle();
+	assert.doesNotMatch(host.widgetLines()![0]!, /● live/, "following the viewport is not chronological live playback");
 	partial.content[0].text += "Second sentence continues growing. ";
 	await host.emit("message_update", { message: partial, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Second sentence continues growing. " } });
 	await host.emit("agent_settled", {}); await settle();
 	assert.match(host.widgetLines()![0]!, /0:01 \/ 0:04.*message 2\/2/);
+	worker.emit({ type: "playback", utterance: segment.utterance, position: 4 }); await settle();
+	assert.doesNotMatch(host.widgetLines()![0]!, /● live/, "exhausted first clip is not live while second prose awaits audio");
+	assert.doesNotMatch(frames.at(-1)!.join("\n"), /● live/);
+	const pendingProse = worker.sent.at(-1) as { utterance: number; segmentId: number };
+	assert.notEqual(pendingProse.segmentId, segment.segmentId);
+	worker.emit({ type: "segment-audio", segmentId: pendingProse.segmentId, utterance: pendingProse.utterance, start: 4, duration: 6 }); await settle();
 	await host.shortcut("f8"); await settle();
 	const complete = { ...partial, stopReason: "stop" };
 	host.addMessage("new", "old", complete);
 	await host.emit("message_end", { message: complete });
 	await host.emit("turn_end", { message: complete });
 	await host.emit("agent_settled", {}); await settle();
-	assert.match(host.widgetLines()![0]!, /Paused.*0:01 \/ 0:0[45].*message 2\/2/);
+	assert.match(host.widgetLines()![0]!, /Paused.*0:04 \/ 0:10.*message 2\/2/);
 	assert.ok(host.widgetOperations.slice(firstOperation).filter(operation => operation.name === "pi-voice-progress")
 		.every(operation => operation.value?.lines?.length), "mounted UI never removes the live playback row");
 	assert.ok(mountedRows.slice(firstMount).every(rows => rows.some(line => /message 2\/2/.test(line))),
 		"Pi's mounted component keeps the selected live target through replacements");
 	assert.ok(frames.slice(firstFrame).length > 0);
+	assert.ok(frames.slice(firstFrame).every(rows => !/Waiting|livewaiting/i.test(rows.join("\n"))), "no obsolete playback state in native frames");
 	assert.ok(frames.slice(firstFrame).every(rows => rows.some(line => /message 2\/2/.test(line))),
 		"actual native screens retain the playbar, not merely the widget map");
+	assert.match(host.widgetLines()![0]!, /0:04 \/ 0:10/, "real retained history exists before Tail");
+	await host.shortcut("f10"); await settle();
+	assert.match(host.widgetLines()![0]!, /Paused.*--:-- \/ --:--/, "paused Tail discards abandoned history time");
+	await host.shortcut("f8"); await settle();
+	await host.shortcut("f10"); await settle();
+	assert.match(host.widgetLines()![0]!, /● live/);
+	assert.doesNotMatch(host.widgetLines()![0]!, /0:04 \/ 0:10/, "Tail abandons the retained history timestamp");
+	assert.match(frames.at(-1)!.join("\n"), /● live/);
 	await host.command("stop");
-	assert.doesNotMatch(host.widgetLines()![0]!, /Paused|Waiting|Playing/);
+	assert.doesNotMatch(host.widgetLines()![0]!, /Paused|Queued|Playing|● live/);
 	await settle();
 	// A finished source block is not completion of the still-streaming response.
 	await host.emit("before_agent_start", {}); await settle();
@@ -133,10 +183,16 @@ test("mounted playbar keeps a queued live target through background preparation 
 	streaming.content = [{ type: "text", text: "" }];
 	await host.emit("message_start", { message: streaming });
 	const streamingFrames = frames.length;
-	assert.match(host.widgetLines()![0]!, /Waiting.*timing pending/);
+	assert.match(host.widgetLines()![0]!, /Playing.*\] ● live ·/);
+	assert.ok(host.styleCalls.some(call => call.style === "error" && call.text === "● live"));
+	const missing = t.mock.method(PlaybackHistory.prototype, "status", () => undefined);
+	worker.emit({ type: "ready" }); await settle();
+	assert.match(host.widgetLines()![0]!, /\[[●━].*● live/, "streaming intent keeps a real bar without a history record");
+	assertFrame("history record temporarily unavailable");
+	missing.mock.restore();
 	for (const type of ["loading", "ready", "idle"] as const) {
 		worker.emit({ type }); await settle();
-		assert.match(host.widgetLines()![0]!, /Waiting.*timing pending/);
+		assert.match(host.widgetLines()![0]!, /Playing.*\] ● live ·/);
 		assertFrame(`initial ${type} preparation gap`);
 	}
 	streaming.content[0].text = "First block sentence. ";
@@ -151,7 +207,7 @@ test("mounted playbar keeps a queued live target through background preparation 
 	await host.emit("message_update", { message: streaming, assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: streaming.content[1].text } });
 	await settle();
 	worker.emit({ type: "idle", utterance: first.utterance }); await settle();
-	assert.match(host.widgetLines()![0]!, /Waiting.*0:03 \/ 0:03/);
+	assert.match(host.widgetLines()![0]!, /Queued.*0:03 \/ 0:03/);
 	assertFrame("source-block handoff");
 	const second = worker.sent.at(-1) as { utterance: number; segmentId: number };
 	assert.notEqual(second.utterance, first.utterance);
@@ -166,6 +222,13 @@ test("mounted playbar keeps a queued live target through background preparation 
 	worker.emit({ type: "idle", utterance: second.utterance }); await settle();
 	assert.match(host.widgetLines()![0]!, /Idle.*0:02 \/ 0:02/);
 	assertFrame("canonicalized completion");
+	const finishedGapStart = frames.length;
+	const finishedMissing = t.mock.method(PlaybackHistory.prototype, "status", () => undefined);
+	worker.emit({ type: "ready" }); await settle();
+	assert.doesNotMatch(host.widgetLines()?.join("\n") ?? "", /\[[●━]|● live/, "finished idle never fabricates a playback record");
+	finishedMissing.mock.restore();
+	worker.emit({ type: "ready" }); await settle();
+	const finishedGapEnd = frames.length;
 	// A tool boundary and delayed session insertion must not unmount the row.
 	const toolMessage = assistant("Before reading a file. ", "toolUse");
 	toolMessage.content.push({ type: "toolCall", id: "call", name: "read", arguments: {} });
@@ -184,15 +247,81 @@ test("mounted playbar keeps a queued live target through background preparation 
 	await host.emit("message_update", { message: afterTool, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: afterTool.content[0].text } });
 	await settle();
 	assertFrame("next assistant after tool");
-	assert.ok(frames.slice(streamingFrames).every(rows => rows.some(line => /(?:Waiting|Playing|Idle).*message /.test(line))),
-		"no native frame loses the playback row across chunks, preparation gaps, completion and tools");
+	assert.ok(frames.filter((_rows, index) => index >= streamingFrames && (index < finishedGapStart || index >= finishedGapEnd))
+		.every(rows => rows.some(line => /(?:Queued|Playing|Idle).*\[[●━]/.test(line))),
+		"native frames keep the bar across chunks, preparation gaps and tools; only finished idle can retire it");
 	for (const columns of [40, 100]) {
 		terminal.columns = columns;
 		tui.requestRender(true);
-		assertFrame(`resized ${columns}-column dock`);
+		if (columns === 40) assert.match(frames.at(-1)!.join("\n"), /🎧/, "narrow dock retains device identity even with a long hostname");
+		else assertFrame(`resized ${columns}-column dock`);
 	}
+	await host.shortcut("f10"); await settle();
+	await host.shortcut("f10"); await settle();
+	const tailMissing = t.mock.method(PlaybackHistory.prototype, "status", () => undefined);
+	worker.emit({ type: "ready" }); await settle();
+	assert.match(host.widgetLines()![0]!, /Playing.*\[[●━].*● live/, "Tail keeps playing intent while awaiting future output without a history status");
+	assertFrame("chronological Tail without history");
+	tailMissing.mock.restore();
+	await host.shortcut("f7"); await settle();
+	assert.doesNotMatch(host.widgetLines()![0]!, /● live/, "previous sentence leaves the chronological live edge");
+	terminal.columns = 160;
+	for (const suffix of ["Unfinished prose", "```ts\nconst pending ="]) {
+		await host.command("stop"); await settle();
+		await host.emit("before_agent_start", {}); await settle();
+		const message = assistant("Plain prose.\n---\n"); delete message.stopReason;
+		await host.emit("message_start", { message });
+		await host.emit("message_update", { message, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: message.content[0].text } });
+		await settle();
+		const clip = worker.sent.at(-1) as { utterance: number; segmentId: number };
+		worker.emit({ type: "segment-audio", utterance: clip.utterance, segmentId: clip.segmentId, start: 0, duration: 1 });
+		worker.emit({ type: "playback", utterance: clip.utterance, position: 1 });
+		worker.emit({ type: "idle", utterance: clip.utterance });
+		await settle();
+		assert.match(frames.at(-1)!.join("\n"), /Playing.*● live/, "silent markdown tail is consumed with its prose");
+		const sent = worker.sent.length;
+		message.content[0].text += suffix;
+		await host.emit("message_update", { message, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: suffix } });
+		await settle(); // No worker event (or idle flush) can refresh this buffered delta.
+		assert.equal(worker.sent.length, sent);
+		assert.doesNotMatch(frames.at(-1)!.join("\n"), /● live/, "buffered source immediately retires the mounted live badge");
+		assertFrame("buffered source retains the mounted playbar");
+	}
+	await host.command("stop"); await settle();
+	await host.emit("before_agent_start", {}); await settle();
+	const silentTail = assistant("Plain prose.\n---\n", "toolUse");
+	await host.emit("message_start", { message: silentTail });
+	await host.emit("message_update", { message: silentTail, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: silentTail.content[0].text } });
+	host.addMessage("silent-tail", "last", silentTail);
+	await host.emit("message_end", { message: silentTail });
+	await settle();
+	const tailClip = worker.sent.at(-1) as { utterance: number; segmentId: number };
+	worker.emit({ type: "segment-audio", utterance: tailClip.utterance, segmentId: tailClip.segmentId, start: 0, duration: 1 });
+	worker.emit({ type: "playback", utterance: tailClip.utterance, position: 1 });
+	worker.emit({ type: "idle", utterance: tailClip.utterance });
+	await settle();
+	assert.match(frames.at(-1)!.join("\n"), /Playing.*● live/, "tool wait remains live after consumed prose plus silent markdown");
+	const cancel = t.mock.method(worker, "cancel", () => 901);
+	const terminate = t.mock.method(worker, "terminate", async () => { throw new Error("stop unconfirmed"); });
+	await host.command("stop"); await settle();
+	assert.match(host.widgetLines()!.join("\n"), /Idle.*\[[●━]/, "history remains visible during stop");
+	assert.match(frames.at(-1)!.join("\n"), /stopping.*waiting for device confirmation/, "mounted status retains delayed-stop warning beside history");
+	await new Promise(resolve => setTimeout(resolve, 1100)); await settle();
+	assert.match(frames.at(-1)!.join("\n"), /stopping|blocked|error/, "failed stop remains visible beside retained progress");
+	assert.ok(host.notices.some(notice => /stop unconfirmed/.test(notice.message)));
+	cancel.mock.restore(); terminate.mock.restore();
+	worker.emit({ type: "idle", cancelId: 901 });
+	const stoppedMissing = t.mock.method(PlaybackHistory.prototype, "status", () => undefined);
+	worker.emit({ type: "ready" }); await settle();
+	assert.doesNotMatch(host.widgetLines()?.join("\n") ?? "", /\[[●━]|● live/, "stop has no phantom transport without history");
+	await host.command("off");
+	for (let i = 0; i < 30 && host.widgetLines(); i++) await settle();
+	assert.equal(host.widgetLines(), undefined);
+	stoppedMissing.mock.restore();
 	await host.shutdown();
 	assert.equal(host.widgetLines(), undefined);
 	assert.deepEqual(mountedRows.at(-1), []);
+	assert.equal(footer.render, originalFooterRender);
+	assert.equal(statuses.get("other"), "Other extension status");
 	assert.equal(host.modelRequests.length, 0);
 });

@@ -134,7 +134,7 @@ test("timing batch replaces its visible row without holes between fast adjacent 
 			widgetRows.push(nativeUI.widgetContainerBelow.render(160).length);
 			const rendered = nativeUI.extensionWidgetsBelow.get("pi-voice-progress")?.render(32);
 			if (rendered && host.widgetLines()?.at(-1)?.startsWith("Word timing:")) {
-				assert.match(rendered[0], / \[local\]$/);
+				assert.match(rendered[0], /\[🎧:.*\]$/);
 				mobileWordRows.push(rendered.length - rendered.findIndex((line: string) => line.trimStart().startsWith("Word timing:")));
 			}
 		} },
@@ -155,7 +155,7 @@ test("timing batch replaces its visible row without holes between fast adjacent 
 	for (let i = 0; i < 3; i++) host.addMessage(`m${i}`, i ? `m${i - 1}` : null, assistant(`Sentence ${i}.`));
 	await host.start();
 	const startup = await waitForWidgetLines(host, lines => lines.some(line => line.includes("Recovering speech timing")));
-	assert.match(startup[0], /^○ Idle · message 3\/3 · timing pending \[local\]$/);
+	assert.match(startup[0], /^○ Idle · \[●━+\] --:-- \/ --:-- · message 3\/3 · timing pending\s+\[🎧:/);
 	assert.equal(startup.at(-1), "Word timing: unknown/pending");
 	while (!jobs) await settle();
 	const start = host.widgetOperations.length - 1;
@@ -205,7 +205,8 @@ test("unified progress widget orders input, playback, and preprocessing and clea
 	assert.ok(removals.includes("pi-voice-playback"), "legacy playback widget must be removed");
 	assert.ok(removals.includes("pi-voice-preprocessing"), "legacy preprocessing widget must be removed");
 	await new Promise(resolve => setTimeout(resolve, 120));
-	assert.equal(host.widgetLines(), undefined);
+	assert.match(host.widgetLines()![0], /Voice · ready/);
+	assert.ok(host.widgetLines()![0].endsWith(`[🎧:${os.hostname()}]`));
 
 	const text = "This answer contains several words for precise timing.\n```ts\nrun();\n```";
 	const partial = assistant(text, "pending");
@@ -218,8 +219,8 @@ test("unified progress widget orders input, playback, and preprocessing and clea
 	await host.emit("agent_settled", { type: "agent_settled" });
 	await settle();
 
-	let lines = await waitForWidgetLines(host, candidate => candidate.length >= 2);
-	assert.match(lines[0], /^◷ Waiting · message 1\/1 · timing pending \[local\]$/);
+	let lines = await waitForWidgetLines(host, candidate => /Queued|Describing/.test(candidate[0] ?? ""));
+	assert.match(lines[0], /^◷ (?:Queued|Describing) · \[●━+\] --:-- \/ --:-- · message 1\/1 · timing pending\s+\[🎧:/);
 	assert.equal(lines[1], "Word timing: unknown/pending");
 	assert.equal(lines.some(line => line.includes("Preparing code descriptions")), false,
 		"background descriptions must not contend with the deferred foreground utterance");
@@ -247,7 +248,7 @@ test("unified progress widget orders input, playback, and preprocessing and clea
 			candidate.every(line => !line.includes("🎙")) &&
 			candidate.some(line => line.includes("Recovering speech timing")),
 	);
-	assert.match(lines[0], /^○ Idle · message 1\/1/);
+	assert.match(lines[0], /^○ Idle ·.*message 1\/1/);
 	assert.match(lines[1], /Preparing code descriptions/);
 	assert.match(lines[2], /Recovering speech timing/);
 	assert.equal(lines[3], "Word timing: unknown/pending");

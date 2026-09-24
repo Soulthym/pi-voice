@@ -5,6 +5,19 @@ import { NARRATION_ACTIVE_MARKER, NarrationProgress } from "../src/narration-pro
 const dim = (text: string): string => `<dim>${text}</dim>`;
 const background = (text: string): string => `<bg>${text}</bg>`;
 
+test("speakable frontier ignores silent tails but retains buffered prose and descriptions", () => {
+	const progress = new NarrationProgress();
+	progress.setCompletedText("Plain prose.\n---\n");
+	assert.equal(progress.sourceEnd, "Plain prose.".length);
+	progress.pushDelta("assistant", 0, "Unfinished prose");
+	assert.equal(progress.sourceEnd, "Plain prose.\n---\nUnfinished prose".length);
+	for (const fence of ["```", "```ts\nconst value = 1;", "```ts\nconst value = 1;\n```\n"]) {
+		progress.setCompletedText(fence + (fence.endsWith("\n") ? "---\n" : ""));
+		assert.equal(progress.sourceEnd, fence.endsWith("\n") ? fence.length : fence.trimEnd().length);
+		assert.ok(progress.cursor < progress.sourceEnd, "unsynthesized descriptions cannot look consumed");
+	}
+});
+
 test("dims unread prose and reveals words from playback progress", () => {
 	const progress = new NarrationProgress();
 	progress.begin();

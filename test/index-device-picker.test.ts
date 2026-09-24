@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { mock, test } from "node:test";
+import { stripTerminalSequences } from "@earendil-works/pi-tui";
 import { DeviceRouter } from "../src/device-router.js";
 import { PhoneInputClient, type PhoneCapture } from "../src/phone-input.js";
 import { FakeVoiceHost, MockedVoiceWorkerClient, assistant } from "./helpers/fake-voice-host.js";
@@ -17,6 +18,31 @@ mock.module("../src/device-picker-ui.js", { namedExports: { ...pickerUI,
 	},
 } });
 const settle = async () => { for (let i = 0; i < 30; i++) await new Promise(resolve => setImmediate(resolve)); };
+
+test("unavailable restored identity keeps its complete stable ID until render-width truncation", async t => {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-id-badge-"));
+	const keys = ["PI_VOICE_CONFIG", "PI_VOICE_COORDINATOR_DIR", "PI_VOICE_DEVICE_DIR"];
+	const old = keys.map(key => process.env[key]);
+	process.env.PI_VOICE_CONFIG = path.join(root, "config.json");
+	process.env.PI_VOICE_COORDINATOR_DIR = path.join(root, "coordinator");
+	process.env.PI_VOICE_DEVICE_DIR = path.join(root, "devices");
+	await fs.writeFile(process.env.PI_VOICE_CONFIG, JSON.stringify({ enabled: true, input: "disabled", timingPreprocessConcurrency: 0 }));
+	const host = new FakeVoiceHost(root, "id-badge");
+	const id = "same-prefix-1234567890-distinct-device-suffix";
+	host.entries.push({ id: "pin", type: "custom", customType: "pi-voice.device-selection", data: { version: 1, selection: id, pin: id }, parentId: null });
+	t.after(async () => {
+		await host.shutdown();
+		keys.forEach((key, i) => { if (old[i] === undefined) delete process.env[key]; else process.env[key] = old[i]; });
+		await fs.rm(root, { recursive: true, force: true });
+	});
+	await host.start();
+	await new Promise(resolve => setTimeout(resolve, 100));
+	const component = host.widgetComponents.get("pi-voice-progress")!;
+	assert.ok(component.render!(160)[0].endsWith(`[🎧:${id}]`));
+	assert.match(stripTerminalSequences(component.render!(32)[0]), /\[🎧:.*…\]$/);
+	assert.ok(component.render!(160)[0].endsWith(`[🎧:${id}]`), "widening restores the full ID, not a pre-sliced prefix");
+	assert.equal(host.modelRequests.length, 0);
+});
 
 test("picker snapshots unique labels, cancels read-only, revalidates and uses the safe sticky transition", async t => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-picker-"));

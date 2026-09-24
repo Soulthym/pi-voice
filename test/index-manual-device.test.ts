@@ -61,8 +61,8 @@ test("manual names/IDs and cycles are sticky across ambiguous attachments, contr
 	assert.deepEqual(pin(), { version: 1, selection: "A", pin: "A" });
 	assert.equal(worker.sent.length, 0, "selection is silent");
 	await new Promise(resolve => setTimeout(resolve, 100));
-	assert.match(footer, /\[Linux Mint PC\]$/);
-	assert.equal(host.widgets.get("pi-voice-progress"), undefined, "idle badge uses the existing footer, not another widget row");
+	assert.match(host.widgetLines()![0], /Voice · ready.*\[🎧:Linux Mint PC\]$/);
+	assert.equal(footer, "", "idle identity never goes through whitespace-collapsing native footer statuses");
 	host.addMessage("a", null, assistant("First sentence. Second sentence."));
 	const entries = host.entries.length;
 	const stopped = worker.pauses.length;
@@ -74,7 +74,7 @@ test("manual names/IDs and cycles are sticky across ambiguous attachments, contr
 	await host.shortcut("f5"); await settle();
 	assert.ok(worker.sent.length);
 	assert.equal(worker.outputs.at(-1), endpoint);
-	assert.match(host.widgetComponents.get("pi-voice-progress")!.render!(80)[0], /\[Linux Mint PC\]$/);
+	assert.match(host.widgetComponents.get("pi-voice-progress")!.render!(80)[0], /\[🎧:Linux Mint PC\]$/);
 	assert.equal(footer.includes("[Linux Mint PC]"), false, "only the widget carries the tag while present");
 	const segments = worker.sent as Array<{ utterance: number; segmentId: number; text: string }>;
 	const first = segments.find(segment => segment.text === "First sentence.")!;
@@ -87,7 +87,7 @@ test("manual names/IDs and cycles are sticky across ambiguous attachments, contr
 	await host.command("device next");
 	assert.equal(host.scrollView.scrollTop, 20, "device switching preserves the manual viewport");
 	assert.equal(pin().selection, "B");
-	assert.match(host.widgetComponents.get("pi-voice-progress")!.render!(80)[0], /^ ⏯ Paused.*\[Phone B\]$/);
+	assert.match(host.widgetComponents.get("pi-voice-progress")!.render!(80)[0], /^ ⏯ Paused.*\[🎧:Phone B\]$/);
 	const count = worker.sent.length;
 	await settle();
 	assert.equal(worker.sent.length, count, "handoff does not start the new sink");
@@ -104,7 +104,7 @@ test("manual names/IDs and cycles are sticky across ambiguous attachments, contr
 	await host.command("device B");
 	assert.equal(pin().selection, "A");
 	assert.match(host.notices.at(-1)!.message, /Stop unconfirmed/);
-	assert.match(host.widgetComponents.get("pi-voice-progress")!.render!(80)[0], /\[Linux Mint PC\]$/, "failed handoff keeps the old badge");
+	assert.match(host.widgetComponents.get("pi-voice-progress")!.render!(80)[0], /\[🎧:Linux Mint PC\]$/, "failed handoff keeps the old badge");
 	await fs.stat(path.join(root, "coordinator", "speech.lock", "lease.json"));
 	terminate.mock.restore();
 	await host.command("device B");
@@ -132,7 +132,7 @@ test("manual names/IDs and cycles are sticky across ambiguous attachments, contr
 	assert.equal(await fs.readFile(process.env.PI_VOICE_CONFIG, "utf8"), overrides);
 	await host.shortcut("f5"); await settle();
 	assert.equal(worker.outputs.at(-1), "tcp://127.0.0.1:23456", "explicit output overrides the pinned endpoint");
-	assert.match(host.widgetComponents.get("pi-voice-progress")!.render!(80)[0], /\[Linux Mint PC\]$/, "badge is selection metadata, not a custom endpoint URL");
+	assert.match(host.widgetComponents.get("pi-voice-progress")!.render!(80)[0], /\[🎧:Linux Mint PC\]$/, "badge is selection metadata, not a custom endpoint URL");
 });
 
 test("registered cycle is stable, wraps, skips missing/invalid entries and rejects ambiguous names without probes", async t => {

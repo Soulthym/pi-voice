@@ -50,7 +50,7 @@ for (const stopReason of ["aborted", "error"]) {
 			const segment = worker.sent.at(-1) as { utterance: number; segmentId: number };
 			worker.emit({ type: "idle", utterance: segment.utterance });
 			await new Promise(resolve => setTimeout(resolve, 100));
-			assert.match(host.widgetLines()![0]!, /Waiting/, "IDLE between chunks is still a live source");
+			assert.match(host.widgetLines()![0]!, /Queued.*\[[●━]/, "IDLE between chunks retains the queued live transport");
 			const leasePath = path.join(env.PI_VOICE_COORDINATOR_DIR, "speech.lock", "lease.json");
 			const originalLease = await fs.readFile(leasePath, "utf8");
 			const cancelId = 71;

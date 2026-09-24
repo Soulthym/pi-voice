@@ -17,11 +17,6 @@ export function playbackTimingStatus(coverage: PlaybackStatus["wordTimingCoverag
 		: "Word timing: unknown/pending";
 }
 
-export function playbackStateLabel(paused: boolean, state: string, waiting = false): string {
-	return paused ? "⏯ Paused" : waiting || state === "loading" || state === "downloading" ? "◷ Waiting"
-		: state === "speaking" ? "▶ Playing" : "○ Idle";
-}
-
 export interface ReadyProgress {
 	label: string;
 	processed: number;
@@ -50,30 +45,24 @@ export function devicePickerLabels(choices: readonly { id: string; name: string 
 }
 
 export function deviceBadge(name: string, width: number): string {
-	return `[${truncateToWidth(name, Math.max(0, Math.min(24, Math.floor(width / 2) - 2)))}]`;
+	// Below six columns even the closed badge plus an identity ellipsis cannot fit.
+	return width < 6 ? "" : `[🎧:${truncateToWidth(name || "no device", width - 5, "…")}]`;
 }
 
-/** Keep activity and a closed device badge before optional voice details. */
+/** Reserve identity before truncating status/hints, then pad to the right edge. */
 export function deviceFooterText(label: string, name: string, width: number): { text: string; badge: string } {
-	width = Math.max(2, width);
-	const [voice, activity, ...details] = label.split(" · ");
-	const primary = [voice, activity].filter(Boolean).join(" · ");
-	const badge = `[${truncateToWidth(name, Math.max(0, Math.min(24, width - visibleWidth(primary) - 3)))}]`;
-	const room = Math.max(0, width - visibleWidth(badge) - 1);
-	let text = truncateToWidth(primary, room);
-	for (const extra of details) {
-		if (extra && visibleWidth(text + ` · ${extra}`) <= room) text += ` · ${extra}`;
-	}
-	return { text: `${text} ${badge}`.trimStart(), badge };
+	width = Math.max(0, width);
+	const badge = deviceBadge(name, width);
+	const room = Math.max(0, width - visibleWidth(badge) - (badge ? 1 : 0));
+	const text = truncateToWidth(label, room, "…");
+	return { text: text + " ".repeat(width - visibleWidth(text) - visibleWidth(badge)) + badge, badge };
 }
 
 /** Reserve the first physical row for the selected identity, without adding a row on narrow terminals. */
 export function deviceProgressLines(lines: readonly string[], name: string, width: number): string[] {
 	if (!lines.length || width < 1) return [];
-	const badge = deviceBadge(name, width);
-	const suffix = ` ${badge}`;
-	const first = truncateToWidth(lines[0], Math.max(0, width - visibleWidth(suffix))) + suffix;
-	return [truncateToWidth(first, width), ...(lines.length > 1 ? wrapTextWithAnsi(lines.slice(1).join("\n"), width) : [])];
+	const first = deviceFooterText(lines[0], name, width).text;
+	return [first, ...(lines.length > 1 ? wrapTextWithAnsi(lines.slice(1).join("\n"), width) : [])];
 }
 
 /** Keeps foreground activity nearest the editor and background work last. */

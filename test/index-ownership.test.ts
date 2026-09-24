@@ -18,8 +18,6 @@ test("sticky pause queues new responses; settings preserve ownership and dirty a
 	process.env.PI_VOICE_DEVICE_DIR = path.join(root, "devices");
 	await fs.writeFile(process.env.PI_VOICE_CONFIG, JSON.stringify({ enabled: true, input: "disabled", output: "local", audioCache: false }));
 	const host = new FakeVoiceHost(root, "owner");
-	let status = "";
-	host.ctx.ui.setStatus = (_key: string, text: string) => { status = text; };
 	const observer = new SessionCoordinator(path.join(root, "other"), "other"); observer.start();
 	t.after(async () => {
 		await host.shutdown(); observer.shutdown();
@@ -28,16 +26,30 @@ test("sticky pause queues new responses; settings preserve ownership and dirty a
 	});
 	host.addMessage("first", null, assistant("First sentence. Second sentence."));
 	const workerIndex = MockedVoiceWorkerClient.instances.length;
-	await host.start(); await host.shortcut("f5"); await settle();
+	await host.start();
+	assert.equal(observer.tryAcquireSpeech(), true);
+	const replay = host.shortcut("f5");
+	await settle();
+	assert.match(host.widgetLines()![0], /Queued/, "actual acquisition waits on the other project's lease");
+	MockedVoiceWorkerClient.instances[workerIndex]!.emit({ type: "playback-phase", utterance: 999, segmentId: 999, phase: "loading" });
+	await settle();
+	assert.match(host.widgetLines()![0], /Queued/, "unrelated worker loading cannot replace ownership wait");
+	assert.ok(host.widgetOperations.some(operation => operation.value?.lines?.some(line => /Describing/.test(line))), "foreground context preparation is Describing");
+	assert.ok(host.widgetOperations.some(operation => operation.value?.lines?.some(line => /Connecting/.test(line))), "device handoff is Connecting");
+	observer.releaseSpeech();
+	await replay;
+	await new Promise(resolve => setTimeout(resolve, 150)); await settle();
 	const worker = MockedVoiceWorkerClient.instances[workerIndex]!;
 	const segments = worker.sent as Array<{ text: string; utterance: number; segmentId: number }>;
 	const first = segments.find(segment => segment.text === "First sentence.")!;
 	const ownerId = observer.speechOwner()!.instanceId;
+	for (const earlier of segments) if (earlier.utterance < first.utterance) worker.emit({ type: "idle", utterance: earlier.utterance });
+	worker.emit({ type: "playback-phase", utterance: first.utterance, segmentId: first.segmentId, phase: "playing" });
 	worker.emit({ type: "speaking" });
 	for (const command of ["highlight off", "autoscroll off", "input local", "stt-model test/mic", "stt-dtype q8", "edit-model other/model"]) {
 		const pauses = worker.pauses.length;
 		await host.command(command);
-		assert.match(status, /speaking/, command);
+		assert.match(host.widgetLines()![0], /Playing/, command);
 		assert.equal(worker.pauses.length, pauses, command);
 		assert.equal(observer.speechOwner()?.instanceId, ownerId, command);
 	}
@@ -169,6 +181,10 @@ for (const paused of [false, true]) {
 			await host.shortcut("f8");
 			worker.emit({ type: "idle", utterance: oldUtterance! }); await settle();
 		} else assert.equal(host.modelRequests.length, 2, "both block descriptions start independently");
+		// The project announcement precedes foreground descriptions on a fresh turn.
+		if (!paused) for (const segment of segments) worker.emit({ type: "idle", utterance: segment.utterance });
+		await new Promise(resolve => setTimeout(resolve, 100));
+		assert.match(host.widgetLines()![0], /Describing/, "foreground awaits its actual description");
 		descriptions[0]!.resolve(assistant("First code description.")); await settle();
 		const first = segments.find(segment => segment.text === "First code description.");
 		assert.ok(first);

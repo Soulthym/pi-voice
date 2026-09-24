@@ -104,7 +104,39 @@ test("non-TUI select puts current first without changing unique option values", 
 	assert.deepEqual(items, ["1. Local", "2. duplicate", "3. duplicate"]);
 });
 
-for (const width of [40, 90]) {
+test("native badge press survives progress refresh, but not removal/replacement", nativeOptions, t => {
+	const h = mounted(t);
+	Object.assign(h.mode, { extensionWidgetsAbove: new Map(), extensionWidgetsBelow: new Map(),
+		widgetContainerAbove: new native.Container(), widgetContainerBelow: new native.Container() });
+	let opened = 0;
+	const component = deviceProgressComponent(["Playing · 0:01 / 0:10"], "Local", () => opened++);
+	const mount = (value: typeof component | undefined) => h.mode.setExtensionWidget("progress", value ? () => value : undefined, { placement: "belowEditor" });
+	mount(component);
+	h.mount(h.mode.widgetContainerBelow);
+	const { y } = h.locate("Playing");
+	const press = () => h.input(`\x1b[<0;90;${y + 1}M`);
+	const release = () => h.input(`\x1b[<0;90;${y + 1}m`);
+	press();
+	component.update(["Playing · 0:02 / 0:10"], "Local");
+	mount(component);
+	h.screen();
+	release();
+	assert.equal(opened, 1, "real native split press/update/release opens once");
+	press();
+	component.invalidate();
+	mount(undefined);
+	h.screen();
+	release();
+	assert.equal(opened, 1);
+	assert.equal(component.handleMouse?.({ type: "click", button: "left", x: 89, y: 0 } as any), undefined);
+	mount(component); h.screen(); press();
+	component.invalidate();
+	mount(deviceProgressComponent(["Playing · new session"], "Local", () => opened++));
+	h.screen(); release();
+	assert.equal(opened, 1, "replacement session cannot inherit a press");
+});
+
+for (const width of [28, 40, 90]) {
 	test(`mounted native progress badge and SelectList mouse/keyboard at ${width} columns`, nativeOptions, async t => {
 		const h = mounted(t, width);
 		let opened = 0;
@@ -117,8 +149,9 @@ for (const width of [40, 90]) {
 				const lines = [...(recording ? ["🎙 Recording"] : []), "⏯ Paused · sentence", "Word timing: pending"];
 				const component = deviceProgressComponent(lines, name, open);
 				const rendered = component.render(width);
-				assert.deepEqual(rendered, deviceProgressLines(lines, name, width - 2).map(line => ` ${line}`));
+				assert.deepEqual(rendered, deviceProgressLines(lines, name, width - 1).map(line => ` ${line}`));
 				assert.ok(rendered.every(line => native.visibleWidth(line) <= width));
+				assert.equal(native.visibleWidth(rendered[0]), width, "badge ends at final terminal column");
 				h.mount(component);
 				h.transcript.scrollTo(20, { disableFollow: true });
 				h.screen();
@@ -183,6 +216,38 @@ for (const width of [40, 90]) {
 		assert.equal(opened, 1, "disposed footer cannot open stale UI");
 	});
 }
+
+test("badge hit columns follow graphemes, resize and input-first rows without stale boxes", nativeOptions, async t => {
+	const h = mounted(t, 28);
+	let opened = 0;
+	const lines = ["⏯ Paused", "Word timing: pending"];
+	const name = "👩‍💻é手机";
+	const component: any = deviceProgressComponent(lines, name, () => { opened++; });
+	h.mount(component);
+	for (const width of [28, 20, 8, 6, 1, 40]) {
+		h.terminal.columns = width;
+		lines[0] = width === 40 ? "🎙 Input · waiting for speech" : "⏯ Paused";
+		const rows = component.render(width);
+		const badge = native.stripTerminalSequences(deviceFooterText(lines[0], name, Math.max(0, width - 1)).badge);
+		assert.ok(rows.every((row: string) => native.visibleWidth(row) <= width));
+		for (let x = 0; x < width; x++) {
+			const before = opened;
+			component.handleMouse?.({ type: "click", button: "left", x, y: 0 } as any);
+			assert.equal(opened - before, badge && x >= width - native.visibleWidth(badge) ? 1 : 0, `column ${x} at width ${width}`);
+		}
+		const before = opened;
+		component.handleMouse?.({ type: "click", button: "left", x: width - 1, y: 1 } as any);
+		assert.equal(opened, before, "second row is never the badge");
+		component.invalidate();
+		component.handleMouse?.({ type: "click", button: "left", x: width - 1, y: 0 } as any);
+		assert.equal(opened, before, "invalidated layout has no stale hit box");
+	}
+	lines.length = 0;
+	assert.deepEqual(component.render(40), []);
+	const before = opened;
+	component.handleMouse?.({ type: "click", button: "left", x: 39, y: 0 } as any);
+	assert.equal(opened, before, "removed rows have no hit box");
+});
 
 for (const underlying of ["editor", "prompt", "newer overlay"] as const) {
 	for (const pressed of [false, true]) {
@@ -343,14 +408,14 @@ test("passive overlay cannot allow typing through an expired prompt", nativeOpti
 	passive.hide();
 });
 
-test("footer keeps primary activity before optional identity detail, without a picker hint", () => {
+test("status reserves identity before activity and hints, without a picker hint", () => {
 	for (const activity of ["ready", "blocked", "stopping", "speaking", "listening", "downloading"]) {
 		for (const width of [27, 40, 160]) {
 			const { text, badge } = deviceFooterText(`Voice · ${activity} · af_heart`, "手机 👩‍💻 é [name]", width);
-			assert.doesNotMatch(text, /Alt\+D|\/voice devices/);
-			if (width === 160) assert.equal(text, `Voice · ${activity} · af_heart ${badge}`);
-			assert.ok(native.visibleWidth(text) <= width);
-			assert.ok(text.startsWith(`Voice · ${activity}`));
+			assert.doesNotMatch(text, /Alt\+[DS]|shortcutHint|\/voice devices/);
+			if (width === 160) assert.equal(text.trimEnd().replace(/ +/g, " "), `Voice · ${activity} · af_heart ${badge}`);
+			assert.equal(native.visibleWidth(text), width);
+			if (width === 160) assert.ok(text.startsWith(`Voice · ${activity}`));
 			assert.ok(text.endsWith(badge));
 			assert.ok(badge.startsWith("[") && badge.endsWith("]"));
 		}
@@ -372,7 +437,7 @@ for (const kind of ["select", "confirm"] as const) {
 			let settled = false;
 			void pending.then(() => { settled = true; });
 			const selector = h.mode.extensionSelector;
-			h.clickText("[手机]");
+			h.clickText("[🎧:手机]");
 			await tick();
 			assert.ok(result, "badge opened production overlay helper");
 			assert.equal(h.tui.hasOverlay(), true);

@@ -45,7 +45,7 @@ import {
 	type VoiceSubmitMode,
 } from "./config.js";
 import { chunkCodeNarration, plainCodeNarration, type CodeNarrationPlan } from "./code-narration.js";
-import { attachDeviceFooter, deviceProgressComponent, selectDeviceOverlay } from "./device-picker-ui.js";
+import { deviceProgressComponent, selectDeviceOverlay } from "./device-picker-ui.js";
 import { DeviceRouter, validDeviceName, type ConnectionDevice, type VoiceDeviceSelection } from "./device-router.js";
 import { LiveTranscriptionSession } from "./live-transcription.js";
 import {
@@ -61,7 +61,7 @@ import {
 import { PhoneInputClient } from "./phone-input.js";
 import { prioritizeFromCurrent, processConcurrently, resolveTimingConcurrency } from "./preprocessing.js";
 import { SpeakableStream, type FencedCodeBlock, type SpeakableSourceRange } from "./speakable.js";
-import { deviceFooterText, devicePickerLabels, notifyVoice, pendingPlaybackTiming, playbackStateLabel, playbackTimingStatus, voiceProgressLines, type ReadyProgress } from "./status-text.js";
+import { devicePickerLabels, notifyVoice, playbackTimingStatus, voiceProgressLines, type ReadyProgress } from "./status-text.js";
 import { anchorLineForMessage, computeAutoScrollTop, isManualScrollAway } from "./auto-scroll.js";
 import { applySpokenEdit, parseEditModelSelector, resolveDictationCandidates } from "./prompt-editor.js";
 import { formatAsrDisplay } from "./asr-display.js";
@@ -69,7 +69,7 @@ import { narrationRenderKey } from "./render-identity.js";
 import { frameNarrationViewport, invalidateNarrationMarkdown, narrationJumpButton, withNarrationLayout } from "./narration-render.js";
 import { SessionCoordinator, type AttentionRequest, type WaitingSession } from "./session-coordinator.js";
 import { supportsInteractiveVoice } from "./session-mode.js";
-import { Vocalizer } from "./vocalizer.js";
+import { Vocalizer, type PlaybackPhase } from "./vocalizer.js";
 import { isVoice, VOICES } from "./voices.js";
 import { VoiceWorkerClient, type WorkerEvent } from "./worker-client.js";
 
@@ -438,6 +438,9 @@ export default async function (pi: ExtensionAPI) {
 	let liveTurnNarrationActive = false;
 	let nextLivePlaybackId = 0;
 	let playbackPaused = false;
+	let playbackTailIntent = false;
+	let playbackTailSourceEnd = 0;
+	let playbackPhase: PlaybackPhase = "idle";
 	let queueIncomingWhilePaused = false;
 	const queuedPausedMessages: Array<PlaybackTarget & { source: typeof liveSource }> = [];
 	let pausedOwnerUtterance: number | undefined;
@@ -451,6 +454,7 @@ export default async function (pi: ExtensionAPI) {
 				restoreTail: boolean;
 				paused: boolean;
 				waiting: boolean;
+				phase: PlaybackPhase;
 				continueLiveTurn: boolean;
 				source: typeof liveSource;
 				blockIds: Map<number, string>;
@@ -565,7 +569,9 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	let selectedDeviceLabel = "no device";
-	let progressWidgetVisible = false;
+	let progressComponent: ReturnType<typeof deviceProgressComponent> | undefined;
+	let progressComponentEpoch: number | undefined;
+	let voiceStatusLine: string | undefined;
 	let progressWidgetKey: string | undefined;
 	let jumpWidgetVisible = false;
 	let displayedCodeProgress: PreprocessingProgress | undefined;
@@ -575,7 +581,15 @@ export default async function (pi: ExtensionAPI) {
 		const ctx = activeContext;
 		if (!ctx) return;
 		try {
-			const playback = config.enabled ? playbackHistory.status() : undefined;
+			const activePlayback = !attentionSuppressed && (playbackPaused || !!pendingReplay || playbackTailIntent ||
+				(ownsSpeech && (speechPurpose === "turn" || speechPurpose === "replay") &&
+					(!ownerTurnEnded || (lastOwnerUtterance !== undefined && completedOwnerUtterance !== lastOwnerUtterance))));
+			const waitingAtTail = playbackTailIntent && !liveTurnNarrationActive && lastOwnerUtterance === undefined && !pendingReplay;
+			const tailMessages = waitingAtTail ? completedAssistantMessages(ctx, config.mode) : [];
+			const playback = config.enabled ? (waitingAtTail ? undefined : playbackHistory.status()) ?? (activePlayback ? {
+				messageId: waitingAtTail ? tailMessages.at(-1)?.id ?? "" : pendingReplay?.target.id ?? playbackHistory.selected()?.id ?? livePlaybackId ?? "", position: 0, duration: 0,
+				messageIndex: tailMessages.length - 1, messageCount: tailMessages.length, hasTimings: false, wordTimingCoverage: undefined,
+			} : undefined) : undefined;
 			let playbackLine: string | undefined;
 			if (playback) {
 				if (playback.messageIndex < 0 && playback.messageId.startsWith("live:")) {
@@ -584,18 +598,22 @@ export default async function (pi: ExtensionAPI) {
 					playback.messageIndex = completed + Math.max(0, liveIds.indexOf(playback.messageId));
 					playback.messageCount = completed + Math.max(1, liveIds.length);
 				}
-				// Worker readiness and gaps between source blocks are not turn completion.
-				const waiting = !!pendingReplay?.waiting || (state === "idle" && ownsSpeech && !attentionSuppressed &&
-					(speechPurpose === "turn" || speechPurpose === "replay") &&
-					(!ownerTurnEnded || (lastOwnerUtterance !== undefined && completedOwnerUtterance !== lastOwnerUtterance)));
-				const icon = playbackStateLabel(playbackPaused, state, waiting);
-				if (!playback.hasTimings || playback.duration <= 0) {
-					playbackLine = `${icon} · ${pendingPlaybackTiming(playback.messageIndex, playback.messageCount)}`;
-				} else {
-					const messageLabel =
-						playback.messageIndex >= 0 ? ` · message ${playback.messageIndex + 1}/${playback.messageCount}` : " · current response";
-					playbackLine = `${icon} · ${playbackBar(playback.position, playback.duration)} ${formatPlaybackTime(playback.position)} / ${formatPlaybackTime(playback.duration)}${messageLabel}`;
-				}
+				const phase = playbackPaused || pendingReplay?.paused ? "paused"
+					: pendingReplay?.waiting ? pendingReplay.phase : activePlayback ? playbackPhase : "idle";
+				const labels: Record<PlaybackPhase, string> = { idle: "○ Idle", playing: "▶ Playing", paused: "⏯ Paused",
+					synthesizing: "◷ Synthesizing", loading: "◷ Loading", describing: "◷ Describing", connecting: "◷ Connecting", queued: "◷ Queued" };
+				const latest = liveSource && !liveSource.final ? [...liveBlockIds.values()].at(-1) ?? livePlaybackId
+					: completedAssistantMessages(ctx, config.mode).at(-1)?.id;
+				// Playback chronology, never the transcript viewport or Alt+T follow setting.
+				const live = activePlayback && !playbackPaused && !pendingReplay?.paused &&
+					(!latest || playback.messageId === latest || !playback.messageId) &&
+					!pendingReplay && playbackPhase === "idle" && (waitingAtTail || ((playbackTailIntent || (liveTurnNarrationActive && !ownerTurnEnded)) &&
+						Math.max(narration.cursor, playbackTailIntent ? playbackTailSourceEnd : 0) >= narration.sourceEnd)) && playback.position >= playback.duration;
+				const known = playback.hasTimings && playback.duration > 0;
+				const time = live ? ctx.ui.theme.fg("error", "● live")
+					: known ? `${formatPlaybackTime(playback.position)} / ${formatPlaybackTime(playback.duration)}` : "--:-- / --:--";
+				const message = playback.messageIndex >= 0 ? `message ${playback.messageIndex + 1}/${playback.messageCount}` : "current response";
+				playbackLine = `${labels[live ? "playing" : phase]} · ${playbackBar(playback.position, playback.duration)} ${time} · ${message}${!known && !live ? " · timing pending" : ""}`;
 			}
 			if (paintPreprocessing) {
 				displayedCodeProgress = codePreprocessingProgress ?? (codeDescriptionPreprocessing ? displayedCodeProgress : undefined);
@@ -610,6 +628,8 @@ export default async function (pi: ExtensionAPI) {
 					? line.text
 					: ctx.ui.theme.fg(line.kind === "playback" && state === "speaking" ? "accent" : "dim", line.text),
 			);
+			if (config.enabled && voiceStatusLine && (!lines.length || transportStopPending || deviceRetryRequired ||
+				pausedForAttention || state === "error")) lines.splice(1, 0, voiceStatusLine);
 			const canJump = config.enabled && ownsSpeech && narration.activeWordStart !== undefined;
 			if (canJump !== jumpWidgetVisible) {
 				ctx.ui.setWidget("pi-voice-jump", canJump ? (_tui, theme) =>
@@ -621,12 +641,19 @@ export default async function (pi: ExtensionAPI) {
 			if (key === progressWidgetKey) return;
 			const name = selectedDeviceLabel;
 			const uiEpoch = contextEpoch;
-			ctx.ui.setWidget("pi-voice-progress", lines.length > 0 ? () => deviceProgressComponent(lines, name, () => {
+			if (progressComponentEpoch !== uiEpoch) {
+				progressComponent?.invalidate();
+				progressComponent = undefined;
+			}
+			progressComponentEpoch = uiEpoch;
+			if (!lines.length) progressComponent?.invalidate();
+			else progressComponent?.update(lines, name);
+			const component = lines.length > 0 ? progressComponent ?? deviceProgressComponent(lines, name, () => {
 				if (uiEpoch === contextEpoch && interactiveVoiceSession) void pickDevice(ctx);
-			}) : undefined, { placement: "belowEditor" });
-			progressWidgetVisible = lines.length > 0;
+			}) : undefined;
+			progressComponent = component;
+			ctx.ui.setWidget("pi-voice-progress", component ? () => component : undefined, { placement: "belowEditor" });
 			progressWidgetKey = key;
-			refreshStatus();
 		} catch {
 			// The active context can become stale just before session shutdown runs.
 		}
@@ -1474,14 +1501,13 @@ export default async function (pi: ExtensionAPI) {
 		inputProgressTimer.unref?.();
 	};
 
-	let footerDeviceStatus: { text: string; badge: string } | undefined;
-	let footerWidth = process.stdout.columns || 80;
 	const refreshStatus = (): void => {
-		footerDeviceStatus = undefined;
 		const ctx = activeContext;
 		if (!ctx) return;
 		if (!config.enabled) {
 			ctx.ui.setStatus("pi-voice", undefined);
+			voiceStatusLine = undefined;
+			refreshProgressWidget();
 			return;
 		}
 		let label = `Voice · ready · ${config.voice}`;
@@ -1519,9 +1545,9 @@ export default async function (pi: ExtensionAPI) {
 		} else {
 			color = "success";
 		}
-		if (!progressWidgetVisible) footerDeviceStatus = deviceFooterText(label, selectedDeviceLabel, footerWidth);
-		const text = footerDeviceStatus?.text ?? label;
-		ctx.ui.setStatus("pi-voice", ctx.ui.theme.fg(color, text));
+		voiceStatusLine = ctx.ui.theme.fg(color, label);
+		ctx.ui.setStatus("pi-voice", undefined);
+		refreshProgressWidget();
 	};
 
 	const persistSegmentTiming = (segmentId: number): void => {
@@ -1701,9 +1727,11 @@ export default async function (pi: ExtensionAPI) {
 			ownerContentExpected = true;
 		},
 		utterance => playbackHistory.finishTimingGeneration(utterance),
+		phase => { playbackPhase = phase; requestPlaybackTimeline(); },
 	);
 	const clearPlaybackTransport = (): number | undefined => {
 		devicePicker?.abort();
+		playbackTailIntent = false;
 		playbackUtterances.clear();
 		lastPlaybackTick = undefined;
 		playbackRequestEpoch += 1;
@@ -1893,7 +1921,10 @@ export default async function (pi: ExtensionAPI) {
 			void playTarget(queued, !playbackHistory.hasCompleteTimingFor(queued.id), false, true);
 			return;
 		}
-		if (!queueIncomingWhilePaused) releaseSpeechOwnership(true);
+		if (!queueIncomingWhilePaused) {
+			playbackTailIntent = false;
+			releaseSpeechOwnership(true);
+		}
 	};
 
 	handleCoordinatedIdle = utterance => {
@@ -2091,7 +2122,7 @@ export default async function (pi: ExtensionAPI) {
 
 	const refreshDeviceLabel = (): void => {
 		const selection = activeDeviceId ?? deviceSelection;
-		selectedDeviceLabel = selection === "auto" ? "no device" : selection === "local" ? "local" : selection.slice(0, 12);
+		selectedDeviceLabel = selection === "auto" ? "no device" : selection === "local" ? hostname() : selection;
 		if (selection !== "auto" && selection !== "local") {
 			try { selectedDeviceLabel = deviceRouter.resolve(selection)?.name ?? selectedDeviceLabel; } catch { /* Keep an unavailable pin truthful. */ }
 		}
@@ -2341,6 +2372,7 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	const previewPlaybackTarget = (target: PlaybackTarget, explicit = true): void => {
+		playbackTailIntent = false;
 		navigationAtTail = false;
 		playbackUtterances.clear();
 		lastPlaybackTick = undefined;
@@ -2431,6 +2463,7 @@ export default async function (pi: ExtensionAPI) {
 			restoreTail,
 			paused: explicitPlay ? false : pendingReplay?.paused ?? playbackPaused,
 			waiting: true,
+			phase: (prepareContext ? "describing" : "connecting") as PlaybackPhase,
 			continueLiveTurn,
 			source: replaySource,
 			blockIds: replayBlockIds,
@@ -2466,6 +2499,8 @@ export default async function (pi: ExtensionAPI) {
 			refreshPlaybackTimeline();
 		}
 
+		request.phase = "connecting";
+		refreshPlaybackTimeline();
 		try {
 			if (inputInProgress) await finishInputForPlayback();
 			if (pendingReplay !== request || request.epoch !== playbackRequestEpoch) return;
@@ -2499,6 +2534,8 @@ export default async function (pi: ExtensionAPI) {
 		if (coordinator && !(ownsSpeech && coordinator.ownsSpeech())) {
 			if (coordinator.tryAcquireSpeech()) newlyAcquired = true;
 			else {
+				request.phase = "queued";
+				refreshPlaybackTimeline();
 				acquired = await coordinator.forceAcquireSpeech();
 				newlyAcquired = acquired;
 			}
@@ -2522,6 +2559,8 @@ export default async function (pi: ExtensionAPI) {
 			return;
 		}
 
+		request.phase = "connecting";
+		refreshPlaybackTimeline();
 		const completedAssistant = waitingSource && !replaySource && !target.source && activeContext && completedAssistantMessages(activeContext, config.mode, false)
 			.find(message => message.id === target.id)?.assistantMessage;
 		const handledSource = replaySource ?? target.source ??
@@ -2616,6 +2655,8 @@ export default async function (pi: ExtensionAPI) {
 		speechContentIndex = contextual?.contentIndex ?? target.contentIndex ?? speechContentIndex;
 		setDescriptionSource(speechContentIndex, continueLiveTurn ? 0 : sourceOffset);
 		playbackPaused = request.paused;
+		playbackTailIntent = request.target.tailPrefix !== undefined;
+		playbackTailSourceEnd = request.target.tailPrefix?.trimEnd().length ?? 0;
 		narration.setPaused(playbackPaused);
 		pausedOwnerUtterance = undefined;
 		refreshPlaybackTimeline();
@@ -3390,13 +3431,6 @@ export default async function (pi: ExtensionAPI) {
 		if (ctx.mode === "tui") {
 			ctx.ui.setWidget("pi-voice-render-driver", tui => {
 				narrationTui = tui;
-				const uiEpoch = contextEpoch;
-				const restoreDeviceFooter = attachDeviceFooter(tui, width => {
-					if (width !== undefined && width !== footerWidth) { footerWidth = width; refreshStatus(); }
-					return footerDeviceStatus;
-				}, () => {
-					if (uiEpoch === contextEpoch && interactiveVoiceSession) void pickDevice(ctx);
-				});
 				// Native End (including remapped keys) and the mouse banner both route
 				// through this method, after Pi has handled overlays/key releases/hit tests.
 				// Observing the accepted action avoids mistaking wheel/search/layout motion for a pin.
@@ -3442,7 +3476,7 @@ export default async function (pi: ExtensionAPI) {
 					dispose: () => {
 						if (native.scrollToBottom === onBottom) native.scrollToBottom = originalBottom;
 						restoreGestures.forEach(restore => restore());
-						restoreDeviceFooter();
+						progressComponent?.invalidate();
 						nativeGestureTracking = false;
 						if (narrationTui === tui) narrationTui = null;
 					},
@@ -3485,6 +3519,9 @@ export default async function (pi: ExtensionAPI) {
 		ctx.ui.setWidget("pi-voice-render-driver", undefined);
 		ctx.ui.setWidget("pi-voice-jump", undefined);
 		jumpWidgetVisible = false;
+		progressComponent?.invalidate();
+		progressComponent = undefined;
+		progressWidgetKey = undefined;
 		ctx.ui.setWidget("pi-voice-progress", undefined);
 		ctx.ui.setWidget("pi-voice-input", undefined);
 		ctx.ui.setWidget("pi-voice-playback", undefined);
@@ -3622,6 +3659,7 @@ export default async function (pi: ExtensionAPI) {
 			ownedSpeechText = "";
 			const sourceOffset = continuingTurn ? narration.startMessage() : 0;
 			if (!continuingTurn) {
+				playbackTailSourceEnd = 0;
 				restoreBottomAfterSpeech = wasFollowingTranscriptEnd;
 				bottomPinned = false;
 				narration.finish();
@@ -3656,8 +3694,10 @@ export default async function (pi: ExtensionAPI) {
 		ownedSpeechText += text;
 		if (livePlaybackId) playbackHistory.updateText(livePlaybackId, ownedSpeechText, { contentIndex, messageType, displayOffset: liveDisplayOffset });
 		if (hasSpeakableAudio(ownedSpeechText)) announceProjectForSpeech();
+		const sourceEnd = narration.sourceEnd;
 		narration.pushDelta(messageType, contentIndex, text, liveDisplayOffset);
 		vocalizer.pushDelta(text);
+		if (narration.sourceEnd !== sourceEnd) requestPlaybackTimeline();
 	};
 
 	pi.on("message_update", event => {
@@ -4170,6 +4210,8 @@ export default async function (pi: ExtensionAPI) {
 		if (latest) {
 			void playTarget({ ...latest, time: 0, sourceOffset: 0, tailPrefix: latest.text }, false, false, false, true, false, ctx);
 			navigationAtTail = true;
+			playbackTailIntent = true;
+			refreshPlaybackTimeline();
 			scrollToBottom(ctx);
 			return;
 		}
@@ -4178,6 +4220,7 @@ export default async function (pi: ExtensionAPI) {
 		const paused = playbackPaused;
 		const cancelId = clearPlaybackTransport();
 		playbackPaused = paused;
+		playbackTailIntent = true;
 		narration.setPaused(paused);
 		queuedPausedMessages.length = 0;
 		queueIncomingWhilePaused = false;

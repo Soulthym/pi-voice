@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Text, visibleWidth } from "@earendil-works/pi-tui";
-import { deviceProgressLines, notifyVoice, pendingPlaybackTiming, playbackStateLabel, playbackTimingStatus, preprocessingStatus, voiceProgressLines } from "../src/status-text.js";
+import { Text, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
+import { deviceBadge, deviceFooterText, deviceProgressLines, notifyVoice, pendingPlaybackTiming, playbackTimingStatus, preprocessingStatus, voiceProgressLines } from "../src/status-text.js";
 
 test("check, recovery and processing counters describe targets, not forced alignment or percent", () => {
 	assert.equal(preprocessingStatus({ label: "Checking saved timing", processed: 109, total: 605, unit: "checked" }),
@@ -58,7 +58,8 @@ test("device badge ends only the first native row in every progress precedence, 
 	for (let offset = 0; offset < lines.length; offset++) {
 		for (const width of [20, 28, 40, 80, 160]) {
 			const plain = deviceProgressLines(lines.slice(offset), "Linux Mint PC", width);
-			assert.match(plain[0], / \[[^\]]+\]$/);
+			assert.match(plain[0], /\[🎧:[^\]]+\]$/);
+			assert.equal(visibleWidth(plain[0]), width, "badge reaches the rightmost column");
 			assert.equal(plain.slice(1).some(line => line.includes("[")), false);
 			assert.ok(plain.every(line => visibleWidth(line) <= width));
 			const wide = deviceProgressLines(lines.slice(offset), "雪📱".repeat(64), width);
@@ -67,7 +68,25 @@ test("device badge ends only the first native row in every progress precedence, 
 		}
 	}
 	assert.deepEqual(deviceProgressLines([], "local", 80), [], "no invented progress work");
-	assert.deepEqual(deviceProgressLines(["⏯ Paused"], "Local", 160), ["⏯ Paused [Local]"], "no picker hint even with spare room");
+	assert.deepEqual(deviceProgressLines(["⏯ Paused"], "Local", 160), ["⏯ Paused" + " ".repeat(160 - visibleWidth("⏯ Paused[🎧:Local]")) + "[🎧:Local]"], "no picker hint even with spare room");
+});
+
+test("badge budget preserves graphemes and closed brackets even on tiny terminals", () => {
+	const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+	for (const name of ["手机", "👩‍💻é🇩🇪", "id-123456789012345678901234567890", ""]) {
+		const identity = name || "no device";
+		const prefixes = new Set(["", ...Array.from(segmenter.segment(identity), part => identity.slice(0, part.index + part.segment.length))]);
+		for (let width = 0; width <= 80; width++) {
+			const { text, badge } = deviceFooterText("🎙 Input · long status and hints ".repeat(4), name, width);
+			assert.equal(visibleWidth(text), width);
+			assert.equal(badge, deviceBadge(name, width));
+			if (width < 6) { assert.equal(badge, ""); continue; }
+			assert.ok(text.endsWith(badge));
+			assert.ok(badge.startsWith("[🎧:") && badge.endsWith("]"));
+			assert.ok(prefixes.has(stripTerminalSequences(badge).slice("[🎧:".length, -1).replace(/…$/, "")), "only whole identity graphemes survive");
+			if (visibleWidth(`[🎧:${identity}]`) <= width) assert.equal(badge, `[🎧:${identity}]`);
+		}
+	}
 });
 
 test("notices use one Voice label and native Pi severity, without ANSI or duplicate severity icons", () => {

@@ -103,7 +103,9 @@ test("setter queries reflect live settings, automatic routing and reload-only sh
 	const footer: Array<string | undefined> = [];
 	mock.method(host.ctx.ui, "setStatus", (_key: string, text: string | undefined) => { footer.push(text); });
 	await host.command("on");
-	assert.match(footer.at(-1)!, /Voice · ready/);
+	await new Promise(resolve => setTimeout(resolve, 100));
+	assert.match(host.widgetLines()![0], /Voice · ready/);
+	assert.equal(footer.at(-1), undefined, "idle identity is rendered in the widget, not collapsed by the native footer");
 	await host.command("off");
 	assert.equal(footer.at(-1), undefined);
 	await host.command("code-budget 7");

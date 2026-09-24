@@ -608,6 +608,7 @@ export class NarrationProgress {
 	#codeBlocks = new Map<string, CodeFocusBlock>();
 	#codeDescriptions = new Map<string, CodeDescriptionBlock>();
 	#raw = "";
+	#sourceEnd: number | undefined;
 	#cursor = 0;
 	#active = false;
 	#paused = false;
@@ -628,6 +629,7 @@ export class NarrationProgress {
 		this.#codeBlocks.clear();
 		this.#codeDescriptions.clear();
 		this.#raw = "";
+		this.#sourceEnd = undefined;
 		this.#cursor = 0;
 		this.#active = true;
 		this.#paused = false;
@@ -665,6 +667,7 @@ export class NarrationProgress {
 		}
 		block.text += delta;
 		this.#raw += delta;
+		this.#sourceEnd = undefined;
 	}
 
 	setCompletedText(text: string, type: NarrationMessageType = "assistant", contentIndex = 0, displayOffset = 0): void {
@@ -935,6 +938,21 @@ export class NarrationProgress {
 
 	get cursor(): number {
 		return this.#cursor;
+	}
+
+	/** Last speakable source, including buffered prose and code awaiting description. */
+	get sourceEnd(): number {
+		if (this.#sourceEnd !== undefined) return this.#sourceEnd;
+		let end = 0;
+		for (const block of this.#blocks) {
+			const stream = new SpeakableStream();
+			const items = [...stream.push(block.text), ...stream.flush()];
+			const localEnd = Math.min(block.text.trimEnd().length, items.reduce((end, item) => Math.max(end, item.source.end), 0));
+			// An opening/empty fence may still acquire a body; it is not a consumed tail.
+			const pendingFence = stream.fenceStarts.some(start => start >= localEnd);
+			if (localEnd || pendingFence) end = block.start + (pendingFence ? block.text.trimEnd().length : localEnd);
+		}
+		return this.#sourceEnd = end;
 	}
 
 	get activeWordStart(): number | undefined {

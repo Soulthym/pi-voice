@@ -97,16 +97,21 @@ function badgeRegion(child: tui.Component, locate: (lines: string[], width: numb
 	}) : content;
 }
 
-export function deviceProgressComponent(lines: string[], name: string, open: () => void): tui.Component {
-	return badgeRegion({
-		render: width => deviceProgressLines(lines, name, Math.max(0, width - 2)).map(line => ` ${line}`),
+export function deviceProgressComponent(lines: string[], name: string, open: () => void) {
+	const component = badgeRegion({
+		render: width => deviceProgressLines(lines, name, Math.max(0, width - 1)).map(line => ` ${line}`),
 		invalidate() {},
 	}, (rows, width) => {
 		const row = tui.stripTerminalSequences(rows[0] ?? "");
-		const badge = tui.stripTerminalSequences(deviceBadge(name, Math.max(0, width - 2)));
+		const badge = tui.stripTerminalSequences(deviceBadge(name, Math.max(0, width - 1)));
 		const end = tui.visibleWidth(row);
-		return !row.endsWith(badge) ? undefined : { row: 0, start: end - tui.visibleWidth(badge), end };
+		return !badge || !row.endsWith(badge) ? undefined : { row: 0, start: end - tui.visibleWidth(badge), end };
 	}, open);
+	return Object.assign(component, { update(nextLines: string[], nextName: string) {
+		lines = nextLines;
+		name = nextName;
+		component.invalidate();
+	} });
 }
 
 /** Preserve Pi's built-in footer and other extensions' statuses; add only native mouse handling.
@@ -137,7 +142,7 @@ export function attachDeviceFooter(tuiRoot: unknown, status: (width?: number) =>
 			}
 			return render.call(node, width);
 		}, invalidate() {} }, lines => {
-			if (!current) return;
+			if (!current?.badge) return;
 			// Pi's standard footer collapses spaces in extension statuses.
 			const text = tui.stripTerminalSequences(current.text).replace(/ +/g, " ").trim();
 			const badge = tui.stripTerminalSequences(current.badge).replace(/ +/g, " ");
