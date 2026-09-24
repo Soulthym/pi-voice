@@ -1643,15 +1643,21 @@ export default async function (pi: ExtensionAPI) {
 					deviceRetryRequired = true;
 					notifyStopFailure(event.message, output.episode);
 				}
-				if (
-					event.utterance !== undefined &&
-					(event.utterance === lastOwnerUtterance ||
+				const currentUtterance = event.utterance !== undefined &&
+					(playbackUtterances.has(event.utterance) || event.utterance === lastOwnerUtterance ||
 						event.utterance === pausedOwnerUtterance ||
-						event.utterance === projectPrefixUtterance)
-				) {
+						event.utterance === projectPrefixUtterance);
+				// Retired errors cannot cancel a replacement; remote uncertainty above
+				// still belongs to the original transport until matching stop proof.
+				if (event.utterance !== undefined && !currentUtterance && event.code !== "REMOTE_PLAYBACK_UNCONFIRMED") return;
+				if (currentUtterance) {
 					attentionSuppressed = true;
 					deviceRetryRequired = true;
 					queuedPausedMessages.length = 0;
+					queueIncomingWhilePaused = false;
+					liveTurnNarrationActive = false;
+					livePlaybackId = undefined;
+					narration.finish();
 					coordinator?.setAttentionEnabled(false);
 					const cancelId = clearPlaybackTransport();
 					if (speechPurpose === "turn" && !ownerTurnEnded) {
@@ -3770,7 +3776,15 @@ export default async function (pi: ExtensionAPI) {
 			for (const check of liveSource.waiters) check();
 		}
 		const eligible = eligibleAssistantBlocks(event.message, config.mode).filter(block => hasSpeakableAudio(block.text));
-		if ((stopReason === "aborted" || stopReason === "error") && pendingReplay?.source && pendingReplay.source === liveSource) {
+		if (stopReason === "aborted" || stopReason === "error") {
+			// A newer aborted response must not retire an unrelated paused replay.
+			for (let i = queuedPausedMessages.length - 1; i >= 0; i--) {
+				if (queuedPausedMessages[i].source === liveSource) queuedPausedMessages.splice(i, 1);
+			}
+			const affectsPlayback = (pendingReplay?.source && pendingReplay.source === liveSource) ||
+				(liveTurnNarrationActive && (!queueIncomingWhilePaused ||
+					[...liveBlockIds.values()].includes(playbackHistory.selected()?.id ?? "")));
+			if (!affectsPlayback) return;
 			queueIncomingWhilePaused = false;
 			queuedPausedMessages.length = 0;
 			liveTurnNarrationActive = false;
@@ -3780,7 +3794,8 @@ export default async function (pi: ExtensionAPI) {
 			narration.finish();
 			livePlaybackId = undefined;
 			if (!inputInProgress) state = "idle";
-			refreshProgressWidget();
+			refreshStatus();
+			refreshPlaybackTimeline();
 			if (!speechReservedForInput && !inputInProgress) releaseAfterTransportCancellation(cancelId, true);
 			return;
 		}
@@ -3815,18 +3830,7 @@ export default async function (pi: ExtensionAPI) {
 			refreshStatus();
 		}
 		if (!config.enabled || attentionSuppressed || deviceRebind || transportStopPending || stopReason === undefined || !ownsSpeech || speechPurpose !== "turn") return;
-		if (stopReason === "aborted" || stopReason === "error") {
-			// End logical playback now; keep the lease until the sink proves it stopped.
-			liveTurnNarrationActive = false;
-			ownerTurnEnded = true;
-			attentionSuppressed = true;
-			const cancelId = clearPlaybackTransport();
-			narration.finish();
-			livePlaybackId = undefined;
-			if (!inputInProgress) state = "idle";
-			refreshProgressWidget();
-			releaseAfterTransportCancellation(cancelId, true);
-		} else if (config.mode !== "yield") {
+		if (config.mode !== "yield") {
 			ownerContentExpected = ownerContentExpected || hasSpeakableAudio(completedText);
 			if (ownerContentExpected) announceProjectForSpeech();
 			vocalizer.flush();
