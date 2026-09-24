@@ -14,7 +14,8 @@
 - User explicitly clarified: no implementation yet, including these highlighting bugs. The interrupted investigation left no implementation changes.
 - Point 6 approved: preserve lease-free live-follow intent between responses and through normal prompt submission; unread output blocked on ownership is Queued, not live. Preserve intent across temporary-to-persisted source identity changes. Pause, Stop and backward navigation exit live display appropriately; viewport scrolling alone does not change chronological intent. Implementation pending.
 - Additional user observation for the deferred dimming investigation: loss of dimming appears limited to the first displayed line of each sentence; in a multi-line comment, lines after the first still dim/highlight correctly. Treat this as a reproduction clue, not a confirmed cause; compare first versus continuation lines during streaming and final rendering.
-- Next decisions: terminal queue-failure cleanup and cancellation of paused sources (the two safety findings). All implementation remains deferred until the point-by-point discussion is complete.
+- Terminal queue-failure cleanup approved: recognize terminal failure of any utterance in the current playback queue, cancel that queue and update the UI promptly. Release ownership only after confirmed stop. Ignore ordinary retired-playback errors without discarding unresolved stop evidence. Implementation pending.
+- Next decision: cancellation of paused sources (the remaining safety finding). All implementation remains deferred until the point-by-point discussion is complete.
 
 ## Previous handoff — completed chronological live follow
 
