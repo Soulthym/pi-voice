@@ -1,6 +1,18 @@
 # Tests
 
-## Phase 1 checkpoint — highlighting and safety
+## Current checkpoint — phase 2 and durable scoped recovery
+
+Final implementation validation: `npm run check` passed; full checkout `npm test` **1015 passed / 33 compatibility skips / zero failures (1048 total)**; full installed-native `npm test` **1048 passed / zero skips or failures**. Logs: `/tmp/phase2-final2-{check,test,native}.log`. Final regressions cover persisted user-entry count invalidation and paused yield-mode foreground selection. The separately staged recovery topic also passed typecheck and **78/78** targeted tests (`/tmp/phase2-recovery-staged-validation.log`). No LSP is configured; TypeScript supplies diagnostics.
+
+Phase 2 points **1–6 plus handoff/off presentation** are implemented. Offline tests cover neutral unknown/incomplete-total bars and elapsed-only time, consistent foreground phase/clock/index across A→B preparation, stable paused selection, mounted progress updates without reinsertion, responsive closed badges and pointer targets, normal-prompt/canonical-ID live continuity, ownership-blocked unread Queued state, Connecting during handoff, idle versus silent-paused completion and off without blank rows. Native frame tests use real Pi rendering with synthetic events and mocked transport; they do not establish the original random live-disappearance cause or physical terminal behavior.
+
+Fresh-host recovery fixtures and synthetic socket receipts cover durable original input/output scopes, reconstructed warnings without startup stop I/O, explicit retry through original device identity after endpoint change, wrong-scope receipts, malformed/missing journals, changed configuration, matching retirement and newer-generation protection. **Phase 1 remains partial:** durable admission/local-child proof coverage is missing, and the orphan fence is never automatically reclaimed, even after every saved receipt succeeds. Broader protocol work is separate, not an unsafe unblock.
+
+Earlier repeated cold-history performance failures also reproduced on baseline. The minimal fix avoids synchronous cold preparation in progress rendering and adds bounded background yields; no performance limits were relaxed. Both final full suites above pass after that fix. Phase 3 timing commands are approved next, not implemented; existing commands remain unchanged.
+
+No live/provider/inference/hardware validation, runtime configuration/private-data access, Pi/SSH/client/session restart or push. User clarification: the prior PC crash was user-caused, not product-attributed; `docs/assets/demo*` was explicitly removed by the user and stays removed. Untracked `ISSUES.md` remains untouched. Historical notes/counts below retain their original checkpoint scope.
+
+## Historical phase 1 checkpoint — highlighting and safety
 
 Final serial validation: `npm run check` passed; `npm test` **994 passed / 33 compatibility skips / zero failures**; installed-native full `npm test` **1027 passed / zero skips or failures**. Logs: `/tmp/phase1-final-{check,test,native}.log`. No LSP configured. Native overrides use installed Pi `dist/index.js` for `PI_VOICE_TEST_AGENT_MODULE`, its `node_modules/@earendil-works/pi-tui/dist/index.js` for `PI_VOICE_TEST_TUI_MODULE`, and `dist/core/keybindings.js` for `PI_VOICE_TEST_KEYBINDINGS_MODULE`. An initial incorrect agent-module override failed imports, then was corrected.
 

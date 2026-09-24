@@ -43,14 +43,15 @@ These entries are excluded from model context. In opt-in `conversation` mode, co
 Interactive TUI processes coordinate through atomic files under `~/.cache/pi-voice/coordinator`:
 
 - heartbeat/presence records;
-- an atomic speech lease;
+- an atomic, durable speech fence;
+- per-owner original remote input/output scope and diagnostic journals under `stop-recovery/`;
 - waiting-attention records;
 - explicit cross-process attention requests;
 - shared code/timing resource leases.
 
-Heartbeats recover stale coordination metadata. This is not proof of remote player/microphone stop: failed cleanup retains ownership and blocks replacement work until an explicit confirmed retry. Presence records explicitly mark interactive sessions, so headless child/subagent processes are excluded even if they inherit the extension and global config.
+Heartbeats recover stale presence metadata, not speech ownership. Expiry/process death is not stop proof: failed cleanup retains the speech fence and blocks replacement work. Presence records explicitly mark interactive sessions, so headless child/subagent processes are excluded even if they inherit the extension and global config.
 
-Manual activity uses acknowledged force-acquire semantics. The requester writes a preemption request, the displaced process stops its transport and releases the lease, and only then does replacement audio start (with a bounded stale-owner fallback). A paused sink retains its device lease because it still owns the physical output resource; paused sessions never auto-resume.
+Manual activity uses acknowledged force-acquire semantics. The requester writes a preemption request, the displaced process stops its transport and releases the lease, and only then does replacement audio start. There is no stale-owner fallback that reclaims an orphan speech fence. A paused sink retains its device lease because it still owns the physical output resource; paused sessions never auto-resume.
 
 ## Device registry
 
@@ -64,6 +65,12 @@ Background work captures a session epoch and checks it after asynchronous operat
 
 Code/audio caches retain completed dependencies. Message timing snapshots are atomic and only persisted after the complete message render succeeds.
 
+Original saved remote input/output scopes and device/cause diagnostics survive process loss in atomic, fsynced recovery journals. Startup reconstructs warnings without stop I/O; explicit `/voice reconnect` retries the original ticket/stream IDs via the original registered device identity (or exact custom endpoint), with configuration/metadata validation. Scoped receipts retire matching handles; generation checks prevent older cleanup from clearing newer scopes.
+
+This is partial recovery, not complete crash-safe admission: durable admission/local-child proof coverage is missing. An orphan speech fence is **never automatically reclaimed, even if all saved receipts succeed**. Missing or malformed journals fail closed. Broader admission/proof protocol work is separate from scoped retry and must not be replaced by an unsafe unblock.
+
+Progress rendering reuses the mounted widget and reads the foreground playback context without synchronously preparing cold history. Background history preparation yields in bounded slices; off renders no reserved rows. Timing-command unification/retry remains approved phase 3 work, not current architecture.
+
 ## Key modules
 
 - [`src/index.ts`](../src/index.ts): Pi lifecycle, commands, routing, coordination, and TUI integration
@@ -71,6 +78,7 @@ Code/audio caches retain completed dependencies. Message timing snapshots are at
 - [`src/worker.mjs`](../src/worker.mjs): TTS/STT, caching, local/network output
 - [`src/narration-progress.ts`](../src/narration-progress.ts): source timing and Markdown styling
 - [`src/session-coordinator.ts`](../src/session-coordinator.ts): leases and attention
+- [`src/stop-recovery.ts`](../src/stop-recovery.ts): durable original scopes, diagnostics and explicit scoped retries, never orphan-fence release
 - [`src/device-router.ts`](../src/device-router.ts): registered-device resolution
 - [`src/playback-history.ts`](../src/playback-history.ts): navigation, timing, seeking
 - [`src/code-describer.ts`](../src/code-describer.ts): semantic and guided code narration
