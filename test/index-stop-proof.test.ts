@@ -84,7 +84,7 @@ test("canonical remote failure is one episode and same-route reconnect retries t
  const before = pins();
  await host.command("reconnect"); await settle();
  assert.equal(pins(), before, "failed retry cannot change the pin");
- assert.ok(host.notices.some(notice => /original handle unavailable/.test(notice.message)), "retry result remains visible");
+ assert.equal(host.notices.filter(notice => notice.level === "error").length, 1, "retry joins the retained episode");
  const stopped = Promise.withResolvers<void>();
  terminate.mock.mockImplementation(() => stopped.promise);
  const retry = host.command("reconnect"); await settle();
@@ -471,6 +471,8 @@ test("older cleanup cannot reset a newer remote diagnostic", async t => {
  await host.command("stop"); await settle();
  worker.emit({ type: "error", code: "REMOTE_PLAYBACK_UNCONFIRMED", message: "new remote failure", utterance: 102 });
  stopped.resolve(); await settle();
+ assert.match(host.widgetLines()!.join("\n"), /Output stop unconfirmed.*new remote failure/);
+ assert.doesNotMatch(host.widgetLines()!.join("\n"), /old remote failure/);
  const errors = host.notices.filter(notice => notice.level === "error").length;
  worker.emit({ type: "error", code: "REMOTE_PLAYBACK_UNCONFIRMED", message: "same new cascade", utterance: 102 });
  assert.equal(host.notices.filter(notice => notice.level === "error").length, errors);
@@ -545,4 +547,39 @@ for (const first of ["input", "output"] as const) test(`late first remote notice
  cancel.mock.mockImplementation(async () => { throw new Error("unresolved microphone"); });
  await host.command("stop"); await settle();
  assert.equal(host.notices.filter(notice => /unresolved microphone/.test(notice.message)).length, 2, "input proof resets only the resolved input episode");
+});
+
+for (const first of ["input", "output"] as const) test(`retained stop rows survive ready/idle and clear only matching ${first} proof`, async t => {
+ const { host, worker, registration, register } = await setup(t);
+ await host.command("test Old audio.");
+ const cancel = t.mock.method(PhoneInputClient.prototype, "cancel", async () => { throw new Error("input receipt missing"); });
+ const terminate = t.mock.method(worker, "terminate", async () => { throw new Error("output receipt missing"); });
+ await host.command("stop"); await settle();
+ const rows = () => host.widgetLines()!.filter(line => /stop unconfirmed/.test(line));
+ assert.equal(rows().length, 2);
+ const paint = t.mock.method(host.ctx.ui.theme as { fg(name: string, text: string): string }, "fg");
+ for (const type of ["ready", "idle"] as const) {
+  worker.emit({ type }); await settle();
+  assert.equal(rows().length, 2);
+ }
+ assert.ok(paint.mock.calls.some(call => call.arguments[0] === "warning" && /Input stop unconfirmed/.test(call.arguments[1])));
+ assert.ok(paint.mock.calls.some(call => call.arguments[0] === "warning" && /Output stop unconfirmed/.test(call.arguments[1])));
+ registration.name = "Replacement label"; await register();
+ cancel.mock.mockImplementation(async () => { throw new Error("input retry failed differently"); });
+ terminate.mock.mockImplementation(async () => { throw new Error("output retry failed differently"); });
+ for (let i = 0; i < 3; i++) { await host.command("reconnect"); await settle(); }
+ assert.equal(host.notices.filter(notice => notice.level === "error").length, 2, "reconnect coalesces independently for each retained resource");
+ assert.ok(rows().every(line => / · A · /.test(line)), "blocking identity is retained");
+ const input = Promise.withResolvers<void>();
+ const output = Promise.withResolvers<void>();
+ cancel.mock.mockImplementation(() => input.promise);
+ terminate.mock.mockImplementation(() => output.promise);
+ const reconnect = host.command("reconnect"); await settle();
+ ({ input, output })[first].resolve(); await settle();
+ const remaining = first === "input" ? "Output" : "Input";
+ assert.equal(rows().length, 1);
+ assert.match(rows()[0], new RegExp(`${remaining} stop unconfirmed`));
+ ({ input, output })[first === "input" ? "output" : "input"].resolve();
+ await reconnect; await settle();
+ assert.deepEqual(rows(), []);
 });

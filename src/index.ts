@@ -382,7 +382,7 @@ export default async function (pi: ExtensionAPI) {
 	const transportCancelWaiters = new Map<number, () => void>();
 	let state: VoiceState = "idle";
 	let lastError = "";
-	type StopEpisode = { notified: boolean; cause: string; utterance?: number; remote?: boolean };
+	type StopEpisode = { notified: boolean; device: string; cause: string; utterance?: number; remote?: boolean };
 	type StopCleanup = { promise: Promise<void>; episode?: StopEpisode };
 	const stopResources: Record<"input" | "output", { episode?: StopEpisode; cleanup?: StopCleanup }> = { input: {}, output: {} };
 	const reportedStopErrors = new WeakSet<object>();
@@ -405,22 +405,24 @@ export default async function (pi: ExtensionAPI) {
 	const trackStop = (resource: "input" | "output", promise: Promise<void>): Promise<void> => {
 		const state = stopResources[resource];
 		if (state.cleanup?.promise === promise) return promise;
+		const device = selectedDeviceLabel;
 		const cleanup: StopCleanup = { promise, episode: state.episode };
 		state.cleanup = cleanup;
 		void promise.then(() => {
 			if (state.cleanup !== cleanup) return;
 			if (state.episode === cleanup.episode) state.episode = undefined;
 			state.cleanup = undefined;
+			refreshProgressWidget();
 		}, error => {
 			const cause = error instanceof Error ? error.message : String(error);
 			const existing = cleanup.episode ?? state.episode;
-			const episode = existing?.remote || existing?.cause === cause
-				? existing : { cause, notified: false };
+			const episode = existing ?? { device, cause, notified: false };
 			if (state.cleanup === cleanup) {
 				if (state.episode === cleanup.episode) state.episode = episode;
 				state.cleanup = undefined;
 			}
 			notifyStopFailure(error, episode);
+			refreshProgressWidget();
 		});
 		return promise;
 	};
@@ -624,10 +626,11 @@ export default async function (pi: ExtensionAPI) {
 				(progress): progress is PreprocessingProgress => progress !== undefined,
 			);
 			const lines = voiceProgressLines(inputProgressMessage, playbackLine, preprocessing,
-				playback ? playbackTimingStatus(playback.wordTimingCoverage) : undefined).map(line =>
+				playback ? playbackTimingStatus(playback.wordTimingCoverage) : undefined,
+				{ input: stopResources.input.episode, output: stopResources.output.episode }).map(line =>
 				line.kind === "input"
 					? line.text
-					: ctx.ui.theme.fg(line.kind === "playback" && state === "speaking" ? "accent" : "dim", line.text),
+					: ctx.ui.theme.fg(line.kind === "stop" ? "warning" : line.kind === "playback" && state === "speaking" ? "accent" : "dim", line.text),
 			);
 			if (config.enabled && voiceStatusLine && (!lines.length || transportStopPending || deviceRetryRequired ||
 				pausedForAttention || state === "error")) lines.splice(1, 0, voiceStatusLine);
@@ -1637,7 +1640,7 @@ export default async function (pi: ExtensionAPI) {
 				if (event.code === "REMOTE_PLAYBACK_UNCONFIRMED") {
 					const output = stopResources.output;
 					if (!output.episode?.remote || (event.utterance !== undefined && output.episode.utterance !== event.utterance)) {
-						output.episode = { cause: event.message, notified: false, utterance: event.utterance, remote: true };
+						output.episode = { device: selectedDeviceLabel, cause: event.message, notified: false, utterance: event.utterance, remote: true };
 						if (output.cleanup && !output.cleanup.episode) output.cleanup.episode = output.episode;
 					}
 					deviceRetryRequired = true;
@@ -2172,6 +2175,7 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	let deviceRebind: Promise<void> | undefined;
+	let reconnectDiagnostic = { notified: false };
 	const unconfirmedDeviceStops = new WeakSet<Promise<void>>();
 	// Persist only session metadata. Reattachment alone never changes an existing pin.
 	const adoptCurrentConnection = (epoch: number, force = false, origin?: ConnectionDevice, current = () => true, manual?: VoiceDeviceSelection): Promise<boolean> => {
@@ -2255,12 +2259,15 @@ export default async function (pi: ExtensionAPI) {
 				}
 				if (force || changed || deviceRetryRequired) notifyConnectedDevice(ctx);
 				deviceRetryRequired = false;
+				reconnectDiagnostic = { notified: false };
 				refreshDeviceLabel();
 				return true;
 			} catch (error) {
 				if (epoch === playbackRequestEpoch && ctx === activeContext) {
 					deviceRetryRequired = true;
-					notifyVoice(ctx, `Device: ${error instanceof Error ? error.message : String(error)}${stopUnconfirmed ? " Stop unconfirmed; ownership retained. Restore the old device connection and retry /voice reconnect." : " Retry /voice reconnect."}`, "error");
+					if (!stopUnconfirmed || (!stopResources.input.episode && !stopResources.output.episode)) {
+						notifyVoice(ctx, `Device: ${error instanceof Error ? error.message : String(error)}${stopUnconfirmed ? " Stop unconfirmed; ownership retained. Restore the old device connection and retry /voice reconnect." : " Retry /voice reconnect."}`, "error", reconnectDiagnostic);
+					}
 				}
 				throw error;
 			}
