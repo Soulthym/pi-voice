@@ -115,6 +115,21 @@ function projectLayout(lines: string[], probe: string[], layout: Layout): Glyph[
 	return rows;
 }
 
+function sgrChannels(text: string): Set<number> {
+	const channels = new Set<number>();
+	for (const match of text.matchAll(/\x1b\[([\d;:]*)m/g)) {
+		const codes = match[1].split(";").map(code => Number(code.split(":")[0]));
+		for (let i = 0; i < codes.length; i++) {
+			const code = codes[i];
+			channels.add(code === 1 || code === 2 || code === 22 ? 22
+				: code >= 30 && code <= 39 || code >= 90 && code <= 97 ? 39
+				: code >= 40 && code <= 49 || code >= 100 && code <= 107 ? 49 : code);
+			if ((code === 38 || code === 48) && !match[1].includes(":")) i += codes[i + 1] === 2 ? 4 : 2;
+		}
+	}
+	return channels;
+}
+
 function paintLayout(lines: string[], rows: Glyph[][], layout: Layout): string[] {
 	const markerAt = layout.marker ? layout.probe.indexOf(layout.marker) : -1;
 	const markerTag = markerAt < 0 ? -1 : layout.probe.indexOf(layout.prefix, markerAt + layout.marker.length);
@@ -123,25 +138,54 @@ function paintLayout(lines: string[], rows: Glyph[][], layout: Layout): string[]
 	return rows.map((row, lineIndex) => {
 		const markerIndex = marked || markerId < 0 ? -1 : row.findIndex(glyph => glyph.paints.includes(markerId));
 		if (markerIndex >= 0) marked = true;
-		const renderRange = (start: number, end: number, depth: number): string => {
+		type Painted = { text: string; restores: Array<{ at: number; opening: string; channels: Set<number> }> };
+		const renderRange = (start: number, end: number, depth: number): Painted => {
 			let output = "";
+			const restores: Painted["restores"] = [];
 			for (let i = start; i < end;) {
 				const id = row[i].paints[depth];
 				let next = i + 1;
 				while (next < end && row[next].paints[depth] === id && (id !== undefined || next !== markerIndex)) next++;
-				if (id !== undefined) output += layout.paints[id](renderRange(i, next, depth + 1));
-				else {
+				if (id !== undefined) {
+					const inner = renderRange(i, next, depth + 1);
+					const painted = layout.paints[id](inner.text);
+					const offset = painted.indexOf(inner.text);
+					if (offset >= 0) {
+						const opening = painted.slice(0, offset);
+						const channels = sgrChannels(opening);
+						for (const restore of inner.restores) {
+							const changed = restore.channels.has(0) || [...channels].some(channel => restore.channels.has(channel));
+							restores.push({ ...restore, at: output.length + offset + restore.at,
+								opening: (changed ? opening : "") + restore.opening });
+						}
+					}
+					output += painted;
+				} else {
 					const first = row[i];
 					// Slice original UTF-16 bytes at whole-grapheme boundaries. Native
 					// column slicing measures ANSI-delimited runs, which can split emoji.
-					const text = first.inherited + lines[lineIndex].slice(first.start, row[next - 1].end);
-					output += (i === markerIndex ? layout.marker : "") + text;
+					const text = (i === markerIndex ? layout.marker : "") + first.inherited +
+						lines[lineIndex].slice(first.start, row[next - 1].end);
+					// Record only native SGR: nested narration deliberately switches
+					// intensity for bold code words and must not be overridden.
+					for (const match of text.matchAll(/(?:\x1b\[[\d;:]*m)+/g)) {
+						restores.push({ at: output.length + match.index + match[0].length, opening: "", channels: sgrChannels(match[0]) });
+					}
+					output += text;
 				}
 				i = next;
 			}
-			return output;
+			return { text: output, restores };
 		};
-		return renderRange(0, row.length, 0) || lines[lineIndex];
+		const painted = renderRange(0, row.length, 0);
+		// Native resets (including SGR 22/0 on first wrapped rows) precede
+		// narration paint, just as they do on continuation rows.
+		let output = "", at = 0;
+		for (const restore of painted.restores) {
+			output += painted.text.slice(at, restore.at) + restore.opening;
+			at = restore.at;
+		}
+		return output + painted.text.slice(at) || lines[lineIndex];
 	});
 }
 
@@ -235,6 +279,27 @@ const baselineCaches = new Map<MarkdownLeaf, { text: string; width: number; line
 /** Attach post-wrap narration paint to a native Markdown instance. */
 export function withNarrationLayout<T extends nativeTui.Component>(component: T): T {
 	if (wrapped.has(component)) return component;
+	// AssistantMessage.updateContent replaces its Markdown children on every
+	// delta/final render and invalidate. Keep replacements on the same post-wrap
+	// path before their very first render, without invalidating or scrolling.
+	const owner = component as T & { updateContent?: (...args: unknown[]) => unknown; children?: nativeTui.Component[] };
+	if (typeof owner.updateContent === "function" && Array.isArray(owner.children)) {
+		wrapped.add(owner);
+		const attach = (node: nativeTui.Component): void => {
+			withNarrationLayout(node);
+			const container = node as nativeTui.Component & { children?: nativeTui.Component[]; child?: nativeTui.Component };
+			container.children?.forEach(attach);
+			if (container.child) attach(container.child);
+		};
+		const update = owner.updateContent.bind(owner);
+		owner.updateContent = (...args) => {
+			const result = update(...args);
+			owner.children?.forEach(attach);
+			return result;
+		};
+		owner.children.forEach(attach);
+		return component;
+	}
 	const leaf = component as unknown as MarkdownLeaf;
 	if (typeof leaf.text !== "string" || !leaf.options || typeof leaf.paddingX !== "number") return component;
 	wrapped.add(component);
@@ -349,6 +414,9 @@ export function invalidateNarrationMarkdown(
 		const value = pending.pop();
 		if (!value || typeof value !== "object" || visited.has(value)) continue;
 		visited.add(value);
+		if (typeof (value as { updateContent?: unknown }).updateContent === "function") {
+			withNarrationLayout(value as nativeTui.Component);
+		}
 		const node = value as { children?: unknown[]; child?: unknown; text?: unknown; invalidate?: () => void; setText?: unknown };
 		if (Array.isArray(node.children)) pending.push(...node.children);
 		if (node.child) pending.push(node.child); // Pi wraps expanded thinking in MouseRegion.
