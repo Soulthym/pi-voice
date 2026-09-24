@@ -1,6 +1,14 @@
 # Pi Voice — implemented agreements and live-validation handoff
 
-## Current handoff — completed chronological live follow
+## Current discussion — display coherence and timing retry (not implemented)
+
+- Work is being approved point by point; the audit is not blanket authorization to implement all findings.
+- Point 1 approved: use Queued for active narration awaiting complete source/context or ownership/resources; retain genuine Idle, explicit Paused precedence, and unpaused chronological Playing/live. Display changes must not force incomplete synthesis or acquire ownership early. Implementation pending.
+- Requested addition: a silent command to retry estimated word alignment, using cached audio where available. Preserve playing/paused state, selection, cursor, viewport and drafts; do not start audible playback. Command spelling and scope remain to be settled. This is a requirement, not an available command.
+- Current workaround: optionally `/voice setup`, then select a message and replay with F5 to attempt alignment again; `/voice timing` reports results. Refinement is not guaranteed. Background timing recovery produces estimates, not forced alignment.
+- Next decision: point 2, truthful progress for unknown or incomplete totals. The remaining audit findings are still proposals.
+
+## Previous handoff — completed chronological live follow
 
 - User clue: the latest finished response showed `○ Idle · [full bar] 0:35 / 0:35 · message 669/669`; red live appeared only while the assistant was working. Completion discarded follow intent with the audio lease; viewport restoration also incorrectly decided chronological Tail.
 - Completion now retains existing playback-tail intent and navigation Tail at the latest eligible source while releasing the lease normally. F8 pauses/resumes that intent without requiring a transport; paused incoming responses queue. Stop, historical replay and manual viewport controls retain their separate semantics.
