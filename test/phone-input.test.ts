@@ -311,9 +311,9 @@ test("reassigned endpoint cannot confirm an unconfirmed origin; retry at origin 
 		await recorded.promise;
 		await assert.rejects(client.cancel(), /unconfirmed/); await capture;
 		origin = b; latest = 10; confirmed = true;
-		await assert.rejects(client.stop(), /unconfirmed/);
+		await assert.rejects(client.stop("unix:///must-not-use-replacement-input.sock"), /unconfirmed/);
 		origin = a;
-		await client.stop();
-		assert.deepEqual(stops, Array(3).fill(`stop ${a}.1`));
+		await client.stop("unix:///must-not-use-replacement-input.sock");
+		assert.deepEqual(stops, Array(3).fill(`stop ${a}.1`), "retry uses the original endpoint and opaque ticket, not the caller's new route");
 	} finally { await new Promise<void>(resolve => server.close(() => resolve())); }
 });

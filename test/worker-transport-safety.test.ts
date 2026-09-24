@@ -116,6 +116,9 @@ test("lost helper and ACK retain the original handle until reconnect gets its ex
  worker.sendSegment(1, 1, "Mock remote PCM", { ...DEFAULT_VOICE_CONFIG, output: `tcp://127.0.0.1:${port}` });
  child.stdout.write(JSON.stringify({ type: "remote-handle", output: `tcp://127.0.0.1:${port}`, id, utterance: 1 }) + "\n");
  child.stdout.write(JSON.stringify({ type: "remote-released", id: foreign }) + "\n");
+ for (const event of [{ type: "ready" }, { type: "idle" }, { type: "idle", utterance: 1 }]) {
+  child.stdout.write(JSON.stringify(event) + "\n");
+ }
  child.exitCode = 1; child.emit("exit", 1); child.emit("close", 1);
  await assert.rejects(worker.terminate(), { code: "REMOTE_PLAYBACK_UNCONFIRMED" });
  assert.ok(events.some(event => event.type === "error" && event.code === "REMOTE_PLAYBACK_UNCONFIRMED"));

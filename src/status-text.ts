@@ -25,8 +25,18 @@ export interface ReadyProgress {
 	detail?: string;
 }
 
+export interface StopDiagnostic {
+	/** Snapshot the blocking identity when the episode starts, not the current badge. */
+	device: string;
+	cause: string;
+}
+
+export function stopUnconfirmedStatus(resource: "input" | "output", diagnostic: StopDiagnostic): string {
+	return `${resource === "input" ? "Input" : "Output"} stop unconfirmed · ${diagnostic.device} · ownership retained: ${diagnostic.cause} · restore its connection; /voice reconnect to retry cleanup`;
+}
+
 export interface VoiceProgressLine {
-	kind: "input" | "playback" | "preprocessing" | "timing";
+	kind: "stop" | "input" | "playback" | "preprocessing" | "timing";
 	text: string;
 }
 
@@ -71,8 +81,13 @@ export function voiceProgressLines(
 	playback: string | undefined,
 	preprocessing: readonly ReadyProgress[],
 	wordTiming?: string,
+	stopDiagnostics: Partial<Record<"input" | "output", StopDiagnostic>> = {},
 ): VoiceProgressLine[] {
 	return [
+		...(["input", "output"] as const).flatMap(resource => {
+			const diagnostic = stopDiagnostics[resource];
+			return diagnostic ? [{ kind: "stop" as const, text: stopUnconfirmedStatus(resource, diagnostic) }] : [];
+		}),
 		...(input ? [{ kind: "input" as const, text: input }] : []),
 		...(playback ? [{ kind: "playback" as const, text: playback }] : []),
 		...preprocessing.map(progress => ({ kind: "preprocessing" as const, text: preprocessingStatus(progress) })),

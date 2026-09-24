@@ -418,6 +418,38 @@ for (const scoped of [false, true]) test(`confirmed Stop resets the matching rem
  assert.equal(host.notices.filter(notice => notice.level === "error").length, errors + 1);
 });
 
+test("ambiguous reconnect retains both original cleanup clients and pin until matching retries finish", async t => {
+ const { host, worker, lease } = await setup(t);
+ await host.command("test Old audio.");
+ const inputs: PhoneInputClient[] = [];
+ const input = Promise.withResolvers<void>();
+ const output = Promise.withResolvers<void>();
+ let retry = false;
+ const cancel = t.mock.method(PhoneInputClient.prototype, "cancel", function(this: PhoneInputClient) {
+  inputs.push(this);
+  return retry ? input.promise : Promise.reject(new Error("input receipt unavailable"));
+ });
+ const terminate = t.mock.method(worker, "terminate", () => retry ? output.promise : Promise.reject(new Error("output receipt unavailable")));
+ await host.command("stop"); await settle();
+ const pins = () => host.entries.filter(entry => entry.type === "custom" && entry.customType === "pi-voice.device-selection").length;
+ const before = pins();
+ const resolve = t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", async (): Promise<{ kind: "device"; id: string }> => { throw new Error("ambiguous tmux attachment"); });
+ await host.command("reconnect"); await settle();
+ assert.equal(pins(), before);
+ assert.ok(await fs.stat(lease));
+ resolve.mock.mockImplementation(async () => ({ kind: "device" as const, id: "A" }));
+ retry = true;
+ const reconnect = host.command("reconnect"); await settle();
+ assert.ok(cancel.mock.callCount() >= 2 && terminate.mock.callCount() >= 2, "both original resources are retried");
+ assert.ok(inputs.every(client => client === inputs[0]), "no replacement input client before proof");
+ assert.equal(pins(), before);
+ output.resolve(); await settle();
+ assert.equal(pins(), before, "output proof alone cannot commit the pin");
+ assert.ok(await fs.stat(lease));
+ input.resolve(); await reconnect; await settle();
+ assert.equal(pins(), before + 1);
+});
+
 test("a remote diagnostic does not hide an independent input stop failure", async t => {
  const { host, worker } = await setup(t);
  await host.command("test Old audio.");

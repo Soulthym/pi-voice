@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Text, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
-import { deviceBadge, deviceFooterText, deviceProgressLines, notifyVoice, pendingPlaybackTiming, playbackTimingStatus, preprocessingStatus, voiceProgressLines } from "../src/status-text.js";
+import { deviceBadge, deviceFooterText, deviceProgressLines, notifyVoice, pendingPlaybackTiming, playbackTimingStatus, preprocessingStatus, stopUnconfirmedStatus, voiceProgressLines } from "../src/status-text.js";
 
 test("check, recovery and processing counters describe targets, not forced alignment or percent", () => {
 	assert.equal(preprocessingStatus({ label: "Checking saved timing", processed: 109, total: 605, unit: "checked" }),
@@ -87,6 +87,29 @@ test("badge budget preserves graphemes and closed brackets even on tiny terminal
 			if (visibleWidth(`[🎧:${identity}]`) <= width) assert.equal(badge, `[🎧:${identity}]`);
 		}
 	}
+});
+
+test("stop diagnostics outlive ordinary progress and notices coalesce per resource episode", () => {
+	const input = { device: "Original microphone (A)", cause: "lost receipt", notified: false };
+	const output = { device: "Original speaker (B)", cause: "disconnected", notified: false };
+	const diagnostics = { input, output };
+	const notices: string[] = [];
+	const ctx = { ui: { notify: (message: string) => notices.push(message) } } as any;
+	for (const playback of ["Voice · ready", "Voice · idle", undefined]) {
+		const lines = voiceProgressLines(undefined, playback, [], undefined, diagnostics);
+		assert.deepEqual(lines.slice(0, 2).map(line => line.kind), ["stop", "stop"]);
+		assert.equal(lines[0].text, stopUnconfirmedStatus("input", input));
+		assert.equal(lines[1].text, stopUnconfirmedStatus("output", output));
+		for (const resource of ["input", "output"] as const) {
+			assert.match(stopUnconfirmedStatus(resource, diagnostics[resource]), /ownership retained.*restore its connection; \/voice reconnect/);
+			notifyVoice(ctx, stopUnconfirmedStatus(resource, diagnostics[resource]), "error", diagnostics[resource]);
+		}
+	}
+	assert.equal(notices.length, 2, "repeated rendering/retry notices share the episode latch");
+	const remaining = voiceProgressLines(undefined, undefined, [], undefined, { output });
+	assert.equal(remaining.length, 1, "input proof must not hide the output warning");
+	assert.match(remaining[0].text, /Original speaker \(B\)/);
+	assert.deepEqual(voiceProgressLines(undefined, undefined, [], undefined, {}), []);
 });
 
 test("notices use one Voice label and native Pi severity, without ANSI or duplicate severity icons", () => {
