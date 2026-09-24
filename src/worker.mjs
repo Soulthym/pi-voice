@@ -486,36 +486,41 @@ function playerCommand(sampleRate) {
 	throw new Error("No audio player found. Install PipeWire (pw-play), mpv, or ffmpeg (ffplay).");
 }
 
-function attachPlaybackClock(sink, sampleRate, utterance, expectFeedback = false) {
-	let startedAt = null;
-	let pausedAt = null;
-	let pausedDuration = 0;
-	let lastFeedbackAt = expectFeedback ? performance.now() : 0;
+export function attachPlaybackClock(sink, sampleRate, utterance, expectFeedback = false) {
+	let updatedAt = null;
+	let position = 0;
+	let paused = false;
+	let lastFeedbackAt = expectFeedback ? performance.now() : -Infinity;
 	sink.samplesWritten = 0;
+	const advance = () => {
+		const now = performance.now();
+		if (updatedAt !== null && !paused) {
+			position = Math.min(position + (now - updatedAt) / 1_000, sink.samplesWritten / sampleRate);
+		}
+		updatedAt = now;
+	};
 	sink.noteAudio = samples => {
-		if (startedAt === null) startedAt = performance.now();
+		// Settle against the OLD buffer limit so starvation cannot consume new PCM.
+		advance();
 		sink.samplesWritten += samples;
 	};
-	sink.reportPlayback = (position, estimated = false) => {
-		if (!Number.isFinite(position) || position < 0) return;
-		if (!estimated) lastFeedbackAt = performance.now();
-		send({ type: "playback", utterance, position, ...(estimated ? { estimated: true } : {}) });
+	sink.reportPlayback = (reportedPosition, estimated = false) => {
+		if (!Number.isFinite(reportedPosition) || reportedPosition < 0) return;
+		if (!estimated) {
+			updatedAt = lastFeedbackAt = performance.now();
+			position = reportedPosition;
+		}
+		send({ type: "playback", utterance, position: reportedPosition, ...(estimated ? { estimated: true } : {}) });
 	};
 	const timer = setInterval(() => {
-		if (startedAt === null || performance.now() - lastFeedbackAt < 750) return;
-		const now = performance.now();
-		const paused = pausedDuration + (pausedAt === null ? 0 : now - pausedAt);
-		const elapsed = (now - startedAt - paused) / 1_000;
-		sink.reportPlayback(Math.min(elapsed, sink.samplesWritten / sampleRate), true);
+		if (sink.samplesWritten === 0 || performance.now() - lastFeedbackAt < 750) return;
+		advance();
+		sink.reportPlayback(position, true);
 	}, 125);
 	timer.unref?.();
-	sink.setPlaybackClockPaused = paused => {
-		const now = performance.now();
-		if (paused && pausedAt === null) pausedAt = now;
-		else if (!paused && pausedAt !== null) {
-			pausedDuration += now - pausedAt;
-			pausedAt = null;
-		}
+	sink.setPlaybackClockPaused = value => {
+		advance();
+		paused = value;
 	};
 	sink.stopPlaybackClock = () => clearInterval(timer);
 	return sink;
