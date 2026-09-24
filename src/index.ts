@@ -59,6 +59,7 @@ import {
 	type PlaybackTimingSnapshot,
 } from "./playback-history.js";
 import { PhoneInputClient } from "./phone-input.js";
+import { StopRecovery } from "./stop-recovery.js";
 import { prioritizeFromCurrent, processConcurrently, resolveTimingConcurrency } from "./preprocessing.js";
 import { SpeakableStream, type FencedCodeBlock, type SpeakableSourceRange } from "./speakable.js";
 import { devicePickerLabels, notifyVoice, playbackTimingStatus, voiceProgressLines, type ReadyProgress } from "./status-text.js";
@@ -385,6 +386,61 @@ export default async function (pi: ExtensionAPI) {
 	type StopEpisode = { notified: boolean; device: string; cause: string; utterance?: number; remote?: boolean };
 	type StopCleanup = { promise: Promise<void>; episode?: StopEpisode };
 	const stopResources: Record<"input" | "output", { episode?: StopEpisode; cleanup?: StopCleanup }> = { input: {}, output: {} };
+	let stopRecovery: StopRecovery | undefined;
+	let orphanRecovery: StopRecovery | undefined;
+	let orphanRecoveryOwner: string | undefined;
+	let orphanRecoveryBlocked = false;
+	const inheritedStops: Partial<Record<"input" | "output", StopEpisode>> = {};
+	const recoveryRoutes = { input: new Map<string, { selection: string; configured: string; device: string }>(), output: new Map<string, { selection: string; configured: string; device: string }>() };
+	const captureRecoveryRoute = (direction: "input" | "output", route: ReturnType<DeviceRouter["routeMetadata"]>): void => {
+		recoveryRoutes[direction].set(route.endpoint, { selection: route.kind === "device" ? route.device.id : "local", configured: config[direction], device: route.kind === "device" ? route.device.name : selectedDeviceLabel });
+	};
+	const retainRecoveryHandle = (direction: "input" | "output", endpoint: string, id: string): void => {
+		if (!stopRecovery || !/^(tcp|unix):/.test(endpoint)) return;
+		const route = recoveryRoutes[direction].get(endpoint);
+		if (!route) throw new Error("Original recovery route not captured; ownership retained");
+		stopRecovery.retain(direction, { endpoint, id, selection: route.selection, configured: route.configured }, route.device);
+	};
+	const restoreStopRecovery = (initialize = false): void => {
+		const previousRecovery = orphanRecovery;
+		const previousOwner = orphanRecoveryOwner;
+		const previousStops = { ...inheritedStops };
+		orphanRecovery = undefined;
+		orphanRecoveryOwner = undefined;
+		orphanRecoveryBlocked = false;
+		delete inheritedStops.input;
+		delete inheritedStops.output;
+		if (!coordinator) return;
+		if (initialize) stopRecovery = new StopRecovery(coordinator.root, coordinator.instanceId);
+		const owner = coordinator.speechOwner();
+		if (!owner || owner.instanceId === coordinator.instanceId) return;
+		try { process.kill(owner.pid, 0); return; }
+		catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") return; }
+		orphanRecoveryBlocked = true;
+		orphanRecoveryOwner = owner.instanceId;
+		try { orphanRecovery = new StopRecovery(coordinator.root, owner.instanceId); }
+		catch (error) { notifyStopFailure(error); }
+		for (const direction of ["input", "output"] as const) {
+			const saved = orphanRecovery?.episode(direction);
+			inheritedStops[direction] = { device: saved?.device ?? "Previous voice owner", cause: saved?.cause ?? "Interrupted transport coverage unavailable; ownership retained",
+				notified: previousOwner === orphanRecoveryOwner &&
+					JSON.stringify(previousRecovery?.episode(direction)?.handles) === JSON.stringify(saved?.handles) && !!previousStops[direction]?.notified };
+		}
+		deviceRetryRequired = true;
+	};
+	const retryStopRecovery = async (): Promise<void> => {
+		if (!orphanRecoveryBlocked) return;
+		if (orphanRecovery) {
+			await Promise.allSettled((["input", "output"] as const).map(async direction => {
+				try { await orphanRecovery!.retry(direction, deviceRouter, config[direction]); }
+				catch (error) { notifyStopFailure(error, inheritedStops[direction]); }
+				const saved = orphanRecovery!.episode(direction);
+				if (saved && inheritedStops[direction]) inheritedStops[direction]!.cause = saved.cause;
+			}));
+		}
+		refreshProgressWidget();
+		throw new Error("Saved stop scopes retried; interrupted transport coverage remains unproven. Ownership retained; restarting or deleting the fence is not stop proof");
+	};
 	const reportedStopErrors = new WeakSet<object>();
 	let stopDiagnostic = { cause: "", notified: false };
 	const notifyStopFailure = (error: unknown, diagnostic?: { notified: boolean }): void => {
@@ -407,16 +463,24 @@ export default async function (pi: ExtensionAPI) {
 		if (state.cleanup?.promise === promise) return promise;
 		const device = selectedDeviceLabel;
 		const cleanup: StopCleanup = { promise, episode: state.episode };
+		const journal = stopRecovery;
+		const generation = journal?.generations[resource];
 		state.cleanup = cleanup;
 		void promise.then(() => {
 			if (state.cleanup !== cleanup) return;
-			if (state.episode === cleanup.episode) state.episode = undefined;
+			if (state.episode === cleanup.episode && journal === stopRecovery && generation === journal?.generations[resource]) {
+				state.episode = undefined;
+				try { journal?.clear(resource); } catch (error) { notifyStopFailure(error); }
+			} else if (!state.episode && journal === stopRecovery && generation !== journal?.generations[resource]) {
+				state.episode = { device, cause: "Newer transport scope remains unconfirmed", notified: false };
+			}
 			state.cleanup = undefined;
 			refreshProgressWidget();
 		}, error => {
 			const cause = error instanceof Error ? error.message : String(error);
 			const existing = cleanup.episode ?? state.episode;
 			const episode = existing ?? { device, cause, notified: false };
+			try { stopRecovery?.fail(resource, episode.device, cause); } catch (error) { notifyStopFailure(error); }
 			if (state.cleanup === cleanup) {
 				if (state.episode === cleanup.episode) state.episode = episode;
 				state.cleanup = undefined;
@@ -562,6 +626,7 @@ export default async function (pi: ExtensionAPI) {
 	const claimOutputDevice = (): VoiceConfig => {
 		const selection = activeDeviceId ?? deviceSelection;
 		const route = deviceRouter.routeMetadata(selection, "output", config.output);
+		captureRecoveryRoute("output", route);
 		outputEndpoint = route.endpoint;
 		outputGeneration = route.kind === "device" ? route.device.connectedAt : undefined;
 		if (route.kind === "device") deviceRouter.claim(selection);
@@ -627,7 +692,7 @@ export default async function (pi: ExtensionAPI) {
 			);
 			const lines = voiceProgressLines(inputProgressMessage, playbackLine, preprocessing,
 				playback ? playbackTimingStatus(playback.wordTimingCoverage) : undefined,
-				{ input: stopResources.input.episode, output: stopResources.output.episode }).map(line =>
+				{ input: stopResources.input.episode ?? inheritedStops.input, output: stopResources.output.episode ?? inheritedStops.output }).map(line =>
 				line.kind === "input"
 					? line.text
 					: ctx.ui.theme.fg(line.kind === "stop" ? "warning" : line.kind === "playback" && state === "speaking" ? "accent" : "dim", line.text),
@@ -1561,6 +1626,15 @@ export default async function (pi: ExtensionAPI) {
 	const playbackUtterances = new Set<number>();
 	let lastPlaybackTick: { utterance: number; position: number } | undefined;
 	const handleWorkerEvent = (event: WorkerEvent): void => {
+		if (event.type === "remote-handle") {
+			try { retainRecoveryHandle("output", event.output, event.id); }
+			catch (error) { notifyStopFailure(error); }
+			return;
+		}
+		if (event.type === "remote-released" || event.type === "remote-not-admitted") {
+			try { stopRecovery?.retire("output", event.id); } catch (error) { notifyStopFailure(error); }
+			return;
+		}
 		// Cancellation acknowledgements still unblock retiring transports, not UI/history.
 		if (event.type === "idle" && event.cancelId !== undefined) {
 			transportCancelWaiters.get(event.cancelId)?.();
@@ -1641,6 +1715,7 @@ export default async function (pi: ExtensionAPI) {
 					const output = stopResources.output;
 					if (!output.episode?.remote || (event.utterance !== undefined && output.episode.utterance !== event.utterance)) {
 						output.episode = { device: selectedDeviceLabel, cause: event.message, notified: false, utterance: event.utterance, remote: true };
+						try { stopRecovery?.fail("output", output.episode.device, output.episode.cause); } catch (error) { notifyStopFailure(error); }
 						if (output.cleanup && !output.cleanup.episode) output.cleanup.episode = output.episode;
 					}
 					deviceRetryRequired = true;
@@ -1807,7 +1882,10 @@ export default async function (pi: ExtensionAPI) {
 		}).catch(notifyStopFailure);
 	};
 
-	const phoneInput = new PhoneInputClient();
+	const phoneInput = new PhoneInputClient(
+		handle => retainRecoveryHandle("input", handle.endpoint, handle.ticket),
+		handle => stopRecovery?.retire("input", handle.ticket, handle.endpoint),
+	);
 	let inputStopBarrier = Promise.resolve();
 	let inputStopPending = false;
 	let cancelPendingDictation: (() => void) | undefined;
@@ -2180,7 +2258,7 @@ export default async function (pi: ExtensionAPI) {
 	let reconnectDiagnostic = { notified: false };
 	const unconfirmedDeviceStops = new WeakSet<Promise<void>>();
 	// Persist only session metadata. Reattachment alone never changes an existing pin.
-	const adoptCurrentConnection = (epoch: number, force = false, origin?: ConnectionDevice, current = () => true, manual?: VoiceDeviceSelection): Promise<boolean> => {
+	const adoptCurrentConnection = (epoch: number, force = false, origin?: ConnectionDevice, current = () => true, manual?: VoiceDeviceSelection, recover = false): Promise<boolean> => {
 		if (!force && (deviceSelection !== "auto" || (!origin && config.output !== "auto"))) {
 			deviceRetryRequired = false;
 			return Promise.resolve(true);
@@ -2201,6 +2279,12 @@ export default async function (pi: ExtensionAPI) {
 				// Explicit reconnect retries stop proof; ordinary playback still waits on the failure.
 				if (previous) await previous.catch(() => { stopUnconfirmed = unconfirmedDeviceStops.has(previous); });
 				if (epoch !== playbackRequestEpoch || ctx !== activeContext || !interactiveVoiceSession) return false;
+				if (recover) restoreStopRecovery();
+				if (orphanRecoveryBlocked) {
+					stopUnconfirmed = true;
+					if (recover) await retryStopRecovery();
+					throw new Error("Previous voice owner stop remains unconfirmed; retry /voice reconnect");
+				}
 				if (force && retiredStops.size) {
 					const previousStopUnconfirmed = stopUnconfirmed;
 					stopUnconfirmed = true;
@@ -3132,6 +3216,7 @@ export default async function (pi: ExtensionAPI) {
 		try {
 			const route = await deviceRouter.route(activeDeviceId ?? deviceSelection, "input", config.input);
 			if (talkEpoch !== contextEpoch || captureEpoch !== inputEpoch) return;
+			captureRecoveryRoute("input", route);
 			inputEndpoint = route.endpoint;
 			inputGeneration = route.kind === "device" ? route.device.connectedAt : undefined;
 			routed = { ...config, input: route.endpoint };
@@ -3373,6 +3458,7 @@ export default async function (pi: ExtensionAPI) {
 		coordinator.setSessionName(pi.getSessionName());
 		coordinator.start();
 		coordinator.setAttentionEnabled(config.enabled);
+		restoreStopRecovery(true);
 		const savedDevice = sessionDeviceSelection(ctx);
 		deviceSelection = savedDevice.selection;
 		activeDeviceId = savedDevice.pin ?? (deviceSelection === "auto" || deviceSelection === "local" ? undefined : deviceSelection);
@@ -4795,7 +4881,7 @@ export default async function (pi: ExtensionAPI) {
 						narration.setPaused(playbackPaused);
 						vocalizer.setPlaybackPaused(true);
 					}
-					if (await adoptCurrentConnection(epoch, true)) {
+					if (await adoptCurrentConnection(epoch, true, undefined, undefined, undefined, true)) {
 						playbackPaused = ownsSpeech;
 						narration.setPaused(playbackPaused);
 						vocalizer.setPlaybackPaused(playbackPaused);

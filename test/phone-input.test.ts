@@ -211,7 +211,8 @@ for (const response of ["legacy", "generic", "foreign", "wrong-counter", "timeou
 	const port = await listen(server);
 	t.mock.timers.enable({ apis: ["setTimeout"] });
 	try {
-		const client = new PhoneInputClient();
+		const retired: unknown[] = [];
+		const client = new PhoneInputClient(undefined, handle => retired.push(handle));
 		const capture = assert.rejects(client.capture(`tcp://127.0.0.1:${port}`));
 		await commanded.promise;
 		const stopped = assert.rejects(client.stop(`tcp://127.0.0.1:${port}`), /not confirmed|timed out|closed/);
@@ -225,6 +226,7 @@ for (const response of ["legacy", "generic", "foreign", "wrong-counter", "timeou
 		if (response === "timeout") { await new Promise(resolve => setImmediate(resolve)); t.mock.timers.tick(10_000); }
 		await assert.rejects(cancelled, /not confirmed|timed out|closed/);
 		await capture;
+		assert.deepEqual(retired, [], "unconfirmed stops cannot retire recovery scopes");
 	} finally {
 		connection?.destroy();
 		await new Promise<void>(resolve => server.close(() => resolve()));
@@ -257,7 +259,7 @@ test("synchronous cancellation before connection setup never requests a ticket",
 	await capture;
 });
 
-test("stop uses the active capture endpoint, not a newly routed endpoint", async () => {
+test("stop retires the exact original handle, not a newly routed endpoint", async () => {
 	const recorded = Promise.withResolvers<void>();
 	let active: net.Socket | undefined;
 	const server = ticketServer((socket, receipt) => socket.once("data", command => {
@@ -266,11 +268,19 @@ test("stop uses the active capture endpoint, not a newly routed endpoint", async
 	}));
 	const port = await listen(server);
 	try {
-		const client = new PhoneInputClient();
+		const retained: { endpoint: string; ticket: string }[] = [];
+		const retired: { endpoint: string; ticket: string }[] = [];
+		const client = new PhoneInputClient(handle => retained.push(handle), handle => retired.push(handle));
 		const capture = client.capture(`tcp://127.0.0.1:${port}`);
 		await recorded.promise;
+		assert.equal(retired.length, 0);
 		await client.stop("tcp://127.0.0.1:1");
 		assert.deepEqual(await capture, { type: "text", data: "" });
+		assert.equal(retained.length, 1);
+		assert.equal(retained[0].endpoint, `tcp://127.0.0.1:${port}`);
+		assert.deepEqual(retired, retained);
+		await client.stop();
+		assert.equal(retired.length, 1);
 	} finally { active?.destroy(); await new Promise<void>(resolve => server.close(() => resolve())); }
 });
 

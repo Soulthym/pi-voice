@@ -267,6 +267,7 @@ export class VoiceWorkerClient {
 		for (const [id, handle] of this.#remoteHandles) {
 			await stopRemotePlayback(handle);
 			this.#remoteHandles.delete(id);
+			this.#onEvent({ type: "remote-released", id });
 		}
 		if (hadHandles) this.#remoteUnconfirmed = false;
 		if (this.#remoteUnconfirmed) throw new RemotePlaybackUnconfirmedError("no scoped remote receipt available");
@@ -386,12 +387,16 @@ export class VoiceWorkerClient {
 			if (validStreamId(event.id) && /^(tcp|unix):/.test(event.output)) {
 				this.#remoteHandles.set(event.id, { output: event.output, id: event.id, utterance: event.utterance });
 				this.#remoteUnconfirmed = true;
+				this.#onEvent(event); // Host journals the original scope for explicit restart recovery.
 			}
 			return;
 		}
 		if (event.type === "remote-released" || event.type === "remote-not-admitted") {
 			const handle = this.#remoteHandles.get(event.id);
-			if (handle && this.#remoteHandles.delete(event.id) && this.#remoteHandles.size === 0 && handle.utterance === this.#remoteUtterance) this.#remoteUnconfirmed = false;
+			if (handle && this.#remoteHandles.delete(event.id)) {
+				if (this.#remoteHandles.size === 0 && handle.utterance === this.#remoteUtterance) this.#remoteUnconfirmed = false;
+				this.#onEvent(event);
+			}
 			return;
 		}
 		if (event.type === "idle" && this.#remoteHandles.size === 0) {

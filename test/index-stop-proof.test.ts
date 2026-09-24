@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
+import * as net from "node:net";
+import { StopRecovery } from "../src/stop-recovery.js";
 import * as path from "node:path";
 import test, { mock } from "node:test";
 import { DeviceRouter } from "../src/device-router.js";
@@ -622,4 +624,85 @@ test("session restart cannot retire ownership using proof older than a remote ep
  assert.ok(await fs.stat(lease));
  terminate.mock.mockImplementation(async () => {});
  await host.command("reconnect"); await settle();
+});
+
+
+test("host journals original route after registration loss, retires receipts and fences late cleanup", async t => {
+ const { host, worker, lease, registration, register } = await setup(t);
+ await host.command("test Original transport.");
+ const owner = JSON.parse(await fs.readFile(lease, "utf8"));
+ const journal = path.join(path.dirname(path.dirname(lease)), "stop-recovery", `${owner.instanceId}.json`);
+ const saved = async () => JSON.parse(await fs.readFile(journal, "utf8"));
+ registration.audioEndpoint = "unix:///replacement";
+ await register();
+ const handle = { type: "remote-handle" as const, output: "unix:///old-output", id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", utterance: 1 };
+ worker.emit(handle);
+ assert.equal((await saved()).output.handles[0].endpoint, "unix:///old-output");
+ assert.equal((await saved()).output.handles[0].selection, "A");
+ worker.emit({ type: "remote-released", id: handle.id });
+ assert.equal((await saved()).output.handles.length, 0);
+ const termination = Promise.withResolvers<void>();
+ const terminate = t.mock.method(worker, "terminate", () => termination.promise);
+ const reconnect = host.command("reconnect");
+ await settle();
+ assert.ok(terminate.mock.callCount());
+ const newer = { ...handle, id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" };
+ worker.emit(newer);
+ termination.resolve();
+ await reconnect; await settle();
+ assert.equal((await saved()).output.handles[0].id, newer.id, "older cleanup cannot erase newer journal generation");
+ worker.emit({ type: "remote-not-admitted", id: newer.id });
+ assert.equal((await saved()).output.handles.length, 0);
+});
+
+
+test("normal microphone receipt retires config A before recovery retries config B", async t => {
+ const { host, lease } = await setup(t);
+ const ticket = `${"a".repeat(32)}.1`;
+ let stopped = Promise.withResolvers<void>();
+ const originalStop = PhoneInputClient.prototype.stop;
+ t.mock.method(PhoneInputClient.prototype, "stop", async function(this: PhoneInputClient, endpoint?: string) {
+  await originalStop.call(this, endpoint);
+  stopped.resolve();
+ });
+ let active: net.Socket | undefined;
+ let recorded = Promise.withResolvers<void>();
+ const server = net.createServer(socket => {
+  socket.on("error", () => {});
+  socket.on("data", raw => {
+   const command = String(raw).trim();
+   if (command === "ticket") socket.write(`ticket ${ticket}\n`);
+   else if (command.startsWith("record ")) { active = socket; recorded.resolve(); }
+   else socket.end(`ok ${Buffer.from(`stopped ${ticket}`).toString("base64")}\n`);
+  });
+ });
+ await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+ t.after(async () => { active?.destroy(); await new Promise<void>(resolve => server.close(() => resolve())); });
+ const address = server.address() as net.AddressInfo;
+ const a = `tcp://127.0.0.1:${address.port}`;
+ const b = `tcp://localhost:${address.port}`;
+ await host.command(`input ${a}`);
+ const first = host.command("talk");
+ await recorded.promise;
+ const owner = JSON.parse(await fs.readFile(lease, "utf8"));
+ const root = path.dirname(path.dirname(lease));
+ const journal = () => new StopRecovery(root, owner.instanceId);
+ assert.equal(journal().episode("input")!.handles[0].configured, a);
+ await host.command("talk");
+ await stopped.promise;
+ assert.deepEqual(journal().episode("input")!.handles, [], "normal stop persists retirement before capture completion");
+ active!.end("ok \n");
+ await first; await settle();
+ await host.command(`input ${b}`);
+ recorded = Promise.withResolvers<void>();
+ stopped = Promise.withResolvers<void>();
+ const second = host.command("talk");
+ await recorded.promise;
+ const retry = t.mock.method(PhoneInputClient, "retryStop", async () => {});
+ await journal().retry("input", new DeviceRouter(), b);
+ assert.deepEqual(retry.mock.calls.map(call => call.arguments), [[{ endpoint: b, ticket }]], "obsolete A cannot block current B recovery");
+ await host.command("talk");
+ await stopped.promise;
+ active!.end("ok \n");
+ await second; await settle();
 });

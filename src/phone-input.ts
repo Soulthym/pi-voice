@@ -172,6 +172,22 @@ export class PhoneInputClient {
 	#cancelCapture: (() => void) | null = null;
 	#stopPending: Promise<void> | null = null;
 
+	constructor(
+		private readonly retainHandle?: (handle: { endpoint: string; ticket: string }) => void,
+		private readonly retireHandle?: (handle: { endpoint: string; ticket: string }) => void,
+	) {}
+
+	/** Opaque original scope only; never substitute a newly issued recording ticket. */
+	static retryStop(handle: { endpoint: string; ticket: string }): Promise<void> {
+		if (!/^(tcp|unix):/.test(handle.endpoint) || !/^[0-9a-f]{32}\.[1-9][0-9]{0,15}$/.test(handle.ticket) || !Number.isSafeInteger(Number(handle.ticket.split(".")[1]))) {
+			return Promise.reject(new Error("Invalid retained microphone scope"));
+		}
+		const client = new PhoneInputClient();
+		client.#activeEndpoint = handle.endpoint;
+		client.#ticket = handle.ticket;
+		return client.stop();
+	}
+
 	cancel(): Promise<void> {
 		this.#generation++;
 		const endpoint = this.#activeEndpoint;
@@ -203,6 +219,8 @@ export class PhoneInputClient {
 				socket.destroy();
 				if (error) reject(error);
 				else {
+					try { this.retireHandle?.({ endpoint, ticket }); }
+					catch (error) { reject(error); return; }
 					if (this.#ticket === ticket) { this.#activeEndpoint = null; this.#ticket = null; }
 					resolve();
 				}
@@ -314,6 +332,8 @@ export class PhoneInputClient {
 					}
 					ticketReceived = true;
 					this.#ticket = header.slice(7);
+					try { this.retainHandle?.({ endpoint, ticket: this.#ticket }); }
+					catch (error) { finish(error instanceof Error ? error : new Error(String(error))); return; }
 					headerBuffer = Buffer.alloc(0);
 					socket.write(`record ${this.#ticket}\n`);
 					return;
