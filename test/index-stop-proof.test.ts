@@ -652,7 +652,7 @@ test("host journals original route after registration loss, retires receipts and
  await reconnect; await settle();
  assert.equal((await saved()).output.handles[0].id, newer.id, "older cleanup cannot erase newer journal generation");
  worker.emit({ type: "remote-not-admitted", id: newer.id });
- assert.equal((await saved()).output.handles.length, 0);
+ assert.equal((await saved()).output, undefined, "matching late receipt completes the acknowledged episode");
 });
 
 
@@ -713,6 +713,84 @@ for (const released of [false, true]) test(`preemption ACK requires matching lat
  }
  assert.equal(journal().episode("output"), undefined);
  await assert.rejects(fs.stat(lease), { code: "ENOENT" });
+ t.mock.timers.reset();
+});
+
+for (const proof of ["late-receipt", "reconnect", "no-ack", "input-pending", "reentry", "failed-retry"] as const) test(`live preemption retains lease and history until both proofs: ${proof}`, async t => {
+ t.mock.timers.enable({ apis: ["setInterval"] });
+ const { host, worker, lease } = await setup(t);
+ const recording = Promise.withResolvers<any>();
+ if (proof === "input-pending") {
+  t.mock.method(PhoneInputClient.prototype, "capture", () => recording.promise);
+  await host.command("talk"); await settle();
+ }
+ const partial = assistant("Original sentence. ", "pending");
+ await host.emit("message_start", { message: partial });
+ await host.emit("message_update", { message: partial, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Original sentence. " } });
+ await settle();
+ const releaseSpeech = SessionCoordinator.prototype.releaseSpeech;
+ const releases = t.mock.method(SessionCoordinator.prototype, "releaseSpeech");
+ const waiting = t.mock.method(SessionCoordinator.prototype, "markWaiting");
+ const input = Promise.withResolvers<void>();
+ if (proof === "input-pending") t.mock.method(PhoneInputClient.prototype, "cancel", () => input.promise);
+ t.mock.method(worker, "cancel", () => 901 as never);
+ const handle = { type: "remote-handle" as const, output: "unix:///old-output", id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", utterance: 1 };
+ worker.emit(handle);
+ const preempt = t.mock.method(SessionCoordinator.prototype, "consumeSpeechPreemptionRequest", () => true);
+ t.mock.timers.tick(200); await settle();
+ preempt.mock.mockImplementation(() => false);
+ if (proof !== "no-ack") worker.emit({ type: "idle", cancelId: 901 });
+ await settle();
+ const sent = worker.sent.length;
+ const continued = assistant("Original sentence. Retained sentence. ", "pending");
+ await host.emit("message_update", { message: continued, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Retained sentence. " } });
+ await settle();
+ assert.equal(worker.sent.length, sent, "retained turn ownership never admits new audio");
+ assert.ok(await fs.stat(lease));
+ const before = releases.mock.callCount();
+ const failedRetry = proof === "failed-retry" ? t.mock.method(worker, "terminate", async () => { throw new Error("new cancellation unconfirmed"); }) : undefined;
+ if (failedRetry) { await host.command("reconnect"); await settle(); }
+ if (proof === "reconnect") {
+  const terminate = t.mock.method(worker, "terminate", async () => {});
+  await host.command("reconnect"); await settle();
+  assert.ok(terminate.mock.callCount(), "unchanged route retries original client despite settled ACK barrier");
+  assert.ok(await fs.stat(lease), "successful termination without retained receipt cannot release");
+ }
+ if (proof === "reentry") {
+  releases.mock.mockImplementation(function(this: SessionCoordinator) {
+   releaseSpeech.call(this);
+   releases.mock.mockImplementation(releaseSpeech);
+   void host.command("stop");
+  });
+ }
+ worker.emit({ type: "remote-released", id: handle.id }); await settle();
+ if (failedRetry) {
+  assert.match(host.widgetLines()!.join("\n"), /Output stop unconfirmed/, "old ACK cannot cover a failed newer cleanup");
+  assert.ok(await fs.stat(lease));
+  failedRetry.mock.mockImplementation(async () => {});
+  await host.command("reconnect"); await settle();
+ }
+ if (proof === "reconnect") { await host.command("reconnect"); await settle(); }
+ if (proof === "no-ack" || proof === "input-pending") {
+  assert.ok(await fs.stat(lease), "one resource receipt is not both-resource cancellation proof");
+  assert.equal(releases.mock.callCount(), before);
+  if (proof === "no-ack") worker.emit({ type: "idle", cancelId: 901 });
+  else { input.resolve(); recording.resolve({ type: "text", data: "" }); }
+  await settle();
+ }
+ await assert.rejects(fs.stat(lease), { code: "ENOENT" });
+ assert.equal(releases.mock.callCount(), before + 1, "deferred preemption finishes exactly once");
+ worker.emit({ type: "remote-released", id: handle.id });
+ worker.emit({ type: "idle", cancelId: 901 }); await settle();
+ assert.equal(releases.mock.callCount(), before + 1);
+ assert.equal(worker.sent.length, sent, "cleanup never implicitly resumes captured speech");
+ if (proof === "reentry") assert.equal(waiting.mock.callCount(), 0, "newer Stop cannot restore displaced attention intent");
+ const final = assistant("Original sentence. Retained sentence.");
+ host.addMessage("retained-turn", null, final);
+ await host.emit("message_end", { message: final });
+ await host.command("reconnect"); await settle();
+ await host.shortcut("f5"); await settle();
+ assert.ok(worker.sent.some(item => /Retained sentence/.test((item as { text?: string }).text ?? "")), "explicit replay retains the completed source");
  t.mock.timers.reset();
 });
 

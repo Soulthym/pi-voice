@@ -382,13 +382,13 @@ export default async function (pi: ExtensionAPI) {
 	let playRequestedAttention: (ctx: ExtensionContext, request: AttentionRequest) => void = () => {};
 	let releaseSpeechOwnership: (announceNext?: boolean) => void = () => {};
 	let pendingSpeechPreemption:
-		| { purpose: SpeechPurpose | undefined; wasComplete: boolean; spokenText: string; cancelId?: number }
+		| { purpose: SpeechPurpose | undefined; wasComplete: boolean; spokenText: string; cancelId?: number; request: number; context: number; input: number }
 		| undefined;
 	let finishSpeechPreemption: () => void = () => {};
 	const transportCancelWaiters = new Map<number, () => void>();
 	let state: VoiceState = "idle";
 	let lastError = "";
-	type StopEpisode = { notified: boolean; device: string; cause: string; utterance?: number; remote?: boolean };
+	type StopEpisode = { notified: boolean; device: string; cause: string; utterance?: number; remote?: boolean; cancelled?: boolean };
 	type StopCleanup = { promise: Promise<void>; episode?: StopEpisode };
 	const stopResources: Record<"input" | "output", { episode?: StopEpisode; cleanup?: StopCleanup }> = { input: {}, output: {} };
 	let stopRecovery: StopRecovery | undefined;
@@ -461,6 +461,17 @@ export default async function (pi: ExtensionAPI) {
 		notifyVoice(activeContext, `Stop unconfirmed; ownership retained: ${cause} · restore the original device connection; /voice reconnect to retry cleanup`, "error", diagnostic ?? stopDiagnostic);
 		stopDiagnostic.notified = true;
 	};
+	const stopsUnresolved = (): boolean => Object.values(stopResources).some(resource => resource.episode || resource.cleanup);
+	const retireStopHandle = (resource: "input" | "output", id: string, endpoint?: string): void => {
+		stopRecovery?.retire(resource, id, endpoint);
+		const state = stopResources[resource];
+		if (state.episode?.cancelled && !state.cleanup && !stopRecovery?.episode(resource)?.handles.length) {
+			stopRecovery?.clear(resource);
+			state.episode = undefined;
+			finishSpeechPreemption();
+			refreshProgressWidget();
+		}
+	};
 	// Observe each resource, not Promise.all's first rejection. Only its latest
 	// cleanup can prove its own episode resolved; a first late notice joins it.
 	const trackStop = (resource: "input" | "output", promise: Promise<void>): Promise<void> => {
@@ -468,6 +479,7 @@ export default async function (pi: ExtensionAPI) {
 		if (state.cleanup?.promise === promise) return promise;
 		const device = selectedDeviceLabel;
 		const cleanup: StopCleanup = { promise, episode: state.episode };
+		if (state.episode) state.episode.cancelled = false;
 		const journal = stopRecovery;
 		state.cleanup = cleanup;
 		void promise.then(() => {
@@ -481,7 +493,9 @@ export default async function (pi: ExtensionAPI) {
 			} else if (!state.episode && journal === stopRecovery && unresolved) {
 				state.episode = { device, cause: "Newer transport scope remains unconfirmed", notified: false };
 			}
+			if (journal === stopRecovery && state.episode && (state.episode === cleanup.episode || !cleanup.episode)) state.episode.cancelled = true;
 			state.cleanup = undefined;
+			finishSpeechPreemption();
 			refreshProgressWidget();
 		}, error => {
 			const cause = error instanceof Error ? error.message : String(error);
@@ -1669,7 +1683,7 @@ export default async function (pi: ExtensionAPI) {
 			return;
 		}
 		if (event.type === "remote-released" || event.type === "remote-not-admitted") {
-			try { stopRecovery?.retire("output", event.id); } catch (error) { notifyStopFailure(error); }
+			try { retireStopHandle("output", event.id); } catch (error) { notifyStopFailure(error); }
 			return;
 		}
 		// Cancellation acknowledgements still unblock retiring transports, not UI/history.
@@ -1921,7 +1935,7 @@ export default async function (pi: ExtensionAPI) {
 
 	const phoneInput = new PhoneInputClient(
 		handle => retainRecoveryHandle("input", handle.endpoint, handle.ticket),
-		handle => stopRecovery?.retire("input", handle.ticket, handle.endpoint),
+		handle => retireStopHandle("input", handle.ticket, handle.endpoint),
 	);
 	let inputStopBarrier = Promise.resolve();
 	let inputStopPending = false;
@@ -2020,7 +2034,7 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	releaseSpeechOwnership = (announceNext = true): void => {
-		if (!ownsSpeech || !coordinator || deviceRebind || transportStopPending || inputStopPending) return;
+		if (!ownsSpeech || !coordinator || deviceRebind || transportStopPending || inputStopPending || stopsUnresolved()) return;
 		if (pendingSpeechPreemption) {
 			finishSpeechPreemption();
 			return;
@@ -2081,6 +2095,7 @@ export default async function (pi: ExtensionAPI) {
 		output = true,
 		handledSource: typeof liveSource | null = liveSource,
 	): boolean => {
+		if (pendingSpeechPreemption || stopsUnresolved()) return false;
 		try { if (output) claimOutputDevice(); } catch (error) {
 			attentionSuppressed = true;
 			deviceRetryRequired = true;
@@ -2121,7 +2136,7 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	const acquireSpeech = (purpose: "turn" | "replay", announceProject = true): boolean => {
-		if (attentionSuppressed || deviceRetryRequired || !interactiveVoiceSession || deviceRebind || inputStopPending || transportStopPending) return false;
+		if (pendingSpeechPreemption || stopsUnresolved() || attentionSuppressed || deviceRetryRequired || !interactiveVoiceSession || deviceRebind || inputStopPending || transportStopPending) return false;
 		if (!coordinator) return true;
 		const alreadyOwned = ownsSpeech && coordinator.ownsSpeech();
 		if (!alreadyOwned && !coordinator.tryAcquireSpeech()) return false;
@@ -2139,7 +2154,7 @@ export default async function (pi: ExtensionAPI) {
 		if (inputStopPending) {
 			try { await inputStopBarrier; } catch { return false; }
 		}
-		if (captureEpoch !== inputEpoch || epoch !== playbackRequestEpoch) return false;
+		if (captureEpoch !== inputEpoch || epoch !== playbackRequestEpoch || pendingSpeechPreemption || stopsUnresolved()) return false;
 		if (!owner) return interactiveVoiceSession;
 		const alreadyOwned = ownsSpeech && owner.ownsSpeech();
 		if (!alreadyOwned && !(await owner.forceAcquireSpeech())) return false;
@@ -2192,9 +2207,14 @@ export default async function (pi: ExtensionAPI) {
 
 	finishSpeechPreemption = (): void => {
 		const interrupted = pendingSpeechPreemption;
-		if (!interrupted || !relinquishSpeech()) return;
+		if (!interrupted || deviceRebind || stopsUnresolved()) return;
+		// Consume before release refreshes UI: callbacks may reenter with newer intent.
 		pendingSpeechPreemption = undefined;
-		preserveDisplacedSpeech(interrupted);
+		const releasedLease = speechLeaseEpoch + 1;
+		relinquishSpeech();
+		if (speechLeaseEpoch === releasedLease && interrupted.request === playbackRequestEpoch && interrupted.context === contextEpoch && interrupted.input === inputEpoch) {
+			preserveDisplacedSpeech(interrupted);
+		}
 	};
 
 	const handleSpeechPreemption = (): void => {
@@ -2207,7 +2227,7 @@ export default async function (pi: ExtensionAPI) {
 		const hadActiveInput = inputInProgress;
 		const inputCancellation = hadActiveInput ? cancelActiveInput() : inputStopBarrier;
 		const cancelId = clearPlaybackTransport();
-		const pending = { ...interrupted, ...(cancelId !== undefined ? { cancelId } : {}) };
+		const pending = { ...interrupted, request: playbackRequestEpoch, context: contextEpoch, input: inputEpoch, ...(cancelId !== undefined ? { cancelId } : {}) };
 		pendingSpeechPreemption = pending;
 		narration.finish();
 		// Release only after both the player and microphone have acknowledged stop.
@@ -2358,11 +2378,12 @@ export default async function (pi: ExtensionAPI) {
 					changed ||= inputInProgress && (inputRoute.endpoint !== inputEndpoint ||
 						(inputRoute.kind === "device" ? inputRoute.device.connectedAt : undefined) !== inputGeneration);
 				} catch (error) { if ((!identityChanged && inputInProgress) || (manual !== undefined && manual !== "auto")) throw error; }
-				if (manual !== undefined || previous || transportStopPending || inputStopPending || (force && (deviceRetryRequired || inputInProgress || playbackPaused)) || (changed && (ownsSpeech || inputInProgress))) {
+				if (manual !== undefined || previous || stopsUnresolved() || pendingSpeechPreemption || transportStopPending || inputStopPending || (force && (deviceRetryRequired || inputInProgress || playbackPaused)) || (changed && (ownsSpeech || inputInProgress))) {
 					// Termination, not a TCP accept or a cancellation timeout, proves the old sink is gone.
 					stopUnconfirmed = true;
 					if (force && inputInProgress) await finishInputForPlayback();
 					await Promise.all([trackStop("output", vocalizer.shutdown()), cancelActiveInput()]);
+					if (stopsUnresolved()) throw new Error("Retained transport scopes remain unconfirmed");
 					liveTurnNarrationActive = false;
 					stopUnconfirmed = false;
 					for (const resolve of transportCancelWaiters.values()) resolve();
@@ -2409,7 +2430,12 @@ export default async function (pi: ExtensionAPI) {
 			if (stopUnconfirmed) throw new Error("Voice stop unconfirmed; retry /voice reconnect");
 		});
 		deviceRebind = barrier;
-		const clearBarrier = () => { if (deviceRebind === barrier) deviceRebind = undefined; };
+		const clearBarrier = () => {
+			if (deviceRebind === barrier) {
+				deviceRebind = undefined;
+				finishSpeechPreemption();
+			}
+		};
 		void adoption.finally(() => {
 			if (deviceRebind === barrier || !deviceRebind) {
 				handoffConnecting = false;
@@ -3955,7 +3981,7 @@ export default async function (pi: ExtensionAPI) {
 			speechConversationMessages = liveSource?.before ?? [];
 			speechAssistantMessage = event.message;
 			const continuingTurn =
-				!deviceRebind && !transportStopPending && liveTurnNarrationActive && ownsSpeech && speechPurpose === "turn" && (coordinator?.ownsSpeech() ?? true);
+				!pendingSpeechPreemption && !stopsUnresolved() && !deviceRebind && !transportStopPending && liveTurnNarrationActive && ownsSpeech && speechPurpose === "turn" && (coordinator?.ownsSpeech() ?? true);
 			const wasFollowingTranscriptEnd = transcriptIsFollowingEnd();
 			if (!continuingTurn && !acquireSpeech("turn")) {
 				speechBlocked = true;
@@ -3990,6 +4016,17 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	const pushLiveDelta = (messageType: NarrationMessageType, contentIndex: number, text: string): void => {
+		if (pendingSpeechPreemption || stopsUnresolved()) {
+			speechBlocked = true;
+			blockedSpeechText += text;
+			if (pendingSpeechPreemption) pendingSpeechPreemption.spokenText += text;
+			blockedMessageHasSpeech ||= hasSpeakableAudio(blockedSpeechText);
+			if (livePlaybackId && (liveBlockIndex === undefined || liveBlockIndex === contentIndex)) {
+				ownedSpeechText += text;
+				playbackHistory.updateText(livePlaybackId, ownedSpeechText, { contentIndex, messageType, displayOffset: liveDisplayOffset });
+			}
+			return;
+		}
 		if (liveBlockIndex !== contentIndex) {
 			if (liveBlockIndex !== undefined) {
 				vocalizer.flush();
@@ -4129,7 +4166,7 @@ export default async function (pi: ExtensionAPI) {
 			pausedForAttention = true;
 			refreshStatus();
 		}
-		if (!config.enabled || attentionSuppressed || deviceRebind || transportStopPending || stopReason === undefined || !ownsSpeech || speechPurpose !== "turn") return;
+		if (!config.enabled || attentionSuppressed || deviceRebind || transportStopPending || pendingSpeechPreemption || stopsUnresolved() || stopReason === undefined || !ownsSpeech || speechPurpose !== "turn") return;
 		if (config.mode !== "yield") {
 			ownerContentExpected = ownerContentExpected || hasSpeakableAudio(completedText);
 			if (ownerContentExpected) announceProjectForSpeech();

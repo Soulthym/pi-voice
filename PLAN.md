@@ -1,6 +1,14 @@
 # Pi Voice — implemented agreements and live-validation handoff
 
-## Current checkpoint — phase 3 timing commands and silent retry
+## Current checkpoint — stop/preemption/reconnect invariants (items 1–3 only)
+
+- ACK without matching receipts keeps the physical lease and turn purpose but gates new live deltas, block flushes and prefixes. Source history remains available for explicit retry; cleanup never auto-resumes audio.
+- Unresolved input/output episodes or deferred preemption force unchanged-route reconnect through original-client cleanup. Successful termination alone cannot discard retained scopes or commit the replacement pin.
+- Matching late receipts resolve only cancellation-acknowledged episodes. Both resource proofs complete deferred preemption once; consumption before release callbacks and command/session/input/lease epoch checks prevent stale displaced intent from returning. No broad status reset.
+- Offline regressions cover live deltas after ACK, late proof, no ACK, missing input proof, unchanged-route retry, no premature lease release, callback reentry/newer Stop, and explicit replay of retained source. Typecheck and diff checks passed; final full suite **1044 passed / 33 compatibility skips / zero failures** (`/tmp/stop-task-full-final.log`); focused runner **227 passed / zero failures** before the final failed-retry regression (`/tmp/stop-task-final-targeted.log`). A direct targeted invocation with ambient routing variables failed the handoff fixture; both environment-sanitized full runner passes and the focused runner passed it. No root-cause claim for that invocation. LSP is unavailable.
+- Scope excludes other user items, durable admission/local-child coverage, live diagnosis and runtime changes. No provider/inference/live-session calls, client/SSH restart, settings changes, issue-file or demo edits. Existing historical notes remain below.
+
+## Historical checkpoint — phase 3 timing commands and silent retry
 
 - Implemented the read-only combined `/voice timing` report and `/voice timing workers` query. `/voice timing workers auto|<1..8>` retains the existing setter/config behavior and `timingPreprocessConcurrency` JSON key; no migration. Automatic concurrency remains capped at four. Strict arity and literal bounds reject extra arguments and noncanonical numeric spellings before mutation.
 - Removed the old command from parsing, help, autocomplete and active command documentation, without an alias. Queries return before transcript-follow handling. Existing query fixtures cover idle, playing, paused and microphone-active states; added command completion, invalid-argument and persisted-key assertions.
