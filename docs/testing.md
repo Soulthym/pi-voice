@@ -1,6 +1,12 @@
 # Tests
 
-## Current checkpoint — playback clock and truthful live/work frontiers
+## Current checkpoint — completed live-follow intent
+
+The user clarified that `○ Idle · [full bar] 0:35 / 0:35 · message 669/669` after the latest response was wrong: caught-up unpaused playback must remain Playing + red `● live` between turns. The mounted regression now runs full message_end → turn_end → worker finish and checks released audio ownership with persistent live, lease-free F8 pause, queued next-response single-F8 resume, F6 last-message selection and completed historical Idle. F7 completion checks are viewport-independent. Earlier completed-Idle assertions below describe superseded behavior, not the current contract.
+
+Validation: `npm run check` passed; full checkout **971 passed, 33 compatibility skips, no failures**; full installed-native **1004 passed, no skips/failures**. Logs: `/tmp/voice-live-final.log`, `/tmp/voice-live-native-final.log`. No LSP server configured; typecheck substitutes for diagnostics. All transport/provider behavior was mocked; native terminals were inert. No hardware, real inference, provider calls, live session restarts or runtime settings changed. Operator: host `/reload` only, when ready; not performed here.
+
+## Previous checkpoint — playback clock and truthful live/work frontiers
 
 `npm run check` passed. Full checkout: **971 passed, 33 compatibility skips, no failures**; full installed-native: **1004 passed, no skips/failures**. Logs: `/tmp/pi-voice-review-fixed-full.log`, `/tmp/pi-voice-review-native-final2.log`. No LSP server configured; TypeScript and diff checks used instead.
 
@@ -15,7 +21,7 @@ All evidence is offline synthetic clock/transport or inert native UI. No provide
 
 Final serial reruns: `npm run check` passed; full checkout `npm test` **956 passed, 33 compatibility skips, no failures**; full installed-native `npm test` **989 passed, no skips/failures**. Logs: `/tmp/pi-voice-ui-final.log`, `/tmp/pi-voice-ui-native-final.log`. Native run sets `PI_VOICE_TEST_TUI_MODULE`, `PI_VOICE_TEST_AGENT_MODULE` and `PI_VOICE_TEST_KEYBINDINGS_MODULE` to the installed Pi modules (command pattern below). LSP diagnostics were unavailable (no server); TypeScript and whitespace checks passed. Direct focused runs without the test runner's environment sanitization failed route/style assertions; the sanitized focused and both final full runs passed.
 
-`test/index-live-progress.test.ts` mounts the real native widget lifecycle and captures rendered frames with synthetic events/mocked transport. New checks deliberately remove `PlaybackHistory.status()` during streaming and chronological Tail to exercise the missing-history playbar gap and retained active-intent bar; finished idle/Stop without history must not fabricate one. This is an offline controlled reproduction, **not a diagnosis of the original user's random live disappearance**. Phase propagation, paused precedence, known/unknown timing, separate native error-red `● live`, block/tool boundaries, first-line headphone badge, stop warnings and resizing are covered by mocked tests. No physical terminal write timing, arbitrary dock pressure, real provider preparation or hardware behavior is established.
+`test/index-live-progress.test.ts` mounts the real native widget lifecycle and captures rendered frames with synthetic events/mocked transport. New checks deliberately remove `PlaybackHistory.status()` during streaming and chronological Tail to exercise the missing-history playbar gap and retained active-intent bar; initial/stopped idle without history must not fabricate one; completed live follow retains its intent-backed bar. This is an offline controlled reproduction, **not a diagnosis of the original user's random live disappearance**. Phase propagation, paused precedence, known/unknown timing, separate native error-red `● live`, block/tool boundaries, first-line headphone badge, stop warnings and resizing are covered by mocked tests. No physical terminal write timing, arbitrary dock pressure, real provider preparation or hardware behavior is established.
 
 Review regressions also cover consumed streaming audio with pending versus exhausted work, stale multi-utterance terminal failures, partial prose/fence arrivals without unrelated worker events, silent Markdown tails, partially consumed historical Tail, retained stop warnings and native pointer press→progress update→release.
 

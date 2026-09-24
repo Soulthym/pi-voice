@@ -96,7 +96,9 @@ test("sticky pause queues new responses; settings preserve ownership and dirty a
 	await host.shortcut("f10");
 	const completed = segments.length;
 	await host.shortcut("f8"); await settle();
-	assert.ok(segments.length > completed, "resume from completed tail recreates playback in one action");
+	assert.equal(segments.length, completed, "F8 pauses completed live intent without recreating playback");
+	assert.match(host.widgetLines()![0], /Paused/);
+	await host.shortcut("f5"); await settle(); // Explicit replay recreates transport for the lease test below.
 	assert.equal(worker.pauses.at(-1), false);
 
 	// Resume before the incoming response has finished: keep the lease between

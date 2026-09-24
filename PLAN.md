@@ -1,6 +1,13 @@
 # Pi Voice — implemented agreements and live-validation handoff
 
-## Current handoff — four review fixes ready for user reload
+## Current handoff — completed chronological live follow
+
+- User clue: the latest finished response showed `○ Idle · [full bar] 0:35 / 0:35 · message 669/669`; red live appeared only while the assistant was working. Completion discarded follow intent with the audio lease; viewport restoration also incorrectly decided chronological Tail.
+- Completion now retains existing playback-tail intent and navigation Tail at the latest eligible source while releasing the lease normally. F8 pauses/resumes that intent without requiring a transport; paused incoming responses queue. Stop, historical replay and manual viewport controls retain their separate semantics.
+- Validation: typecheck passed; full checkout **971 passed / 33 compatibility skips**, installed-native **1004 passed / no skips**, no failures. No LSP configured. Logs and limitations: [testing](docs/testing.md).
+- Offline full-completion regressions cover message_end → turn_end → worker finish, released ownership, mounted Playing/live, paused-next-response/single resume, historical Idle and F6/F7 chronology. No new tail flag or client changes. Operator: host `/reload` when ready, not performed here.
+
+## Previous handoff — four review fixes ready for user reload
 
 - Root shared clock excludes starvation before new PCM submission; real feedback anchors fallback and estimated positions never establish stop proof.
 - Describing means actual foreground description API work (including active shared producers); context/next-fence/resource waits are Queued, cached plans are free. Other compact labels and paused precedence remain unchanged.

@@ -87,7 +87,7 @@ for (const key of ["f5", "f8"]) for (const pauseResume of (key === "f5" ? [false
 		assert.equal(host.scrollView.isFollowingEnd, !manual);
 		const before = worker.sent.length;
 		await host.shortcut("f7"); await settle();
-		assert.equal(segments[before].text, manual ? "First sentence." : "Second sentence.",
-			"completion restores logical tail only when it restores the viewport");
+		assert.equal(segments[before].text, "Second sentence.",
+			"completed latest playback is at the chronological tail regardless of viewport");
 	}
 });

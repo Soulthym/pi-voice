@@ -2,7 +2,16 @@
 
 Updated incrementally. Companion: `PLAN.md`. Reorganize freely while preserving evidence and disposition.
 
-## Current checkpoint — four review fixes before user reload
+## Current checkpoint — live between completed responses
+
+- Clarified user evidence: latest finished source displayed `○ Idle · [full bar] 0:35 / 0:35 · message 669/669`; live only survived while the model worked. Prior 1004-test coverage actually asserted Idle after full completion, so streaming-only live checks did not establish the intended lifecycle.
+- Root cause: completeOwnerSpeech cleared playbackTailIntent before releaseSpeechOwnership/relinquishSpeech cleared turn activity; the badge lost its active-playback guard. restoreFollowAfterSpeech separately tied navigationAtTail to viewport-bottom restoration.
+- Fix: latest chronological completion retains existing intent and navigation Tail while relinquishing the audio lease. Retained completed history supplies paused time; F8 controls lease-free follow intent and queued incoming output. Manual viewport movement cannot change playback chronology. Older completed replay remains Idle, not live.
+- Updated native-mounted regression executes full message_end/turn_end/worker-idle ordering and asserts lease release, persistent live, next-response queue/resume, F6 last-message selection, historical Idle; existing F7 tests now require last-sentence behavior regardless of viewport. No provider/inference/hardware calls or live reload. ISSUES and demo assets preserved.
+
+- Validation: typecheck passed; full checkout **971 passed / 33 compatibility skips**, installed-native **1004 passed / no skips**, no failures. No LSP configured. Logs: `/tmp/voice-live-final.log`, `/tmp/voice-live-native-final.log`. Operator host `/reload` only when ready, not performed here.
+
+## Previous checkpoint — four review fixes before user reload
 
 - Shared estimated clock settles against the old submitted-audio limit before append; starvation is not playback. Fake clock: 1 second played + 9 seconds empty + 2 seconds appended + 125 ms = **1.125 seconds**. Real feedback reanchors fallback; estimates never prove a device stopped.
 - Describing is only an actual foreground API dependency, including an already-active shared producer. Canonical context/next-fence, replay preparation and resource waits are Queued; cache hits charge no attempt and never report Describing. Consumer cancellation and generation guards remain intact.

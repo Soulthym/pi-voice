@@ -586,7 +586,8 @@ export default async function (pi: ExtensionAPI) {
 					(!ownerTurnEnded || (lastOwnerUtterance !== undefined && completedOwnerUtterance !== lastOwnerUtterance))));
 			const waitingAtTail = playbackTailIntent && !liveTurnNarrationActive && lastOwnerUtterance === undefined && !pendingReplay;
 			const tailMessages = waitingAtTail ? completedAssistantMessages(ctx, config.mode) : [];
-			const playback = config.enabled ? (waitingAtTail ? undefined : playbackHistory.status()) ?? (activePlayback ? {
+			const historyStatus = playbackHistory.status();
+			const playback = config.enabled ? (waitingAtTail && historyStatus && (historyStatus.messageId !== tailMessages.at(-1)?.id || historyStatus.position < historyStatus.duration) ? undefined : historyStatus) ?? (activePlayback ? {
 				messageId: waitingAtTail ? tailMessages.at(-1)?.id ?? "" : pendingReplay?.target.id ?? playbackHistory.selected()?.id ?? livePlaybackId ?? "", position: 0, duration: 0,
 				messageIndex: tailMessages.length - 1, messageCount: tailMessages.length, hasTimings: false, wordTimingCoverage: undefined,
 			} : undefined) : undefined;
@@ -1459,8 +1460,6 @@ export default async function (pi: ExtensionAPI) {
 		try {
 			activeScrollView()?.scrollToEnd?.();
 			atTranscriptTail = transcriptIsFollowingEnd();
-			const latest = activeContext && completedAssistantMessages(activeContext, config.mode, false).at(-1);
-			navigationAtTail = atTranscriptTail && (!liveSource || liveSource.final) && latest?.id === playbackHistory.selected()?.id;
 		} catch {
 			// Follow restoration is cosmetic; ignore missing runtime support.
 		}
@@ -1925,7 +1924,12 @@ export default async function (pi: ExtensionAPI) {
 			return;
 		}
 		if (!queueIncomingWhilePaused) {
-			playbackTailIntent = false;
+			// Completion advances chronology, not the viewport; waiting never retains the audio lease.
+			const latest = activeContext && completedAssistantMessages(activeContext, config.mode, false).at(-1);
+			if (latest && (speechPurpose === "turn" || speechPurpose === "replay") && latest?.id === playbackHistory.selected()?.id) {
+				navigationAtTail = true;
+				playbackTailIntent = true;
+			}
 			releaseSpeechOwnership(true);
 		}
 	};
@@ -3604,7 +3608,7 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	pi.on("before_agent_start", async () => {
-		if (!interactiveVoiceSession || playbackPaused) return;
+		if (!interactiveVoiceSession || playbackPaused || (playbackTailIntent && !ownsSpeech)) return;
 		speechBlocked = false;
 		blockedMessageHasSpeech = false;
 		blockedWarningIssued = false;
@@ -4235,6 +4239,22 @@ export default async function (pi: ExtensionAPI) {
 		description: "⏯ Pause or resume playback",
 		handler: async ctx => {
 			if (!requireEnabledVoice(ctx)) return;
+			if (playbackTailIntent && !ownsSpeech && !pendingReplay && !attentionSuppressed) {
+				playbackPaused = !playbackPaused;
+				narration.setPaused(playbackPaused);
+				queueIncomingWhilePaused = playbackPaused;
+				if (!playbackPaused) {
+					const queued = queuedPausedMessages.shift();
+					if (queued) void playTarget(queued, !playbackHistory.hasCompleteTimingFor(queued.id), false, true);
+					else if (liveSource && !liveSource.final) {
+						const live = liveNavigationMessages()[0] ?? { id: livePlaybackId ??= `live:${++nextLivePlaybackId}`, text: "" };
+						void playTarget({ ...live, time: 0, sourceOffset: 0 }, true, false, true);
+					}
+				}
+				refreshStatus();
+				refreshPlaybackTimeline();
+				return;
+			}
 			if (atTranscriptTail && !playbackPaused && !attentionSuppressed && !(ownsSpeech && speechPurpose === "turn" && !ownerTurnEnded) &&
 				(pausedOwnerUtterance === undefined || !ownsSpeech) && !pendingReplay) {
 				await replaySelected(ctx);
