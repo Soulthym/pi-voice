@@ -12,7 +12,9 @@
 - Point 5 approved: retain status, time/live and right-aligned `[🎧:device]`; shrink the bar on narrow terminals, shorten message numbering to `671/671` and omit it if necessary. Truncate long names while retaining emoji/brackets; prefer one row where feasible and no shortcut hints. Implementation pending.
 - New highlighting TODOs, to implement only after the point-by-point discussion: highest priority is retaining dimming/highlighting after the final model render while audio still plays; second is eliminating dimming/native-color flicker during streaming. Preserve syntax colors, layout and manual scrolling. These are user-reported symptoms, not yet diagnosed or fixed.
 - User explicitly clarified: no implementation yet, including these highlighting bugs. The interrupted investigation left no implementation changes.
-- Next decision: point 6, live-follow lifecycle consistency. The remaining audit findings are still proposals.
+- Point 6 approved: preserve lease-free live-follow intent between responses and through normal prompt submission; unread output blocked on ownership is Queued, not live. Preserve intent across temporary-to-persisted source identity changes. Pause, Stop and backward navigation exit live display appropriately; viewport scrolling alone does not change chronological intent. Implementation pending.
+- Additional user observation for the deferred dimming investigation: loss of dimming appears limited to the first displayed line of each sentence; in a multi-line comment, lines after the first still dim/highlight correctly. Treat this as a reproduction clue, not a confirmed cause; compare first versus continuation lines during streaming and final rendering.
+- Next decisions: terminal queue-failure cleanup and cancellation of paused sources (the two safety findings). All implementation remains deferred until the point-by-point discussion is complete.
 
 ## Previous handoff — completed chronological live follow
 
