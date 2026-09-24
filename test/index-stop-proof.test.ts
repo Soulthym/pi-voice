@@ -10,7 +10,7 @@ import { FakeVoiceHost, MockedVoiceWorkerClient, assistant } from "./helpers/fak
 
 mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: MockedVoiceWorkerClient } });
 const settle = async () => { for (let i = 0; i < 15; i++) await new Promise<void>(resolve => setImmediate(resolve)); };
-async function setup(t: import("node:test").TestContext) {
+async function setup(t: import("node:test").TestContext, history = false) {
  const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-stop-proof-"));
  const env = { PI_VOICE_CONFIG: path.join(root, "config"), PI_VOICE_DEVICE_DIR: path.join(root, "devices"), PI_VOICE_COORDINATOR_DIR: path.join(root, "coordinator") };
  const old = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
@@ -23,6 +23,7 @@ async function setup(t: import("node:test").TestContext) {
  t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", async () => ({ kind: "device" as const, id: "A" }));
  const host = new FakeVoiceHost(root, "proof");
  const index = MockedVoiceWorkerClient.instances.length;
+ if (history) host.addMessage("history", null, assistant("Historical response."));
  await host.start();
  const worker = MockedVoiceWorkerClient.instances[index]!;
  const lease = path.join(env.PI_VOICE_COORDINATOR_DIR, "speech.lock", "lease.json");
@@ -463,7 +464,7 @@ test("a remote diagnostic does not hide an independent input stop failure", asyn
 });
 
 test("older cleanup cannot reset a newer remote diagnostic", async t => {
- const { host, worker } = await setup(t);
+ const { host, worker, lease } = await setup(t);
  await host.command("test Old audio.");
  const stopped = Promise.withResolvers<void>();
  t.mock.method(worker, "terminate", () => stopped.promise);
@@ -473,6 +474,7 @@ test("older cleanup cannot reset a newer remote diagnostic", async t => {
  stopped.resolve(); await settle();
  assert.match(host.widgetLines()!.join("\n"), /Output stop unconfirmed.*new remote failure/);
  assert.doesNotMatch(host.widgetLines()!.join("\n"), /old remote failure/);
+ assert.ok(await fs.stat(lease), "older proof cannot release ownership after newer uncertainty");
  const errors = host.notices.filter(notice => notice.level === "error").length;
  worker.emit({ type: "error", code: "REMOTE_PLAYBACK_UNCONFIRMED", message: "same new cascade", utterance: 102 });
  assert.equal(host.notices.filter(notice => notice.level === "error").length, errors);
@@ -583,3 +585,25 @@ for (const first of ["input", "output"] as const) test(`retained stop rows survi
  await reconnect; await settle();
  assert.deepEqual(rows(), []);
 });
+
+for (const route of ["reconnect", "device local"]) for (const historical of [false, true]) {
+ test(`terminal source after ${route} preserves only unrelated history (${historical})`, async t => {
+  const { host, worker } = await setup(t, true);
+  if (historical) { await host.shortcut("f5"); await settle(); await host.shortcut("f8"); }
+  const partial = assistant("Interrupted response.", "pending");
+  await host.emit("message_start", { message: partial });
+  await host.emit("message_update", { message: partial,
+   assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Interrupted response. " } });
+  await settle();
+  if (!historical) await host.shortcut("f8");
+  await host.command(route); await settle();
+  const sent = worker.sent.length;
+  const before = host.widgetLines();
+  const pauses = worker.pauses.length;
+  await host.emit("message_end", { message: assistant("Interrupted response.", "aborted") });
+  if (historical) assert.deepEqual(host.widgetLines(), before, "unrelated historical selection is preserved");
+  await host.shortcut("f8"); await settle();
+  if (historical) assert.ok(worker.sent.length > sent || (worker.pauses.length > pauses && worker.pauses.at(-1) === false), "historical paused source remains resumable");
+  else assert.equal(worker.sent.length, sent, "F8 cannot revive aborted source after transport reset");
+ });
+}

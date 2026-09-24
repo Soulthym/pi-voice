@@ -1797,11 +1797,13 @@ export default async function (pi: ExtensionAPI) {
 	const releaseAfterTransportCancellation = (cancelId: number | undefined, announceNext = false, inputCancelled = Promise.resolve()): void => {
 		const leaseEpoch = speechLeaseEpoch;
 		void Promise.all([waitForTransportCancellation(cancelId), inputCancelled, inputStopBarrier]).then(() => {
-			const rebind = deviceRebind;
-			if (rebind) return rebind.catch(error => { if (unconfirmedDeviceStops.has(rebind)) throw error; }).then(() => {
+			const release = (): void => {
+				if (Object.values(stopResources).some(resource => resource.episode || resource.cleanup)) return;
 				if (ownsSpeech && speechLeaseEpoch === leaseEpoch) releaseSpeechOwnership(announceNext);
-			});
-			if (ownsSpeech && speechLeaseEpoch === leaseEpoch) releaseSpeechOwnership(announceNext);
+			};
+			const rebind = deviceRebind;
+			if (rebind) return rebind.catch(error => { if (unconfirmedDeviceStops.has(rebind)) throw error; }).then(release);
+			release();
 		}).catch(notifyStopFailure);
 	};
 
@@ -3789,8 +3791,8 @@ export default async function (pi: ExtensionAPI) {
 				if (queuedPausedMessages[i].source === liveSource) queuedPausedMessages.splice(i, 1);
 			}
 			const affectsPlayback = (pendingReplay?.source && pendingReplay.source === liveSource) ||
-				(liveTurnNarrationActive && (!queueIncomingWhilePaused ||
-					[...liveBlockIds.values()].includes(playbackHistory.selected()?.id ?? "")));
+				[...liveBlockIds.values()].includes(playbackHistory.selected()?.id ?? "") ||
+				(liveTurnNarrationActive && !queueIncomingWhilePaused);
 			if (!affectsPlayback) return;
 			queueIncomingWhilePaused = false;
 			queuedPausedMessages.length = 0;
