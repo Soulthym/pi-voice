@@ -157,7 +157,7 @@ test("mounted playbar keeps a queued live target through background preparation 
 	await host.emit("message_start", { message: partial });
 	await host.emit("message_update", { message: partial, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: partial.content[0].text } });
 	await host.shortcut("f10"); await settle();
-	assert.match(host.widgetLines()![0]!, /Paused.*message 2\/2.*timing pending/);
+	assert.match(host.widgetLines()![0]!, /Paused.*2\/2.*timing pending/);
 	const worker = MockedVoiceWorkerClient.instances[workerIndex]!;
 	const segment = worker.sent.find((event: any) => event.text.includes("New response")) as { utterance: number; segmentId: number };
 	assert.ok(segment, JSON.stringify(worker.sent));
@@ -176,10 +176,10 @@ test("mounted playbar keeps a queued live target through background preparation 
 	const firstFrame = frames.length;
 	for (const type of ["loading", "ready", "idle"] as const) {
 		worker.emit({ type }); await settle();
-		assert.match(host.widgetLines()![0]!, /Paused.*message 2\/2.*timing pending/);
+		assert.match(host.widgetLines()![0]!, /Paused.*2\/2.*timing pending/);
 	}
 	await host.shortcut("f8"); await settle();
-	assert.match(host.widgetLines()![0]!, /Queued.*message 2\/2.*timing pending/);
+	assert.match(host.widgetLines()![0]!, /Queued.*2\/2.*timing pending/);
 	for (const phase of ["loading", "synthesizing", "connecting", "queued"] as const) {
 		worker.emit({ type: "playback-phase", utterance: segment.utterance, segmentId: segment.segmentId, phase });
 		await settle();
@@ -193,14 +193,14 @@ test("mounted playbar keeps a queued live target through background preparation 
 	worker.emit({ type: "speaking" });
 	worker.emit({ type: "playback", utterance: segment.utterance, position: 1 });
 	await settle();
-	assert.match(host.widgetLines()![0]!, /Playing.*\[━+\] 0:01 · message 2\/2/);
+	assert.match(host.widgetLines()![0]!, /Playing.*\[━+\] 0:01 · 2\/2/);
 	assert.doesNotMatch(host.widgetLines()![0]!, /● live/);
 	await host.shortcut("alt+t"); await settle();
 	assert.doesNotMatch(host.widgetLines()![0]!, /● live/, "following the viewport is not chronological live playback");
 	partial.content[0].text += "Second sentence continues growing. ";
 	await host.emit("message_update", { message: partial, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Second sentence continues growing. " } });
 	await host.emit("agent_settled", {}); await settle();
-	assert.match(host.widgetLines()![0]!, /\[━+\] 0:01 · message 2\/2/);
+	assert.match(host.widgetLines()![0]!, /\[━+\] 0:01 · 2\/2/);
 	worker.emit({ type: "playback", utterance: segment.utterance, position: 4 }); await settle();
 	assert.doesNotMatch(host.widgetLines()![0]!, /● live/, "exhausted first clip is not live while second prose awaits audio");
 	assert.doesNotMatch(frames.at(-1)!.join("\n"), /● live/);
@@ -213,14 +213,14 @@ test("mounted playbar keeps a queued live target through background preparation 
 	await host.emit("message_end", { message: complete });
 	await host.emit("turn_end", { message: complete });
 	await host.emit("agent_settled", {}); await settle();
-	assert.match(host.widgetLines()![0]!, /Paused.*0:04 \/ 0:10.*message 2\/2/);
+	assert.match(host.widgetLines()![0]!, /Paused.*0:04 \/ 0:10.*2\/2/);
 	assert.ok(host.widgetOperations.slice(firstOperation).filter(operation => operation.name === "pi-voice-progress")
 		.every(operation => operation.value?.lines?.length), "mounted UI never removes the live playback row");
-	assert.ok(mountedRows.slice(firstMount).every(rows => rows.some(line => /message 2\/2/.test(line))),
+	assert.ok(mountedRows.slice(firstMount).every(rows => rows.some(line => /2\/2/.test(line))),
 		"Pi's mounted component keeps the selected live target through replacements");
 	assert.ok(frames.slice(firstFrame).length > 0);
 	assert.ok(frames.slice(firstFrame).every(rows => !/Waiting|livewaiting/i.test(rows.join("\n"))), "no obsolete playback state in native frames");
-	assert.ok(frames.slice(firstFrame).every(rows => rows.some(line => /message 2\/2/.test(line))),
+	assert.ok(frames.slice(firstFrame).every(rows => rows.some(line => /2\/2/.test(line))),
 		"actual native screens retain the playbar, not merely the widget map");
 	assert.match(host.widgetLines()![0]!, /0:04 \/ 0:10/, "real retained history exists before Tail");
 	await host.shortcut("f10"); await settle();
@@ -262,18 +262,18 @@ test("mounted playbar keeps a queued live target through background preparation 
 	streaming.content.push({ type: "text", text: "```\n" });
 	await host.emit("message_update", { message: streaming, assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: streaming.content[1].text } });
 	await settle();
-	assert.match(host.widgetLines()![0]!, /Playing.*0:01.*message 3\/4/, "preparing B cannot borrow A's phase or replace its audible context");
+	assert.match(host.widgetLines()![0]!, /Playing.*0:01.*3\/4/, "preparing B cannot borrow A's phase or replace its audible context");
 	worker.emit({ type: "idle", utterance: first.utterance }); await settle();
-	assert.match(host.widgetLines()![0]!, /Queued.*\[━+\] --:--.*message 4\/4/);
+	assert.match(host.widgetLines()![0]!, /Queued.*\[━+\] --:--.*4\/4/);
 	assert.doesNotMatch(host.widgetLines()![0]!, /0:03/, "B never borrows A's completed clock");
 	assertFrame("source-block handoff without a B utterance");
 	const suffix = "```\nSecond block sentence. ";
 	streaming.content[1].text += suffix;
 	await host.emit("message_update", { message: streaming, assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: suffix } });
 	await settle();
-	assert.match(host.widgetLines()![0]!, /Queued.*--:--.*message 4\/4/);
+	assert.match(host.widgetLines()![0]!, /Queued.*--:--.*4\/4/);
 	await host.shortcut("f8"); await settle();
-	assert.match(host.widgetLines()![0]!, /Paused.*--:--.*message 4\/4/, "pause preserves queued B rather than returning to completed A");
+	assert.match(host.widgetLines()![0]!, /Paused.*--:--.*4\/4/, "pause preserves queued B rather than returning to completed A");
 	await host.shortcut("f8"); await settle();
 	const second = worker.sent.at(-1) as { utterance: number; segmentId: number };
 	assert.notEqual(second.utterance, first.utterance);
@@ -316,8 +316,8 @@ test("mounted playbar keeps a queued live target through background preparation 
 	host.addMessage("queued-response", "last", queuedResponse);
 	await host.emit("turn_end", { message: queuedResponse }); await settle();
 	assert.equal(worker.sent.length, sentBeforePause, "paused live edge queues the next complete response");
-	assert.match(host.widgetLines()![0]!, /Paused.*0:02 \/ 0:02.*message 4\/5/, "incoming B cannot replace paused A's position with a tail placeholder");
-	assert.match(frames.at(-1)!.join("\n"), /Paused.*0:02 \/ 0:02.*message 4\/5/,
+	assert.match(host.widgetLines()![0]!, /Paused.*0:02 \/ 0:02.*4\/5/, "incoming B cannot replace paused A's position with a tail placeholder");
+	assert.match(frames.at(-1)!.join("\n"), /Paused.*0:02 \/ 0:02.*4\/5/,
 		"delayed session insertion repaints paused chronology without a worker event or forced render");
 	await host.shortcut("f8"); await settle();
 	assert.ok(worker.sent.length > sentBeforePause, "one F8 resumes the queued response");
@@ -466,7 +466,7 @@ for (const mode of ["assistant", "yield"] as const) test(`${mode} progress retai
 	else response.content.push({ type: "text", text: "Second response sentence. " });
 	await host.emit("message_start", { message: response });
 	await host.emit("message_update", { message: response, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: response.content[0].text } });
-	if (mode === "assistant") assert.match(host.widgetLines()![0], /message 3\/3/, "first streaming paint retains the historical count without cold preparation");
+	if (mode === "assistant") assert.match(host.widgetLines()![0], /3\/3/, "first streaming paint retains the historical count without cold preparation");
 	if (mode === "yield") {
 		host.addMessage("response", "user", response);
 		await host.emit("message_end", { message: response });
@@ -475,7 +475,7 @@ for (const mode of ["assistant", "yield"] as const) test(`${mode} progress retai
 	await settle();
 	const worker = MockedVoiceWorkerClient.instances.at(-1)!;
 	if (mode === "assistant") {
-		assert.match(host.widgetLines()![0], /message 3\/3/);
+		assert.match(host.widgetLines()![0], /3\/3/);
 	} else {
 		const first = worker.sent.find((event: any) => event.text.includes("First response")) as { utterance: number; segmentId: number };
 		const second = worker.sent.find((event: any) => event.text.includes("Second response")) as { utterance: number; segmentId: number };
@@ -487,8 +487,8 @@ for (const mode of ["assistant", "yield"] as const) test(`${mode} progress retai
 		}
 		worker.emit({ type: "playback-phase", utterance: second.utterance, segmentId: second.segmentId, phase: "synthesizing" });
 		await settle();
-		assert.match(host.widgetLines()![0], /Synthesizing.*message 2\/2/);
+		assert.match(host.widgetLines()![0], /Synthesizing.*2\/2/);
 		await host.shortcut("f8"); await settle();
-		assert.match(host.widgetLines()![0], /Paused.*message 2\/2/);
+		assert.match(host.widgetLines()![0], /Paused.*2\/2/);
 	}
 });

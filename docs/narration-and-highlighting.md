@@ -58,7 +58,7 @@ For each spoken segment, Pi Voice retains source ranges, synthesized duration, o
 - Reached words return to normal.
 - Guided code operations activate against playback time.
 
-Wav2Vec2 forced alignment improves word timestamps but never delays synthesis. If alignment is late or unavailable, duration-weighted word estimates remain active. If network player feedback is missing, playback uses a pause-aware fallback clock. The word-timing row describes source-word estimates, not device-clock accuracy.
+Wav2Vec2 forced alignment improves word timestamps but never delays synthesis. If alignment is late or unavailable, duration-weighted word estimates remain active. If network player feedback is missing, playback uses a pause-aware fallback clock. The `/voice timing` report describes source-word estimates, not device-clock accuracy; no word-quality row is reserved in the UI.
 
 Subsequent assistant messages do not reset earlier message styling while queued speech is still playing. Pause freezes audio and highlighting at the same position; resume continues both.
 

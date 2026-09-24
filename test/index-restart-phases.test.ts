@@ -74,8 +74,8 @@ test("605 targets restore in a fresh host without provider, measurement, synthes
 	assert.ok(lines(restarted).some(line => /Checking saved timing · \d+\/605 targets checked/.test(line)));
 	assert.ok(!lines(restarted).some(line => /Recovering speech timing|generating speech|decoding cached audio/.test(line)));
 	assert.equal(snapshots(restarted).length, 605, "no duplicate persistence on compatible restart");
-	assert.match(restarted.widgetLines()![0], /^○ Idle ·.*message 605\/605/);
-	assert.equal(restarted.widgetLines()?.at(-1), "Word timing: 2/2 estimated");
+	assert.match(restarted.widgetLines()![0], /^○ Idle .*605\/605/);
+	assert.ok(restarted.widgetLines()?.every(line => !line.includes("Word timing:")));
 	assert.ok(lines(restarted).every(line => !/clock/i.test(line)));
 	await restarted.command("timing");
 	assert.match(restarted.notices.at(-1)!.message, /^Voice · Word timing: 2\/2 estimated\n/);

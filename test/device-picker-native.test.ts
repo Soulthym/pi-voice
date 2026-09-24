@@ -136,6 +136,28 @@ test("native badge press survives progress refresh, but not removal/replacement"
 	assert.equal(opened, 1, "replacement session cannot inherit a press");
 });
 
+for (const width of [40, 80, 120]) {
+	test(`native playback frame omits timing row and compact-prefix decoration at ${width} columns`, t => {
+		const h = mounted(t, width);
+		for (const time of ["● live", "0:35 / 1:20"]) {
+			const lines = [`▶ Playing [━━━━━━━━━━━━━━━━━━━━━━━●] ${time} · 702/702`];
+			const component = deviceProgressComponent(lines, "fp5", () => {});
+			h.mount(component);
+			const rows = component.render(width);
+			assert.equal(rows.length, 1, "playback now occupies one row instead of playback + word quality");
+			const frame = h.screen();
+			const playback = frame.find(line => line.includes("▶ Playing"))!;
+			assert.ok(playback.includes(time), playback);
+			assert.match(playback, /Playing \[[━●]+\]/);
+			assert.match(playback, /\[🎧:fp5\]$/);
+			assert.equal(native.visibleWidth(playback), width);
+			assert.doesNotMatch(frame.join("\n"), /Word timing| · \[|message /);
+			if (width >= 80) assert.ok(playback.includes(`${time} · 702/702`));
+			t.diagnostic(playback);
+		}
+	});
+}
+
 for (const width of [28, 40, 90]) {
 	test(`mounted native progress badge and SelectList mouse/keyboard at ${width} columns`, nativeOptions, async t => {
 		const h = mounted(t, width);
@@ -146,7 +168,7 @@ for (const width of [28, 40, 90]) {
 		const open = () => { opened++; result = selectDeviceOverlay(h.ctx, labels, controller.signal, h.tui); };
 		for (const name of ["手机 [a [b]", "👩‍💻 é".repeat(20), "same-prefix-123", ""]) {
 			for (const recording of [false, true]) {
-				const lines = [...(recording ? ["🎙 Recording"] : []), "⏯ Paused · [━━━━━━━━━━━━━━━━━━━━━━━━] 0:35 / 1:20 · message 671/671", "Word timing: pending"];
+				const lines = [...(recording ? ["🎙 Recording"] : []), "⏯ Paused [━━━━━━━━━━━━━━━━━━━━━━━━] 0:35 / 1:20 · 671/671"];
 				const component = deviceProgressComponent(lines, name, open);
 				const rendered = component.render(width);
 				assert.deepEqual(rendered, deviceProgressLines(lines, name, width - 1).map(line => ` ${line}`));
@@ -220,7 +242,7 @@ for (const width of [28, 40, 90]) {
 test("badge hit columns follow graphemes, resize and input-first rows without stale boxes", nativeOptions, async t => {
 	const h = mounted(t, 28);
 	let opened = 0;
-	const lines = ["⏯ Paused", "Word timing: pending"];
+	const lines = ["⏯ Paused", "↺ Recovering speech timing · 1/2 targets ready"];
 	const name = "👩‍💻é手机";
 	const component: any = deviceProgressComponent(lines, name, () => { opened++; });
 	h.mount(component);

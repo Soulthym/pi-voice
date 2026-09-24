@@ -128,7 +128,7 @@ Run:
 /voice timing
 ```
 
-Missing client feedback uses a pause-aware estimated position internally; the playback row does not currently display clock provenance. The `Word timing` row measures source-word estimates instead. On Termux, the repository also includes `termux/pi-voice-test-playback-position` for direct mpv clock diagnostics.
+Missing client feedback uses a pause-aware estimated position internally; the playback row does not currently display clock provenance. The `/voice timing` report measures source-word estimates instead; it has no persistent UI row. On Termux, the repository also includes `termux/pi-voice-test-playback-position` for direct mpv clock diagnostics.
 
 ## Voice reaches bottom but native follow looks inactive
 

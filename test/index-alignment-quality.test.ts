@@ -9,7 +9,7 @@ import { FakeVoiceHost, MockedVoiceWorkerClient, streamCompletedResponse } from 
 mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: MockedVoiceWorkerClient } });
 const settle = async () => { await new Promise(resolve => setTimeout(resolve, 150)); };
 
-test("worker quality reaches the widget independently of clock estimates and preserves paused framing", async t => {
+test("worker quality reaches timing diagnostics independently of clock estimates and preserves paused framing", async t => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-quality-"));
 	const names = ["PI_VOICE_CONFIG", "PI_VOICE_COORDINATOR_DIR", "PI_VOICE_DEVICE_DIR"] as const;
 	const old = Object.fromEntries(names.map(name => [name, process.env[name]]));
@@ -32,26 +32,30 @@ test("worker quality reaches the widget independently of clock estimates and pre
 	const segment = worker.sent.at(-1) as { segmentId: number; utterance: number };
 	const { segmentId, utterance } = segment;
 	const widget = () => host.widgetLines()?.join("\n") ?? "";
-	assert.match(widget(), /^◷ Queued ·.*--:-- · message 1\/1 · timing pending\s+\[🎧:/);
-	assert.equal(host.widgetLines()?.at(-1), "Word timing: unknown/pending");
+	const timing = async (target = host) => {
+		await target.command("timing");
+		return target.notices.at(-1)!.message.split("\n")[0].replace(/^Voice · /, "");
+	};
+	assert.match(widget(), /^◷ Queued .*--:-- · 1\/1 · timing pending\s+\[🎧:/);
+	assert.equal(await timing(), "Word timing: unknown/pending");
 	worker.emit({ type: "loading" });
 	await settle();
-	assert.match(widget(), /^◷ Queued ·.*message 1\/1/, "unscoped model loading does not claim foreground work");
+	assert.match(widget(), /^◷ Queued .*1\/1/, "unscoped model loading does not claim foreground work");
 	for (const earlier of worker.sent as Array<{ utterance: number }>) if (earlier.utterance < utterance) worker.emit({ type: "idle", utterance: earlier.utterance });
 	worker.emit({ type: "playback-phase", utterance, segmentId, phase: "playing" });
 	worker.emit({ type: "speaking" });
 	await settle();
-	assert.match(widget(), /^▶ Playing ·.*--:-- · message 1\/1 · timing pending\s+\[🎧:/);
+	assert.match(widget(), /^▶ Playing .*--:-- · 1\/1 · timing pending\s+\[🎧:/);
 	await host.shortcut("f8");
-	assert.match(widget(), /^⏯ Paused ·.*--:-- · message 1\/1 · timing pending\s+\[🎧:/);
+	assert.match(widget(), /^⏯ Paused .*--:-- · 1\/1 · timing pending\s+\[🎧:/);
 	await host.shortcut("f8");
 	worker.emit({ type: "segment-audio", segmentId, utterance, start: 0, duration: 6, timingQuality: "estimated" });
 	worker.emit({ type: "playback", utterance, position: 1, estimated: false });
 	await settle();
-	assert.equal(host.widgetLines()?.at(-1), "Word timing: 3/3 estimated");
+	assert.equal(await timing(), "Word timing: 3/3 estimated");
 	assert.doesNotMatch(widget(), /clock/i);
 	worker.emit({ type: "alignment-error", segmentId, quality: "estimated", message: "Alignment superseded by upcoming speech" });
-	assert.equal(host.widgetLines()?.at(-1), "Word timing: 3/3 estimated");
+	assert.equal(await timing(), "Word timing: 3/3 estimated");
 	const beforeClockChange = widget();
 	worker.emit({ type: "playback", utterance, position: 1, estimated: true });
 	await settle();
@@ -65,18 +69,18 @@ test("worker quality reaches the widget independently of clock estimates and pre
 	const frozen = host.render(text);
 	const top = host.scrollView.scrollTop;
 	const pausedLine = host.widgetLines()![0];
-	assert.match(pausedLine, /^⏯ Paused ·/);
+	assert.match(pausedLine, /^⏯ Paused /);
 	worker.emit({ type: "alignment", segmentId, quality: "mixed", words: [
 		{ text: "Alpha", start: 0, end: 1, quality: "ctc-refined" },
 		{ text: "beta", start: 3, end: 4, quality: "estimated" },
 		{ text: "gamma", start: 5, end: 6, quality: "ctc-refined" },
 	] });
-	assert.equal(host.widgetLines()?.at(-1), "Word timing: 1/3 estimated");
+	assert.equal(await timing(), "Word timing: 1/3 estimated");
 	assert.equal(host.widgetLines()![0], pausedLine);
 	assert.equal(host.render(text), frozen);
 	assert.equal(host.scrollView.scrollTop, top);
 	worker.emit({ type: "alignment", segmentId, quality: "ctc-refined", words: ["Alpha", "beta", "gamma"].map((text, i) => ({ text, start: i * 2, end: i * 2 + 1, quality: "ctc-refined" })) });
-	assert.equal(host.widgetLines()?.at(-1), "Word timing: 0/3 estimated");
+	assert.equal(await timing(), "Word timing: 0/3 estimated");
 	assert.equal(host.widgetLines()![0], pausedLine);
 	assert.equal(host.scrollView.scrollTop, top);
 	assert.equal(host.render(text), frozen);
@@ -93,14 +97,14 @@ test("worker quality reaches the widget independently of clock estimates and pre
 	assert.equal(reloaded.seekTarget(2)?.time, 2);
 	await host.command("stop");
 	worker.emit({ type: "alignment-error", segmentId: segmentId + 999, message: "obsolete" });
-	assert.equal(host.widgetLines()?.at(-1), "Word timing: 0/3 estimated");
+	assert.equal(await timing(), "Word timing: 0/3 estimated");
 	await host.shutdown();
 	const restoredHost = new FakeVoiceHost(root, "quality-reloaded");
 	t.after(() => restoredHost.shutdown());
 	restoredHost.entries.push(...JSON.parse(JSON.stringify(host.entries)));
 	await restoredHost.start();
-	assert.equal(restoredHost.widgetLines()?.at(-1), "Word timing: 0/3 estimated", "persisted measured coverage survives reload");
-	assert.match(restoredHost.widgetLines()![0], /^○ Idle ·/);
+	assert.equal(await timing(restoredHost), "Word timing: 0/3 estimated", "persisted measured coverage survives reload");
+	assert.match(restoredHost.widgetLines()![0], /^○ Idle /);
 	await restoredHost.shutdown();
 	const legacyHost = new FakeVoiceHost(root, "quality-legacy");
 	t.after(() => legacyHost.shutdown());
@@ -109,10 +113,7 @@ test("worker quality reaches the widget independently of clock estimates and pre
 		if (entry.customType === "pi-voice.playback-timing") delete (entry.data as PlaybackTimingSnapshot).units;
 	}
 	await legacyHost.start();
-	assert.equal(legacyHost.widgetLines()?.at(-1), "Word timing: unknown/pending", "legacy sparse checkpoints cannot fabricate word coverage");
+	assert.equal(await timing(legacyHost), "Word timing: unknown/pending", "legacy sparse checkpoints cannot fabricate word coverage");
 	assert.ok(host.widgetFrames.every(lines => !lines.some(line => /clock/i.test(line))));
-	const { Text } = await import("@earendil-works/pi-tui");
-	const wordRows = host.widgetFrames.flatMap(lines => lines.filter(line => line.startsWith("Word timing:")));
-	for (const count of [3, 1, 0]) assert.ok(wordRows.includes(`Word timing: ${count}/3 estimated`));
-	assert.ok(wordRows.every(line => new Text(line, 1, 0).render(32).length === 1), "native mobile word rows keep their height as quality changes");
+	assert.ok(host.widgetFrames.every(lines => !lines.some(line => /Word timing:| · \[|message /.test(line))), "quality changes never add a timing row or restore old playback decoration");
 });

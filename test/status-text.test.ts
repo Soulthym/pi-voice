@@ -5,19 +5,19 @@ import { deviceBadge, deviceFooterText, deviceProgressLines, notifyVoice, pendin
 
 test("responsive playback retains status, time/live and a closed grapheme-safe badge", () => {
 	for (const width of [40, 80, 120]) for (const time of ["0:35 / 1:20", "0:35", "\x1b[31m● live\x1b[39m", "--:--"]) {
-		const line = `\x1b[2m◷ Synthesizing · [━━━━━━━━━━━━━━━━━━━━━━━━] ${time} · message 671/671 · timing pending\x1b[22m`;
+		const line = `\x1b[2m◷ Synthesizing [━━━━━━━━━━━━━━━━━━━━━━━━] ${time} · 671/671 · timing pending\x1b[22m`;
 		const result = deviceFooterText(line, "👩🏽‍💻é".repeat(30), width);
 		const plain = stripTerminalSequences(result.text);
 		assert.equal(visibleWidth(result.text), width);
 		assert.match(plain, /Synthesizing/);
 		assert.ok(plain.includes(stripTerminalSequences(time)), plain);
 		assert.match(plain, /\[🎧:.*\]$/);
-		assert.doesNotMatch(plain, /message …|F8|Alt/);
+		assert.doesNotMatch(plain, /message | · \[|F8|Alt/);
 	}
 });
 
 test("playback survives tiny widths and keeps timing before decoration at 32 columns", () => {
-	const label = "◷ Synthesizing · [━━━━━━━━━━━━━━━━━━━━━━━━] 0:35 / 1:20 · message 671/671";
+	const label = "◷ Synthesizing [━━━━━━━━━━━━━━━━━━━━━━━━] 0:35 / 1:20 · 671/671";
 	for (let width = 0; width <= 5; width++) {
 		const result = deviceFooterText(label, "Local", width);
 		assert.equal(result.badge, "");
@@ -41,7 +41,7 @@ test("check, recovery and processing counters describe targets, not forced align
 		"↺ Recovering speech timing · 109/605 targets ready · decoding cached audio: 2");
 	assert.equal(preprocessingStatus({ label: "Preparing code descriptions", processed: 2, total: 5, unit: "processed" }),
 		"↺ Preparing code descriptions · 2/5 targets processed");
-	assert.equal(pendingPlaybackTiming(279, 605), "message 280/605 · timing pending");
+	assert.equal(pendingPlaybackTiming(279, 605), "280/605 · timing pending");
 	assert.equal(pendingPlaybackTiming(-1, 605), "current response · timing pending");
 });
 
@@ -63,7 +63,7 @@ test("input, playback, descriptions, timing retain their display precedence", ()
 	assert.match(plain, /Recovering speech timing.*3\/8 targets ready/);
 });
 
-test("native word timing rows keep their height as four-digit counts refine", () => {
+test("native timing report keeps count wrapping stable as four-digit counts refine", () => {
 	for (const [width, expectedRows, pendingRows] of [[20, 3, 2], [32, 2, 1], [40, 1, 1]]) {
 		for (const total of [1000, 9999]) {
 			for (const estimated of [total, 999, 10, 1, 0]) {
@@ -85,7 +85,7 @@ test("device badge ends only the first native row in every progress precedence, 
 	const lines = voiceProgressLines("🎙 Input · waiting for speech", "⏯ Paused", [
 		{ label: "Preparing code descriptions", processed: 2, total: 5 },
 		{ label: "Recovering speech timing", processed: 3, total: 8 },
-	], "Word timing: unknown/pending").map(line => line.text);
+	]).map(line => line.text);
 	for (let offset = 0; offset < lines.length; offset++) {
 		for (const width of [20, 28, 40, 80, 160]) {
 			const plain = deviceProgressLines(lines.slice(offset), "Linux Mint PC", width);
@@ -127,7 +127,7 @@ test("stop diagnostics outlive ordinary progress and notices coalesce per resour
 	const notices: string[] = [];
 	const ctx = { ui: { notify: (message: string) => notices.push(message) } } as any;
 	for (const playback of ["Voice · ready", "Voice · idle", undefined]) {
-		const lines = voiceProgressLines(undefined, playback, [], undefined, diagnostics);
+		const lines = voiceProgressLines(undefined, playback, [], diagnostics);
 		assert.deepEqual(lines.slice(0, 2).map(line => line.kind), ["stop", "stop"]);
 		assert.equal(lines[0].text, stopUnconfirmedStatus("input", input));
 		assert.equal(lines[1].text, stopUnconfirmedStatus("output", output));
@@ -137,10 +137,10 @@ test("stop diagnostics outlive ordinary progress and notices coalesce per resour
 		}
 	}
 	assert.equal(notices.length, 2, "repeated rendering/retry notices share the episode latch");
-	const remaining = voiceProgressLines(undefined, undefined, [], undefined, { output });
+	const remaining = voiceProgressLines(undefined, undefined, [], { output });
 	assert.equal(remaining.length, 1, "input proof must not hide the output warning");
 	assert.match(remaining[0].text, /Original speaker \(B\)/);
-	assert.deepEqual(voiceProgressLines(undefined, undefined, [], undefined, {}), []);
+	assert.deepEqual(voiceProgressLines(undefined, undefined, [], {}), []);
 });
 
 test("notices use one Voice label and native Pi severity, without ANSI or duplicate severity icons", () => {

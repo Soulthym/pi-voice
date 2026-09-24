@@ -717,8 +717,8 @@ export default async function (pi: ExtensionAPI) {
 				const time = live ? ctx.ui.theme.fg("error", "● live")
 					: known ? `${formatPlaybackTime(playback.position)} / ${formatPlaybackTime(playback.duration)}`
 					: playback.hasTimings || playback.position > 0 ? formatPlaybackTime(playback.position) : "--:--";
-				const message = playback.messageIndex >= 0 ? `message ${playback.messageIndex + 1}/${playback.messageCount}` : "current response";
-				playbackLine = `${labels[live ? "playing" : phase]} · ${playbackBar(playback.position, known ? playback.duration : 0)} ${time} · ${message}${!known && !live ? " · timing pending" : ""}`;
+				const message = playback.messageIndex >= 0 ? `${playback.messageIndex + 1}/${playback.messageCount}` : "current response";
+				playbackLine = `${labels[live ? "playing" : phase]} ${playbackBar(playback.position, known ? playback.duration : 0)} ${time} · ${message}${!known && !live ? " · timing pending" : ""}`;
 			}
 			if (paintPreprocessing) {
 				displayedCodeProgress = codePreprocessingProgress ?? (codeDescriptionPreprocessing ? displayedCodeProgress : undefined);
@@ -728,7 +728,6 @@ export default async function (pi: ExtensionAPI) {
 				(progress): progress is PreprocessingProgress => progress !== undefined,
 			);
 			const lines = voiceProgressLines(inputProgressMessage, playbackLine, preprocessing,
-				playback ? playbackTimingStatus(playback.wordTimingCoverage) : undefined,
 				{ input: stopResources.input.episode ?? inheritedStops.input, output: stopResources.output.episode ?? inheritedStops.output }).map(line =>
 				line.kind === "input"
 					? line.text

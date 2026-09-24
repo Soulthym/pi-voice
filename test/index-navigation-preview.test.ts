@@ -49,7 +49,7 @@ test("failed previous-message acquisition keeps subsequent preview and audio on 
 	t.after(() => { acquire.mock.restore(); force.mock.restore(); });
 	await host.shortcut("f6"); await settle();
 	assert.ok(host.render("B sentence.").includes(NARRATION_ACTIVE_MARKER));
-	assert.match(host.widgetLines()?.join(" ") ?? "", /message 2\/3/);
+	assert.match(host.widgetLines()?.join(" ") ?? "", /2\/3/);
 	acquire.mock.restore(); force.mock.restore();
 	await host.shortcut("f6"); await settle();
 	assert.ok(host.render("A sentence.").includes(NARRATION_ACTIVE_MARKER));
@@ -116,7 +116,7 @@ test("rapid F6 presses select two previous messages before preparation yields", 
 	await Promise.all([first, second]); await settle();
 	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
 	assert.equal((worker.sent.at(-1) as { text: string }).text, "A sentence.");
-	assert.match(host.widgetLines()?.join(" ") ?? "", /message 1\/3/);
+	assert.match(host.widgetLines()?.join(" ") ?? "", /1\/3/);
 });
 
 for (const manual of [false, true]) test(`initial marker retry respects manual scrolling (${manual})`, async t => {
@@ -267,7 +267,7 @@ for (const duringPreparation of [false, true]) for (const latest of ["f6", "stop
 	else {
 		assert.ok(sent.some(segment => segment.text === "Answer 38."));
 		assert.ok(sent.every(segment => segment.text !== "Answer 39."));
-		assert.match(host.widgetLines()?.join(" ") ?? "", /message 39\/40/);
+		assert.match(host.widgetLines()?.join(" ") ?? "", /39\/40/);
 	}
 });
 
@@ -537,7 +537,7 @@ test("streaming F5 replays the prefix, continues future deltas, ticks and canoni
 	await host.emit("agent_settled", {}); await settle();
 	assert.deepEqual(segments.map(segment => segment.text).filter(text => !text.startsWith("Project ")),
 		["First sentence.", "Second sentence.", "First sentence.", "Second sentence.", "Third sentence."]);
-	assert.match(host.widgetLines()?.join(" ") ?? "", /message 2\/2/);
+	assert.match(host.widgetLines()?.join(" ") ?? "", /2\/2/);
 	await host.shortcut("f5"); await settle();
 	assert.equal(segments.filter(segment => segment.text === "First sentence.").length, 3);
 });
@@ -624,7 +624,7 @@ for (const beforeDelta of [true, false]) test(`live replay retains unfinished se
 	await host.emit("message_end", { message: complete });
 	await host.emit("turn_end", { message: complete });
 	await host.emit("agent_settled", {}); await settle();
-	assert.match(host.widgetLines()?.join(" ") ?? "", /message 1\/1/);
+	assert.match(host.widgetLines()?.join(" ") ?? "", /1\/1/);
 });
 
 for (const finalize of [false, true]) test(`live replay refreshes after device wait across source blocks (finalized: ${finalize})`, async t => {
@@ -670,7 +670,7 @@ for (const finalize of [false, true]) test(`live replay refreshes after device w
 	worker.emit({ type: "playback", utterance: last.utterance, position: 0.1 });
 	await new Promise(resolve => setTimeout(resolve, 100));
 	assert.ok(host.render(partial.content[2].text.trim()).includes(`${NARRATION_ACTIVE_MARKER}Answer`), host.render(partial.content[2].text.trim()));
-	assert.match(host.widgetLines()?.join(" ") ?? "", /message 2\/2/);
+	assert.match(host.widgetLines()?.join(" ") ?? "", /2\/2/);
 });
 
 for (const latest of ["stop", "f6"]) test(`pending live replay yields to ${latest}`, async t => {
@@ -718,7 +718,7 @@ test("live replay survives finalization during cold preparation without automati
 	await host.emit("turn_end", { message: complete });
 	for (let i = 0; i < 6; i++) await settle();
 	assert.deepEqual((worker.sent.slice(before) as Array<{ text: string }>).map(segment => segment.text), ["Unfinished prefix", "Later block."]);
-	assert.match(host.widgetLines()?.join(" ") ?? "", /message 21\/22/);
+	assert.match(host.widgetLines()?.join(" ") ?? "", /21\/22/);
 });
 
 test("failed live acquisition retry retains continuation after canonical finalization", async t => {
@@ -774,7 +774,7 @@ test("replaying an earlier live part continues later blocks finalized during pre
 	const last = worker.sent.at(-1) as { utterance: number };
 	worker.emit({ type: "idle", utterance: last.utterance }); await settle();
 	assert.deepEqual((worker.sent.slice(before) as Array<{ text: string }>).map(segment => segment.text), ["First part.", "Second unfinished sentence.", "Third part."]);
-	assert.match(host.widgetLines()?.join(" ") ?? "", /message 1\/3/);
+	assert.match(host.widgetLines()?.join(" ") ?? "", /1\/3/);
 });
 
 test("live replay refreshes deltas received while the old sink cancellation is unacknowledged", async t => {
@@ -829,7 +829,7 @@ test("pending live replay keeps its source IDs across the next tool turn", async
 	worker.emit({ type: "segment-audio", utterance: last.utterance, segmentId: last.segmentId, start: 0, duration: 2 });
 	worker.emit({ type: "playback", utterance: last.utterance, position: 0.1 });
 	await new Promise(resolve => setTimeout(resolve, 100));
-	assert.match(host.widgetLines()?.join(" ") ?? "", /message 2\/3/);
+	assert.match(host.widgetLines()?.join(" ") ?? "", /2\/3/);
 	assert.ok(host.render("Old final.").includes(`${NARRATION_ACTIVE_MARKER}Old`));
 	assert.equal(host.render("New prefix completed.").includes(NARRATION_ACTIVE_MARKER), false, "new finalization must not inherit the old replay capture");
 });

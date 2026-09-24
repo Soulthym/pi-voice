@@ -36,7 +36,7 @@ export function stopUnconfirmedStatus(resource: "input" | "output", diagnostic: 
 }
 
 export interface VoiceProgressLine {
-	kind: "stop" | "input" | "playback" | "preprocessing" | "timing";
+	kind: "stop" | "input" | "playback" | "preprocessing";
 	text: string;
 }
 
@@ -45,7 +45,7 @@ export function preprocessingStatus(progress: ReadyProgress): string {
 }
 
 export function pendingPlaybackTiming(messageIndex: number, messageCount: number): string {
-	const message = messageIndex >= 0 ? `message ${messageIndex + 1}/${messageCount}` : "current response";
+	const message = messageIndex >= 0 ? `${messageIndex + 1}/${messageCount}` : "current response";
 	return `${message} · timing pending`;
 }
 
@@ -63,7 +63,7 @@ export function deviceBadge(name: string, width: number): string {
 export function deviceFooterText(label: string, name: string, width: number): { text: string; badge: string } {
 	width = Math.max(0, width);
 	const closing = label.match(/(?:\x1b\[[\d;]*m)+$/)?.[0] ?? "";
-	const playback = /^(.*?) · \[([━●]+)\] (.*?)(?: · (?:message )?(\d+\/\d+)| · current response)?(?: · timing pending)?$/.exec(closing ? label.slice(0, -closing.length) : label);
+	const playback = /^(.*?) \[([━●]+)\] (.*?)(?: · (\d+\/\d+)| · current response)?(?: · timing pending)?$/.exec(closing ? label.slice(0, -closing.length) : label);
 	let badge = deviceBadge(name, width);
 	if (playback && visibleWidth(label) + visibleWidth(badge) + 1 > width) {
 		const [, status, bar, time, counter] = playback;
@@ -73,11 +73,11 @@ export function deviceFooterText(label: string, name: string, width: number): { 
 			return { text: wrapTextWithAnsi(essentials + closing, width).join("\n"), badge: "" };
 		}
 		const room = Math.max(0, width - visibleWidth(badge) - (badge ? 1 : 0));
-		const count = counter && visibleWidth(essentials) + counter.length + 7 <= room ? ` · ${counter}` : "";
-		const size = Math.min(bar.length, room - visibleWidth(essentials + count) - 5);
+		const count = counter && visibleWidth(essentials) + counter.length + 5 <= room ? ` · ${counter}` : "";
+		const size = Math.min(bar.length, room - visibleWidth(essentials + count) - 3);
 		const cursor = bar.indexOf("●");
 		const scaled = size > 0 ? Array.from({ length: size }, (_, i) => cursor >= 0 && i === Math.round(cursor / Math.max(1, bar.length - 1) * (size - 1)) ? "●" : "━").join("") : "";
-		label = (scaled ? `${status} · [${scaled}] ${time}${count}` : essentials + count) + closing;
+		label = (scaled ? `${status} [${scaled}] ${time}${count}` : essentials + count) + closing;
 	}
 	const room = Math.max(0, width - visibleWidth(badge) - (badge ? 1 : 0));
 	const text = truncateToWidth(label, room, "…");
@@ -96,7 +96,6 @@ export function voiceProgressLines(
 	input: string | undefined,
 	playback: string | undefined,
 	preprocessing: readonly ReadyProgress[],
-	wordTiming?: string,
 	stopDiagnostics: Partial<Record<"input" | "output", StopDiagnostic>> = {},
 ): VoiceProgressLine[] {
 	return [
@@ -107,6 +106,5 @@ export function voiceProgressLines(
 		...(input ? [{ kind: "input" as const, text: input }] : []),
 		...(playback ? [{ kind: "playback" as const, text: playback }] : []),
 		...preprocessing.map(progress => ({ kind: "preprocessing" as const, text: preprocessingStatus(progress) })),
-		...(wordTiming ? [{ kind: "timing" as const, text: wordTiming }] : []),
 	];
 }

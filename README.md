@@ -143,7 +143,7 @@ Live and completed content share one playback cursor. Navigation preserves playi
 
 Automatic Voice following at the exact bottom adopts Pi's native end-follow and clears its “Jump to latest” banner without selecting playback Tail. Manual scrolling and paused framing still win.
 
-`Word timing: n/total estimated` describes the selected message's source words, not background work; sparse saved timing shows `unknown/pending`. Listening alone does not guarantee alignment refinement.
+`/voice timing` reports `Word timing: n/total estimated` (no persistent UI row), describing the selected message's source words, not background work; sparse saved timing shows `unknown/pending`. Listening alone does not guarantee alignment refinement.
 
 Speak after pressing the microphone key. Recording normally stops after about 1.35 seconds of silence. In the default review mode, edit the resulting prompt and press Enter yourself.
 

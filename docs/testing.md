@@ -1,6 +1,14 @@
 # Tests
 
-## Current checkpoint — final review 5 after `fad21f4`
+## Current checkpoint — compact playback UI after `e1511af`
+
+`npm run check` passed; full checkout `npm test`: **1055 passed / 33 compatibility skips / zero failures (1088 total)**; full installed-native `npm test`: **1088 passed / zero skips or failures**. Logs: `/tmp/voice-ui-trim-tests.log`, `/tmp/voice-ui-trim-native.log`. LSP unavailable; TypeScript supplies diagnostics.
+
+Mounted native frames at 40/80/120 columns keep the right-aligned badge and omit the word-quality row, pre-bar separator and `message ` label. At 80 columns the live content is `▶ Playing [━━━━━━━━━━━━━━━━━━━━━━━●] ● live · 702/702`, padded before `[🎧:fp5]`; at 40 columns it is `▶ Playing [●] ● live · 702/702 [🎧:fp5]`. Narrow timed rows may still omit the count to preserve time and device identity. Progress-layout tests verify one fewer row; `/voice timing` still verifies unknown, estimated, mixed, refined and restored coverage. Retry/refinement behavior and badge/picker controls are unchanged.
+
+These are inert native frames and mocked transport/provider checks, not hardware or live-session proof. No runtime settings or sessions were changed. Operator: run `/reload` in the host Pi session to load this checkout; no client/SSH restart is needed for this UI-only change.
+
+## Historical checkpoint — final review 5 after `fad21f4`
 
 `npm run check` passed; full checkout `npm test`: **1052 passed / 33 compatibility skips / zero failures (1085 total)**; full installed-native `npm test`: **1085 passed / zero skips or failures**. Logs: `/tmp/fix5-check.log`, `/tmp/fix5-test.log`, `/tmp/fix5-native.log`. LSP unavailable; TypeScript supplies diagnostics.
 
@@ -44,7 +52,7 @@ Phase 1 remains partial: durable speech fencing survives process expiry, but res
 
 ## Previous checkpoint — completed live-follow intent
 
-The user clarified that `○ Idle · [full bar] 0:35 / 0:35 · message 669/669` after the latest response was wrong: caught-up unpaused playback must remain Playing + red `● live` between turns. The mounted regression now runs full message_end → turn_end → worker finish and checks released audio ownership with persistent live, lease-free F8 pause, queued next-response single-F8 resume, F6 last-message selection and completed historical Idle. F7 completion checks are viewport-independent. Earlier completed-Idle assertions below describe superseded behavior, not the current contract.
+The user clarified that the historical output `○ Idle · [full bar] 0:35 / 0:35 · message 669/669` after the latest response was wrong: caught-up unpaused playback must remain Playing + red `● live` between turns. The mounted regression now runs full message_end → turn_end → worker finish and checks released audio ownership with persistent live, lease-free F8 pause, queued next-response single-F8 resume, F6 last-message selection and completed historical Idle. F7 completion checks are viewport-independent. Earlier completed-Idle assertions below describe superseded behavior, not the current contract.
 
 Validation: `npm run check` passed; full checkout **971 passed, 33 compatibility skips, no failures**; full installed-native **1004 passed, no skips/failures**. Logs: `/tmp/voice-live-final.log`, `/tmp/voice-live-native-final.log`. No LSP server configured; typecheck substitutes for diagnostics. All transport/provider behavior was mocked; native terminals were inert. No hardware, real inference, provider calls, live session restarts or runtime settings changed. Operator: host `/reload` only, when ready; not performed here.
 
@@ -245,7 +253,7 @@ providers, devices, and temporary configuration; this is not a live-device test.
 
 Latest UX regression coverage includes actual source-word counts before checkpoint thinning,
 paused mixed→refined metadata updates without cursor/scroll movement, explicit startup and
-pending playback states, native 20/32/40-column count wrapping (including four-digit totals),
+pending playback states, native 20/32/40-column `/voice timing` report wrapping (including four-digit totals),
 and stable background rows. Sentence tests cover the reported `10/10. Run /reload` text,
 Markdown/invisible markers, every formatted delta split, shared code/prose navigation,
 ordered prefixes, decimals/versions, lowercase continuations and UTF-16 offsets.
