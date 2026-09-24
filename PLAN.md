@@ -1,6 +1,18 @@
 # Pi Voice — implemented agreements and live-validation handoff
 
-## Current integration handoff — picker and routing lifecycle
+## Current handoff — compact playback phases and first-line VoiceUI
+
+- Playback phases: Idle, Playing, Paused, Synthesizing, Loading, Describing, Connecting, Queued; paused intent wins. Separate native error-red `● live` replaces time only at the unpaused chronological playback edge, including caught-up next-output wait. Older replay, unread/queued audio and paused playback are not live; End/Alt+T only control the viewport. Unknown times stay `--:-- / --:--`, not invented durations.
+- `[🎧:device]` sits at the right end of the first VoiceUI line, including idle status. Identity is reserved before status/hints; narrow names truncate with a closed badge (omitted below six available columns). Alt+S and supported widget clicks open the picker; no idle-footer click claim. Pi's footer and other extension statuses remain intact.
+- New offline evidence: real native mounting/rendered-frame checks with synthetic events and mocked transport deliberately make `PlaybackHistory.status()` unavailable during active streaming/Tail. This exercises a missing-history playbar gap and its fallback; it is **not a diagnosis of the original random live disappearance**. Finished idle/Stop must not fabricate a transport row. Earlier narrower evidence is retained below as historic.
+- Final serial validation: typecheck passed; full checkout **956 passed / 33 compatibility skips**, full installed-native **989 passed / no skips**, no failures. Review regressions include pending/exhausted streaming work, terminal queue failure, partial/silent source tails and split pointer events. These are offline checks, not new live confirmation. See [testing](docs/testing.md).
+- This diff is host-only: clients unchanged; operator `/reload` when ready, not performed here. No hardware, provider calls, real inference, live Pi/SSH/client restart or runtime-settings changes. This handoff makes no new hardware/live reliability claim. `ISSUES.md`, assets and discussion notes are preserved; no commit in this docs sync.
+
+## Historic checkpoints and discussion
+
+The remaining entries preserve their original evidence, counts and proposals. Older Waiting labels, plain badges and idle-footer placement describe earlier implementations, not the current UI above; historical operator instructions apply only to their named migrations.
+
+## Historic integration handoff — picker and routing lifecycle
 
 - Preserved and separately committed the inherited routing fixes as `8d665ce`: paused same-route reconnect retires the sink and retains the exact streaming suffix; fresh mic/input-only ownership does not become playback pause intent. Confirmed-stop barriers, review-only dictation finalization, public context/session facades and sticky selection remain intact.
 - Wired `e44775d`'s `devicePickerLabels` into the actual picker: raw names and full-ID mapping survive; number/current/short-ID precede long names and the initial choice now matches the available current ID (Local only when current or no current candidate is available). Confirming the same healthy route pins manually without audio interruption. Actual 40-column native host integration checks duplicate Unicode names, colliding clipped IDs, visible current marker, pointer selection to the full ID, and default keyboard selection.

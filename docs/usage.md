@@ -69,15 +69,15 @@ From Tail, the first F6 selects the last eligible message (not its predecessor);
 
 ## Device picker
 
-Click the existing `[device]` badge on the **first** Voice progress line (or the built-in idle Voice footer), or press **Alt+S**. Both open a native SelectList overlay: click/tap an option to choose, or use arrows and Enter; Escape cancels. An existing extension select/confirm remains underneath with its promise and focus intact. If another floating overlay is already open, dismiss it before opening the picker. Changing terminal height cancels the picker; reopen at the new size. Stop, newer playback/device controls, and session shutdown cancel the picker. If the underlying prompt expires or another overlay takes focus, the picker dismisses without typing through to the draft. `/voice devices` is the command alternative; `/voice device` remains a read-only report.
+Click the `[🎧:device]` badge at the **right end of the first VoiceUI line**, including its idle status line, or press **Alt+S**. Both open a native SelectList overlay: click/tap an option to choose, or use arrows and Enter; Escape cancels. An existing extension select/confirm remains underneath with its promise and focus intact. If another floating overlay is already open, dismiss it before opening the picker. Changing terminal height cancels the picker; reopen at the new size. Stop, newer playback/device controls, and session shutdown cancel the picker. If the underlying prompt expires or another overlay takes focus, the picker dismisses without typing through to the draft. `/voice devices` is the command alternative; `/voice device` remains a read-only report.
 
 The snapshot lists valid, apparently available registered devices plus **Local (host audio)**. Number, current marker and width-bounded short ID precede the raw name, keeping identity visible at 40 columns even with long duplicate Unicode names. Numbers distinguish colliding short IDs; choices still map to full IDs, never parsed display text. Missing/disconnected pins are not inserted as available choices. Registration and endpoint availability are not audio-readiness proof. Reopen to see newly connected devices. Choice revalidates identity/generation/endpoints, including after stop; stale sessions, shutdown and newer controls cannot apply an old choice.
 
 Opening/cancelling does not stop capture/playback, claim ownership, change pins, or explicitly move the viewport. Choosing a changed route uses the same confirmed-stop, sticky transition as `/voice device <id>` and preserves the draft/playback cursor. Existing playback stays silently paused; idle or input-only ownership does not pause future automatic narration. Explicit endpoint overrides still win.
 
-The idle footer reserves room for primary activity and a closed, width-bounded device badge before optional voice information; other extension statuses and Pi's footer remain in place.
+VoiceUI reserves device identity before truncating status/hints and pads the first line to the right edge. Names are width-bounded with an ellipsis; below six available columns the badge is omitted rather than left open. The idle Voice status now lives in this widget, not Pi's footer; other extension statuses and Pi's footer remain in place.
 
-Mouse/touch needs fullscreen Pi with native `MouseRegion` support and a terminal emitting SGR mouse events. Regular/frame-mode and older TTYs retain the keyboard selector overlay and plain label, not an emulated button. Progress/footer badges show no picker shortcut hint; Alt+S remains available and listed in help. Custom footers that replace Pi's built-in footer use Alt+S. Touch follows the same terminal protocol; physical phone gestures have not been validated. No SSH-wrapper key interception or client upgrade is needed.
+Mouse/touch needs fullscreen Pi with native `MouseRegion` support and a terminal emitting SGR mouse events. Regular/frame-mode and older TTYs retain the keyboard selector overlay and plain label, not an emulated button. The badge shows no picker shortcut hint; Alt+S remains available and listed in help. There is no idle-footer click target. Touch follows the same terminal protocol; physical phone gestures have not been validated. No SSH-wrapper key interception or client upgrade is needed.
 
 The current available device is initially highlighted by exact ID (including Local), scrolled into view; Enter confirms it. Duplicate names do not affect selection. If the current pin is unavailable, it is not offered and the first valid choice (Local) is highlighted. Non-TUI selectors without initial-index support display the current choice first. Confirming the same available, unchanged route makes an automatic pin manual/sticky without stopping playback or finalizing recording, including after session restore. This uses route metadata, not an audio-readiness probe; changed endpoints/registration generations and unconfirmed cleanup retain the safe transition. Explicit `/voice device …` commands retain their existing transition semantics.
 
@@ -85,12 +85,14 @@ The current available device is initially highlighted by exact ID (including Loc
 
 ## Highlighting and status
 
-Unread prose is dimmed. The active sentence/newline unit receives a subtle background after native wrapping, and each reached word returns to the normal foreground. The playback line shows **Idle**, **Waiting**, **Playing**, or **Paused**, position, duration, and selected message. A separate final row shows `Word timing: n/total estimated` or `unknown/pending`; this is not a device-clock accuracy indicator.
+Unread prose is dimmed. The active sentence/newline unit receives a subtle background after native wrapping, and each reached word returns to the normal foreground. The compact playback phases are **Idle**, **Playing**, **Paused**, **Synthesizing**, **Loading**, **Describing**, **Connecting**, and **Queued**. Paused intent takes precedence; preparation reports its actual phase rather than a generic Waiting state: foreground description/context work is Describing, device handoff is Connecting, and acquisition blocked by another project's ownership is Queued. The line includes a playback bar and selected message. Known times use `m:ss / m:ss`; unknown times remain `--:-- / --:--` with `timing pending`, never invented durations.
 
-Background status intentionally separates session work from selected-message state:
+A separate **`● live`**, styled with Pi's native `error` red, replaces the time only at the unpaused chronological playback edge, including caught-up waiting for next output, which shows **Playing · ● live** (with the playback bar). Actual latency keeps its preparation phase, not Playing. It is not a phase or a synonym for Playing: older replay, queued/unread audio and paused playback are not live. Native End, Alt+T and `/voice bottom` change viewport follow only, never establish live playback. A separate final row shows `Word timing: n/total estimated` or `unknown/pending`; this is not a device-clock accuracy indicator.
+
+Background status intentionally separates session work from selected-message state (badge spacing depends on terminal width):
 
 ```text
-○ Idle · message 280/605 · timing pending
+○ Idle · [●━━━━━━━━━━━━━━━━━━━━━━━] --:-- / --:-- · message 280/605 · timing pending    [🎧:local]
 ↺ Checking saved timing · 109/605 targets checked
 ```
 

@@ -12,10 +12,12 @@ Preprocessing continues while spoken output is disabled. Foreground speech defer
 
 ## Status lines
 
-Session-wide progress and selected-message playback state use distinct labels:
+Session-wide progress and selected-message playback state use distinct labels. Foreground phases are Idle, Playing, Paused, Synthesizing, Loading, Describing, Connecting and Queued; background work does not itself select a foreground phase. The separate native error-red `● live` replaces time only at the unpaused chronological edge (including caught-up next-output wait); viewport End/Alt+T is unrelated. Unknown times are not fabricated. See [status](usage.md#highlighting-and-status).
+
+Example (badge spacing depends on terminal width):
 
 ```text
-○ Idle · message 280/605 · timing pending
+○ Idle · [●━━━━━━━━━━━━━━━━━━━━━━━] --:-- / --:-- · message 280/605 · timing pending    [🎧:local]
 ↺ Preparing code descriptions · 24/61 targets processed
 ↺ Recovering speech timing · 109/605 targets ready · decoding cached audio: 2
 Word timing: unknown/pending

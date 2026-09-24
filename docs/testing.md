@@ -1,6 +1,22 @@
 # Tests
 
-## Current checkpoint — restored-pin current confirmation
+## Current checkpoint — compact phases and native-frame history gap
+
+Final serial reruns: `npm run check` passed; full checkout `npm test` **956 passed, 33 compatibility skips, no failures**; full installed-native `npm test` **989 passed, no skips/failures**. Logs: `/tmp/pi-voice-ui-final.log`, `/tmp/pi-voice-ui-native-final.log`. Native run sets `PI_VOICE_TEST_TUI_MODULE`, `PI_VOICE_TEST_AGENT_MODULE` and `PI_VOICE_TEST_KEYBINDINGS_MODULE` to the installed Pi modules (command pattern below). LSP diagnostics were unavailable (no server); TypeScript and whitespace checks passed. Direct focused runs without the test runner's environment sanitization failed route/style assertions; the sanitized focused and both final full runs passed.
+
+`test/index-live-progress.test.ts` mounts the real native widget lifecycle and captures rendered frames with synthetic events/mocked transport. New checks deliberately remove `PlaybackHistory.status()` during streaming and chronological Tail to exercise the missing-history playbar gap and retained active-intent bar; finished idle/Stop without history must not fabricate one. This is an offline controlled reproduction, **not a diagnosis of the original user's random live disappearance**. Phase propagation, paused precedence, known/unknown timing, separate native error-red `● live`, block/tool boundaries, first-line headphone badge, stop warnings and resizing are covered by mocked tests. No physical terminal write timing, arbitrary dock pressure, real provider preparation or hardware behavior is established.
+
+Review regressions also cover consumed streaming audio with pending versus exhausted work, stale multi-utterance terminal failures, partial prose/fence arrivals without unrelated worker events, silent Markdown tails, partially consumed historical Tail, retained stop warnings and native pointer press→progress update→release.
+
+Current presentation: Idle, Playing, Paused, Synthesizing, Loading, Describing, Connecting, Queued; `● live` replaces time only at the unpaused chronological edge, including caught-up next-output waits. End/Alt+T is viewport-only. `[🎧:device]` is at the right end of the first VoiceUI line, including idle status—not an idle-footer click target. See [usage](usage.md#highlighting-and-status).
+
+No hardware, provider calls, real inference, live Pi/SSH/client restart or runtime-setting changes. Clients are unchanged in this UI diff; user host `/reload` only, not performed here. Historical counts and evidence below remain checkpoint-specific.
+
+## Historic checkpoints
+
+The remaining sections preserve earlier validation, not current suite counts or UI claims. Old Waiting labels, plain badges, idle-footer targets and earlier picker shortcuts describe their original checkpoints.
+
+## Historic checkpoint — restored-pin current confirmation
 
 `npm run check` passed. Full checkout: **949 passed, 29 compatibility skips, 0 failures (978 total)**. Full installed-native: **978 passed, no skips/failures**. Logs: `/tmp/pi-voice-restore-full.log`, `/tmp/pi-voice-restore-native.log`. No LSP server configured.
 

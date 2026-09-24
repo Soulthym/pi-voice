@@ -134,7 +134,7 @@ See [Configuration](docs/configuration.md) for valid values and setting behavior
 | `F10` | Next assistant message; after the latest, enter playback Tail |
 | `Alt+V` | Re-anchor the current narrated position |
 | `Alt+T` | Pin to and follow the transcript tail |
-| `Alt+S` | Choose a voice device (also click the existing `[device]` badge in supported fullscreen Pi) |
+| `Alt+S` | Choose a voice device (also click the first-line `[🎧:device]` badge in supported fullscreen Pi) |
 | `Ctrl+Shift+V` | Toggle spoken output |
 
 Live and completed content share one playback cursor. Navigation preserves playing/paused intent, including at Tail; from Tail, F6 selects the last message and F7 its last available unit. Alt+T moves only the viewport, not this cursor. Playback/navigation re-arm follow and frame immediately; paused navigation stays silent. Alt+V or **Jump to voice location** re-arms follow without resuming. Later manual scrolling wins again.
@@ -162,7 +162,9 @@ Speak after pressing the microphone key. Recording normally stops after about 1.
 /voice setup
 ```
 
-Manual device selection is session-sticky, including reload and shared tmux controls. Switching waits for confirmed stop, preserves the draft/cursor, and leaves existing playback paused; F8 resumes. Idle/input-only selection does not pause future narration. The first existing progress row (or idle footer) ends with `[device name]`; click it in mouse-capable fullscreen Pi or press Alt+S for the same native picker. Open/cancel is read-only. Regular/older TTYs keep a plain label and keyboard access. Progress/footer badges show no picker shortcut hint; Alt+S remains in help. Alt+S is unused by checked Pi/Voice defaults; Alt+D remains native forward-delete-word; configured voice-control conflicts retain their binding with a warning. See [picker controls and limitations](docs/usage.md#device-picker). Explicit endpoint overrides still win. See [routing and trust](docs/devices-and-ssh.md).
+Manual device selection is session-sticky, including reload and shared tmux controls. Switching waits for confirmed stop, preserves the draft/cursor, and leaves existing playback paused; F8 resumes. Idle/input-only selection does not pause future narration. The right end of the first VoiceUI line, including idle status, carries `[🎧:device]`; click it in mouse-capable fullscreen Pi or press Alt+S for the same native picker. It is no longer an idle-footer click target. Open/cancel is read-only. Regular/older TTYs keep a plain label and keyboard access. The badge shows no picker shortcut hint; Alt+S remains in help. Alt+S is unused by checked Pi/Voice defaults; Alt+D remains native forward-delete-word; configured voice-control conflicts retain their binding with a warning. See [picker controls and limitations](docs/usage.md#device-picker).
+
+Playback phases are **Idle, Playing, Paused, Synthesizing, Loading, Describing, Connecting, Queued**. The separate native error-red **`● live`** replaces the time at the unpaused chronological playback edge, including caught-up next-output waits (Playing + `● live`)—not merely while playing or viewing the bottom. Foreground description/context waits show Describing, device handoff Connecting, and another project's ownership Queued. End/Alt+T change viewport follow only. Unknown times stay `--:-- / --:--`; no duration is invented. See [status details](docs/usage.md#highlighting-and-status). Explicit endpoint overrides still win. See [routing and trust](docs/devices-and-ssh.md).
 
 `/voice stop` must start the editor input to be recognized as a command. Nonempty-draft access remains a usability gap; no Escape/Stop shortcut discards your draft. Explicit playback finalizes microphone capture and preserves manual edits.
 
