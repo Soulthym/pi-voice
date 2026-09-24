@@ -171,7 +171,7 @@ test("timing batch replaces its visible row without holes between fast adjacent 
 	gates[1].resolve();
 	const idle = await waitForWidgetLines(host, lines => lines.length === 2 && !lines.some(line => line.includes("Recovering")));
 	assert.match(idle[0], /^○ Idle ·/);
-	assert.equal(idle[1], "Word timing: unknown/pending");
+	assert.equal(idle[1], "Word timing: 2/2 estimated");
 	assert.ok(mobileWordRows.length > 1);
 	assert.ok(mobileWordRows.every(rows => rows === 1), "32-column word row keeps one native row across updates");
 	const settled = host.widgetOperations.filter(operation => operation.name === "pi-voice-progress").length;
@@ -263,7 +263,7 @@ test("unified progress widget orders input, playback, and preprocessing and clea
 		candidate => candidate.length > 0 && candidate.every(line => !/Preparing code|Recovering speech/.test(line)),
 	);
 	assert.match(lines[0], /^○ Idle ·.*message 1\/1/);
-	assert.equal(lines[1], "Word timing: unknown/pending");
+	assert.equal(lines[1], "Word timing: 8/8 estimated");
 	assert.equal(lines.length, 2);
 	assert.ok(host.widgetOperations.every(operation => !operation.value?.lines?.some(line => /clock/i.test(line))));
 	const timingEntry = host.entries.findLast(

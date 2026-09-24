@@ -57,7 +57,7 @@ test("605 targets restore in a fresh host without provider, measurement, synthes
 	assert.equal(original.modelRequests.length, 7, "cold descriptions really use the fake provider");
 	assert.ok(lines(original).some(line => /Recovering speech timing.*decoding cached audio/.test(line)));
 	// Sub-frame word-estimation phases are intentionally coalesced, not flashed.
-	// Refined sparse checkpoints survive, but cannot establish complete word coverage.
+	// Refined sparse checkpoints must not override the persisted estimated word coverage.
 	for (const point of snapshots(original).find(entry => entry.data.messageId === "answer-604").data.checkpoints) point.quality = "ctc-refined";
 	const persisted = JSON.stringify(original.entries);
 	await original.shutdown();
@@ -75,11 +75,11 @@ test("605 targets restore in a fresh host without provider, measurement, synthes
 	assert.ok(!lines(restarted).some(line => /Recovering speech timing|generating speech|decoding cached audio/.test(line)));
 	assert.equal(snapshots(restarted).length, 605, "no duplicate persistence on compatible restart");
 	assert.match(restarted.widgetLines()![0], /^○ Idle ·.*message 605\/605/);
-	assert.equal(restarted.widgetLines()?.at(-1), "Word timing: unknown/pending");
-	assert.ok(lines(restarted).every(line => !/clock|Word timing: \d/i.test(line)), "restored sparse timing never fabricates word counts");
+	assert.equal(restarted.widgetLines()?.at(-1), "Word timing: 2/2 estimated");
+	assert.ok(lines(restarted).every(line => !/clock/i.test(line)));
 	await restarted.command("timing");
-	assert.match(restarted.notices.at(-1)!.message, /^Voice · Word timing: unknown\/pending\n/);
-	assert.doesNotMatch(restarted.notices.at(-1)!.message, /clock|\d+\/\d+ estimated/i);
+	assert.match(restarted.notices.at(-1)!.message, /^Voice · Word timing: 2\/2 estimated\n/);
+	assert.doesNotMatch(restarted.notices.at(-1)!.message, /clock/i);
 
 	// A genuine synthesis-setting mismatch must still recover, never masquerade as a check.
 	phase = "synthesis";
