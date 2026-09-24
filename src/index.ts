@@ -2963,6 +2963,8 @@ export default async function (pi: ExtensionAPI) {
 			}
 			if (!pendingCanonicalizations.has(canonicalize)) return;
 			syncPlaybackMessages(ctx);
+			// Paused playback has no worker event to paint delayed session insertion.
+			refreshProgressWidget();
 			if (!pendingCanonicalizations.has(canonicalize) || attempt >= 5) return;
 			const timer = setTimeout(() => {
 				try { retry(attempt + 1); } catch { /* Session replacement invalidates retries. */ }

@@ -317,6 +317,8 @@ test("mounted playbar keeps a queued live target through background preparation 
 	await host.emit("turn_end", { message: queuedResponse }); await settle();
 	assert.equal(worker.sent.length, sentBeforePause, "paused live edge queues the next complete response");
 	assert.match(host.widgetLines()![0]!, /Paused.*0:02 \/ 0:02.*message 4\/5/, "incoming B cannot replace paused A's position with a tail placeholder");
+	assert.match(frames.at(-1)!.join("\n"), /Paused.*0:02 \/ 0:02.*message 4\/5/,
+		"delayed session insertion repaints paused chronology without a worker event or forced render");
 	await host.shortcut("f8"); await settle();
 	assert.ok(worker.sent.length > sentBeforePause, "one F8 resumes the queued response");
 	const resumed = worker.sent.at(-1) as { utterance: number; segmentId: number };
