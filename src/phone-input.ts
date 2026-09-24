@@ -279,6 +279,10 @@ export class PhoneInputClient {
 					this.#socket = null;
 					this.#cancelCapture = null;
 				}
+				if (!error && capture && !streamMode && this.#ticket) {
+					try { this.retireHandle?.({ endpoint, ticket: this.#ticket }); }
+					catch (retirementError) { error = retirementError instanceof Error ? retirementError : new Error(String(retirementError)); }
+				}
 				const stopped = this.#ticket && (error || streamMode) ? this.stop() : Promise.resolve();
 				void stopped.catch(() => {});
 				if ((!this.#ticket || (!error && !streamMode)) && this.#activeEndpoint === endpoint) {
