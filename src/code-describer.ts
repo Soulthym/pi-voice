@@ -277,6 +277,8 @@ export function legacyCodeDescriptionCacheKey(
 export interface CodeDescriptionAttemptOptions {
 	/** Invoked before every provider attempt so callers can meter usage. */
 	onAttempt?: () => void;
+	/** True only while a submitted provider attempt is outstanding. */
+	onActivity?: (active: boolean) => void;
 }
 
 /**
@@ -400,6 +402,7 @@ export async function describeCodeBlock(
 					try {
 						combinedSignal.throwIfAborted();
 						options?.onAttempt?.();
+						options?.onActivity?.(true);
 					} catch (error) {
 						attemptError = error;
 						throw error;
@@ -411,7 +414,7 @@ export async function describeCodeBlock(
 				? { sessionId: conversation.normalPrompt!.sessionId }
 				: { cacheRetention: "none" as const, sessionId: randomUUID() }),
 		},
-	).catch(error => { throw attemptError ?? error; });
+	).catch(error => { throw attemptError ?? error; }).finally(() => options?.onActivity?.(false));
 		// Providers can serialize hook failures into an error response.
 		if (attemptError) throw attemptError;
 		if (response.stopReason === "aborted") {

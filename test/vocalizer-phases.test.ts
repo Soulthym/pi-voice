@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { CodeDescriptionCache } from "../src/code-description-cache.js";
 import { DEFAULT_VOICE_CONFIG } from "../src/config.js";
 import { plainCodeNarration, type CodeNarrationPlan } from "../src/code-narration.js";
 import { Vocalizer, type PlaybackPhase } from "../src/vocalizer.js";
@@ -52,7 +53,8 @@ test("description phases are cancellation fenced and never override playing or p
 	let description = Promise.withResolvers<CodeNarrationPlan>();
 	const sent: number[] = [];
 	const vocalizer = new Vocalizer(() => ({ ...DEFAULT_VOICE_CONFIG, enabled: true }), () => {},
-		() => description.promise, undefined, { ...worker, sendSegment(utterance: number) { sent.push(utterance); } });
+		(_block, _context, _signal, activity) => { activity(true); return description.promise; },
+		undefined, { ...worker, sendSegment(utterance: number) { sent.push(utterance); } });
 	vocalizer.speak("```js\nconst x = 1;\n```");
 	assert.equal(vocalizer.playbackPhase, "describing");
 	vocalizer.setPlaybackPaused(true);
@@ -77,7 +79,7 @@ test("description phases are cancellation fenced and never override playing or p
 test("buffered playback wins over synthesis until consumed, then exposes real pending work", async () => {
 	const description = Promise.withResolvers<CodeNarrationPlan>();
 	const vocalizer = new Vocalizer(() => ({ ...DEFAULT_VOICE_CONFIG, enabled: true }), () => {},
-		() => description.promise, undefined, worker);
+		(_block, _context, _signal, activity) => { activity(true); return description.promise; }, undefined, worker);
 	vocalizer.pushDelta("First sentence. ");
 	vocalizer.handleWorkerEvent({ type: "playback-phase", utterance: 1, segmentId: 1, phase: "playing" });
 	vocalizer.handleWorkerEvent({ type: "segment-audio", utterance: 1, segmentId: 1, start: 0, duration: 1 });
@@ -97,4 +99,71 @@ test("buffered playback wins over synthesis until consumed, then exposes real pe
 	vocalizer.clear();
 	vocalizer.handleWorkerEvent({ type: "segment-audio", utterance: 1, segmentId: 3, start: 2, duration: 1 });
 	assert.equal(vocalizer.playbackPhase, "idle");
+});
+
+
+test("description dependency waits are queued; active coalesced work is describing and cache hits are free", async () => {
+	const cache = new CodeDescriptionCache();
+	const context = Promise.withResolvers<void>();
+	const resource = Promise.withResolvers<void>();
+	const reply = Promise.withResolvers<CodeNarrationPlan>();
+	let attempts = 0;
+	let producerSignal: AbortSignal | undefined;
+	const create = async (signal: AbortSignal, activity: (active: boolean) => void) => {
+		producerSignal = signal;
+		await resource.promise;
+		signal.throwIfAborted();
+		attempts++;
+		activity(true);
+		try { return await reply.promise; } finally { activity(false); }
+	};
+	const background = cache.getOrCreate("shared", create);
+	const phases: PlaybackPhase[] = [];
+	const vocalizer = new Vocalizer(() => ({ ...DEFAULT_VOICE_CONFIG, enabled: true }), () => {},
+		async (_block, _context, signal, activity) => {
+			await context.promise;
+			return cache.getOrCreate("shared", create, undefined, undefined, signal, activity);
+		}, undefined, worker, undefined, undefined, phase => phases.push(phase));
+	const fence = "```js\nrun();\n```";
+	vocalizer.speak(fence);
+	assert.equal(vocalizer.playbackPhase, "queued", "next-fence context wait");
+	context.resolve(); await tick();
+	assert.equal(vocalizer.playbackPhase, "queued", "coordinator resource wait");
+	resource.resolve(); await tick();
+	assert.equal(vocalizer.playbackPhase, "describing");
+	vocalizer.clear();
+	assert.equal(producerSignal?.aborted, false, "background consumer keeps producer alive");
+	vocalizer.speak(fence); await tick();
+	assert.equal(vocalizer.playbackPhase, "describing", "joining already-active background producer");
+	reply.resolve(plainCodeNarration("Runs the requested operation."));
+	await background; await tick();
+	assert.equal(vocalizer.playbackPhase, "queued");
+	vocalizer.clear(); phases.length = 0;
+	vocalizer.speak(fence); await tick();
+	assert.equal(phases.includes("describing"), false);
+	assert.equal(attempts, 1);
+	vocalizer.clear();
+});
+
+test("last-consumer cancellation detaches activity and stale producers cannot affect replacements", async () => {
+	const cache = new CodeDescriptionCache();
+	const stale = Promise.withResolvers<CodeNarrationPlan>();
+	let oldActivity!: (active: boolean) => void;
+	let oldSignal!: AbortSignal;
+	const controller = new AbortController();
+	const events: boolean[] = [];
+	const pending = cache.getOrCreate("key", (signal, activity) => {
+		oldSignal = signal; oldActivity = activity; activity(true); return stale.promise;
+	}, undefined, undefined, controller.signal, active => events.push(active));
+	await tick();
+	controller.abort();
+	await assert.rejects(pending);
+	assert.equal(oldSignal.aborted, true);
+	const afterCancel = [...events];
+	const replacement = plainCodeNarration("Keeps the replacement result.");
+	await cache.getOrCreate("key", async () => replacement);
+	oldActivity(true);
+	stale.resolve(plainCodeNarration("Stale result must not be stored.")); await tick();
+	assert.deepEqual(events, afterCancel);
+	assert.equal(cache.get("key"), replacement);
 });

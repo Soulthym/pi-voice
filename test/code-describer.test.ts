@@ -233,14 +233,28 @@ test("non-semantic replies are retried up to three times with a corrective nudge
 		{ text: GOOD },
 	]);
 	let attempts = 0;
+	const activity: boolean[] = [];
 	const plan = await describeCodeBlock(ctx, { language: "ts", code: "run();" }, "current", "summary", undefined, undefined, {
 		onAttempt: () => {
 			attempts += 1;
 		},
+		onActivity: active => activity.push(active),
 	});
 	assert.match(JSON.stringify(plan), /keyboard shortcuts/);
 	assert.equal(calls(), 3);
 	assert.equal(attempts, 3);
+	assert.deepEqual(activity, [true, false, true, false, true, false]);
+});
+
+test("refused provider attempts never report active description work", async () => {
+	const { ctx, calls } = scriptedCtx([{ text: GOOD }]);
+	const activity: boolean[] = [];
+	await assert.rejects(describeCodeBlock(ctx, { language: "ts", code: "run();" }, "current", "summary", undefined, undefined, {
+		onAttempt: () => { throw new CodeDescriptionBudgetExhaustedError(); },
+		onActivity: active => activity.push(active),
+	}), CodeDescriptionBudgetExhaustedError);
+	assert.equal(calls(), 0);
+	assert.equal(activity.includes(true), false);
 });
 
 test("persistently non-semantic replies fail after three attempts", async () => {

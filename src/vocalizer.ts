@@ -26,6 +26,7 @@ type CodeDescriber = (
 	block: FencedCodeBlock,
 	context: CodeDescriptionSourceContext,
 	signal: AbortSignal,
+	onActivity: (active: boolean) => void,
 ) => Promise<CodeNarrationPlan>;
 type VoiceWorker = Pick<
 	VoiceWorkerClient,
@@ -340,25 +341,35 @@ export class Vocalizer {
 		const controller = new AbortController();
 		this.#descriptionControllers.add(controller);
 		const foreground = this.#phases.get(utterance);
-		if (foreground) foreground.descriptions += 1;
+		if (foreground) foreground.deferred += 1;
+		let describing = false;
+		const onActivity = (active: boolean) => {
+			if (generation !== this.#generation || controller.signal.aborted || describing === active) return;
+			describing = active;
+			if (foreground) foreground.descriptions += active ? 1 : -1;
+			this.#reportPhase();
+		};
 		this.#reportPhase();
 		let description: Promise<CodeNarrationPlan>;
 		try {
 			description = this.#describeCode
-				? this.#describeCode(block, context, controller.signal)
+				? this.#describeCode(block, context, controller.signal, onActivity)
 				: Promise.resolve(plainCodeNarration(fallbackCodeDescription(block)));
 		} catch (error) {
 			description = Promise.reject(error);
 		}
 		const ready = description
 			.catch(() => plainCodeNarration(fallbackCodeDescription(block)))
-			.finally(() => this.#descriptionControllers.delete(controller));
+			.finally(() => {
+				onActivity(false);
+				this.#descriptionControllers.delete(controller);
+			});
 		const before = this.#deliveryBarrier ?? Promise.resolve();
 		this.#deliveryBarrier = before.then(async () => {
 			const spoken = await ready;
 			if (generation !== this.#generation) return;
 			this.#sendDescription(spoken, block, source, utterance, sourceBase, skipUnits);
-			if (foreground) foreground.descriptions -= 1;
+			if (foreground) foreground.deferred -= 1;
 			this.#reportPhase();
 		});
 	}

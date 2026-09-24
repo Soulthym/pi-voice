@@ -67,7 +67,7 @@ export function parseCodeDescriptionCacheSnapshot(value: unknown): CodeDescripti
 export class CodeDescriptionCache {
 	#plans = new Map<string, CodeNarrationPlan>();
 	#identities = new Map<string, string>();
-	#pending = new Map<string, { promise: Promise<CodeNarrationPlan>; controller: AbortController; consumers: number }>();
+	#pending = new Map<string, { promise: Promise<CodeNarrationPlan>; controller: AbortController; consumers: number; describing: boolean; listeners: Set<(active: boolean) => void> }>();
 	#restoredKeys = new Set<string>();
 	#generation = 0;
 
@@ -129,11 +129,13 @@ export class CodeDescriptionCache {
 
 	getOrCreate(
 		key: string,
-		create: (signal: AbortSignal) => Promise<CodeNarrationPlan>,
+		create: (signal: AbortSignal, onActivity: (active: boolean) => void) => Promise<CodeNarrationPlan>,
 		onStore?: (snapshot: CodeDescriptionCacheSnapshot) => void,
 		/** Let a joining caller retry a rejection specific to the original caller's policy. */
 		retryRejected?: (error: unknown) => boolean,
 		signal?: AbortSignal,
+		/** Observe this shared producer, including activity already underway when joining. */
+		onActivity?: (active: boolean) => void,
 	): Promise<CodeNarrationPlan> {
 		if (signal?.aborted) return Promise.reject(signal.reason);
 		const cached = this.#plans.get(key);
@@ -143,9 +145,14 @@ export class CodeDescriptionCache {
 		const joining = !!active;
 		if (!active) {
 			const controller = new AbortController();
-			const entry = { controller, consumers: 0, promise: undefined! as Promise<CodeNarrationPlan> };
+			const entry = { controller, consumers: 0, describing: false, listeners: new Set<(active: boolean) => void>(), promise: undefined! as Promise<CodeNarrationPlan> };
+			const activity = (active: boolean) => {
+				if (controller.signal.aborted || this.#pending.get(key) !== entry) return;
+				entry.describing = active;
+				for (const listener of entry.listeners) listener(active);
+			};
 			const pending = Promise.resolve()
-				.then(() => { controller.signal.throwIfAborted(); return create(controller.signal); })
+				.then(() => { controller.signal.throwIfAborted(); return create(controller.signal, activity); })
 				.then(plan => {
 					controller.signal.throwIfAborted();
 					if (generation !== this.#generation) return plan;
@@ -166,11 +173,20 @@ export class CodeDescriptionCache {
 		}
 		const entry = active;
 		entry.consumers += 1;
+		if (onActivity) {
+			entry.listeners.add(onActivity);
+			onActivity(entry.describing);
+		}
+		const detach = () => {
+			if (onActivity && entry.listeners.delete(onActivity)) onActivity(false);
+		};
 		const result = new Promise<CodeNarrationPlan>((resolve, reject) => {
-			const abort = () => reject(signal!.reason);
+			const abort = () => { detach(); reject(signal!.reason); };
 			signal?.addEventListener("abort", abort, { once: true });
+			if (signal?.aborted) abort();
 			entry.promise.then(resolve, reject).finally(() => signal?.removeEventListener("abort", abort));
 		}).finally(() => {
+			detach();
 			entry.consumers -= 1;
 			if (entry.consumers === 0) {
 				if (this.#pending.get(key) === entry) this.#pending.delete(key);
@@ -179,7 +195,7 @@ export class CodeDescriptionCache {
 		});
 		return joining && retryRejected ? result.catch(error => {
 			if (signal?.aborted || !retryRejected(error) || generation !== this.#generation) throw error;
-			return this.getOrCreate(key, create, onStore, retryRejected, signal);
+			return this.getOrCreate(key, create, onStore, retryRejected, signal, onActivity);
 		}) : result;
 	}
 }

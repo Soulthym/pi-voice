@@ -738,7 +738,7 @@ export default async function (pi: ExtensionAPI) {
 		block: FencedCodeBlock,
 		identityContext: IdentityContext,
 		providerMessagesThroughBlock: readonly Message[],
-		options?: { chargeBackfill?: () => boolean; signal?: AbortSignal; background?: boolean; allowPaused?: boolean },
+		options?: { chargeBackfill?: () => boolean; signal?: AbortSignal; background?: boolean; allowPaused?: boolean; onActivity?: (active: boolean) => void },
 ): Promise<CodeNarrationPlan> => {
 		const fallback = plainCodeNarration(fallbackCodeDescription(block));
 		const requestEpoch = contextEpoch;
@@ -776,7 +776,7 @@ export default async function (pi: ExtensionAPI) {
 			return await codeDescriptionCache
 				.getOrCreate(
 					key,
-					(signal) => {
+					(signal, onActivity) => {
 						// Every provider attempt is metered; cache hits and coalesced
 						// duplicates never reach describeCodeBlock at all.
 						const generate = () => {
@@ -789,6 +789,7 @@ export default async function (pi: ExtensionAPI) {
 								conversation,
 								signal,
 								{
+									onActivity,
 									onAttempt: () => {
 										if (requestEpoch !== contextEpoch || !isCurrentContext(ctx)) throw new Error("Code description aborted");
 										if (options?.chargeBackfill && !options.chargeBackfill()) {
@@ -819,6 +820,7 @@ export default async function (pi: ExtensionAPI) {
 						requestEpoch === contextEpoch && isCurrentContext(ctx) &&
 						(error === BACKGROUND_DEFERRED || error === BACKFILL_EXHAUSTED || error instanceof CodeDescriptionBudgetExhaustedError),
 					options?.signal,
+					options?.onActivity,
 				)
 				.then(plan => {
 					if (requestEpoch === contextEpoch && isCurrentContext(ctx) && !plan.omitted) {
@@ -1678,13 +1680,13 @@ export default async function (pi: ExtensionAPI) {
 	const vocalizer = new Vocalizer(
 		() => routedVoiceConfig(),
 		handleWorkerEvent,
-		async (block, sourceContext, signal) => {
+		async (block, sourceContext, signal, onActivity) => {
 			const ctx = activeContext;
 			if (!ctx) return Promise.reject(new Error("No active Pi context for code description"));
 			const providerMessages = [...await (typeof sourceContext.providerMessages === "function"
 				? sourceContext.providerMessages(signal) : sourceContext.providerMessages ?? [])];
 			if (signal.aborted) return { records: [], guided: false, omitted: true };
-			return requestCodeDescription(ctx, block, structuredContextIdentity(providerMessages), providerMessages, { signal });
+			return requestCodeDescription(ctx, block, structuredContextIdentity(providerMessages), providerMessages, { signal, onActivity });
 		},
 		segment => {
 			if (ownsSpeech) {
