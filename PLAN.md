@@ -1,6 +1,14 @@
 # Pi Voice — implemented agreements and live-validation handoff
 
-## Current checkpoint — stop/preemption/reconnect invariants (items 1–3 only)
+## Current delivery — display, highlighting, timing and stop safety
+
+- Implemented the approved display points 1–6, internal handoff presentation, streaming/final-render highlighting fixes, current-queue failure/paused-source cancellation, and persistent scoped stop diagnostics/retries. Historical discussion entries below retain their original pending wording; they are not the current implementation status.
+- Unified `/voice timing`, `/voice timing workers [auto|1..8]`, and `/voice timing retry current|all|<min>-<max>|<exact-message-id>` are implemented. The old command has no compatibility alias. Retry is silent and cached-audio-only; it now also refines provably reconstructable mixed units while retaining existing refined timestamps. Unknown or incompletely represented sparse provenance remains conservatively skipped. Recovery hydration and completion preserve newer compatible refinement and coverage.
+- Final validation: typecheck passed; checkout **1052 passed / 33 compatibility skips**, installed-native **1085 passed / zero skips**, no failures. Independent focused reviews of the final stop/preemption and timing-merge fixes found no further concrete introduced issues. These are offline tests, not live hardware or inference validation; earlier failures and evidence remain in historical notes and testing documentation.
+- Remaining limitation: durable admission/local-child proof is incomplete after process loss. Saved remote handles can be retried, but an orphan fence cannot be cleared unless complete stop proof is available. No unsafe force-release or restart-as-proof shortcut was added.
+- Operator handoff: host `/reload` when safe and ready; no client update required. No reload, push, real inference/provider/hardware operation, or runtime-settings change was performed. `ISSUES.md` remains untouched; user-deleted demo assets remain removed.
+
+## Review checkpoint — stop/preemption/reconnect invariants (items 1–3 only)
 
 - ACK without matching receipts keeps the physical lease and turn purpose but gates new live deltas, block flushes and prefixes. Source history remains available for explicit retry; cleanup never auto-resumes audio.
 - Unresolved input/output episodes or deferred preemption force unchanged-route reconnect through original-client cleanup. Successful termination alone cannot discard retained scopes or commit the replacement pin.
