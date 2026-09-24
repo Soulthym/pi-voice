@@ -3215,6 +3215,13 @@ export default async function (pi: ExtensionAPI) {
 							if (epoch !== contextEpoch || workEpoch !== timingWorkEpoch || !isCurrentContext(ctx) || !canRecover()) return;
 							// One failed unit leaves the whole target incomplete; never persist a prefix as complete.
 							if (!Number.isFinite(duration) || duration <= 0) throw new Error("Audio duration unavailable");
+							// Original audio and a retry may have filled this unit while measurement awaited.
+							const current = playbackHistory.timingForUnit(message.id, measuredRenderKey, unit);
+							if (current?.[0].duration === duration) {
+								checkpoints.push(...current.map(point => ({ ...point, time: time + point.time })));
+								time += duration;
+								continue;
+							}
 							const unitStart = checkpoints.length;
 							checkpoints.push({ time, duration, sourceOffset: item.source.start, quality: "estimated" });
 							let coverage = { estimated: 0, total: 0 };

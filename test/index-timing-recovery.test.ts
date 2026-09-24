@@ -125,7 +125,7 @@ test("same-transport resume cancels paused background timing before unpausing", 
 	assert.equal(host.entries.some(entry => entry.data?.version === 3), false, "cancelled recovery cannot persist a late result");
 });
 
-test("background completion merges a concurrent paused retry and persists all unit coverage", async t => {
+for (const sameMissingUnit of [false, true]) test(`background completion merges a concurrent paused retry and persists all unit coverage (same missing unit: ${sameMissingUnit})`, async t => {
 	mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: MeasuringWorker } });
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-recovery-retry-"));
 	const keys = ["PI_VOICE_CONFIG", "PI_VOICE_COORDINATOR_DIR", "PI_VOICE_DEVICE_DIR"];
@@ -138,6 +138,7 @@ test("background completion merges a concurrent paused retry and persists all un
 	const measurements: string[] = [];
 	mock.method(MeasuringWorker.prototype, "measureSegment", (text: string) => {
 		measurements.push(text);
+		if (sameMissingUnit && text === "Gamma delta.") return Promise.resolve(2);
 		return new Promise<number>(resolve => { finish = resolve; });
 	});
 	t.after(async () => {
@@ -153,11 +154,13 @@ test("background completion merges a concurrent paused retry and persists all un
 	const beforeReplay = worker.sent.length;
 	await host.shortcut("f5");
 	const first = worker.sent[beforeReplay] as { segmentId: number; utterance: number };
-	worker.emit({ type: "segment-audio", segmentId: first.segmentId, utterance: first.utterance, start: 0, duration: 2, timingQuality: "estimated" });
+	const supplyAudio = () => worker.emit({ type: "segment-audio", segmentId: first.segmentId, utterance: first.utterance, start: 0, duration: 2, timingQuality: "estimated" });
+	if (!sameMissingUnit) supplyAudio();
 	worker.emit({ type: "playback", utterance: first.utterance, position: 0.5 });
 	await host.shortcut("f8");
 	for (let i = 0; i < 100 && !finish; i++) await new Promise(resolve => setTimeout(resolve, 10));
-	assert.deepEqual(measurements, ["Gamma delta."]);
+	assert.deepEqual(measurements, [sameMissingUnit ? "Alpha beta." : "Gamma delta."]);
+	if (sameMissingUnit) supplyAudio();
 	const frozen = host.render(text);
 	const top = host.scrollView.scrollTop;
 	const sent = worker.sent.length;
