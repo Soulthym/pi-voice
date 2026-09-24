@@ -1980,7 +1980,8 @@ export default async function (pi: ExtensionAPI) {
 		}
 	};
 
-	const relinquishSpeech = (): void => {
+	const relinquishSpeech = (): boolean => {
+		if (Object.values(stopResources).some(resource => resource.episode || resource.cleanup)) return false;
 		coordinator?.releaseSpeech();
 		ownsSpeech = false;
 		codeWorkEpoch += 1;
@@ -2000,6 +2001,7 @@ export default async function (pi: ExtensionAPI) {
 		refreshStatus();
 		scheduleVoiceWorkerIdleStop();
 		if (activeContext) scheduleMissingCodeDescriptions(activeContext);
+		return true;
 	};
 
 	const speakAttentionNotification = (waiting: WaitingSession): void => {
@@ -2019,6 +2021,10 @@ export default async function (pi: ExtensionAPI) {
 
 	releaseSpeechOwnership = (announceNext = true): void => {
 		if (!ownsSpeech || !coordinator || deviceRebind || transportStopPending || inputStopPending) return;
+		if (pendingSpeechPreemption) {
+			finishSpeechPreemption();
+			return;
+		}
 		restoreFollowAfterSpeech();
 		if (announceNext && config.enabled && !attentionSuppressed && !playbackPaused) {
 			const waiting = coordinator.nextUnannouncedWaiting();
@@ -2186,9 +2192,8 @@ export default async function (pi: ExtensionAPI) {
 
 	finishSpeechPreemption = (): void => {
 		const interrupted = pendingSpeechPreemption;
-		if (!interrupted) return;
+		if (!interrupted || !relinquishSpeech()) return;
 		pendingSpeechPreemption = undefined;
-		relinquishSpeech();
 		preserveDisplacedSpeech(interrupted);
 	};
 

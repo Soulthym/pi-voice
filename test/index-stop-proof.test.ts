@@ -685,6 +685,37 @@ for (const late of [false, true]) for (const released of [false, true]) test(`ca
  }
 });
 
+for (const released of [false, true]) test(`preemption ACK requires matching late remote receipt (released: ${released})`, async t => {
+ t.mock.timers.enable({ apis: ["setInterval"] });
+ const { host, worker, lease } = await setup(t);
+ await host.command("test Original transport.");
+ const owner = JSON.parse(await fs.readFile(lease, "utf8"));
+ const journal = () => new StopRecovery(path.dirname(path.dirname(lease)), owner.instanceId);
+ const cancel = t.mock.method(worker, "cancel", () => 901 as never);
+ const preempt = t.mock.method(SessionCoordinator.prototype, "consumeSpeechPreemptionRequest", () => true);
+ t.mock.timers.tick(200); await settle();
+ preempt.mock.mockImplementation(() => false);
+ assert.ok(cancel.mock.callCount(), "preemption started cleanup");
+ const handle = { type: "remote-handle" as const, output: "unix:///old-output", id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", utterance: 1 };
+ worker.emit(handle);
+ worker.emit({ type: "remote-released", id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" });
+ if (released) worker.emit({ type: "remote-released", id: handle.id });
+ worker.emit({ type: "idle", cancelId: 901 }); await settle();
+ if (!released) {
+  assert.equal(JSON.parse(await fs.readFile(lease, "utf8")).instanceId, owner.instanceId);
+  assert.equal(journal().episode("output")!.handles[0].id, handle.id);
+  assert.match(host.widgetLines()!.join("\n"), /Output stop unconfirmed/);
+  await host.emit("before_agent_start", {}); await settle();
+  assert.ok(await fs.stat(lease), "other ownership-release paths retain the fence");
+  worker.emit({ type: "remote-released", id: handle.id });
+  await host.command("stop");
+  worker.emit({ type: "idle", cancelId: 901 }); await settle();
+ }
+ assert.equal(journal().episode("output"), undefined);
+ await assert.rejects(fs.stat(lease), { code: "ENOENT" });
+ t.mock.timers.reset();
+});
+
 test("normal microphone receipt retires config A before recovery retries config B", async t => {
  const { host, lease } = await setup(t);
  const ticket = `${"a".repeat(32)}.1`;
