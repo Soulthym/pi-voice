@@ -153,6 +153,52 @@ test("real timing retry handler snapshots scope, stays silent, persists coverage
 	assert.equal(snapshots().length, initial + 1);
 });
 
+test("handler retries remaining mixed source words twice without replacing first-word CTC", async t => {
+	calls.length = 0;
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-mixed-retry-"));
+	const names = ["PI_VOICE_CONFIG", "PI_VOICE_COORDINATOR_DIR", "PI_VOICE_DEVICE_DIR"];
+	const old = names.map(name => process.env[name]);
+	for (const [i, name] of names.entries()) process.env[name] = path.join(root, String(i));
+	const config = { ...DEFAULT_VOICE_CONFIG, enabled: false, mode: "assistant" as const, timingPreprocessConcurrency: 0 as const, codeDescriptionPreprocessBudget: 0, input: "disabled", output: "local" };
+	await fs.writeFile(process.env.PI_VOICE_CONFIG!, JSON.stringify(config));
+	const host = new FakeVoiceHost(root, "mixed-retry");
+	t.after(async () => {
+		await host.shutdown(); mock.restoreAll();
+		for (const [i, name] of names.entries()) { if (old[i] === undefined) delete process.env[name]; else process.env[name] = old[i]; }
+		await fs.rm(root, { recursive: true, force: true });
+	});
+	const text = "Alpha beta gamma.";
+	const renderKey = narrationRenderKey(text, config, []);
+	host.addMessage("mixed", null, { role: "assistant", content: [{ type: "text", text }], stopReason: "stop", timestamp: 1 });
+	const checkpoints = [
+		{ time: 0, duration: 3, sourceOffset: 0, quality: "mixed" },
+		{ time: 0.25, duration: 0, sourceOffset: 0, quality: "ctc-refined" },
+	];
+	host.api.appendEntry("pi-voice.playback-timing", { version: 3, messageId: "mixed", renderKey, duration: 3, checkpoints,
+		units: [{ unit: { sourceOffset: 0, skipUnits: 0 }, checkpoints, coverage: { total: 3, estimated: 2 } }] });
+	await host.start();
+	const frames = host.widgetOperations.length;
+	mock.method(host.ctx.ui, "setEditorText", () => assert.fail("retry changed draft"));
+	for (const [i, remaining] of [1, 0].entries()) {
+		await host.command("timing retry mixed");
+		await tick();
+		assert.equal(calls.length, i + 1);
+		calls[i].resolve({ status: "timing", duration: 3, quality: remaining ? "mixed" : "ctc-refined", words: [
+			{ text: "Alpha", start: 0.1, end: 0.5, quality: "ctc-refined" },
+			{ text: "beta", start: i ? 0.9 : 1, end: 1.5, quality: "ctc-refined" },
+			{ text: "gamma", start: 2, end: 2.5, quality: remaining ? "estimated" : "ctc-refined" },
+		] });
+		await tick();
+		const saved = host.entries.filter(entry => entry.customType === "pi-voice.playback-timing").at(-1)!.data;
+		assert.deepEqual(saved.units[0].coverage, { total: 3, estimated: remaining });
+		assert.equal(saved.units[0].checkpoints[1].time, 0.25);
+		assert.equal(saved.units[0].checkpoints[2].time, 1);
+		assert.equal(saved.duration, 3);
+	}
+	assert.equal(host.widgetOperations.length, frames);
+	assert.equal(host.modelRequests.length, 0);
+});
+
 for (const improved of [true, false]) test(`paused retry preserves playback and accepts pending CTC after an unimproved retry (${improved})`, async t => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-retry-paused-"));
 	const env = { PI_VOICE_CONFIG: path.join(root, "config"), PI_VOICE_COORDINATOR_DIR: path.join(root, "coordinator"), PI_VOICE_DEVICE_DIR: path.join(root, "devices") };

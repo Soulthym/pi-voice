@@ -327,6 +327,13 @@ Read `docs/installation.md` and `docs/endpoint-protocol.md` for migration/recove
 - Offline regression: an unimproved retry saves an estimated partial, original CTC improves live, then a new recovery pass preserves that improvement and reloads with **2/4 estimated**, not 4/4. Missing-unit hydration and changed-identity rejection are covered separately.
 - Validation: typecheck and 37 focused tests passed; the new integration regression fails with the old recovery-start restore. No live/model/provider validation or runtime-setting changes.
 
+## Mixed WORD timing retry (task 5)
+
+- Completed cache-only admission for mixed units with reconstructable per-word provenance: dense explicit labels, or valid source-word coverage accounting for every refined word through distinct retained CTC anchors. Unknown/ambiguous sparse units still skip and report; no blanket guard removal.
+- Retry preserves old refined timestamps/qualities, keeps aggregate segment quality separate from the first word's actual CTC timestamp, and counts coverage from the cached spoken plan's mapped source words. Subsequent retries can refine remaining estimates. Commit-time revalidation respects newer original alignment/recovery metadata; incompatible/crossing candidates skip the unit, never shift old CTC anchors.
+- Offline checks cover first-word CTC, sparse accounted/missing/duplicate anchors, dense labels, two retries through the real handler, stale-current improvement, suffix replay offsets, unit base/duration and unchanged foreground metadata. Typecheck and diff checks passed; focused runner **147 passed**, final full suite **1051 passed / 33 compatibility skips / zero failures** (`/tmp/word-retry-{focused,full}-final.log`). LSP unavailable. An initial direct invocation omitted the required module-mocking flag; validation uses the environment-sanitized repository runner.
+- Existing version-3 bounded checkpoint snapshots only: no new alignment cache format, TTS/provider/output calls, lease work, runtime settings or live/client/SSH restart. Original navigation thinning remains; old sparse snapshots missing any refined word remain intentionally ineligible. Real-model alignment accuracy/live behavior remains unverified. **Durable admission/local-child restart-proof coverage remains incomplete**, as documented above; this timing change does not close that gap. Previous commits, discussion notes, untracked issue file and deleted demos remain untouched.
+
 ## Evidence and outstanding verification
 
 - Initial production-pool concurrency benchmark selected **3**, not the earlier standalone experiment's 4: ~1.76× sequential synthesis throughput at ~1.75× ordered latency; 4 exceeded 2×. This is not a live phone throughput claim.

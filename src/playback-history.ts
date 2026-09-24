@@ -400,7 +400,8 @@ export class PlaybackHistory {
 		record.wordTimingCoverage ??= new Map();
 		// Code narration offsets address descriptions, not the message's source words.
 		const applicable = tracked.code ? [] : words;
-		const known = applicable.every(word => Number.isFinite(word.time) && word.time >= 0 &&
+		const known = new Set(applicable.map(word => word.sourceOffset)).size === applicable.length &&
+			applicable.every(word => Number.isFinite(word.time) && word.time >= 0 &&
 			Number.isInteger(word.sourceOffset) &&
 			word.sourceOffset - tracked.sourceBase + tracked.capture.origin.sourceOffset >= 0 &&
 			word.sourceOffset - tracked.sourceBase + tracked.capture.origin.sourceOffset < record.text.length &&
@@ -431,7 +432,8 @@ export class PlaybackHistory {
 			if (!Number.isFinite(word.time) || word.time < 0 || !Number.isInteger(word.sourceOffset)) continue;
 			const absoluteTime = (absoluteStart ?? tracked.capture.baseTime + tracked.audioStart) + word.time;
 			const sourceOffset = word.sourceOffset - tracked.sourceBase + tracked.capture.origin.sourceOffset;
-			if (sourceOffset < 0 || sourceOffset === tracked.sourceOffset || absoluteTime - lastTime < 0.4) continue;
+			if (sourceOffset < 0 || (sourceOffset === tracked.sourceOffset
+				? word.quality !== "ctc-refined" : absoluteTime - lastTime < 0.4)) continue;
 			relative.push({ time: word.time, duration: 0, sourceOffset, ...(word.quality ? { quality: word.quality } : {}) });
 			if (absoluteStart !== undefined) record.checkpoints.push({ time: absoluteTime, duration: 0, sourceOffset, ...(word.quality ? { quality: word.quality } : {}) });
 			tracked.wordOffsets.add(sourceOffset);
@@ -489,13 +491,50 @@ export class PlaybackHistory {
 		return merged;
 	}
 
+	/** Sparse mixed units are safe only when every refined source word is retained. */
+	retryableTimingUnit(messageId: string, renderKey: string, unit: PlaybackUnit, sourceWords: number[]): boolean {
+		const points = this.timingForUnit(messageId, renderKey, unit);
+		if (!points?.length) return false;
+		if (new Set(sourceWords).size !== sourceWords.length ||
+			sourceWords.some((offset, i) => !Number.isInteger(offset) || offset < unit.sourceOffset ||
+				(i > 0 && offset <= sourceWords[i - 1]))) return false;
+		const coverage = this.#records.get(messageId)?.wordTimingCoverage?.get(`${unit.sourceOffset}:${unit.skipUnits}`);
+		if (points.every(point => point.quality === "estimated")) return !coverage || coverage.estimated === coverage.total;
+		if (!sourceWords.length) return false;
+		const words = points.slice(1);
+		if (new Set(words.map(word => word.sourceOffset)).size !== words.length || words.some(word =>
+			!sourceWords.includes(word.sourceOffset) || !Number.isFinite(word.time) || word.time < 0 || word.time >= points[0].duration ||
+			(word.quality !== "estimated" && word.quality !== "ctc-refined"))) return false;
+		const refined = words.filter(word => word.quality === "ctc-refined").length;
+		const dense = words.length === sourceWords.length;
+		return refined < sourceWords.length && (dense || !!coverage && coverage.total === sourceWords.length &&
+			Number.isInteger(coverage.estimated) && coverage.estimated >= 0 && coverage.estimated <= coverage.total &&
+			coverage.total - coverage.estimated === refined);
+	}
+
 	/** Cache-only refinement: never touches capture, selection or clocks. */
-	refineTimingUnit(messageId: string, renderKey: string, unit: PlaybackUnit, checkpoints: TimingCheckpoint[], coverage: { estimated: number; total: number }): PlaybackTimingSnapshot | undefined {
+	refineTimingUnit(messageId: string, renderKey: string, unit: PlaybackUnit, checkpoints: TimingCheckpoint[], coverage: { estimated: number; total: number }, sourceWords?: number[]): PlaybackTimingSnapshot | undefined {
 		const record = this.#records.get(messageId);
 		const previous = this.timingForUnit(messageId, renderKey, unit);
-		// Unknown/mixed provenance cannot safely be replaced from sparse checkpoints.
-		if (!record || !previous?.length || !checkpoints.length || previous.some(point => point.quality !== "estimated") ||
+		// Revalidate current provenance after asynchronous alignment/recovery, not the invocation snapshot.
+		if (!record || !previous?.length || !checkpoints.length ||
+			(sourceWords ? !this.retryableTimingUnit(messageId, renderKey, unit, sourceWords) : previous.some(point => point.quality !== "estimated")) ||
 			previous[0].duration !== checkpoints[0].duration) return;
+		if (sourceWords?.length) {
+			const words = checkpoints.slice(1);
+			if (words.length !== sourceWords.length || words.some((word, i) => word.sourceOffset !== sourceWords[i] ||
+				(word.quality !== "estimated" && word.quality !== "ctc-refined"))) return;
+			const retained = new Map(previous.slice(1).map(word => [word.sourceOffset, word]));
+			const merged = words.map(word => retained.has(word.sourceOffset) &&
+				(retained.get(word.sourceOffset)!.quality === "ctc-refined" || word.quality === "estimated")
+				? { ...retained.get(word.sourceOffset)! } : { ...word });
+			// Incompatible candidates are skipped, never repaired by moving an old CTC anchor.
+			if (merged.some((word, i) => !Number.isFinite(word.time) || word.time < 0 || word.time >= previous[0].duration ||
+				(i > 0 && word.time <= merged[i - 1].time))) return;
+			coverage = { total: merged.length, estimated: merged.filter(word => word.quality === "estimated").length };
+			const quality = coverage.estimated === 0 ? "ctc-refined" : coverage.estimated === coverage.total ? "estimated" : "mixed";
+			checkpoints = [{ ...previous[0], quality }, ...merged];
+		}
 		const anchor = record.checkpoints.filter(point => point.duration > 0 && point.sourceOffset === unit.sourceOffset)[unit.skipUnits];
 		if (anchor) {
 			record.checkpoints = record.checkpoints.filter(point => point !== anchor && !(point.duration === 0 && point.time >= anchor.time && point.time < anchor.time + anchor.duration));

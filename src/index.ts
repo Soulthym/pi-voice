@@ -3085,7 +3085,13 @@ export default async function (pi: ExtensionAPI) {
 					previousSource = item.source.start;
 					const unit = { sourceOffset: item.source.start, skipUnits };
 					const old = playbackHistory.timingForUnit(message.id, plan.renderKey, unit);
-					if (!old?.length || old.some(point => point.quality !== "estimated")) { skipped++; continue; }
+					if (!old?.length) { skipped++; continue; }
+					const mapped = new NarrationProgress();
+					mapped.setCompletedText(message.text);
+					mapped.registerSegment({ id: 1, utterance: 1, text: item.text, source: item.source });
+					mapped.setSegmentAudio(1, 0, old[0].duration);
+					const sourceWords = item.wordTimings ? mapped.sourceWordTimings(1).map(word => word.sourceOffset) : [];
+					if (!playbackHistory.retryableTimingUnit(message.id, plan.renderKey, unit, sourceWords)) { skipped++; continue; }
 					// One cache decode/alignment at a time; foreground owns the next slot.
 					await new Promise<void>(resolve => setImmediate(resolve));
 					let result: TimingRetryResult | undefined;
@@ -3108,28 +3114,27 @@ export default async function (pi: ExtensionAPI) {
 					if (!compatible(message, plan.renderKey)) return;
 					if (result.status === "cache-miss") { missing++; continue; }
 					if (!Number.isFinite(result.duration) || result.duration <= 0 || Math.abs(result.duration - old[0].duration) > 0.02) { skipped++; continue; }
-					const mapped = new NarrationProgress();
-					mapped.setCompletedText(message.text);
-					mapped.registerSegment({ id: 1, utterance: 1, text: item.text, source: item.source });
-					mapped.setSegmentAudio(1, 0, old[0].duration);
 					mapped.setAlignment(1, result.words, result.quality);
 					const words = item.wordTimings ? mapped.sourceWordTimings(1) : [];
 					const quality = item.wordTimings ? mapped.timingQuality(1) : result.quality;
 					const coverage = { total: words.length, estimated: words.filter(word => word.quality !== "ctc-refined").length };
-					const points = [{ ...old[0], quality }, ...words.filter(word => word.sourceOffset !== unit.sourceOffset)
-						.map(word => ({ ...word, duration: 0 }))];
-					const snapshot = playbackHistory.refineTimingUnit(message.id, plan.renderKey, unit, points, coverage);
+					const points = [{ ...old[0], quality }, ...words.map(word => ({ ...word, duration: 0 }))];
+					const previousRefined = playbackHistory.timingForUnit(message.id, plan.renderKey, unit)
+						?.filter(point => point.duration === 0 && point.quality === "ctc-refined").length ?? 0;
+					const snapshot = playbackHistory.refineTimingUnit(message.id, plan.renderKey, unit, points, coverage, sourceWords);
 					if (snapshot) {
 						pi.appendEntry(PLAYBACK_TIMING_ENTRY, snapshot);
 						let versions = persistedTimingSnapshots.get(message.id);
 						if (!versions) persistedTimingSnapshots.set(message.id, versions = new Map());
 						versions.set(plan.renderKey, snapshot);
-						if (quality === "ctc-refined" || quality === "mixed") improved++;
-						if (quality !== "ctc-refined") estimated++;
-					}
+						const saved = snapshot.units?.find(entry => entry.unit.sourceOffset === unit.sourceOffset && entry.unit.skipUnits === unit.skipUnits);
+						if (item.wordTimings ? (saved?.coverage?.total ?? 0) - (saved?.coverage?.estimated ?? 0) > previousRefined
+							: quality === "ctc-refined" || quality === "mixed") improved++;
+						if (item.wordTimings ? saved?.coverage?.estimated : quality !== "ctc-refined") estimated++;
+					} else skipped++;
 				}
 			}
-			if (current()) notifyVoice(ctx, `Timing retry · ${improved} improved · ${estimated} still estimated · ${missing} missing cached audio · ${skipped} skipped (missing plan, refined/mixed or unknown timing)`, "info");
+			if (current()) notifyVoice(ctx, `Timing retry · ${improved} improved · ${estimated} still estimated · ${missing} missing cached audio · ${skipped} skipped (missing plan, refined, incompatible or unknown timing)`, "info");
 		})().catch(error => {
 			if (current()) notifyVoice(ctx, `Timing retry · ${String(error)}`, "error");
 		}).finally(() => {

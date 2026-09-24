@@ -60,13 +60,14 @@ test("unimproved retry leaves pending original CTC eligible but cannot revive st
 	], { estimated: 2, total: 2 }));
 	history.setTimingQuality(1, "ctc-refined");
 	history.setWordTimings(1, refined.map(point => ({ time: point.time, sourceOffset: point.sourceOffset, quality: point.quality })));
-	assert.deepEqual(history.timingForUnit("a", "plan", unit), refined);
+	const withFirstWord = [refined[0], { ...refined[0], duration: 0 }, refined[1]];
+	assert.deepEqual(history.timingForUnit("a", "plan", unit), withFirstWord);
 	assert.equal(history.status()?.position, 1);
 	history.beginCapture(message.id, message.text);
 	history.setTimingQuality(1, "estimated");
 	history.setWordTimings(1, [{ time: 1.5, sourceOffset: 6, quality: "estimated" }]);
 	history.setSegmentAudio(1, 0, 9);
-	assert.deepEqual(history.timingForUnit("a", "plan", unit), refined, "retired ID cannot change quality, words or duration");
+	assert.deepEqual(history.timingForUnit("a", "plan", unit), withFirstWord, "retired ID cannot change quality, words or duration");
 });
 
 test("partial retry snapshot cannot rewind a newer capture during sync", () => {
