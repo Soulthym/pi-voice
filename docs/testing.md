@@ -1,6 +1,16 @@
 # Tests
 
-## Current checkpoint — phase 3 timing retry
+## Current checkpoint — final review fixes after `fa80347`
+
+`npm run check` passed; full checkout `npm test`: **1038 passed / 33 compatibility skips / zero failures (1071 total)**; full installed-native `npm test`: **1071 passed / zero skips or failures**. Logs: `/tmp/fix4-check.log`, `/tmp/fix4-test-final.log`, `/tmp/fix4-native.log`. LSP is unavailable; TypeScript supplies diagnostics.
+
+- Stop-journal tests cover late admission followed by matching release and cancel ACK, unreleased late scopes, and preemption retaining ownership until matching proof. ACK alone never retires remote handles (`73b4f27`, `e846d98`).
+- Actual PhoneInput and filesystem-backed recovery with fake sockets cover accepted single-response AUDIO/OK retirement, completed custom endpoint A followed by active B and restart recovery, plus rejection/EOF without proof (`32d8da6`).
+- Automatic recovery stays enabled while deferred other-unit and same-unit measurements race retries. Reload preserves refined quality and all word coverage; estimated retries leave original pending CTC eligible, stale identity remains rejected, and paused highlight/scroll state stays unchanged (`4fb16b9`, `e5232cd`). Coverage expectation updates: `33969ed`.
+
+The initial full run exposed three obsolete unknown-coverage assertions, updated for intentionally persisted word counts. A focused preemption run also reported a handoff failure that its agent reproduced before that change; both final serial full suites above pass. These are synthetic transports/measurements and inert installed-native UI tests, not real restart/device proof. Orphan ownership still fails closed: saved remote receipts do not establish complete durable admission/local-child proof, and no unsafe unlock was added. No providers, models, hardware, live Pi/SSH/client restarts, runtime settings or private exports were used; `ISSUES.md` and user-removed demos remain untouched. The already-landed large retry feature was not rewritten; follow-up fixes remain separate logical commits.
+
+## Historical checkpoint — phase 3 timing retry
 
 Timing reports, worker commands and silent cached-audio alignment retry are implemented. Documentation-pass validation: `npm run check` passed; the four targeted retry files (`index-timing-retry`, `playback-timing-retry`, `worker-client-timing-retry`, `worker-timing-retry`) passed **5/5 tests**, no skips (`/tmp/phase3-docs-retry-tests.log`). LSP is unavailable. These checks use mocked inference/transport and cover command scope, metadata persistence, paused-state preservation, cancellation, bounded cache reads and the no-synthesis path; no real alignment accuracy or live behavior is established. This documentation pass did not rerun the full suite. Earlier suite counts below are historical, not current validation.
 

@@ -2,7 +2,15 @@
 
 Updated incrementally. Companion: `PLAN.md`. Reorganize freely while preserving evidence and disposition.
 
-## Current checkpoint — phase 2 display coherence and scoped recovery
+## Current checkpoint — final review fixes after `fa80347`
+
+- **A — stop journal:** cleanup now checks unresolved saved scopes rather than generation changes. Late handles with matching releases plus cancel ACK clear safely; unreleased handles and pending preemption retain ownership. ACK is not a global remote-release receipt (`73b4f27`, `e846d98`).
+- **B — phone capture:** accepted single-response AUDIO/OK persists matching retirement before dropping its ticket; rejection/EOF never proves retirement. Actual PhoneInput/recovery tests use temporary filesystem state and fake sockets to verify completed custom endpoint A cannot obstruct recovery of active B (`32d8da6`).
+- **C/D — timing quality:** automatic recovery merges current compatible unit metadata and all coverage, including refinements arriving during same-unit measurement. Wholly estimated retry does not supersede pending original CTC. Deferred-background/retry/reload and paused-original-CTC regressions preserve refined quality/counts and paused highlight/scroll, with stale identity still rejected (`4fb16b9`, `e5232cd`; coverage expectation updates `33969ed`).
+- Validation: typecheck passed; full checkout **1038 passed / 33 compatibility skips / zero failures**, installed-native **1071 passed / zero skips or failures**. Logs and initial failure disposition: `docs/testing.md`. LSP unavailable. All inference/transport is mocked; native UI is inert. No real providers/models/hardware, live restart, settings or private exports; `ISSUES.md` untouched and deleted demos not restored.
+- **Remaining real restart-proof limitation:** complete durable admission/local-child proof is still missing. An orphan ownership fence remains blocked even if all saved remote receipts succeed; these fixes do not provide automatic reclamation or an unsafe unlock. The already-landed >800-line retry feature/history is unchanged; these fixes are split by stop journal, phone capture and timing-quality concerns.
+
+## Historical checkpoint — phase 2 display coherence and scoped recovery
 
 - Phase 2 points **1–6 plus handoff/off presentation are implemented offline**. Active incomplete/context/resource waits are Queued; unknown/incomplete totals have a neutral bar and only reliable elapsed time (otherwise `--:--`), not a false completion fraction. Phase, clock and index follow the audible foreground A until B takes over; B never borrows A's clock, and paused selection stays stable. Progress updates reuse the mounted component rather than reinsert it; off renders no blank rows. Narrow layout shrinks/omits decoration before status/time and keeps a closed right-aligned device badge where space permits.
 - Lease-free live intent survives normal prompt submission and canonical source-ID handoff; unread output blocked by another owner is Queued, not live. Device adoption shows Connecting during the handoff, then preserves deliberate silent pause for prior playback or Idle for an idle session. Picker open/cancel does not create a handoff or acquire ownership.
