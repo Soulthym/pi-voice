@@ -7,7 +7,8 @@
 - Requested addition: a silent command to retry estimated word alignment, using cached audio where available. Preserve playing/paused state, selection, cursor, viewport and drafts; do not start audible playback. Command spelling and scope remain to be settled. This is a requirement, not an available command.
 - Current workaround: optionally `/voice setup`, then select a message and replay with F5 to attempt alignment again; `/voice timing` reports results. Refinement is not guaranteed. Background timing recovery produces estimates, not forced alignment.
 - Point 2 approved: unknown totals use a neutral bar without a false zero-position marker; streaming/incomplete totals show reliable elapsed time only, not a completion fraction. Complete totals show normal progress and elapsed/total. Unpaused caught-up live shows red `● live` instead of time. Never substitute the previous message's clock for unavailable current timing. Implementation pending.
-- Next decision: point 3, consistent source identity for status, time and message index. The remaining audit findings are still proposals.
+- Point 3 approved: derive status, timing and message index from one consistent playback context. While A plays, describe A regardless of preparation for B. After A finishes and playback awaits B, describe B's preparation with its own timing or unknown timing. Paused selection and position remain stable. Implementation pending.
+- Next decision: point 4, stable widget mounting/order. The remaining audit findings are still proposals.
 
 ## Previous handoff — completed chronological live follow
 
