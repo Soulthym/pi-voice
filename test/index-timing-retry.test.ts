@@ -24,7 +24,7 @@ class RetryWorker extends MockedVoiceWorkerClient {
 }
 mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: RetryWorker } });
 const tick = async () => { await new Promise(resolve => setTimeout(resolve, 25)); };
-const result: TimingRetryResult = { status: "timing", duration: 2, quality: "ctc-refined", words: [
+const result: Extract<TimingRetryResult, { status: "timing" }> = { status: "timing", duration: 2, quality: "ctc-refined", words: [
 	{ text: "Alpha", start: 0, end: 0.5, quality: "ctc-refined" },
 	{ text: "beta", start: 1, end: 1.5, quality: "ctc-refined" },
 ] };
@@ -153,7 +153,7 @@ test("real timing retry handler snapshots scope, stays silent, persists coverage
 	assert.equal(snapshots().length, initial + 1);
 });
 
-test("retry current refines a paused capture without moving its highlight, cursor, viewport or draft", async t => {
+for (const improved of [true, false]) test(`paused retry preserves playback and accepts pending CTC after an unimproved retry (${improved})`, async t => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-retry-paused-"));
 	const env = { PI_VOICE_CONFIG: path.join(root, "config"), PI_VOICE_COORDINATOR_DIR: path.join(root, "coordinator"), PI_VOICE_DEVICE_DIR: path.join(root, "devices") };
 	const previous = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
@@ -185,13 +185,25 @@ test("retry current refines a paused capture without moving its highlight, curso
 	await host.command("timing retry current");
 	await tick();
 	assert.equal(calls.length, count + 1);
-	calls.at(-1)!.resolve(result);
+	calls.at(-1)!.resolve(improved ? result : { ...result, quality: "estimated",
+		words: result.words.map(word => ({ ...word, quality: "estimated" })) });
 	await tick();
 	assert.equal(host.render("Alpha beta."), frozen);
 	assert.equal(host.widgetLines()![0], line);
 	assert.equal(host.scrollView.scrollTop, top);
 	const snapshot = host.entries.filter(entry => entry.customType === "pi-voice.playback-timing").at(-1)!.data;
-	assert.deepEqual(snapshot.units[0].coverage, { estimated: 0, total: 2 });
+	assert.deepEqual(snapshot.units[0].coverage, { estimated: improved ? 0 : 2, total: 2 });
+	if (!improved) {
+		worker.emit({ type: "alignment", segmentId: segment.segmentId, quality: "ctc-refined", words: result.words });
+		worker.emit({ type: "idle", utterance: segment.utterance });
+		const accepted = host.entries.filter(entry => entry.customType === "pi-voice.playback-timing").at(-1)!.data;
+		assert.equal(accepted.units[0].checkpoints[0].quality, "ctc-refined");
+		assert.deepEqual(accepted.units[0].coverage, { estimated: 0, total: 2 });
+		assert.equal(host.render("Alpha beta."), frozen);
+		assert.equal(host.scrollView.scrollTop, top);
+		assert.match(host.widgetLines()![0], /Paused/);
+		return;
+	}
 	worker.emit({ type: "alignment", segmentId: segment.segmentId, quality: "estimated", words: [
 		{ text: "Alpha", start: 0, end: 1, quality: "estimated" },
 		{ text: "beta", start: 1.5, end: 2, quality: "estimated" },

@@ -3212,6 +3212,7 @@ export default async function (pi: ExtensionAPI) {
 							if (!Number.isFinite(duration) || duration <= 0) throw new Error("Audio duration unavailable");
 							const unitStart = checkpoints.length;
 							checkpoints.push({ time, duration, sourceOffset: item.source.start, quality: "estimated" });
+							let coverage = { estimated: 0, total: 0 };
 							if (item.wordTimings) {
 								phase("estimating word timing");
 								const segmentId = ++timingSegmentId;
@@ -3222,7 +3223,9 @@ export default async function (pi: ExtensionAPI) {
 									source: item.source,
 								});
 								timingNarration.setSegmentAudio(segmentId, 0, duration);
-								for (const word of timingNarration.sourceWordTimings(segmentId)) {
+								const words = timingNarration.sourceWordTimings(segmentId);
+								coverage = { estimated: words.filter(word => word.quality !== "ctc-refined").length, total: words.length };
+								for (const word of words) {
 									const wordTime = time + word.time;
 									if (word.sourceOffset === item.source.start || wordTime - lastWordTime < 0.4) continue;
 									checkpoints.push({ time: wordTime, duration: 0, sourceOffset: word.sourceOffset, quality: word.quality });
@@ -3231,7 +3234,7 @@ export default async function (pi: ExtensionAPI) {
 							}
 							if (renderKeyFor(ctx, contextual) !== measuredRenderKey) return;
 							playbackHistory.retainTimingUnit(message.id, measuredRenderKey, unit,
-								checkpoints.slice(unitStart).map(point => ({ ...point, time: point.time - time })));
+								checkpoints.slice(unitStart).map(point => ({ ...point, time: point.time - time })), coverage);
 							time += duration;
 						}
 					} catch (error) {
@@ -3249,14 +3252,14 @@ export default async function (pi: ExtensionAPI) {
 					try {
 						if (renderKeyFor(ctx, contextual) !== measuredRenderKey) return;
 						syncPlaybackMessages(ctx);
-						const snapshot: PlaybackTimingSnapshot = {
+						const snapshot = playbackHistory.completeRecoveredTimings({
 							version: 3,
 							messageId: message.id,
 							renderKey: measuredRenderKey,
 							duration: time,
 							checkpoints,
-						};
-						playbackHistory.restore([snapshot]);
+						});
+						if (!snapshot) return;
 						requestPlaybackTimeline();
 						pi.appendEntry(PLAYBACK_TIMING_ENTRY, snapshot);
 						processedMessages += 1;

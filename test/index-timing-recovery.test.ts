@@ -4,10 +4,18 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test, { mock } from "node:test";
 import { FakeVoiceHost, MockedVoiceWorkerClient, streamCompletedResponse } from "./helpers/fake-voice-host.js";
+import { PlaybackHistory } from "../src/playback-history.js";
+import type { TimingRetryResult } from "../src/worker-client.js";
 
 const measured: string[] = [];
 let duration = 0;
 class MeasuringWorker extends MockedVoiceWorkerClient {
+	retryTiming(): Promise<TimingRetryResult> {
+		return Promise.resolve({ status: "timing", duration: 2, quality: "ctc-refined", words: [
+			{ text: "Alpha", start: 0, end: 0.5, quality: "ctc-refined" },
+			{ text: "beta", start: 1, end: 1.5, quality: "ctc-refined" },
+		] });
+	}
 	override measureSegment(...args: unknown[]): Promise<number> {
 		measured.push(String(args[0]));
 		return Promise.resolve(duration);
@@ -115,4 +123,63 @@ test("same-transport resume cancels paused background timing before unpausing", 
 	finish?.(9);
 	await new Promise(resolve => setImmediate(resolve));
 	assert.equal(host.entries.some(entry => entry.data?.version === 3), false, "cancelled recovery cannot persist a late result");
+});
+
+test("background completion merges a concurrent paused retry and persists all unit coverage", async t => {
+	mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: MeasuringWorker } });
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-recovery-retry-"));
+	const keys = ["PI_VOICE_CONFIG", "PI_VOICE_COORDINATOR_DIR", "PI_VOICE_DEVICE_DIR"];
+	const previous = keys.map(key => process.env[key]);
+	keys.forEach((key, i) => { process.env[key] = path.join(root, String(i)); });
+	await fs.writeFile(process.env.PI_VOICE_CONFIG!, JSON.stringify({ enabled: true, mode: "assistant", input: "disabled", output: "local",
+		codeDescriptionPreprocessConcurrency: 0, timingPreprocessConcurrency: 1 }));
+	const host = new FakeVoiceHost(root, "recovery-retry");
+	let finish: ((duration: number) => void) | undefined;
+	const measurements: string[] = [];
+	mock.method(MeasuringWorker.prototype, "measureSegment", (text: string) => {
+		measurements.push(text);
+		return new Promise<number>(resolve => { finish = resolve; });
+	});
+	t.after(async () => {
+		finish?.(2); await host.shutdown(); mock.reset();
+		keys.forEach((key, i) => { if (previous[i] === undefined) delete process.env[key]; else process.env[key] = previous[i]; });
+		await fs.rm(root, { recursive: true, force: true });
+	});
+	const workerStart = MockedVoiceWorkerClient.instances.length;
+	const text = "Alpha beta. Gamma delta.";
+	await host.start();
+	await streamCompletedResponse(host, "answer", "user", text);
+	const worker = MockedVoiceWorkerClient.instances.slice(workerStart).find(worker => worker.sent.length)!;
+	const beforeReplay = worker.sent.length;
+	await host.shortcut("f5");
+	const first = worker.sent[beforeReplay] as { segmentId: number; utterance: number };
+	worker.emit({ type: "segment-audio", segmentId: first.segmentId, utterance: first.utterance, start: 0, duration: 2, timingQuality: "estimated" });
+	worker.emit({ type: "playback", utterance: first.utterance, position: 0.5 });
+	await host.shortcut("f8");
+	for (let i = 0; i < 100 && !finish; i++) await new Promise(resolve => setTimeout(resolve, 10));
+	assert.deepEqual(measurements, ["Gamma delta."]);
+	const frozen = host.render(text);
+	const top = host.scrollView.scrollTop;
+	const sent = worker.sent.length;
+	const snapshots = () => host.entries.filter(entry => entry.customType === "pi-voice.playback-timing");
+	await host.command("timing retry current");
+	for (let i = 0; i < 100 && !snapshots().length; i++) await new Promise(resolve => setTimeout(resolve, 10));
+	assert.equal(snapshots().at(-1)?.data.units[0].checkpoints[0].quality, "ctc-refined");
+	assert.equal(snapshots().at(-1)?.data.complete, false);
+	finish!(2);
+	for (let i = 0; i < 100 && snapshots().at(-1)?.data.complete === false; i++) await new Promise(resolve => setTimeout(resolve, 10));
+	const saved = snapshots().at(-1)!.data;
+	assert.notEqual(saved.complete, false);
+	const restored = new PlaybackHistory();
+	restored.sync([{ id: saved.messageId, text, renderKey: saved.renderKey }]);
+	restored.restore(JSON.parse(JSON.stringify([saved])));
+	assert.equal(restored.timingForUnit(saved.messageId, saved.renderKey, { sourceOffset: 0, skipUnits: 0 })?.[0].quality, "ctc-refined");
+	assert.equal(saved.checkpoints[0].quality, "ctc-refined");
+	assert.deepEqual(restored.status()?.wordTimingCoverage, { estimated: 2, total: 4 });
+	assert.equal(restored.status()?.timingsComplete, true);
+	assert.equal(host.render(text), frozen);
+	assert.equal(host.scrollView.scrollTop, top);
+	assert.equal(worker.sent.length, sent);
+	assert.equal(worker.pauses.at(-1), true);
+	assert.equal(host.modelRequests.length, 0);
 });

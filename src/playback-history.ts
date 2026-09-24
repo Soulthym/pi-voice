@@ -446,11 +446,41 @@ export class PlaybackHistory {
 			.map(point => ({ ...point, time: point.time - anchor.time }));
 	}
 
-	retainTimingUnit(messageId: string, renderKey: string, unit: PlaybackUnit, checkpoints: TimingCheckpoint[]): void {
+	retainTimingUnit(messageId: string, renderKey: string, unit: PlaybackUnit, checkpoints: TimingCheckpoint[], coverage?: { estimated: number; total: number }): void {
 		const record = this.#records.get(messageId);
 		if (!record || record.renderKey !== renderKey || !checkpoints.length) return;
 		record.units ??= new Map();
-		record.units.set(`${unit.sourceOffset}:${unit.skipUnits}`, checkpoints.map(point => ({ ...point })));
+		const key = `${unit.sourceOffset}:${unit.skipUnits}`;
+		record.units.set(key, checkpoints.map(point => ({ ...point })));
+		if (coverage) {
+			record.wordTimingCoverage ??= new Map();
+			record.wordTimingCoverage.set(key, { ...coverage });
+		}
+	}
+
+	/** Join recovery's absolute clock with current unit metadata after asynchronous measurement. */
+	completeRecoveredTimings(snapshot: PlaybackTimingSnapshot): PlaybackTimingSnapshot | undefined {
+		const record = this.#records.get(snapshot.messageId);
+		if (!record || record.renderKey !== snapshot.renderKey) return;
+		const checkpoints: TimingCheckpoint[] = [];
+		const units: NonNullable<PlaybackTimingSnapshot["units"]> = [];
+		const ordinals = new Map<number, number>();
+		for (const anchor of snapshot.checkpoints.filter(point => point.duration > 0)) {
+			const skipUnits = ordinals.get(anchor.sourceOffset) ?? 0;
+			ordinals.set(anchor.sourceOffset, skipUnits + 1);
+			const unit = { sourceOffset: anchor.sourceOffset, skipUnits };
+			const current = this.timingForUnit(snapshot.messageId, snapshot.renderKey, unit);
+			const compatible = current?.[0].duration === anchor.duration;
+			const points = compatible ? current! : snapshot.checkpoints
+				.filter(point => point === anchor || (point.duration === 0 && point.time >= anchor.time && point.time < anchor.time + anchor.duration))
+				.map(point => ({ ...point, time: point.time - anchor.time }));
+			checkpoints.push(...points.map(point => ({ ...point, time: anchor.time + point.time })));
+			units.push({ unit, checkpoints: points, coverage: compatible
+				? record.wordTimingCoverage?.get(`${unit.sourceOffset}:${unit.skipUnits}`) : undefined });
+		}
+		const merged = { ...snapshot, checkpoints, units };
+		this.restore([merged]);
+		return merged;
 	}
 
 	/** Cache-only refinement: never touches capture, selection or clocks. */
@@ -467,10 +497,10 @@ export class PlaybackHistory {
 			record.checkpoints.sort((a, b) => a.time - b.time);
 		}
 		this.retainTimingUnit(messageId, renderKey, unit, checkpoints);
-		// Retire only these consumers' metadata, not their playback or other units.
+		// Only improved retries retire original metadata; an estimated retry must leave pending CTC eligible.
 		for (const segment of this.#segments.values()) {
 			if (segment.capture.record === record && segment.sourceOffset === unit.sourceOffset && segment.skipUnits === unit.skipUnits) {
-				segment.timingSuperseded = true;
+				segment.timingSuperseded = checkpoints.some(point => point.quality === "ctc-refined" || point.quality === "mixed");
 			}
 		}
 		record.wordTimingCoverage ??= new Map();
