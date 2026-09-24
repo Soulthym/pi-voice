@@ -221,7 +221,7 @@ export class SessionCoordinator {
 			return true;
 		}
 		// A same-PID owner may still be stopping transports after session replacement.
-		// Only its acknowledged release (or a stale lease) permits acquisition.
+		// Only its acknowledged release permits acquisition.
 		if (remaining) return false;
 		const lease = this.#acquireLease(this.#speechPath(), "speech");
 		this.#speechLease = lease;
@@ -231,7 +231,7 @@ export class SessionCoordinator {
 	speechOwner(): SessionPresence | undefined {
 		this.#removeStaleLease(this.#speechPath());
 		const owner = readJson<Lease>(path.join(this.#speechPath(), "lease.json"));
-		return owner && this.#isLive(owner) ? owner : undefined;
+		return owner?.kind === "speech" ? owner : undefined;
 	}
 
 	ownsSpeech(): boolean {
@@ -458,7 +458,9 @@ export class SessionCoordinator {
 	#removeStaleLease(directory: string): void {
 		if (!fs.existsSync(directory)) return;
 		const lease = readJson<Lease>(path.join(directory, "lease.json"));
-		if (lease && this.#isLive(lease)) return;
+		// Process death/heartbeat expiry cannot prove a remote player or recorder stopped.
+		// Keep the durable speech fence; only the owning cleanup may release it.
+		if (lease && (lease.kind === "speech" || this.#isLive(lease))) return;
 		try {
 			const age = Date.now() - fs.statSync(directory).mtimeMs;
 			if (!lease && age < 2_000) return;

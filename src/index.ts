@@ -3342,6 +3342,7 @@ export default async function (pi: ExtensionAPI) {
 		clearPlaybackTransport();
 		try {
 			await Promise.all([inputCancelled, deviceRebind?.catch(() => {}), trackStop("output", vocalizer.shutdown())]);
+			if (Object.values(stopResources).some(resource => resource.episode || resource.cleanup)) throw new Error("Newer stop remains unconfirmed");
 			deviceRebind = undefined;
 			for (const resolve of transportCancelWaiters.values()) resolve();
 			transportCancelWaiters.clear();
@@ -3573,6 +3574,7 @@ export default async function (pi: ExtensionAPI) {
 			trackStop("input", phoneInput.cancel()), retiringRebind?.catch(() => {}),
 			...workers.map(worker => worker.terminate()), trackStop("output", vocalizer.shutdown()),
 		]).then(() => {
+			if (Object.values(stopResources).some(resource => resource.episode || resource.cleanup)) throw new Error("Newer stop remains unconfirmed");
 			retiringCoordinator?.shutdown();
 			retiredStops.delete(cleanup);
 		}).finally(() => { stopping = undefined; });

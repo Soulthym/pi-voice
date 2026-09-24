@@ -326,3 +326,21 @@ test("shares preprocessing concurrency slots across sessions", async () => {
 		fs.rmSync(root, { recursive: true, force: true });
 	}
 });
+
+for (const pid of [process.pid, 2147483647]) test(`speech fence survives expiry and restart (pid ${pid})`, async () => {
+ const { root, first, second } = coordinators();
+ try {
+  assert.equal(first.tryAcquireSpeech(), true);
+  const file = path.join(root, "speech.lock", "lease.json");
+  const lease = JSON.parse(fs.readFileSync(file, "utf8"));
+  fs.writeFileSync(file, JSON.stringify({ ...lease, pid, updatedAt: 0 }));
+  assert.equal(second.speechOwner()?.instanceId, first.instanceId);
+  assert.equal(second.tryAcquireSpeech(), false, "expiry/dead PID is not stop proof");
+  assert.equal(await second.forceAcquireSpeech(), false, "handoff timeout is not proof either");
+  first.releaseSpeech(); // Original retained cleanup has obtained actual stop proof.
+  assert.equal(second.tryAcquireSpeech(), true);
+ } finally {
+  first.shutdown(); second.shutdown();
+  fs.rmSync(root, { recursive: true, force: true });
+ }
+});

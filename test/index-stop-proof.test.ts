@@ -607,3 +607,19 @@ for (const route of ["reconnect", "device local"]) for (const historical of [fal
   else assert.equal(worker.sent.length, sent, "F8 cannot revive aborted source after transport reset");
  });
 }
+
+test("session restart cannot retire ownership using proof older than a remote episode", async t => {
+ const { host, worker, lease } = await setup(t);
+ await host.command("test Old audio.");
+ const stopped = Promise.withResolvers<void>();
+ const terminate = t.mock.method(worker, "terminate", () => stopped.promise);
+ worker.emit({ type: "error", code: "REMOTE_PLAYBACK_UNCONFIRMED", message: "old failure", utterance: 101 });
+ const restart = host.emit("session_start", { type: "session_start" });
+ const rejected = assert.rejects(restart, /Newer stop remains unconfirmed/);
+ await settle();
+ worker.emit({ type: "error", code: "REMOTE_PLAYBACK_UNCONFIRMED", message: "new failure", utterance: 102 });
+ stopped.resolve(); await rejected;
+ assert.ok(await fs.stat(lease));
+ terminate.mock.mockImplementation(async () => {});
+ await host.command("reconnect"); await settle();
+});
