@@ -17,7 +17,8 @@
 - Terminal queue-failure cleanup approved: recognize terminal failure of any utterance in the current playback queue, cancel that queue and update the UI promptly. Release ownership only after confirmed stop. Ignore ordinary retired-playback errors without discarding unresolved stop evidence. Implementation pending.
 - Paused-source cancellation approved: process abort/error cancellation before paused-source queueing returns; F8 must not revive cancelled playback. Preserve unrelated paused historical playback and position, retain ownership until affected transport stop is confirmed, and do not delete the saved transcript. Implementation pending.
 - Persistent stop warnings and recovery approved: keep input/output stop-unconfirmed diagnostics visible until matching proof, identifying the blocking device and directing the user to restore its connection and retry `/voice reconnect`. Verify reconnect retries both resources with the original handles. Ordinary Ready/Idle events, disconnects and Pi restarts must not clear uncertainty or release ownership; no unsafe force-release bypass and no repeated notification spam. Implementation pending.
-- Next decision: internal handoff pause presentation. Timing-retry command details also remain to be settled. All implementation remains deferred until the point-by-point discussion is complete.
+- Handoff presentation approved: display Connecting during a device handoff, not Paused merely because an internal transport is paused. Paused follows deliberate playback-pause intent, including the agreed silent post-switch state for previously active playback; an idle session stays idle after switching. Opening/cancelling the picker changes neither state nor ownership. Implementation pending.
+- Next decision: timing-retry command spelling, scope and behavior. All implementation remains deferred until the point-by-point discussion is complete.
 
 ## Previous handoff — completed chronological live follow
 
