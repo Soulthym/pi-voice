@@ -61,6 +61,7 @@ export class Vocalizer {
 	#onNarrationSegment: ((segment: NarrationSegment) => void) | undefined;
 	#onUtteranceAllocated: ((utterance: number) => void) | undefined;
 	#onUtteranceEnded: ((utterance: number) => void) | undefined;
+	#onSourceOmitted: ((source: SpeakableSourceRange) => void) | undefined;
 	#idleTimer: NodeJS.Timeout | null = null;
 	#deliveryBarrier: Promise<void> | null = null;
 	#descriptionControllers = new Set<AbortController>();
@@ -80,9 +81,11 @@ export class Vocalizer {
 		onUtteranceAllocated?: (utterance: number) => void,
 		onUtteranceEnded?: (utterance: number) => void,
 		onPlaybackPhase?: (phase: PlaybackPhase) => void,
+		onSourceOmitted?: (source: SpeakableSourceRange) => void,
 	) {
 		this.#getConfig = getConfig;
 		this.#onPlaybackPhase = onPlaybackPhase;
+		this.#onSourceOmitted = onSourceOmitted;
 		this.#worker = worker ?? new VoiceWorkerClient(event => {
 			this.handleWorkerEvent(event);
 			onEvent(event);
@@ -337,6 +340,7 @@ export class Vocalizer {
 		const generation = this.#generation;
 		const sourceBase = this.#sourceOffset;
 		const skipUnits = this.#skipUnits;
+		const trackNarration = this.#trackNarration;
 		this.#skipUnits = 0;
 		const controller = new AbortController();
 		this.#descriptionControllers.add(controller);
@@ -368,6 +372,7 @@ export class Vocalizer {
 		this.#deliveryBarrier = before.then(async () => {
 			const spoken = await ready;
 			if (generation !== this.#generation) return;
+			if (spoken.omitted && trackNarration) this.#onSourceOmitted?.(source);
 			this.#sendDescription(spoken, block, source, utterance, sourceBase, skipUnits);
 			if (foreground) foreground.deferred -= 1;
 			this.#reportPhase();

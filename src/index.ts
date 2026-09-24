@@ -1730,6 +1730,7 @@ export default async function (pi: ExtensionAPI) {
 		},
 		utterance => playbackHistory.finishTimingGeneration(utterance),
 		phase => { playbackPhase = phase; requestPlaybackTimeline(); },
+		source => { narration.consumeOmittedSource(source.end); requestPlaybackTimeline(); },
 	);
 	const clearPlaybackTransport = (): number | undefined => {
 		devicePicker?.abort();

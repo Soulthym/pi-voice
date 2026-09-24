@@ -948,6 +948,11 @@ export class NarrationProgress {
 		return Math.max(this.#cursor, this.#consumedSourceEnd);
 	}
 
+	/** Terminal silence needs no playback, even while paused; never alter highlights. */
+	consumeOmittedSource(end: number): void {
+		this.#consumedSourceEnd = Math.max(this.#consumedSourceEnd, end);
+	}
+
 	#consumeSegment(segment: NarrationSegment): void {
 		if (this.#paused) return;
 		const description = segment.codeDescription;
