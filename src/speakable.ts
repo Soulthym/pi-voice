@@ -184,6 +184,11 @@ export class SpeakableStream {
 		return out;
 	}
 
+	/** A fence still awaiting its closing marker, including a partial opening line. */
+	get unfinishedFence(): boolean {
+		return this.#mode === "fence-open" || (this.#mode === "fence-body" && !this.#isClosingFence(this.#fenceLine));
+	}
+
 	/** Message end: drain everything left, including a trailing partial sentence. */
 	flush(): SpeakableItem[] {
 		const out: SpeakableItem[] = [];
