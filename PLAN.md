@@ -1,6 +1,17 @@
 # Pi Voice — implemented agreements and live-validation handoff
 
-## Current discussion — display coherence and timing retry (not implemented)
+## Phase 1 checkpoint — highlighting and stop safety (partial)
+
+- User authorized the complete discussion after the USERPC crash; this implementation is restricted to phase 1. The historical “no implementation yet” statements below describe the earlier discussion, not current authorization.
+- Highlighting implemented: native intensity resets and recreated Markdown leaves no longer remove narration paint; streamed/final native AssistantMessage frames assert effective first/continuation-line styling with audio independently active. Syntax/layout/markers/manual-scroll and unmappable fallback remain covered.
+- Queue safety implemented: failure of any current queued utterance cancels the queue; matching paused-source abort/error cannot be revived by F8, including after reconnect/device adoption. Retired ordinary errors and unrelated historical selection remain separate. Newer stop uncertainty blocks older cleanup from releasing ownership.
+- Retained input/output diagnostics now identify the blocking device and recovery action, survive Ready/Idle, coalesce reconnect notices and clear only on matching proof. Original-handle retries and ambiguous selection are mock-tested. Durable speech fences now survive heartbeat expiry/process death rather than treating either as proof.
+- **Phase 1 is not fully complete:** process restart still loses in-memory opaque cleanup handles and diagnostic episodes. The durable fence prevents unsafe acquisition but does not provide automatic recovery or reconstructed warning UI after restart. Do not delete the fence or restart Pi as a recovery shortcut. This remaining persistence/recovery work needs completion before claiming the whole C contract.
+- Phase 2 UI points 1–6, handoff presentation and timing command/retry changes remain pending; none were implemented here.
+- Validation: typecheck; checkout **994 passed / 33 compatibility skips**; installed-native full suite **1027 passed / zero skips**, no failures. Actual native rendering, synthetic events and mocked transport only; no live/provider/hardware/restart validation. See FINDINGS and docs/testing.md.
+- `ISSUES.md` remains untracked/untouched. The initially untracked `docs/assets/demos/` directory is now absent; review found no deletion in the diff or inspected test cleanup, but the cause is unproven. Preservation cannot honestly be claimed for those missing assets.
+
+## Approved discussion — display coherence and timing retry (historical pre-implementation notes)
 
 - Work is being approved point by point; the audit is not blanket authorization to implement all findings.
 - Point 1 approved: use Queued for active narration awaiting complete source/context or ownership/resources; retain genuine Idle, explicit Paused precedence, and unpaused chronological Playing/live. Display changes must not force incomplete synthesis or acquire ownership early. Implementation pending.

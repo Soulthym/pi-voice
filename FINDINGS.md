@@ -2,7 +2,17 @@
 
 Updated incrementally. Companion: `PLAN.md`. Reorganize freely while preserving evidence and disposition.
 
-## Current checkpoint — live between completed responses
+## Phase 1 checkpoint — native paint and stop safety (partial)
+
+- Native root causes: SGR 22/reset 0 inside native output cancelled dim/bold styling, especially the first displayed line; native Markdown leaf recreation could drop patched rendering. Post-wrap painting now restores narration intensity without replacing syntax foreground colors, and hooks follow recreated leaves. Actual AssistantMessage streamed/final frames test effective SGR state rather than ANSI presence, canonical source handoff, independent continuing audio, layout, graphemes, markers and manual scroll. Unmappable baseline remains intentional.
+- Current-queue membership, not only the last paused-prefix utterance, now determines terminal cancellation. Matching source abort/error precedes paused queueing; cancellation remains effective after device adoption clears live transport activity. Tests cover first-of-two failure, withheld stop ACK/retained lease, matching proof/release, stale errors and unrelated historical selection.
+- Persistent warning rows retain per-resource device snapshots through Ready/Idle, coalesce reconnect notices and clear on matching proof. A review reproduction exposed older cleanup releasing a lease despite a newer failure; release now checks unresolved resources. Reconnect tests retain original opaque handles despite replacement endpoint selection and ambiguity; input drafts remain covered.
+- Speech ownership no longer expires merely because its process/heartbeat died. **Remaining gap:** full restart loses in-memory cleanup handles and warning episodes; the durable fence fails closed but cannot yet recover automatically or reconstruct diagnostics. Phase 1 C is partial, not complete. No unsafe bypass was added. UI 1–6/handoff presentation/timing retry remain pending.
+- Commits: `34e82da`, `239a18e`, `9e739a2`, `ae78b19`, review fixes `12c85e7`, `2015286`. Typecheck passed; final serial checkout **994 passed / 33 skips**, installed-native **1027 passed / no skips**, zero failures. All transport evidence is synthetic/mocked; native renderer checks do use installed Pi. No live symptom-resolution claim, providers, inference, hardware, runtime changes or session restarts.
+- Initial native invocation incorrectly selected the AssistantMessage module as the agent entry and failed imports; corrected full native invocation uses installed `dist/index.js` and passes. Earlier concurrent-agent runs were not final validation. Logs: `/tmp/phase1-final-{check,test,native}.log`.
+- Preservation limitation: initial status included untracked `docs/assets/demos/`, subsequently absent. No deletion appears in committed changes or inspected cleanup; cause remains unknown. `ISSUES.md` remains untracked and untouched. No claim that missing demos were preserved.
+
+## Previous checkpoint — live between completed responses
 
 - Clarified user evidence: latest finished source displayed `○ Idle · [full bar] 0:35 / 0:35 · message 669/669`; live only survived while the model worked. Prior 1004-test coverage actually asserted Idle after full completion, so streaming-only live checks did not establish the intended lifecycle.
 - Root cause: completeOwnerSpeech cleared playbackTailIntent before releaseSpeechOwnership/relinquishSpeech cleared turn activity; the badge lost its active-playback guard. restoreFollowAfterSpeech separately tied navigationAtTail to viewport-bottom restoration.

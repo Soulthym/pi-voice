@@ -1,6 +1,14 @@
 # Tests
 
-## Current checkpoint — completed live-follow intent
+## Phase 1 checkpoint — highlighting and safety
+
+Final serial validation: `npm run check` passed; `npm test` **994 passed / 33 compatibility skips / zero failures**; installed-native full `npm test` **1027 passed / zero skips or failures**. Logs: `/tmp/phase1-final-{check,test,native}.log`. No LSP configured. Native overrides use installed Pi `dist/index.js` for `PI_VOICE_TEST_AGENT_MODULE`, its `node_modules/@earendil-works/pi-tui/dist/index.js` for `PI_VOICE_TEST_TUI_MODULE`, and `dist/core/keybindings.js` for `PI_VOICE_TEST_KEYBINDINGS_MODULE`. An initial incorrect agent-module override failed imports, then was corrected.
+
+Native AssistantMessage tests assert effective intensity on first and continuation lines through streaming/final rendering with audio independently active. Mock integration covers any-current-utterance failure, withheld ACK ownership, matching proof, newer failure races, paused source abort after device adoption, persistent device warning rows and original-handle reconnect. These are offline tests, not live hardware/inference confirmation. No runtime settings or live sessions were changed.
+
+Phase 1 remains partial: durable speech fencing survives process expiry, but restarted-process opaque-handle recovery and diagnostic reconstruction are not implemented. UI 1–6 and timing changes remain pending. See PLAN/FINDINGS for the missing-untracked-demo preservation limitation.
+
+## Previous checkpoint — completed live-follow intent
 
 The user clarified that `○ Idle · [full bar] 0:35 / 0:35 · message 669/669` after the latest response was wrong: caught-up unpaused playback must remain Playing + red `● live` between turns. The mounted regression now runs full message_end → turn_end → worker finish and checks released audio ownership with persistent live, lease-free F8 pause, queued next-response single-F8 resume, F6 last-message selection and completed historical Idle. F7 completion checks are viewport-independent. Earlier completed-Idle assertions below describe superseded behavior, not the current contract.
 
