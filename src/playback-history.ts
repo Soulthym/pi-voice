@@ -203,6 +203,18 @@ export class PlaybackHistory {
 					record.wordTimingCoverage.set(`${saved.unit.sourceOffset}:${saved.unit.skipUnits}`, { ...counts });
 				}
 			}
+			if (!restoreClock) {
+				const ordinals = new Map<number, number>();
+				for (const anchor of checkpoints.filter(point => point.duration > 0)) {
+					const skipUnits = ordinals.get(anchor.sourceOffset) ?? 0;
+					ordinals.set(anchor.sourceOffset, skipUnits + 1);
+					const unit = { sourceOffset: anchor.sourceOffset, skipUnits };
+					if (this.timingForUnit(record.id, snapshot.renderKey, unit)) continue;
+					this.retainTimingUnit(record.id, snapshot.renderKey, unit, checkpoints
+						.filter(point => point === anchor || (point.duration === 0 && point.time >= anchor.time && point.time < anchor.time + anchor.duration))
+						.map(point => ({ ...point, time: point.time - anchor.time })));
+				}
+			}
 			if (restoreClock) {
 				record.checkpoints = checkpoints.map(checkpoint => ({ ...checkpoint })).sort((left, right) => left.time - right.time);
 				record.duration = snapshot.duration;

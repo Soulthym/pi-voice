@@ -85,6 +85,40 @@ test("recovery hydration fills missing compatible units without replacing curren
 	assert.equal(history.hasCompleteTimingFor(message.id), false);
 });
 
+test("recovery hydrates checkpoint-only units without replacing live timing or coverage", () => {
+	for (const partialUnits of [false, true]) {
+		const history = new PlaybackHistory();
+		history.sync([message]);
+		const first = { sourceOffset: 0, skipUnits: 0 };
+		const second = { sourceOffset: 0, skipUnits: 1 };
+		const refined = [{ time: 0, duration: 2, sourceOffset: 0, quality: "ctc-refined" as const }];
+		const coverage = { estimated: 0, total: 2 };
+		history.restore([{ version: 3, messageId: message.id, renderKey: "A", duration: 2, complete: false,
+			checkpoints: refined, units: [{ unit: first, checkpoints: refined, coverage }] }]);
+		const before = history.resumeTarget();
+		const estimated = [{ time: 0, duration: 2, sourceOffset: 0, quality: "estimated" as const }];
+		const saved: PlaybackTimingSnapshot = { version: 3, messageId: message.id, renderKey: "A", duration: 5,
+			checkpoints: [...estimated, { time: 2, duration: 3, sourceOffset: 0 },
+				{ time: 3, duration: 0, sourceOffset: 6 }],
+			...(partialUnits ? { units: [{ unit: first, checkpoints: estimated, coverage: { estimated: 2, total: 2 } }] } : {}),
+		};
+		history.restore([{ ...saved, renderKey: "B" }], true);
+		assert.equal(history.timingForUnit(message.id, "A", second), undefined);
+		history.restore([saved], true);
+		assert.deepEqual(history.timingForUnit(message.id, "A", first), refined);
+		assert.deepEqual(history.timingForUnit(message.id, "A", second), [
+			{ time: 0, duration: 3, sourceOffset: 0 }, { time: 1, duration: 0, sourceOffset: 6 },
+		]);
+		assert.equal(history.status()?.duration, 2);
+		assert.equal(history.hasCompleteTimingFor(message.id), false);
+		assert.deepEqual(history.resumeTarget(), before);
+		assert.equal(history.sentenceTarget(1, [first, second])?.time, 0, "saved absolute clock is not installed");
+		const merged = history.completeRecoveredTimings(saved)!;
+		assert.deepEqual(merged.units?.[0].coverage, coverage, "live coverage survives hydration");
+		assert.equal(merged.units?.[1].coverage, undefined, "sparse checkpoints cannot supply coverage counts");
+	}
+});
+
 test("code chunk ordinals stay distinct and invalid audio cannot complete a target", () => {
 	const history = new PlaybackHistory();
 	history.sync([message]);
