@@ -31,6 +31,8 @@ transformersEnv.logLevel = "error";
 if (transformersEnv.backends?.onnx) transformersEnv.backends.onnx.logLevel = "error";
 
 const ttsModels = new Map();
+const loadedTtsModels = new Set();
+let synthesisJobId;
 const sttModels = new Map();
 let epoch = 0;
 let queue = [];
@@ -49,7 +51,7 @@ let activeOperation;
 
 function send(message) {
 	if (synthesisChild) {
-		if (process.connected) process.send({ event: message }, () => {});
+		if (process.connected) process.send({ id: synthesisJobId, event: message }, () => {});
 	} else process.stdout.write(`${JSON.stringify(message)}\n`);
 }
 
@@ -248,9 +250,19 @@ async function writeCachedAudio(file, pcm, bitrate) {
 	}
 }
 
+function reportPlaybackPhase(operation, phase) {
+	operation.phase = phase;
+	if (operation.type !== "segment" || operation.epoch !== epoch || shuttingDown) return;
+	// Lookahead is not foreground work. The client gives buffered playback precedence.
+	if (activeOperation !== operation) return;
+	send({ type: "playback-phase", utterance: operation.utterance, segmentId: operation.segmentId, phase });
+}
+
 async function audioForOperation(operation) {
 	const report = phase => {
-		if (operation.type === "measure" && operation.epoch === epoch) {
+		if (operation.type === "segment") reportPlaybackPhase(operation, phase === "cache-decode" ? "loading" : phase);
+		if (operation.type === "synthesis") send({ type: "synthesis-phase", phase: phase === "cache-decode" ? "loading" : phase });
+		if (operation.type === "measure" && operation.epoch === epoch && (phase === "synthesis" || phase === "cache-decode")) {
 			send({ type: "measurement-progress", requestId: operation.requestId, phase });
 		}
 	};
@@ -262,11 +274,17 @@ async function audioForOperation(operation) {
 	if (operation.type === "segment" && !synthesisChild) {
 		if (operation.epoch !== epoch) throw new Error("Sentence generation cancelled");
 		const { audioPromise, ...input } = operation;
-		return sentencePool.generate(input);
+		reportPlaybackPhase(operation, "queued");
+		return sentencePool.generate(input, event => {
+			if (operation.epoch !== epoch) return;
+			if (event.type === "synthesis-phase") reportPlaybackPhase(operation, event.phase);
+			else sentencePool.onEvent(event); // Preserve legacy model download events.
+		});
 	}
-	report("synthesis");
+	if (operation.type === "measure") report("synthesis");
 	const operationEpoch = epoch;
-	const model = await getModel(operation.model, operation.dtype);
+	const model = await getModel(operation.model, operation.dtype, () => report("loading"));
+	if (operation.type !== "measure") report("synthesizing");
 	const output = await generateSentenceAudio(model, operation.text,
 		{ voice: operation.voice, speed: operation.speed }, () => operationEpoch !== epoch);
 	const sampleRate = output.sampling_rate || DEFAULT_SAMPLE_RATE;
@@ -279,8 +297,9 @@ async function audioForOperation(operation) {
 	return { pcm, sampleRate };
 }
 
-async function getModel(modelId = DEFAULT_TTS_MODEL, dtype = DEFAULT_TTS_DTYPE) {
+async function getModel(modelId = DEFAULT_TTS_MODEL, dtype = DEFAULT_TTS_DTYPE, onLoading) {
 	const key = `${modelId}\0${dtype}`;
+	if (!loadedTtsModels.has(key)) onLoading?.();
 	const cached = ttsModels.get(key);
 	if (cached) return cached;
 	send({ type: "loading" });
@@ -298,6 +317,7 @@ async function getModel(modelId = DEFAULT_TTS_MODEL, dtype = DEFAULT_TTS_DTYPE) 
 	});
 	ttsModels.set(key, loading);
 	const model = await loading;
+	loadedTtsModels.add(key);
 	send({ type: "ready" });
 	return model;
 }
@@ -787,14 +807,17 @@ async function runOperation(operation) {
 		}
 		return;
 	}
+	reportPlaybackPhase(operation, operation.phase ?? "queued");
 	const audio = await (operation.audioPromise ?? audioForOperation(operation));
 	if (operation.epoch !== epoch) return;
 	const sampleRate = audio.sampleRate;
 	const pcm = audio.pcm;
 	if (!(pcm instanceof Float32Array) || pcm.length === 0) return;
+	reportPlaybackPhase(operation, "connecting");
 	const sink = startPlayer(sampleRate, operation.utterance, operation.output);
 	await sink.ready;
 	if (operation.epoch !== epoch || sink.stopped) return;
+	reportPlaybackPhase(operation, "playing");
 	const start = sink.samplesWritten / sampleRate;
 	const duration = pcm.length / sampleRate;
 	send({ type: "segment-audio", utterance: operation.utterance, segmentId: operation.segmentId, start, duration, timingQuality: "estimated" });
@@ -899,6 +922,7 @@ function shutdown(cancelId) {
 if (synthesisChild) {
 	process.on("disconnect", () => process.exit(0));
 	process.on("message", async ({ id, operation }) => {
+		synthesisJobId = id;
 		let response;
 		try {
 			const audio = operation.type === "preload"

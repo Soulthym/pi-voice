@@ -14,10 +14,10 @@ export class SentencePool {
 		this.#pump();
 	}
 
-	generate(operation) {
+	generate(operation, onEvent) {
 		if (this.#closed) return Promise.reject(new Error("Sentence pool closed"));
 		return new Promise((resolve, reject) => {
-			this.#queue.push({ id: ++this.#nextId, operation, resolve, reject });
+			this.#queue.push({ id: ++this.#nextId, operation, onEvent, resolve, reject });
 			this.#pump();
 		});
 	}
@@ -31,7 +31,12 @@ export class SentencePool {
 		this.#workers.push(slot);
 		child.on("message", message => {
 			if (!this.#workers.includes(slot)) return;
-			if (message.event) { if (slot.job) this.onEvent(message.event); return; }
+			if (message.event) {
+				if (slot.job && (message.id === undefined || message.id === slot.job.id)) {
+					(slot.job.onEvent ?? this.onEvent)(message.event);
+				}
+				return;
+			}
 			const job = slot.job;
 			if (!job || message.id !== job.id) return;
 			slot.job = undefined;

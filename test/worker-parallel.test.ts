@@ -22,7 +22,8 @@ test("real playback queue bounds lookahead, preserves order, fences cancellation
 	let written = Promise.withResolvers<void>();
 	let stopped = Promise.withResolvers<void>();
 	const played: number[] = [];
-	const sink = { ready: Promise.resolve(), stopped: false, samplesWritten: 0 };
+	const ready = Promise.withResolvers<void>();
+	const sink = { ready: ready.promise, stopped: false, samplesWritten: 0 };
 	mock.module("../src/playback-controller.mjs", { namedExports: { createPlaybackController: () => ({
 		startPlayer: () => sink,
 		writeAudio: async (_sink: unknown, pcm: Float32Array) => { played.push(pcm[0]!); await written.promise; },
@@ -44,6 +45,16 @@ test("real playback queue bounds lookahead, preserves order, fences cancellation
 	for (let id = 1; id <= 8; id++) enqueue(id);
 	await tick();
 	assert.equal(requests.length, 4);
+	const report = (request: any, phase: string, id = request.id) => request.child.emit("message", { id, event: { type: "synthesis-phase", phase } });
+	const phases = () => events.filter(event => event.type === "playback-phase");
+	report(requests[0], "loading");
+	assert.equal(phases().at(-1).phase, "loading");
+	const beforeLookahead = phases().length;
+	report(requests[1], "loading"); report(requests[1], "synthesizing");
+	report(requests[0], "playing", -1);
+	assert.equal(phases().length, beforeLookahead, "lookahead and wrong-job events cannot replace foreground phase");
+	report(requests[0], "synthesizing");
+	assert.equal(phases().at(-1).phase, "synthesizing");
 	lines.emit("line", JSON.stringify({ type: "tts-workers", workers: 1 }));
 	assert.ok(children.every(child => !child.killed), "resize must not interrupt in-flight inference");
 	for (const workers of [0, 9, 1.5, "8"]) lines.emit("line", JSON.stringify({ type: "tts-workers", workers }));
@@ -56,7 +67,11 @@ test("real playback queue bounds lookahead, preserves order, fences cancellation
 	assert.equal(children.filter(child => child.killed).length, 3, "excess workers retire after producing results");
 	complete(requests[0]);
 	await tick();
+	assert.equal(phases().at(-1).phase, "connecting", "audio generation is complete but the sink is not ready");
+	assert.deepEqual(played, []);
+	ready.resolve(); await tick();
 	assert.deepEqual(played, [1]);
+	assert.deepEqual(phases().slice(-2).map(event => event.phase), ["connecting", "playing"]);
 	assert.equal(requests.length, 4, "a paused/backpressured sink bounds completed PCM too");
 	written.resolve();
 	await tick();
@@ -69,7 +84,9 @@ test("real playback queue bounds lookahead, preserves order, fences cancellation
 	enqueue(9);
 	await tick();
 	assert.ok(children.some(child => child.killed), "busy native inference must be interrupted");
-	for (const request of requests.filter(request => request.operation.segmentId <= 8)) complete(request);
+	const beforeStale = phases().length;
+	for (const request of requests.filter(request => request.operation.segmentId <= 8)) { report(request, "loading"); complete(request); }
+	assert.equal(phases().length, beforeStale, "cancelled children cannot report phases");
 	await tick();
 	assert.deepEqual(played, [1, 2, 3, 4], "stale completions must not start a replacement sink");
 	stopped.resolve();

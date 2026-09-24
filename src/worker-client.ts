@@ -9,7 +9,11 @@ import type { AlignmentWord, TimingQuality } from "./narration-progress.js";
 
 export type MeasurementPhase = "cache-decode" | "synthesis";
 
+export type PlaybackPhase = "idle" | "playing" | "paused" | "synthesizing" | "loading" | "describing" | "connecting" | "queued";
+export type WorkerPlaybackPhase = "playing" | "synthesizing" | "loading" | "connecting" | "queued";
+
 export type WorkerEvent =
+	| { type: "playback-phase"; utterance: number; segmentId: number; phase: WorkerPlaybackPhase }
 	| { type: "remote-handle"; output: string; id: string; utterance: number }
 	| { type: "remote-released"; id: string }
 	| { type: "remote-not-admitted"; id: string }

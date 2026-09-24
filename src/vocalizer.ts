@@ -8,7 +8,8 @@ import {
 } from "./code-narration.js";
 import type { NarrationSegment } from "./narration-progress.js";
 import { SpeakableStream, type FencedCodeBlock, type SpeakableItem, type SpeakableSourceRange } from "./speakable.js";
-import { VoiceWorkerClient, type WorkerEvent } from "./worker-client.js";
+import { VoiceWorkerClient, type WorkerEvent, type PlaybackPhase } from "./worker-client.js";
+export type { PlaybackPhase } from "./worker-client.js";
 
 const IDLE_FLUSH_MS = 1_000;
 
@@ -45,6 +46,10 @@ type VoiceWorker = Pick<
 
 export class Vocalizer {
 	#worker: VoiceWorker;
+	#phases = new Map<number, { phase: PlaybackPhase; descriptions: number; pending: Set<number>; deferred: number; audioEnd?: number; position: number }>();
+	#paused = false;
+	#reportedPhase: PlaybackPhase = "idle";
+	#onPlaybackPhase: ((phase: PlaybackPhase) => void) | undefined;
 	#getConfig: () => VoiceConfig;
 	#describeCode: CodeDescriber | undefined;
 	#speakable: SpeakableStream | null = null;
@@ -70,16 +75,63 @@ export class Vocalizer {
 		onEvent: (event: WorkerEvent) => void,
 		describeCode?: CodeDescriber,
 		onNarrationSegment?: (segment: NarrationSegment) => void,
-		worker: VoiceWorker = new VoiceWorkerClient(onEvent),
+		worker: VoiceWorker | undefined = undefined,
 		onUtteranceAllocated?: (utterance: number) => void,
 		onUtteranceEnded?: (utterance: number) => void,
+		onPlaybackPhase?: (phase: PlaybackPhase) => void,
 	) {
 		this.#getConfig = getConfig;
-		this.#worker = worker;
+		this.#onPlaybackPhase = onPlaybackPhase;
+		this.#worker = worker ?? new VoiceWorkerClient(event => {
+			this.handleWorkerEvent(event);
+			onEvent(event);
+		});
 		this.#describeCode = describeCode;
 		this.#onNarrationSegment = onNarrationSegment;
 		this.#onUtteranceAllocated = onUtteranceAllocated;
 		this.#onUtteranceEnded = onUtteranceEnded;
+	}
+
+	/** Foreground only; pause intent wins even during description/model/transport startup. */
+	get playbackPhase(): PlaybackPhase {
+		if (this.#paused) return "paused";
+		// An open utterance is not pending work once all submitted audio is consumed.
+		const current = Array.from(this.#phases.values()).find(entry => entry.pending.size > 0 || entry.descriptions > 0 ||
+			entry.deferred > 0 || (entry.audioEnd !== undefined && entry.position < entry.audioEnd));
+		if (!current) return "idle";
+		if (current.audioEnd !== undefined && current.position < current.audioEnd) return "playing";
+		if (current.pending.size === 0) return current.descriptions > 0 ? "describing" : current.deferred > 0 ? "queued" : "idle";
+		return current.phase;
+	}
+
+	/** Injected workers must pass their events here; the default worker does so automatically. */
+	handleWorkerEvent(event: WorkerEvent): void {
+		if (event.type === "playback-phase" || event.type === "segment-audio" || event.type === "playback") {
+			const current = this.#phases.get(event.utterance);
+			if (current) {
+				if (event.type === "playback-phase") {
+					if (current.pending.has(event.segmentId)) current.phase = event.phase;
+				} else if (event.type === "segment-audio") {
+					current.pending.delete(event.segmentId);
+					current.audioEnd = Math.max(current.audioEnd ?? 0, event.start + event.duration);
+					current.phase = "queued";
+				} else current.position = Math.max(current.position, event.position);
+			}
+		} else if (event.type === "idle" && event.utterance !== undefined) {
+			this.#phases.delete(event.utterance);
+		} else if (event.type === "error" && !event.requestId && !event.preview &&
+			(event.utterance === undefined || this.#phases.has(event.utterance))) {
+			// The worker cancels its entire queue on terminal failure, not just this utterance.
+			this.#reset();
+		}
+		this.#reportPhase();
+	}
+
+	#reportPhase(): void {
+		const phase = this.playbackPhase;
+		if (phase === this.#reportedPhase) return;
+		this.#reportedPhase = phase;
+		this.#onPlaybackPhase?.(phase);
 	}
 
 	setNarrationSourceOffset(offset: number, skipUnits = 0): void {
@@ -172,11 +224,21 @@ export class Vocalizer {
 	}
 
 	setPlaybackPaused(paused: boolean): void {
+		this.#paused = paused;
+		this.#reportPhase();
 		this.#worker.setPlaybackPaused?.(paused);
 	}
 
 	clear(): number | undefined {
+		this.#reset();
+		return this.#worker.cancel() as number | undefined;
+	}
+
+	#reset(): void {
 		this.#generation += 1;
+		this.#phases.clear();
+		this.#paused = false;
+		this.#reportPhase();
 		this.#clearIdleTimer();
 		this.#speakable = null;
 		this.#utterance = null;
@@ -188,7 +250,6 @@ export class Vocalizer {
 		this.#codeDescriptionMessages = undefined;
 		for (const controller of this.#descriptionControllers) controller.abort();
 		this.#descriptionControllers.clear();
-		return this.#worker.cancel() as number | undefined;
 	}
 
 	measureSegment(text: string): Promise<number> {
@@ -256,8 +317,13 @@ export class Vocalizer {
 		const generation = this.#generation;
 		const trackNarration = this.#trackNarration;
 		const utterance = this.#ensureUtterance();
+		const foreground = this.#phases.get(utterance)!;
+		foreground.deferred += 1;
+		this.#reportPhase();
 		this.#deliveryBarrier = this.#deliveryBarrier.then(() => {
-			if (generation === this.#generation) this.#sendSegments([text], utterance, source, false, undefined, undefined, sourceBase, trackNarration);
+			if (generation !== this.#generation) return;
+			foreground.deferred -= 1;
+			this.#sendSegments([text], utterance, source, false, undefined, undefined, sourceBase, trackNarration);
 		});
 	}
 
@@ -273,6 +339,9 @@ export class Vocalizer {
 		this.#skipUnits = 0;
 		const controller = new AbortController();
 		this.#descriptionControllers.add(controller);
+		const foreground = this.#phases.get(utterance);
+		if (foreground) foreground.descriptions += 1;
+		this.#reportPhase();
 		let description: Promise<CodeNarrationPlan>;
 		try {
 			description = this.#describeCode
@@ -289,6 +358,8 @@ export class Vocalizer {
 			const spoken = await ready;
 			if (generation !== this.#generation) return;
 			this.#sendDescription(spoken, block, source, utterance, sourceBase, skipUnits);
+			if (foreground) foreground.descriptions -= 1;
+			this.#reportPhase();
 		});
 	}
 
@@ -326,6 +397,7 @@ export class Vocalizer {
 	#ensureUtterance(): number {
 		if (this.#utterance === null) {
 			this.#utterance = ++this.#nextUtterance;
+			this.#phases.set(this.#utterance, { phase: "queued", descriptions: 0, pending: new Set(), deferred: 0, position: 0 });
 			this.#onUtteranceAllocated?.(this.#utterance);
 		}
 		return this.#utterance;
@@ -345,6 +417,12 @@ export class Vocalizer {
 		const config = this.#getConfig();
 		segments.forEach((text, index) => {
 			const id = ++this.#nextSegment;
+			const foreground = this.#phases.get(utterance);
+			if (foreground) {
+				if (foreground.pending.size === 0) foreground.phase = "queued";
+				foreground.pending.add(id);
+			}
+			this.#reportPhase();
 			const narrationSource = source
 				? revealAtEnd && index < segments.length - 1
 					? { start: source.start, end: source.start }

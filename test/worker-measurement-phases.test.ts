@@ -52,6 +52,7 @@ test("measurement reports cached decoding or synthesis, never runs word alignmen
 			{ type: "measurement", requestId, duration: 1 },
 		]);
 	}
+	assert.equal(events.filter(event => event.type === "playback-phase").length, 0, "background synthesis is never foreground playback");
 	assert.equal(decoded, 1);
 	assert.equal(generated, 1);
 });
