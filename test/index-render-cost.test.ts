@@ -130,8 +130,8 @@ test("completed conversation keys survive replay, settling and custom leaves; co
 		for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve));
 	};
 	sourceKeyCalls = 0;
-	// Charge deterministic synthetic work per cold key, not elapsed CI wall time.
-	let clock = performance.now();
+	// Use an integer origin so synthetic 8ms slices stay exact across floating-point boundaries.
+	let clock = 0;
 	const now = mock.method(performance, "now", () => clock);
 	host.scrollView.setDocument(Array.from({ length: 300 }, (_, line) =>
 		line === 160 ? () => host.render("Replay target.") : `line ${line}`), 40);

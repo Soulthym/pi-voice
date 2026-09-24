@@ -13,7 +13,8 @@ for (const family of ["native", "WAV", "AU"]) for (const source of ["failed", "e
 	assert.equal(spawnSync("ffmpeg", ["-version"]).status, 0, "ffmpeg is required for this regression");
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-desktop-capture-"));
 	const bin = path.join(root, "bin"); await fs.mkdir(bin);
-	const pcm = Buffer.alloc(16000);
+	// The stopped fixture must outlast ffmpeg's input probing so it can emit Ogg before stop.
+	const pcm = Buffer.alloc(source === "stopped" ? 6 * 16000 * 2 : 16000);
 	for (let i = 0; i < pcm.length / 2; i++) pcm.writeInt16LE(Math.round(8000 * Math.sin(i * 2 * Math.PI * 440 / 16000)), i * 2);
 	await fs.writeFile(path.join(root, "synthetic.pcm"), pcm);
 	for (const [name, body] of Object.entries({
@@ -52,13 +53,17 @@ ${body}
 	let samples = 0;
 	const capture = client.capture(`tcp://127.0.0.1:${address.port}`, { onAudio: audio => { samples += audio.length; } });
 	if (source === "stopped") {
-		for (let i = 0; i < 400 && !await fs.stat(path.join(root, "ready")).catch(() => false); i++) await new Promise(resolve => setTimeout(resolve, 10));
+		for (let i = 0; i < 400; i++) {
+			if (Buffer.concat(wire).includes(Buffer.from("stream\nOggS")) && await fs.stat(path.join(root, "ready")).catch(() => false)) break;
+			await new Promise(resolve => setTimeout(resolve, 10));
+		}
 		assert.ok(await fs.stat(path.join(root, "ready")));
+		assert.ok(Buffer.concat(wire).includes(Buffer.from("stream\nOggS")), "encoder must produce Ogg before stop");
 		await client.stop();
 	}
 	if (source === "pcm" || source === "stopped") {
 		assert.equal((await capture).type, "audio");
-		assert.equal(samples, 8000, "encoder/decoder must flush all synthetic samples");
+		assert.equal(samples, pcm.length / 2, "encoder/decoder must flush all synthetic samples");
 	} else {
 		await assert.rejects(capture, source.startsWith("help-") ? /Could not inspect pw-record raw PCM support/ : /no decodable audio; check the selected device's recorder, microphone access, and audio tools/);
 		assert.equal(samples, 0);
