@@ -469,14 +469,16 @@ export default async function (pi: ExtensionAPI) {
 		const device = selectedDeviceLabel;
 		const cleanup: StopCleanup = { promise, episode: state.episode };
 		const journal = stopRecovery;
-		const generation = journal?.generations[resource];
 		state.cleanup = cleanup;
 		void promise.then(() => {
 			if (state.cleanup !== cleanup) return;
-			if (state.episode === cleanup.episode && journal === stopRecovery && generation === journal?.generations[resource]) {
+			// ACK proves cancellation, not individual remote releases. Only matching
+			// receipts retire handles, including those admitted during this cleanup.
+			const unresolved = journal?.episode(resource)?.handles.length;
+			if (state.episode === cleanup.episode && journal === stopRecovery && !unresolved) {
 				state.episode = undefined;
 				try { journal?.clear(resource); } catch (error) { notifyStopFailure(error); }
-			} else if (!state.episode && journal === stopRecovery && generation !== journal?.generations[resource]) {
+			} else if (!state.episode && journal === stopRecovery && unresolved) {
 				state.episode = { device, cause: "Newer transport scope remains unconfirmed", notified: false };
 			}
 			state.cleanup = undefined;

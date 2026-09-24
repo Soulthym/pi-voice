@@ -656,6 +656,35 @@ test("host journals original route after registration loss, retires receipts and
 });
 
 
+for (const late of [false, true]) for (const released of [false, true]) test(`cancel ACK clears only matching remote receipts (late admission: ${late}, released: ${released})`, async t => {
+ const { host, worker, lease } = await setup(t);
+ await host.command("test Original transport.");
+ const owner = JSON.parse(await fs.readFile(lease, "utf8"));
+ const journal = () => new StopRecovery(path.dirname(path.dirname(lease)), owner.instanceId);
+ const handle = { type: "remote-handle" as const, output: "unix:///old-output", id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", utterance: 1 };
+ t.mock.method(worker, "cancel", () => 901 as never);
+ if (!late) worker.emit(handle);
+ await host.command("stop"); await settle();
+ if (late) worker.emit(handle);
+ worker.emit({ type: "remote-released", id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" });
+ assert.equal(journal().episode("output")!.handles[0].id, handle.id, "unrelated receipt cannot retire the scope");
+ if (released) worker.emit({ type: "remote-released", id: handle.id });
+ worker.emit({ type: "idle", cancelId: 901 }); await settle();
+ if (released) {
+  assert.equal(journal().episode("output"), undefined);
+  await assert.rejects(fs.stat(lease), { code: "ENOENT" });
+  assert.doesNotMatch(host.widgetLines()!.join("\n"), /Output stop unconfirmed/);
+ } else {
+  assert.equal(journal().episode("output")!.handles[0].id, handle.id, "ACK cannot globally clear retained handles");
+  assert.ok(await fs.stat(lease));
+  assert.match(host.widgetLines()!.join("\n"), /Output stop unconfirmed/);
+  worker.emit({ type: "remote-released", id: handle.id });
+  await host.command("stop");
+  worker.emit({ type: "idle", cancelId: 901 }); await settle();
+  await assert.rejects(fs.stat(lease), { code: "ENOENT" });
+ }
+});
+
 test("normal microphone receipt retires config A before recovery retries config B", async t => {
  const { host, lease } = await setup(t);
  const ticket = `${"a".repeat(32)}.1`;
