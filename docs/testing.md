@@ -1,6 +1,14 @@
 # Tests
 
-## Current checkpoint — final review fixes after `fa80347`
+## Current checkpoint — final review 5 after `fad21f4`
+
+`npm run check` passed; full checkout `npm test`: **1052 passed / 33 compatibility skips / zero failures (1085 total)**; full installed-native `npm test`: **1085 passed / zero skips or failures**. Logs: `/tmp/fix5-check.log`, `/tmp/fix5-test.log`, `/tmp/fix5-native.log`. LSP unavailable; TypeScript supplies diagnostics.
+
+Regressions cover unresolved preemption fencing and retained-scope reconnect, verified deferred handoff, missing-only recovery hydration (including checkpoint-only snapshots), and reconstructable mixed-word retry with exact refined-time preservation and commit-time revalidation. Unknown sparse provenance remains a conservative skip. Review identified the checkpoint-only hydration omission; a focused follow-up fixed it before these final serial suites.
+
+These are mocked transport/alignment and inert native UI checks, not real restart/device proof. Durable restart ownership/proof gaps remain fail-closed as documented in PLAN.md. No hardware, inference, providers, live sessions, settings or SSH changes; `ISSUES.md` and removed demos untouched.
+
+## Previous checkpoint — final review fixes after `fa80347`
 
 `npm run check` passed; full checkout `npm test`: **1038 passed / 33 compatibility skips / zero failures (1071 total)**; full installed-native `npm test`: **1071 passed / zero skips or failures**. Logs: `/tmp/fix4-check.log`, `/tmp/fix4-test-final.log`, `/tmp/fix4-native.log`. LSP is unavailable; TypeScript supplies diagnostics.
 
