@@ -154,8 +154,15 @@ test("scope all revisits blocks that compaction summarized away", async t => {
 	await streamCompletedResponse(host, "kept-answer", "compaction-entry", "Kept.\n```ts\nkeptCode();\n```");
 	await settle();
 
+	// Live work may hit the coordinator's 100 ms lease retry while backfill finishes.
+	// setImmediate-only settling does not wait for that timer.
+	const deadline = Date.now() + 2_000;
+	while (host.modelRequests.length < 2 && Date.now() < deadline) {
+		await new Promise(resolve => setTimeout(resolve, 10));
+	}
 	assert.equal(host.modelRequests.length, 2);
 	assert.match(JSON.stringify(host.modelRequests), /oldCode/);
+	assert.match(JSON.stringify(host.modelRequests), /keptCode/);
 });
 
 test("backfill budget caps historical work while live descriptions stay free", async t => {
