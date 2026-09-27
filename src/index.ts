@@ -416,9 +416,10 @@ export default async function (pi: ExtensionAPI) {
 		delete inheritedStops.input;
 		delete inheritedStops.output;
 		if (!coordinator) return;
-		if (initialize) stopRecovery = new StopRecovery(coordinator.root, coordinator.instanceId);
+		if (initialize) stopRecovery = coordinator.recovery;
 		const owner = coordinator.speechOwner();
 		if (!owner || owner.instanceId === coordinator.instanceId) return;
+		if (coordinator.recoverIdleSpeech(owner)) return;
 		try { process.kill(owner.pid, 0); return; }
 		catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") return; }
 		orphanRecoveryBlocked = true;
@@ -426,6 +427,7 @@ export default async function (pi: ExtensionAPI) {
 		try { orphanRecovery = new StopRecovery(coordinator.root, owner.instanceId); }
 		catch (error) { notifyStopFailure(error); }
 		for (const direction of ["input", "output"] as const) {
+			if (orphanRecovery?.isIdle(direction)) continue;
 			const saved = orphanRecovery?.episode(direction);
 			inheritedStops[direction] = { device: saved?.device ?? "Previous voice owner", cause: saved?.cause ?? "Interrupted transport coverage unavailable; ownership retained",
 				notified: previousOwner === orphanRecoveryOwner &&
@@ -444,7 +446,15 @@ export default async function (pi: ExtensionAPI) {
 			}));
 		}
 		refreshProgressWidget();
-		throw new Error("Saved stop scopes retried; interrupted transport coverage remains unproven. Ownership retained; restarting or deleting the fence is not stop proof");
+		const error = new Error("Interrupted transport coverage remains unproven. Ownership retained; reconnect cannot reconstruct missing admission evidence. Preserve the original device receipts and see docs/troubleshooting.md#unconfirmed-stop; restarting or deleting the fence is not stop proof.");
+		notifyStopFailure(error);
+		throw error;
+	};
+	const beforePhysicalIO = (direction: "input" | "output"): void => {
+		if (!coordinator?.ownsSpeech() || stopRecovery !== coordinator.recovery) {
+			throw new Error("Physical voice IO requires the current durable owner");
+		}
+		stopRecovery.beforeIO(direction);
 	};
 	const reportedStopErrors = new WeakSet<object>();
 	let stopDiagnostic = { cause: "", notified: false };
@@ -1864,6 +1874,7 @@ export default async function (pi: ExtensionAPI) {
 		utterance => playbackHistory.finishTimingGeneration(utterance),
 		phase => { playbackPhase = phase; requestPlaybackTimeline(); },
 		source => { narration.consumeOmittedSource(source.end); requestPlaybackTimeline(); },
+		() => beforePhysicalIO("output"),
 	);
 	const clearPlaybackTransport = (): number | undefined => {
 		devicePicker?.abort();
@@ -1935,6 +1946,7 @@ export default async function (pi: ExtensionAPI) {
 	const phoneInput = new PhoneInputClient(
 		handle => retainRecoveryHandle("input", handle.endpoint, handle.ticket),
 		handle => retireStopHandle("input", handle.ticket, handle.endpoint),
+		() => beforePhysicalIO("input"),
 	);
 	let inputStopBarrier = Promise.resolve();
 	let inputStopPending = false;
@@ -3724,7 +3736,13 @@ export default async function (pi: ExtensionAPI) {
 		ctx.ui.setWidget("pi-voice-follow-hint", undefined);
 		followHintVisible = false;
 		if (attentionPollTimer) clearInterval(attentionPollTimer);
-		attentionPollTimer = setInterval(pollWaitingAttention, 200);
+		attentionPollTimer = setInterval(() => {
+			try { pollWaitingAttention(); }
+			catch (error) {
+				attentionSuppressed = true;
+				notifyVoice(activeContext, `Attention poll failed; ownership retained: ${error instanceof Error ? error.message : String(error)}`, "error");
+			}
+		}, 200);
 		attentionPollTimer.unref?.();
 		pendingCodeDescriptions.clear();
 		codeDescriptionText.clear();

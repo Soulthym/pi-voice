@@ -1,9 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { ConnectionDevice } from "./connection-device.js";
+import { StopRecovery } from "./stop-recovery.js";
 
 export interface SessionPresence {
 	interactive: true;
@@ -17,6 +19,8 @@ export interface SessionPresence {
 	sessionName?: string;
 	attentionEnabled?: boolean;
 	attentionEpoch?: number;
+	/** Unique acquisition identity; legacy leases have none. */
+	speechGeneration?: string;
 }
 
 export interface WaitingSession extends SessionPresence {
@@ -57,11 +61,19 @@ function readJson<T>(file: string): T | undefined {
 	}
 }
 
-function writeJson(file: string, value: unknown): void {
+function writeJson(file: string, value: unknown, durable = false): void {
 	fs.mkdirSync(path.dirname(file), { recursive: true });
 	const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
 	fs.writeFileSync(temporary, `${JSON.stringify(value)}\n`, { mode: 0o600 });
+	if (durable) {
+		const fd = fs.openSync(temporary, "r");
+		try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+	}
 	fs.renameSync(temporary, file);
+	if (durable) for (const directory of [path.dirname(file), path.dirname(path.dirname(file))]) {
+		const fd = fs.openSync(directory, "r");
+		try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+	}
 }
 
 function remove(file: string): void {
@@ -79,10 +91,21 @@ export class SessionCoordinator {
 	#heartbeat: NodeJS.Timeout | undefined;
 	#stopped = false;
 	#speechLease = false;
+	#pendingRelease: NodeJS.Timeout | undefined;
 	#speechRequestEpoch = 0;
 	#pendingPreemptionFile: string | undefined;
 	#attentionEnabled = true;
 	#outgoingAttention: string | undefined;
+	#recovery: StopRecovery | undefined;
+
+	get recovery(): StopRecovery {
+		if (!this.#recovery) {
+			const recovery = new StopRecovery(this.root, this.instanceId);
+			recovery.initialize();
+			this.#recovery = recovery;
+		}
+		return this.#recovery;
+	}
 
 	cancelSpeechAcquisition(): void {
 		this.#speechRequestEpoch += 1;
@@ -110,12 +133,13 @@ export class SessionCoordinator {
 	constructor(cwd: string, sessionId: string, root = process.env.PI_VOICE_COORDINATOR_DIR ?? path.join(os.homedir(), ".cache", "pi-voice", "coordinator")) {
 		this.sessionId = sessionId;
 		this.cwd = path.resolve(cwd);
-		this.root = root;
+		this.root = path.resolve(root);
 		const identity = createHash("sha256").update(`${process.pid}\0${sessionId}\0${this.cwd}\0${randomUUID()}`).digest("hex");
 		this.instanceId = `${process.pid}-${identity.slice(0, 16)}`;
 	}
 
 	start(): void {
+		void this.recovery; // Durable idle evidence precedes presence, ownership and admission.
 		this.#stopped = false;
 		fs.mkdirSync(this.#presenceDir(), { recursive: true });
 		fs.mkdirSync(this.#waitingDir(), { recursive: true });
@@ -124,10 +148,14 @@ export class SessionCoordinator {
 		fs.mkdirSync(this.#resourceDir(), { recursive: true });
 		this.#writePresence();
 		this.#heartbeat = setInterval(() => {
-			this.#writePresence();
-			if (this.#speechLease) this.#refreshLease(this.#speechPath());
-			for (const lease of this.#resourceLeases) this.#refreshLease(lease);
-			this.#cleanStaleFiles();
+			try {
+				this.#writePresence();
+				if (this.#speechLease) this.#refreshLease(this.#speechPath());
+				for (const lease of this.#resourceLeases) this.#refreshLease(lease);
+				this.#cleanStaleFiles();
+			} catch (error) {
+				console.error("Coordinator heartbeat failed; retaining speech fence", error);
+			}
 		}, HEARTBEAT_MS);
 		this.#heartbeat.unref?.();
 	}
@@ -176,8 +204,7 @@ export class SessionCoordinator {
 	tryAcquireSpeech(): boolean {
 		if (this.#stopped) return false;
 		if (this.ownsSpeech()) {
-			this.#speechLease = true;
-			return true;
+			return this.#reuseSpeechLease();
 		}
 		const lease = this.#acquireLease(this.#speechPath(), "speech");
 		this.#speechLease = lease;
@@ -191,8 +218,7 @@ export class SessionCoordinator {
 		const current = () => !this.#stopped && epoch === this.#speechRequestEpoch;
 		if (!current()) return false;
 		if (this.ownsSpeech()) {
-			this.#speechLease = true;
-			return true;
+			return this.#reuseSpeechLease();
 		}
 		const owner = this.speechOwner();
 		if (owner) {
@@ -217,8 +243,7 @@ export class SessionCoordinator {
 		if (!current()) return false;
 		const remaining = this.speechOwner();
 		if (remaining?.instanceId === this.instanceId) {
-			this.#speechLease = true;
-			return true;
+			return this.#reuseSpeechLease();
 		}
 		// A same-PID owner may still be stopping transports after session replacement.
 		// Only its acknowledged release permits acquisition.
@@ -238,10 +263,82 @@ export class SessionCoordinator {
 		return this.speechOwner()?.instanceId === this.instanceId;
 	}
 
+	#reuseSpeechLease(): boolean {
+		// A previous publication may have linked successfully but failed fsync.
+		const fd = fs.openSync(this.root, "r");
+		try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+		this.#cancelDeferredRelease();
+		this.#speechLease = true;
+		return true;
+	}
+
+	#cancelDeferredRelease(): void {
+		if (this.#pendingRelease) clearTimeout(this.#pendingRelease);
+		this.#pendingRelease = undefined;
+	}
+
 	releaseSpeech(): void {
-		if (!this.#speechLease) return;
-		this.#releaseLease(this.#speechPath());
-		this.#speechLease = false;
+		if (!this.#speechLease || this.#pendingRelease) return;
+		const expected = readJson<Lease>(path.join(this.#speechPath(), "lease.json"));
+		const release = (): void => {
+			this.#pendingRelease = undefined;
+			try {
+				const released = this.#withSpeechMutation(false, () => {
+					const owner = readJson<Lease>(path.join(this.#speechPath(), "lease.json"));
+					if (owner?.kind === "speech" && owner.instanceId === this.instanceId &&
+						owner.pid === expected?.pid && owner.speechGeneration === expected.speechGeneration) {
+						fs.rmSync(this.#speechPath(), { recursive: true });
+					}
+					return true;
+				});
+				if (released) this.#speechLease = false;
+				else this.#pendingRelease = setTimeout(release, SPEECH_HANDOFF_POLL_MS);
+			} catch (error) {
+				// Worker-event callers cannot catch asynchronous filesystem failures.
+				console.error("Speech release failed; retrying", error);
+				this.#pendingRelease = setTimeout(release, HEARTBEAT_MS);
+			}
+		};
+		release();
+	}
+
+	/** No transport calls: dead authority + new-format non-admission is the entire proof. */
+	recoverIdleSpeech(expected: SessionPresence): boolean {
+		if (!expected.speechGeneration) return false;
+		return this.#withSpeechMutation(false, () => {
+			const file = path.join(this.#speechPath(), "lease.json");
+			const owner = readJson<Lease>(file);
+			if (owner?.kind !== "speech" || owner.instanceId !== expected.instanceId ||
+				owner.speechGeneration !== expected.speechGeneration || owner.pid !== expected.pid ||
+				!Number.isInteger(owner.pid) || owner.pid <= 0) return false;
+			try { process.kill(owner.pid, 0); return false; }
+			catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") return false; }
+			try {
+				const recovery = new StopRecovery(this.root, owner.instanceId);
+				if (!recovery.isIdle("input") || !recovery.isIdle("output")) return false;
+			} catch { return false; }
+			fs.rmSync(this.#speechPath(), { recursive: true });
+			return true;
+		});
+	}
+
+	#withSpeechMutation<T>(busy: T, operation: () => T): T {
+		// Linux flock locks the inherited open file description, not the helper PID.
+		// Never unlink this inode: independent opens must always contend on the same lock.
+		const lock = path.join(this.root, ".speech-mutation.lock");
+		const fd = fs.openSync(lock, "a", 0o600);
+		try {
+			if (process.platform !== "linux" && process.platform !== "android") throw new Error("Speech coordination requires Linux flock");
+			const result = spawnSync("flock", ["-n", "3"], { stdio: ["ignore", "ignore", "pipe", fd] });
+			if (result.status === 1) return busy;
+			if (result.error || result.status !== 0) throw new Error("Speech coordination requires working Linux flock", { cause: result.error });
+			const value = operation();
+			if (value === true) {
+				const directory = fs.openSync(this.root, "r");
+				try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+			}
+			return value;
+		} finally { fs.closeSync(fd); }
 	}
 
 	attentionIsCurrent(): boolean {
@@ -428,10 +525,39 @@ export class SessionCoordinator {
 	}
 
 	#writePresence(): void {
+		void this.recovery; // Pre-start setters must not create the root before durable initialization.
 		writeJson(this.#presenceFile(this.instanceId), this.#presence());
 	}
 
 	#acquireLease(directory: string, kind: string): boolean {
+		if (kind === "speech") {
+			void this.recovery;
+			return this.#withSpeechMutation(false, () => {
+				if (fs.existsSync(directory)) return false;
+				const temporary = fs.mkdtempSync(`${directory}.`);
+				let published = false;
+				try {
+					writeJson(path.join(temporary, "lease.json"), { ...this.#presence(), kind, speechGeneration: randomUUID() }, true);
+					// Native atomic no-clobber publication, including empty legacy directories.
+					try { fs.symlinkSync(path.basename(temporary), directory, "dir"); }
+					catch (error) {
+						if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+						throw error;
+					}
+					published = true;
+					this.#cancelDeferredRelease();
+					return true;
+				} finally {
+					// ponytail: retain named backing directories as audit data; add offline pruning if disk growth matters.
+					// Legacy recursive removal unlinks only speech.lock, never its populated backing directory.
+					if (!published) remove(temporary);
+				}
+			});
+		}
+		return this.#createLease(directory, kind);
+	}
+
+	#createLease(directory: string, kind: string): boolean {
 		this.#removeStaleLease(directory);
 		try {
 			fs.mkdirSync(directory);
@@ -450,13 +576,20 @@ export class SessionCoordinator {
 	}
 
 	#refreshLease(directory: string): void {
+		if (directory === this.#speechPath()) {
+			this.#withSpeechMutation(undefined, () => this.#writeLeaseHeartbeat(directory));
+		} else this.#writeLeaseHeartbeat(directory);
+	}
+
+	#writeLeaseHeartbeat(directory: string): void {
 		const file = path.join(directory, "lease.json");
 		const lease = readJson<Lease>(file);
-		if (lease?.instanceId === this.instanceId) writeJson(file, { ...lease, updatedAt: Date.now() });
+		if (lease?.instanceId === this.instanceId) writeJson(file, { ...lease, updatedAt: Date.now() }, directory === this.#speechPath());
 	}
 
 	#removeStaleLease(directory: string): void {
-		if (!fs.existsSync(directory)) return;
+		// Even missing/malformed speech metadata is uncertainty, not abandoned ownership proof.
+		if (directory === this.#speechPath() || !fs.existsSync(directory)) return;
 		const lease = readJson<Lease>(path.join(directory, "lease.json"));
 		// Process death/heartbeat expiry cannot prove a remote player or recorder stopped.
 		// Keep the durable speech fence; only the owning cleanup may release it.
