@@ -2,6 +2,12 @@
 
 Updated incrementally. Companion: `PLAN.md`. Reorganize freely while preserving evidence and disposition.
 
+## Operator-confirmed legacy-fence recovery — 2026-09-27
+
+- User requested recovery of the blocked session and explicitly confirmed fp5 was neither playing nor recording. This was manual operator confirmation, not a reconstructed protocol receipt or proof inferred from a dead PID.
+- Under the existing speech-mutation lock, verified the exact legacy instance `1628259-a4da85c4dcb928b1`, session `01a0e2d9-b05e-7028-a965-41657cffe342`, unchanged lease bytes/inode and absent original PID. Archived only that fence, with lease/journal backups and an explicit manual-recovery note, to `~/.cache/pi-voice/coordinator/manual-recovery/20260927T173338Z-1628259-a4da85c4dcb928b1/`. The original recovery journal remains intact.
+- Read-only post-check found no active speech fence. No SSH/device actions, settings changes, recordings/transcripts deletion or other-owner lease mutations occurred. Normal controls can now be retried; old displayed notices may need `/voice reconnect` to refresh. This incident-specific administrative recovery does not close the legacy admission-proof gap or add an automatic force-release path.
+
 ## Current checkpoint — final review fixes after `fa80347`
 
 - **A — stop journal:** cleanup now checks unresolved saved scopes rather than generation changes. Late handles with matching releases plus cancel ACK clear safely; unreleased handles and pending preemption retain ownership. ACK is not a global remote-release receipt (`73b4f27`, `e846d98`).
