@@ -74,7 +74,7 @@ export class Vocalizer {
 
 	constructor(
 		getConfig: () => VoiceConfig,
-		onEvent: (event: WorkerEvent) => void,
+		private readonly onEvent: (event: WorkerEvent) => void,
 		describeCode?: CodeDescriber,
 		onNarrationSegment?: (segment: NarrationSegment) => void,
 		worker: VoiceWorker | undefined = undefined,
@@ -82,6 +82,7 @@ export class Vocalizer {
 		onUtteranceEnded?: (utterance: number) => void,
 		onPlaybackPhase?: (phase: PlaybackPhase) => void,
 		onSourceOmitted?: (source: SpeakableSourceRange) => void,
+		private readonly beforePlayback?: () => void,
 	) {
 		this.#getConfig = getConfig;
 		this.#onPlaybackPhase = onPlaybackPhase;
@@ -298,7 +299,9 @@ export class Vocalizer {
 	}
 
 	#pushItems(items: SpeakableItem[]): void {
+		const generation = this.#generation;
 		for (const item of items) {
+			if (generation !== this.#generation) return;
 			const source = {
 				start: item.source.start + this.#sourceOffset,
 				end: item.source.end + this.#sourceOffset,
@@ -400,7 +403,9 @@ export class Vocalizer {
 		let descriptionOffset = 0;
 		const skip = Math.min(requestedSkip, Math.max(0, chunks.length - 1));
 		const inherited = chunks.slice(0, skip).flatMap(chunk => chunk.cues.flatMap(cue => cue.operations));
+		const generation = this.#generation;
 		for (const [index, chunk] of chunks.entries()) {
+			if (generation !== this.#generation) return;
 			if (index < skip) { descriptionOffset += chunk.text.length + 1; continue; }
 			if (index === skip && inherited.length) chunk.cues.unshift({ offset: 0, operations: inherited });
 			this.#sendSegments(
@@ -437,7 +442,9 @@ export class Vocalizer {
 	): void {
 		if (segments.length === 0) return;
 		const config = this.#getConfig();
-		segments.forEach((text, index) => {
+		const generation = this.#generation;
+		for (const [index, text] of segments.entries()) {
+			if (generation !== this.#generation) return;
 			const id = ++this.#nextSegment;
 			const foreground = this.#phases.get(utterance);
 			if (foreground) {
@@ -462,8 +469,16 @@ export class Vocalizer {
 					codeDescription,
 				});
 			}
+			// Includes local playback and remote handshake, before a stream ID can exist.
+			try { this.beforePlayback?.(); }
+			catch (error) {
+				const event: WorkerEvent = { type: "error", utterance, message: error instanceof Error ? error.message : String(error) };
+				this.handleWorkerEvent(event);
+				this.onEvent(event);
+				return;
+			}
 			this.#worker.sendSegment(utterance, id, text, config);
-		});
+		}
 	}
 
 	#armIdle(callback: () => void): void {

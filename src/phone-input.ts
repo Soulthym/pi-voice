@@ -175,6 +175,7 @@ export class PhoneInputClient {
 	constructor(
 		private readonly retainHandle?: (handle: { endpoint: string; ticket: string }) => void,
 		private readonly retireHandle?: (handle: { endpoint: string; ticket: string }) => void,
+		private readonly beforeCapture?: () => void,
 	) {}
 
 	/** Opaque original scope only; never substitute a newly issued recording ticket. */
@@ -256,6 +257,8 @@ export class PhoneInputClient {
 		const generation = ++this.#generation;
 		await cancelled;
 		if (generation !== this.#generation) throw new Error("Voice microphone cancelled");
+		// Local connect spawns a helper; fence even the pre-ticket/handshake window.
+		this.beforeCapture?.();
 		const socket = connectEndpoint(endpoint);
 		this.#socket = socket;
 		this.#activeEndpoint = endpoint;
