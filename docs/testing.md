@@ -1,6 +1,14 @@
 # Tests
 
-## Current checkpoint — compact playback UI after `e1511af`
+## Current checkpoint — never-admitted orphan recovery
+
+`npm run check` passed. Final isolated checkout `npm test`: **1098 passed / 33 compatibility skips / zero failures (1131 total)**. Full installed-native suite: **1131 passed / zero skips or failures**. Logs: `/tmp/voice-idle-final-{check,test,native}.log`. LSP is unavailable. Native checks use inert terminals and mocked providers/transports, not live hardware or real inference.
+
+Regressions distinguish disconnected F5 before dispatch from uncertain/admitted work, suppress false input warnings only with durable idle proof, preserve legacy fences, reject stale owner/generation comparisons, and cover alias-root locking, lock-holder death, deferred release, journal/fsync failure, transient failure in prose/description batches, unsupported locking, Android platform gating and caught heartbeat/attention failures. Independent review found and drove these fixes. **Complete per-scope worker/endpoint admission and retirement accounting remains unimplemented**; successful saved receipts do not reclaim an uncertain owner.
+
+Final runs used short isolated HOME, TMPDIR, XDG config/cache/runtime roots. An initial isolated run exceeded the Unix socket path limit; rerunning with a shorter TMPDIR passed without changing production code. An earlier delegated full run did not isolate HOME and may have created directories in the real model cache through worker imports; it is not claimed to have been cache-write-free. No live Pi/SSH/client restart, lease mutation, device stop, deployment, real inference or provider call was performed. The existing legacy fence remains unresolved; see [incident evidence](troubleshooting.md#disconnected-replay-incident-2026-09-27).
+
+## Historical checkpoint — compact playback UI after `e1511af`
 
 `npm run check` passed; full checkout `npm test`: **1055 passed / 33 compatibility skips / zero failures (1088 total)**; full installed-native `npm test`: **1088 passed / zero skips or failures**. Logs: `/tmp/voice-ui-trim-tests.log`, `/tmp/voice-ui-trim-native.log`. LSP unavailable; TypeScript supplies diagnostics.
 
@@ -248,7 +256,7 @@ The test runner defaults to four concurrent test processes and keeps the existin
 `test/*.test.ts` selection. It removes `SSH_CONNECTION`, `SSH_CLIENT`, `SSH_TTY`,
 `TMUX`, `TMUX_PANE`, and `PI_VOICE_*` from the child environment, except explicit
 `PI_VOICE_TEST_*` opt-ins (such as `PI_VOICE_TEST_TUI_MODULE`). Other environment
-variables and the invoking shell are unchanged. Tests provide their own mocked
+variables and the invoking shell are unchanged. Worker imports can create directories under HOME even with inference mocked: for a cache-isolated run, set HOME, XDG_CONFIG_HOME, XDG_CACHE_HOME and XDG_RUNTIME_DIR to an owned temporary root, and use a **short** TMPDIR (Unix socket paths are length-limited). Setting only `PI_VOICE_CACHE_DIR` is insufficient because the runner removes it. Tests provide their own mocked
 providers, devices, and temporary configuration; this is not a live-device test.
 
 Latest UX regression coverage includes actual source-word counts before checkpoint thinning,

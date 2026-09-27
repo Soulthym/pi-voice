@@ -13,6 +13,8 @@ npm install
 pi install .
 ```
 
+Speech ownership requires Linux (including an otherwise supported Termux host) with `flock` (util-linux) in `PATH` and a local filesystem supporting directory fsync and symlinks. Missing locking support fails closed before acquiring speech; native macOS/Windows hosting is not supported by this recovery path.
+
 Install `ffmpeg` for microphone decoding and Opus cache reads/writes. Without it, synthesis still works, but microphone input and audio caching do not.
 
 For local Linux devices, install:
@@ -123,6 +125,10 @@ GatewayPorts no
 Validate with `sshd -t`, then reload `sshd` after changing its configuration. These settings do not control Tailscale's built-in SSH server; its version and policy must permit TCP reverse forwarding. Managed endpoint metadata is stored under `~/.cache/pi-voice/devices` on the Pi host.
 
 ## Upgrading
+
+### Never-admitted orphan recovery
+
+This change is host-only; **no client scripts or endpoint protocol changed**. Load the updated extension when it is safe to do so; no SSH/client restart or hardware test is needed for this change. New owners get durable pre-dispatch admission evidence. Old journals are not upgraded, and an existing unresolved fence is not cleared by `/reload` or updating clients. Read the [legacy incident limitations](troubleshooting.md#disconnected-replay-incident-2026-09-27) before attempting recovery. Do not interrupt live sessions or delete coordination/runtime state to install this update.
 
 ### Sticky device selection and selected-device badge
 
