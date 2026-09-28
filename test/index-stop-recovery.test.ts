@@ -1,15 +1,21 @@
 import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import test, { mock } from "node:test";
 import { DeviceRouter } from "../src/device-router.js";
+import { normalizeVoiceOutput } from "../src/config.js";
 import { PhoneInputClient } from "../src/phone-input.js";
 import { StopRecovery } from "../src/stop-recovery.js";
 import { SessionCoordinator } from "../src/session-coordinator.js";
 import { FakeVoiceHost, MockedVoiceWorkerClient, assistant } from "./helpers/fake-voice-host.js";
 
 mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: MockedVoiceWorkerClient } });
+
+test("single-slash Unix config normalizes to the sink's remote prefix", () => {
+	assert.equal(normalizeVoiceOutput("unix:/test-output"), "unix:///test-output");
+});
 
 for (const diesAfterStartup of [false, true]) for (const journalAvailable of [true, false]) for (const retryFails of [false, true]) test(`startup restores orphan warnings without stop IO; explicit reconnect retains fence (journal: ${journalAvailable}, late death: ${diesAfterStartup}, retry failure: ${retryFails})`, async t => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-recovery-index-"));
@@ -96,11 +102,15 @@ test("covered empty output orphan reconnect retires durably without inventing an
 	const file = path.join(env.PI_VOICE_COORDINATOR_DIR, "speech.lock", "lease.json");
 	await fs.mkdir(path.dirname(file));
 	await fs.writeFile(file, JSON.stringify({ kind: "speech", instanceId: "dead-owner", pid: 2147483647, speechGeneration: "original-generation", interactive: true, updatedAt: 1, cwd: root, sessionId: "previous" }));
-	t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", async () => ({ kind: "intentional_local" as const }));
+	const resolveConnection = t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", async () => ({ kind: "intentional_local" as const }));
 	await host.start();
 	assert.match(host.widgetLines()!.join("\n"), /Output stop unconfirmed/);
 	assert.doesNotMatch(host.widgetLines()!.join("\n"), /Input stop unconfirmed/);
+	const beforeReconnect = resolveConnection.mock.callCount();
+	const previousNotices = host.notices.length;
 	await host.command("reconnect");
+	assert.ok(resolveConnection.mock.callCount() > beforeReconnect, "successful recovery continues connection adoption");
+	assert.equal(host.notices.slice(previousNotices).some(notice => /Previous voice owner stop remains unconfirmed/.test(notice.message)), false);
 	await assert.rejects(fs.stat(file), { code: "ENOENT" });
 	const restored = new StopRecovery(env.PI_VOICE_COORDINATOR_DIR, "dead-owner");
 	assert.equal(restored.isIdle("output"), true);
@@ -108,7 +118,7 @@ test("covered empty output orphan reconnect retires durably without inventing an
 	assert.doesNotMatch(host.widgetLines()!.join("\n"), /stop unconfirmed/);
 });
 
-for (const admitted of [false, true]) test(`new-format orphan after disconnected F5 vs output admission (${admitted})`, async t => {
+for (const [admitted, output] of [[false, "local"], [true, "local"], [true, "tcp:local-player"], [true, "unix:/test-output"]] as const) test(`new-format orphan after disconnected F5 vs output admission (${admitted}, ${output})`, async t => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-idle-index-"));
 	const env = { PI_VOICE_CONFIG: path.join(root, "config"), PI_VOICE_DEVICE_DIR: path.join(root, "devices"), PI_VOICE_COORDINATOR_DIR: path.join(root, "coordinator") };
 	const old = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
@@ -130,7 +140,8 @@ for (const admitted of [false, true]) test(`new-format orphan after disconnected
 	const route = DeviceRouter.prototype.routeMetadata;
 	t.mock.method(DeviceRouter.prototype, "routeMetadata", function(this: DeviceRouter, ...args: Parameters<typeof route>) {
 		if (!admitted && snapshot && args[1] === "output") throw new Error("F5 device disconnected before route validation");
-		return route.apply(this, args);
+		const resolved = route.apply(this, args);
+		return args[1] === "output" ? { ...resolved, endpoint: output } : resolved;
 	});
 	const acquire = SessionCoordinator.prototype.tryAcquireSpeech;
 	t.mock.method(SessionCoordinator.prototype, "tryAcquireSpeech", function(this: SessionCoordinator) {
@@ -146,6 +157,7 @@ for (const admitted of [false, true]) test(`new-format orphan after disconnected
 		const ledger = new StopRecovery(env.PI_VOICE_COORDINATOR_DIR, owner.instanceId);
 		assert.equal(ledger.isIdle("output"), false, "write-ahead precedes worker dispatch, not stream-ID receipt");
 		assert.equal(ledger.isIdle("input"), true);
+		assert.equal(JSON.parse(readFileSync(ledger.file, "utf8")).admission.output, "uncertain", "only sink-recognized remote prefixes have covered admission");
 		send(...args);
 	});
 	await host.shortcut("f5");

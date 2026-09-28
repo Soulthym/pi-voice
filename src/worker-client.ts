@@ -81,6 +81,7 @@ export class VoiceWorkerClient {
 	#cancelGenerations = new Map<number, number>();
 	#ttsWorkers: number | undefined;
 	#activeUtterance: number | undefined;
+	#grantUtterances = new Set<number>();
 	#onEvent: (event: WorkerEvent) => void;
 	#retryConfig?: () => VoiceConfig;
 
@@ -92,6 +93,7 @@ export class VoiceWorkerClient {
 	sendSegment(utterance: number, segmentId: number, text: string, config: VoiceConfig): void {
 		this.setTtsWorkers(config.ttsWorkers);
 		this.#activeUtterance = utterance;
+		this.#grantUtterances.add(utterance);
 		this.#dispatchClosed = false;
 		this.#send({
 			type: "segment",
@@ -108,7 +110,7 @@ export class VoiceWorkerClient {
 			audioCacheBitrate: config.audioCacheBitrate,
 			output: config.output,
 		});
-		if (/^(tcp|unix):/.test(config.output)) {
+		if (/^(tcp|unix):\/\//.test(config.output)) {
 			this.#remoteUnconfirmed = true;
 			this.#remoteUtterance = utterance;
 			this.#remoteGeneration += 1;
@@ -135,6 +137,7 @@ export class VoiceWorkerClient {
 
 	cancel(): number | undefined {
 		this.#dispatchClosed = true;
+		this.#grantUtterances.clear();
 		this.#rejectTimingRetries(new Error("Speech timing retry interrupted"));
 		this.#paused = false;
 		for (const pending of this.#pendingMeasurements.values()) {
@@ -281,6 +284,7 @@ export class VoiceWorkerClient {
 	/** Escalation after a missing cancel ACK (e.g. 1s). Rejection means keep the speech lease. */
 	terminate(): Promise<void> {
 		this.#dispatchClosed = true;
+		this.#grantUtterances.clear();
 		if (this.#termination) return this.#termination;
 		const pending = this.#terminate();
 		this.#termination = pending;
@@ -431,15 +435,16 @@ export class VoiceWorkerClient {
 			return;
 		}
 		if (event.type === "remote-handle") {
-			if (validStreamId(event.id) && /^(tcp|unix):/.test(event.output)) {
+			if (validStreamId(event.id) && /^(tcp|unix):\/\//.test(event.output)) {
 				this.#remoteHandles.set(event.id, { output: event.output, id: event.id, utterance: event.utterance, bootId: event.bootId });
 				this.#remoteUnconfirmed = true;
-				const generation = this.#remoteGeneration;
+				// Queued submissions share admission; only cancellation invalidates a saved grant.
+				const generation = this.#nextCancelId;
 				const source = this.#child;
 				let granted = false;
 				delete event.grant; // Wire data never supplies executable admission authority.
 				this.#onEvent({ ...event, ...(validBootId(event.bootId) ? { grant: () => {
-					if (granted || retired || !source || this.#child !== source || this.#closed.has(source) || this.#dispatchClosed || generation !== this.#remoteGeneration || event.utterance !== this.#activeUtterance) return;
+					if (granted || retired || !source || this.#child !== source || this.#closed.has(source) || this.#dispatchClosed || generation !== this.#nextCancelId || !this.#grantUtterances.has(event.utterance)) return;
 					granted = true;
 					this.#send({ type: "output-grant", id: event.id, bootId: event.bootId });
 				} } : {}) }); // Grant only after the host durably journals the exact scope.
@@ -515,6 +520,7 @@ export class VoiceWorkerClient {
 				else pending.reject(new Error(event.message));
 			}
 		}
+		if ((event.type === "idle" || event.type === "error") && event.utterance !== undefined) this.#grantUtterances.delete(event.utterance);
 		if (
 			(event.type === "idle" && event.utterance === this.#activeUtterance) ||
 			(event.type === "error" && event.utterance === this.#activeUtterance)

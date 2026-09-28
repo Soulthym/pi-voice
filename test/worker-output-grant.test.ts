@@ -23,6 +23,7 @@ test("output grant requires durable exact reservation; cancellation closes late 
  const output = "unix:///test-only-output";
  worker.sendSegment(1, 1, "No inference", { ...DEFAULT_VOICE_CONFIG, output });
  const handle = { type: "remote-handle", output, id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", bootId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", utterance: 1 };
+ worker.sendSegment(2, 2, "Queued without inference", { ...DEFAULT_VOICE_CONFIG, output });
  child.stdout.write(JSON.stringify(handle) + "\n");
  assert.equal(messages.some(m => m.type === "output-grant"), false, "event delivery is not journal ACK");
  const retain = () => journal.retain("output", { endpoint: output, id: handle.id, bootId: handle.bootId, selection: "device", configured: "auto" }, "Test output");
@@ -32,11 +33,17 @@ test("output grant requires durable exact reservation; cancellation closes late 
  assert.equal(messages.some(m => m.type === "output-grant"), false);
  retain();
  assert.equal(new StopRecovery(root, "test-owner").episode("output")?.handles[0]?.bootId, handle.bootId);
+ worker.sendSegment(3, 3, "Another queued utterance", { ...DEFAULT_VOICE_CONFIG, output });
  events[0].grant(); events[0].grant();
  assert.deepEqual(messages.filter(m => m.type === "output-grant"), [{ type: "output-grant", id: handle.id, bootId: handle.bootId }]);
  child.stdout.write(JSON.stringify({ ...handle, id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc" }) + "\n");
- worker.cancel(); events.at(-1).grant();
- assert.equal(messages.filter(m => m.type === "output-grant").length, 1);
+ const lateGrant = events.at(-1).grant;
+ worker.cancel(); lateGrant();
+ worker.sendSegment(4, 4, "New cancellation generation", { ...DEFAULT_VOICE_CONFIG, output });
+ lateGrant();
+ child.stdout.write(JSON.stringify({ ...handle, id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd" }) + "\n");
+ events.at(-1).grant();
+ assert.equal(messages.filter(m => m.type === "output-grant").length, 1, "old callbacks and delayed cancelled announcements stay closed after new work");
  assert.equal(journal.isIdle("input"), true, "unused input must not acquire a fake episode");
  journal.retire("output", handle.id, output);
  assert.equal(journal.isIdle("output"), false, "partial Stage B does not invent complete dispatch coverage");

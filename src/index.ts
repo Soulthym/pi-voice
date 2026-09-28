@@ -402,7 +402,7 @@ export default async function (pi: ExtensionAPI) {
 		recoveryRoutes[direction].set(route.endpoint, { selection: route.kind === "device" ? route.device.id : "local", configured: config[direction], device: route.kind === "device" ? route.device.name : selectedDeviceLabel });
 	};
 	const retainRecoveryHandle = (direction: "input" | "output", endpoint: string, id: string, bootId?: string): void => {
-		if (!stopRecovery || !/^(tcp|unix):/.test(endpoint)) {
+		if (!stopRecovery || !/^(tcp|unix):\/\//.test(endpoint)) {
 			if (direction === "output") throw new Error("Recovery journal unavailable; dispatch denied");
 			return;
 		}
@@ -465,7 +465,7 @@ export default async function (pi: ExtensionAPI) {
 		if (!coordinator?.ownsSpeech() || stopRecovery !== coordinator.recovery) {
 			throw new Error("Physical voice IO requires the current durable owner");
 		}
-		stopRecovery.beforeIO(direction, direction === "output" && /^(tcp|unix):/.test(routedVoiceConfig().output));
+		stopRecovery.beforeIO(direction, direction === "output" && /^(tcp|unix):\/\//.test(routedVoiceConfig().output));
 	};
 	const reportedStopErrors = new WeakSet<object>();
 	let stopDiagnostic = { cause: "", notified: false };
@@ -2373,9 +2373,11 @@ export default async function (pi: ExtensionAPI) {
 				if (epoch !== playbackRequestEpoch || ctx !== activeContext || !interactiveVoiceSession) return false;
 				if (recover) restoreStopRecovery();
 				if (orphanRecoveryBlocked) {
+					const previousStopUnconfirmed = stopUnconfirmed;
 					stopUnconfirmed = true;
 					if (recover) await retryStopRecovery();
-					throw new Error("Previous voice owner stop remains unconfirmed; retry /voice reconnect");
+					if (orphanRecoveryBlocked) throw new Error("Previous voice owner stop remains unconfirmed; retry /voice reconnect");
+					stopUnconfirmed = previousStopUnconfirmed;
 				}
 				if (force && retiredStops.size) {
 					const previousStopUnconfirmed = stopUnconfirmed;
