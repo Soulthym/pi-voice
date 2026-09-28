@@ -394,6 +394,7 @@ export default async function (pi: ExtensionAPI) {
 	let stopRecovery: StopRecovery | undefined;
 	let orphanRecovery: StopRecovery | undefined;
 	let orphanRecoveryOwner: string | undefined;
+	let orphanRecoveryLease: ReturnType<SessionCoordinator["speechOwner"]>;
 	let orphanRecoveryBlocked = false;
 	const inheritedStops: Partial<Record<"input" | "output", StopEpisode>> = {};
 	const recoveryRoutes = { input: new Map<string, { selection: string; configured: string; device: string }>(), output: new Map<string, { selection: string; configured: string; device: string }>() };
@@ -415,6 +416,7 @@ export default async function (pi: ExtensionAPI) {
 		const previousStops = { ...inheritedStops };
 		orphanRecovery = undefined;
 		orphanRecoveryOwner = undefined;
+		orphanRecoveryLease = undefined;
 		orphanRecoveryBlocked = false;
 		delete inheritedStops.input;
 		delete inheritedStops.output;
@@ -427,6 +429,7 @@ export default async function (pi: ExtensionAPI) {
 		catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") return; }
 		orphanRecoveryBlocked = true;
 		orphanRecoveryOwner = owner.instanceId;
+		orphanRecoveryLease = owner;
 		try { orphanRecovery = new StopRecovery(coordinator.root, owner.instanceId); }
 		catch (error) { notifyStopFailure(error); }
 		for (const direction of ["input", "output"] as const) {
@@ -448,6 +451,11 @@ export default async function (pi: ExtensionAPI) {
 				if (saved && inheritedStops[direction]) inheritedStops[direction]!.cause = saved.cause;
 			}));
 		}
+		if (orphanRecoveryLease && coordinator?.recoverIdleSpeech(orphanRecoveryLease)) {
+			restoreStopRecovery();
+			refreshProgressWidget();
+			return;
+		}
 		refreshProgressWidget();
 		const error = new Error("Interrupted transport coverage remains unproven. Ownership retained; reconnect cannot reconstruct missing admission evidence. Preserve the original device receipts and see docs/troubleshooting.md#unconfirmed-stop; restarting or deleting the fence is not stop proof.");
 		notifyStopFailure(error);
@@ -457,7 +465,7 @@ export default async function (pi: ExtensionAPI) {
 		if (!coordinator?.ownsSpeech() || stopRecovery !== coordinator.recovery) {
 			throw new Error("Physical voice IO requires the current durable owner");
 		}
-		stopRecovery.beforeIO(direction);
+		stopRecovery.beforeIO(direction, direction === "output" && /^(tcp|unix):/.test(routedVoiceConfig().output));
 	};
 	const reportedStopErrors = new WeakSet<object>();
 	let stopDiagnostic = { cause: "", notified: false };
@@ -514,7 +522,7 @@ export default async function (pi: ExtensionAPI) {
 			const cause = error instanceof Error ? error.message : String(error);
 			const existing = cleanup.episode ?? state.episode;
 			const episode = existing ?? { device, cause, notified: false };
-			try { stopRecovery?.fail(resource, episode.device, cause); } catch (error) { notifyStopFailure(error); }
+			try { if (!stopRecovery?.isIdle(resource)) stopRecovery?.fail(resource, episode.device, cause); } catch (error) { notifyStopFailure(error); }
 			if (state.cleanup === cleanup) {
 				if (state.episode === cleanup.episode) state.episode = episode;
 				state.cleanup = undefined;

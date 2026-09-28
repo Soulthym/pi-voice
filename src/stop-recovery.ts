@@ -8,12 +8,10 @@ import { stopRemotePlayback, validStreamId, validBootId } from "./remote-playbac
 export type RecoveryHandle = { endpoint: string; id: string; selection: string; configured: string; bootId?: string };
 export type RecoveryEpisode = { device: string; cause: string; handles: RecoveryHandle[] };
 type Journal = { input?: RecoveryEpisode; output?: RecoveryEpisode } & (
-	{ version: 1 } | { version: 2; owner: string; admission: Record<DeviceDirection, "idle" | "uncertain"> }
+	{ version: 1 } | { version: 2 | 3; owner: string; admission: Record<DeviceDirection, "idle" | "uncertain" | "covered"> }
 );
 
-/** Only a freshly initialized, never-admitted owner proves orphan recovery safe.
- * ponytail: uncertainty is monotonic for this owner's lifetime; full transport accounting is needed to reset it.
- */
+/** v3 remote output grants require a durable scope; unknown/local admission stays fenced. */
 export class StopRecovery {
 	readonly file: string;
 	#journal: Journal = { version: 1 };
@@ -26,9 +24,9 @@ export class StopRecovery {
 		try {
 			// ponytail: keep every unresolved scope in memory; stream the journal if its size becomes operationally significant.
 			const value = JSON.parse(fs.readFileSync(this.file, "utf8")) as Journal;
-			if (value.version !== 1 && value.version !== 2) throw new Error("Invalid recovery journal version");
-			if (value.version === 2 && (value.owner !== instanceId || !value.admission ||
-				!["idle", "uncertain"].includes(value.admission.input) || !["idle", "uncertain"].includes(value.admission.output))) {
+			if (value.version !== 1 && value.version !== 2 && value.version !== 3) throw new Error("Invalid recovery journal version");
+			if (value.version !== 1 && (value.owner !== instanceId || !value.admission ||
+				!["idle", "uncertain"].includes(value.admission.input) || !(value.version === 3 ? ["idle", "uncertain", "covered"] : ["idle", "uncertain"]).includes(value.admission.output))) {
 				throw new Error("Invalid recovery admission ledger");
 			}
 			for (const direction of ["input", "output"] as const) {
@@ -39,6 +37,7 @@ export class StopRecovery {
 					throw new Error("Invalid recovery journal");
 				}
 			}
+			if (value.version === 3 && value.admission.output === "covered" && value.output?.handles.some(handle => !validBootId(handle.bootId))) throw new Error("Invalid covered output scope");
 			this.#journal = value;
 			this.#exists = true;
 		} catch (error) {
@@ -49,18 +48,18 @@ export class StopRecovery {
 	/** Fresh random owner only. Never upgrade missing/legacy evidence for an old owner. */
 	initialize(): void {
 		if (this.#exists || fs.existsSync(this.file)) throw new Error("Recovery owner already exists");
-		this.#journal = { version: 2, owner: this.instanceId, admission: { input: "idle", output: "idle" } };
+		this.#journal = { version: 3, owner: this.instanceId, admission: { input: "idle", output: "idle" } };
 		this.#save();
 	}
 
 	isIdle(direction: DeviceDirection): boolean {
-		return this.#exists && this.#journal.version === 2 && this.#journal.admission[direction] === "idle" && !this.#journal[direction];
+		return this.#exists && this.#journal.version !== 1 && this.#journal.admission[direction] === "idle" && !this.#journal[direction];
 	}
 
 	/** Must finish durably BEFORE sending work that could open a player or recorder. */
-	beforeIO(direction: DeviceDirection): void {
-		if (!this.#exists || this.#journal.version !== 2) throw new Error("Admission ledger unavailable");
-		this.#journal.admission[direction] = "uncertain";
+	beforeIO(direction: DeviceDirection, preparedOutput = false): void {
+		if (!this.#exists || this.#journal.version === 1) throw new Error("Admission ledger unavailable");
+		this.#journal.admission[direction] = direction === "output" && preparedOutput && this.#journal.version === 3 && this.#journal.admission.output !== "uncertain" ? "covered" : "uncertain";
 		// Always persist, including retries after a failed fsync. Memory is not durability proof.
 		this.#save();
 	}
@@ -72,7 +71,7 @@ export class StopRecovery {
 
 	retain(direction: DeviceDirection, handle: RecoveryHandle, device: string): void {
 		if (!validHandle(direction, handle)) throw new Error("Invalid recovery handle");
-		if (this.#journal.version === 2) this.#journal.admission[direction] = "uncertain";
+		if (this.#journal.version !== 1) this.#journal.admission[direction] = direction === "output" && this.#journal.version === 3 && validBootId(handle.bootId) && this.#journal.admission.output !== "uncertain" ? "covered" : "uncertain";
 		const episode = this.#journal[direction] ??= { device, cause: "Original transport stop not yet confirmed", handles: [] };
 		const existing = episode.handles.find(existing => existing.id === handle.id);
 		if (direction === "output" && existing && (existing.endpoint !== handle.endpoint || existing.bootId !== handle.bootId || existing.selection !== handle.selection || existing.configured !== handle.configured)) throw new Error("Recovery scope identity changed");
@@ -85,7 +84,8 @@ export class StopRecovery {
 	}
 
 	fail(direction: DeviceDirection, device: string, cause: string): void {
-		if (this.#journal.version === 2) this.#journal.admission[direction] = "uncertain";
+		// A failed stop does not lose coverage: every possible remote grant is still listed.
+		if (this.#journal.version !== 1 && !(direction === "output" && this.#journal.version === 3 && this.#journal.admission.output === "covered")) this.#journal.admission[direction] = "uncertain";
 		const episode = this.#journal[direction] ??= { device, cause, handles: [] };
 		episode.cause = cause;
 		this.#save();
@@ -102,15 +102,17 @@ export class StopRecovery {
 	}
 
 	clear(direction: DeviceDirection): void {
+		if (this.#journal[direction]?.handles.length) return;
+		const previous = structuredClone(this.#journal);
 		delete this.#journal[direction];
-		this.#save();
+		if (direction === "output" && this.#journal.version === 3 && this.#journal.admission.output === "covered") this.#journal.admission.output = "idle";
+		try { this.#save(); } catch (error) { this.#journal = previous; throw error; }
 	}
 
-	/** Validate the original selection against current configured metadata, never the new pin.
-	 * Even after every saved receipt, a crash may have lost another admission: retain the fence.
-	 */
+	/** Only retry a dead owner's scopes, using original selection, never the new pin. */
 	async retry(direction: DeviceDirection, router: DeviceRouter, configured: string): Promise<void> {
 		const episode = this.#journal[direction];
+		if (direction === "output" && this.#journal.version === 3 && this.#journal.admission.output === "covered" && !episode?.handles.length) { this.clear(direction); return; }
 		if (!episode) return;
 		if (!episode.handles.length) throw new Error(`${episode.device}: no retained ${direction} scope; ownership retained`);
 		for (const handle of [...episode.handles]) {
@@ -122,10 +124,11 @@ export class StopRecovery {
 				(route.kind === "custom" && route.endpoint !== handle.endpoint)) throw new Error("Original recovery route unavailable");
 			if (direction === "input") await PhoneInputClient.retryStop({ endpoint: route.endpoint, ticket: handle.id });
 			else await stopRemotePlayback({ output: route.endpoint, id: handle.id, bootId: handle.bootId });
-			episode.handles = episode.handles.filter(existing => existing.id !== handle.id);
+			this.retire(direction, handle.id, handle.endpoint);
 			episode.cause = "Saved scope stopped; interrupted transport coverage remains unproven; ownership retained";
 			this.#save();
 		}
+		if (direction === "output" && this.#journal.version === 3 && this.#journal.admission.output === "covered") this.clear(direction);
 	}
 
 	#save(): void {

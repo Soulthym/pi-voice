@@ -302,7 +302,7 @@ export class SessionCoordinator {
 		release();
 	}
 
-	/** No transport calls: dead authority + new-format non-admission is the entire proof. */
+	/** No transport calls: dead authority + durable all-direction idle proof, including retired v3 output scopes. */
 	recoverIdleSpeech(expected: SessionPresence): boolean {
 		if (!expected.speechGeneration) return false;
 		return this.#withSpeechMutation(false, () => {
