@@ -108,7 +108,7 @@ function makeFakeBin(root: string, scripts: Record<string, string>): string {
 
 /** Coreutils the client scripts legitimately need; everything else stays absent. */
 const RESTRICTED_TOOLS = [
-	"bash", "sh", "basename", "cat", "cmp", "dd", "dirname", "env", "grep", "sed", "head", "id", "kill",
+	"bash", "sh", "basename", "cat", "chmod", "cmp", "dd", "dirname", "env", "grep", "sed", "head", "id", "kill", "sync",
 	"mkdir", "mkfifo", "mv", "od", "printf", "readlink", "rm", "rmdir", "flock", "sh", "sleep", "stat", "tail", "timeout", "touch", "tr", "base64", "setsid", "ps",
 ];
 
@@ -453,6 +453,8 @@ wait $!`,
 			cwd: root,
 			env: {
 				...process.env,
+				HOME: root,
+				XDG_STATE_HOME: path.join(root, "state"),
 				XDG_RUNTIME_DIR: runtime,
 				PATH: bin,
 				MPV_LIFETIME: "500",

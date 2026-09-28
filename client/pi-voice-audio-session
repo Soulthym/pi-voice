@@ -17,7 +17,23 @@ player_exited=false
 feeder_pid=
 lock_held=false
 protocol=1
-state_dir="$runtime_dir/pi-voice-session-$session_id"
+state_home=${XDG_STATE_HOME:-${HOME:?}/.local/state}
+playback_dir="$state_home/pi-voice/playback"
+state_dir="$playback_dir/$session_id"
+boot_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)
+if [[ $boot_id =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+  boot_id="\"$boot_id\""
+else
+  boot_id=null
+fi
+
+publish_exit() (
+  umask 077
+  printf '{"id":"%s","boot_id":%s}\n' "$session_id" "$boot_id" >"$state_dir/exited.tmp" &&
+    sync "$state_dir/exited.tmp" &&
+    mv -f "$state_dir/exited.tmp" "$state_dir/exited" &&
+    sync "$state_dir"
+)
 
 cleanup() {
   trap - EXIT
@@ -30,7 +46,7 @@ cleanup() {
     player_exited=true
   fi
   # Retain own-child wait proof even after the normal path clears its PID.
-  [[ $player_exited == true ]] && touch "$state_dir/exited"
+  [[ $player_exited == true ]] && publish_exit
   if [[ -n "$mpv_pid" ]] && [[ $(cat "$active_player_file" 2>/dev/null || true) == "$session_id $mpv_pid" ]]; then
     rm -f "$active_player_file"
   fi
@@ -61,14 +77,17 @@ if cmp -s "$header_file" <(printf 'PI_VOICE_CONTROL'); then
   else
     [[ $target_id =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || exit 0
     target_socket="$runtime_dir/pi-voice-mpv-$target_id.sock"
-    target_state="$runtime_dir/pi-voice-session-$target_id"
+    target_state="$playback_dir/$target_id"
+    legacy_state="$runtime_dir/pi-voice-session-$target_id"
     if [[ $command == pause || $command == resume ]] && [[ -S $target_socket ]]; then
       paused=false
       [[ $command == pause ]] && paused=true
       printf '{"command":["set_property","pause",%s]}\n' "$paused" |
         socat -T 1 - "UNIX-CONNECT:$target_socket" >/dev/null 2>&1 || true
     elif [[ $command == stop ]]; then
-      [[ -d $target_state ]] && touch "$target_state/stopped"
+      for target in "$target_state" "$legacy_state"; do
+        [[ -d $target ]] && (umask 077; touch "$target/stopped")
+      done
       if [[ -S $target_socket ]]; then
         printf '{"command":["quit"]}\n' |
           socat -T 1 - "UNIX-CONNECT:$target_socket" >/dev/null 2>&1 || true
@@ -76,11 +95,11 @@ if cmp -s "$header_file" <(printf 'PI_VOICE_CONTROL'); then
       # A missing socket/PID is not proof of exit. Retain the owner's receipt
       # for retries when a stop ACK (or natural completion) was lost.
       for _ in {1..100}; do
-        if [[ -f $target_state/exited ]]; then
+        if { [[ -f $target_state/exited ]] && sync "$target_state/exited" "$target_state"; } || [[ -f $legacy_state/exited ]]; then
           printf '{"type":"stopped","id":"%s"}\n' "$target_id" || true
           break
         fi
-        [[ -d $target_state ]] || break
+        [[ -d $target_state || -d $legacy_state ]] || break
         sleep 0.05
       done
     fi
@@ -119,8 +138,27 @@ if [[ $old_player =~ ^[0-9]+$ ]] && [[ $old_id =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9
   kill -0 "$old_player" 2>/dev/null && kill -KILL "$old_player" 2>/dev/null || true
 fi
 
-# ponytail: receipts last until runtime cleanup; add expiry if session volume warrants it.
-mkdir -m 700 "$state_dir" || exit 1
+# ponytail: retain receipts indefinitely; add expiry only with a safe retry horizon.
+(
+  umask 077
+  durable_parent=$state_home
+  while [[ ! -d $durable_parent ]]; do
+    durable_parent=$(dirname "$durable_parent")
+  done
+  mkdir -p "$state_home" || exit 1
+  for directory in "$state_home/pi-voice" "$playback_dir"; do
+    [[ ! -L $directory ]] || exit 1
+    mkdir -p "$directory" && [[ -O $directory ]] && chmod 700 "$directory" || exit 1
+  done
+  mkdir -m 700 "$state_dir" || exit 1
+  # Persist every newly created ancestor, including the HOME fallback hierarchy.
+  directory=$state_dir
+  while :; do
+    sync "$directory" || exit 1
+    [[ $directory -ef $durable_parent ]] && break
+    directory=$(dirname "$directory")
+  done
+) || exit 1
 rm -f "$ipc_socket" "$audio_fifo"
 mkfifo "$audio_fifo"
 
@@ -153,9 +191,9 @@ for _ in {1..50}; do
 done
 [[ -S "$ipc_socket" ]] || exit 1
 if [[ $protocol == 2 ]]; then
-  printf '{"type":"session","version":2,"id":"%s"}\n' "$session_id" || true
+  printf '{"type":"session","version":2,"id":"%s","boot_id":%s}\n' "$session_id" "$boot_id" || true
 else
-  printf '{"type":"session","id":"%s"}\n' "$session_id" || true
+  printf '{"type":"session","id":"%s","boot_id":%s}\n' "$session_id" "$boot_id" || true
 fi
 
 request_id=0
@@ -189,7 +227,7 @@ if [[ $(cat "$active_player_file" 2>/dev/null || true) == "$session_id $mpv_pid"
   rm -f "$active_player_file"
 fi
 mpv_pid=
-touch "$state_dir/exited"
+publish_exit || exit 1
 if [[ $protocol == 2 && $player_status == 0 && $feeder_status == 0 && ! -f $state_dir/stopped ]]; then
   printf '{"type":"complete","id":"%s"}\n' "$session_id" || true
 fi
