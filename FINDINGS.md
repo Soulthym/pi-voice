@@ -2,6 +2,14 @@
 
 Updated incrementally. Companion: `PLAN.md`. Reorganize freely while preserving evidence and disposition.
 
+## Audio helper exit-receipt publication race — source fix, phone cause unknown
+
+- Proven source defect in both audio helpers: normal own-child `wait` cleared `mpv_pid` before publishing `state_dir/exited`. INT/TERM in that gap entered EXIT cleanup without a PID and lost the receipt. An explicit confirmed-exit flag now survives PID clearing; cleanup publishes from that proof without signalling a reaped/reused PID. INT/TERM cannot interrupt cleanup's child wait; HUP remains ignored and buffered playback still drains.
+- Isolated fake-player tests inject INT and TERM exactly after normal PID clearing, require the matching UUID stop receipt, and cover normal/failing exit, replacement handoff, delayed child exit under repeated cleanup signals, EOF without exit, rejected admission and unknown IDs. No phone/SSH/server audio, deployment, live restarts, providers/inference, settings or coordinator/cache mutation was performed.
+- **Phone incident cause remains unknown.** The intentional client XDG_RUNTIME_DIR/TMPDIR preference versus Termux TMPDIR preference is unchanged pending authorized local read-only path evidence. This source race is not proof of a live directory mismatch or of the reported incident's cause.
+- Updating the device's installed `pi-voice-audio-session` from its corresponding client/Termux variant protects **future helper lifecycles only**. It cannot fabricate already-lost receipts or repair the current orphan admission-proof gap. Stay connected for inspection; defer any client update/restart until that inspection is complete and authorized.
+- Validation: isolated copies of both `aede03b` helpers fail the new injected-INT matching-receipt assertion; fixed helpers pass INT/TERM cases. Shell syntax, diff whitespace and typecheck passed; targeted client/transport tests **21 passed**, full checkout **1098 passed / 33 compatibility skips / zero failures**. Independent read-only review found no actionable issues. LSP unavailable. Native UI was not changed; installed-native rerun omitted. Logs: `/tmp/receipt-{baseline,targeted,full,check}.log`. Untracked `ISSUES.md` preserved.
+
 ## Operator-confirmed legacy-fence recovery — 2026-09-27
 
 - User requested recovery of the blocked session and explicitly confirmed fp5 was neither playing nor recording. This was manual operator confirmation, not a reconstructed protocol receipt or proof inferred from a dead PID.

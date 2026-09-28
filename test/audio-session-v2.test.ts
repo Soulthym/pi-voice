@@ -30,6 +30,10 @@ const fs = require('fs'), net = require('net');
 const ipc = process.argv.find(a => a.startsWith('--input-ipc-server=')).split('=')[1];
 const id = /mpv-([0-9a-f-]+)\\.sock/.exec(ipc)[1], base = process.env.TMPDIR + '/fake-' + id;
 fs.writeFileSync(base + '.pid', String(process.pid));
+process.on('SIGTERM', () => {
+ if (fs.existsSync(base + '.hold')) fs.writeFileSync(base + '.term', '');
+ else process.exit(0);
+});
 let eof = false, paused = false, quitting = false;
 const server = net.createServer(s => s.on('data', b => {
  const c = JSON.parse(String(b)).command;
@@ -78,8 +82,8 @@ setTimeout(() => process.exit(0), 150);
 			await until(() => session.child.exitCode !== null);
 			return session.output();
 		}
-		async function audio() {
-			const session = start(script, true);
+		async function audio(scriptPath = script) {
+			const session = start(scriptPath, true);
 			session.child.stdin.write("PI_VOICE_CONTROLhello\n");
 			await until(() => session.output().includes('"type":"protocol"'));
 			assert.deepEqual(JSON.parse(session.output().trim()), { type: "protocol", version: 2 });
@@ -141,12 +145,16 @@ setTimeout(() => process.exit(0), 150);
 				}
 			}
 			assert.equal(await control("unknown"), "");
+			const statesBeforeAdmission = fs.readdirSync(root).filter(f => f.startsWith("pi-voice-session-"));
 			const bad = start();
 			bad.child.stdin.end("PI_VOICE_CONTROLhello\nnot audio\n");
 			await until(() => bad.child.exitCode !== null);
 			assert.equal(bad.output().includes('"session"'), false);
 			assert.equal(fs.existsSync(path.join(root, `fake-${bad.child.pid}.pid`)), false);
 			assert.equal(await control("stop 99999999"), "", "absence is not a receipt");
+			assert.equal(await control("stop aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"), "", "unknown UUID is not exit proof");
+			assert.deepEqual(fs.readdirSync(root).filter(f => f.startsWith("pi-voice-session-")), statesBeforeAdmission,
+				"rejected admission without a player must not create exit proof");
 
 			const natural = await audio();
 			const playerFile = path.join(root, "pi-voice-active-player.pid");
@@ -165,10 +173,31 @@ setTimeout(() => process.exit(0), 150);
 			await until(() => fs.existsSync(natural.base + ".eof"));
 			assert.equal(fs.readFileSync(natural.base + ".eof", "utf8"), "128", "headers must not reach mpv");
 			assert.equal(natural.output().includes('"complete"'), false);
+			natural.child.kill("SIGHUP");
+			await delay(100);
+			assert.equal(natural.child.exitCode, null, "HUP must not truncate draining playback");
+			assert.equal(fs.existsSync(path.join(root, `pi-voice-session-${natural.id}`, "exited")), false, "EOF is not exit proof");
 			fs.writeFileSync(natural.base + ".release", "");
 			await until(() => natural.child.exitCode !== null);
 			assert.ok(natural.output().includes(`{"type":"complete","id":"${natural.id}"}`));
 			assert.equal(await control(`stop ${natural.id}`), `{"type":"stopped","id":"${natural.id}"}\n`);
+
+			// Inject at the exact lost-receipt boundary in an isolated copy, not by timing a signal.
+			const source = fs.readFileSync(script, "utf8");
+			const boundary = 'mpv_pid=\ntouch "$state_dir/exited"';
+			assert.equal(source.split(boundary).length, 2);
+			for (const signal of ["INT", "TERM"]) {
+				const injected = path.join(root, `pi-voice-audio-session-${signal}`);
+				fs.writeFileSync(injected, source.replace(boundary, () => `mpv_pid=\nkill -${signal} "$$"\ntouch "$state_dir/exited"`));
+				const interrupted = await audio(injected);
+				interrupted.child.stdin.end(Buffer.alloc(32));
+				await until(() => fs.existsSync(interrupted.base + ".eof"));
+				fs.writeFileSync(interrupted.base + ".release", "");
+				await until(() => interrupted.child.exitCode !== null);
+				assert.equal(interrupted.child.exitCode, 1, `${signal} must run EXIT cleanup`);
+				assert.equal(interrupted.output().includes('"complete"'), false);
+				assert.equal(await control(`stop ${interrupted.id}`), `{"type":"stopped","id":"${interrupted.id}"}\n`);
+			}
 
 			const orphan = await audio();
 			assert.notEqual(orphan.id, natural.id);
@@ -202,6 +231,26 @@ setTimeout(() => process.exit(0), 150);
 			assert.ok(fs.existsSync(orphan.base + ".exit"));
 			assert.equal(await control(`stop ${orphan.id}`), `{"type":"stopped","id":"${orphan.id}"}\n`);
 			await until(() => orphan.child.exitCode !== null);
+
+			const held = await audio();
+			fs.writeFileSync(held.base + ".hold", "");
+			held.child.kill("SIGTERM");
+			await until(() => fs.existsSync(held.base + ".term"));
+			for (const signal of ["SIGINT", "SIGTERM"] as const) held.child.kill(signal);
+			await delay(100);
+			assert.equal(held.child.exitCode, null, "cleanup must keep waiting for its actual child despite repeated signals");
+			assert.equal(fs.existsSync(path.join(root, `pi-voice-session-${held.id}`, "exited")), false);
+			fs.writeFileSync(held.base + ".fail", "");
+			await until(() => held.child.exitCode !== null);
+			assert.equal(await control(`stop ${held.id}`), `{"type":"stopped","id":"${held.id}"}\n`);
+
+			const replaced = await audio();
+			const replacement = await audio();
+			await until(() => replaced.child.exitCode !== null);
+			assert.equal(await control(`stop ${replaced.id}`), `{"type":"stopped","id":"${replaced.id}"}\n`);
+			assert.equal(fs.existsSync(path.join(root, `pi-voice-session-${replacement.id}`, "exited")), false);
+			assert.equal(await control(`stop ${replacement.id}`), `{"type":"stopped","id":"${replacement.id}"}\n`);
+			await until(() => replacement.child.exitCode !== null);
 
 			const interrupted = await audio();
 			interrupted.child.kill("SIGTERM");

@@ -13,21 +13,24 @@ audio_fifo="$runtime_dir/pi-voice-mpv-$session_id.pcm"
 player_lock="$runtime_dir/pi-voice-player.lock"
 active_player_file="$runtime_dir/pi-voice-active-player.pid"
 mpv_pid=
+player_exited=false
 feeder_pid=
 lock_held=false
 protocol=1
 state_dir="$runtime_dir/pi-voice-session-$session_id"
 
 cleanup() {
-  trap - EXIT INT TERM
+  trap - EXIT
+  trap '' INT TERM
   [[ -n "$feeder_pid" ]] && kill "$feeder_pid" 2>/dev/null || true
-  [[ -n "$mpv_pid" ]] && kill "$mpv_pid" 2>/dev/null || true
+  [[ $player_exited == false && -n "$mpv_pid" ]] && kill "$mpv_pid" 2>/dev/null || true
   [[ -n "$feeder_pid" ]] && wait "$feeder_pid" 2>/dev/null || true
-  if [[ -n "$mpv_pid" ]]; then
+  if [[ $player_exited == false && -n "$mpv_pid" ]]; then
     wait "$mpv_pid" 2>/dev/null || true
-    # Only the owning shell can certify that its actual child has exited.
-    touch "$state_dir/exited"
+    player_exited=true
   fi
+  # Retain own-child wait proof even after the normal path clears its PID.
+  [[ $player_exited == true ]] && touch "$state_dir/exited"
   if [[ -n "$mpv_pid" ]] && [[ $(cat "$active_player_file" 2>/dev/null || true) == "$session_id $mpv_pid" ]]; then
     rm -f "$active_player_file"
   fi
@@ -177,7 +180,11 @@ feeder_status=0
 wait "$feeder_pid" 2>/dev/null || feeder_status=$?
 feeder_pid=
 player_status=0
+# The polling loop has ended; do not interrupt reaping/proof publication.
+trap '' INT TERM
 wait "$mpv_pid" 2>/dev/null || player_status=$?
+player_exited=true
+trap 'exit 1' INT TERM
 if [[ $(cat "$active_player_file" 2>/dev/null || true) == "$session_id $mpv_pid" ]]; then
   rm -f "$active_player_file"
 fi
