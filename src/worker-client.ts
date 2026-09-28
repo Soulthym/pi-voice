@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import * as readline from "node:readline";
-import { stopRemotePlayback, validStreamId, RemotePlaybackUnconfirmedError } from "./remote-playback.mjs";
+import { stopRemotePlayback, validStreamId, validBootId, RemotePlaybackUnconfirmedError } from "./remote-playback.mjs";
 export { RemotePlaybackUnconfirmedError } from "./remote-playback.mjs";
 import { normalizeWorkerCount, type VoiceConfig } from "./config.js";
 
@@ -18,7 +18,7 @@ export type WorkerPlaybackPhase = "playing" | "synthesizing" | "loading" | "conn
 
 export type WorkerEvent =
 	| { type: "playback-phase"; utterance: number; segmentId: number; phase: WorkerPlaybackPhase }
-	| { type: "remote-handle"; output: string; id: string; utterance: number }
+	| { type: "remote-handle"; output: string; id: string; utterance: number; bootId?: string; grant?: () => void }
 	| { type: "remote-released"; id: string }
 	| { type: "remote-not-admitted"; id: string }
 	| { type: "loading" }
@@ -73,7 +73,8 @@ export class VoiceWorkerClient {
 	#retiring = new Set<ChildProcessWithoutNullStreams>();
 	#signalled = new Set<ChildProcessWithoutNullStreams>();
 	#remoteUnconfirmed = false;
-	#remoteHandles = new Map<string, { output: string; id: string; utterance: number }>();
+	#remoteHandles = new Map<string, { output: string; id: string; utterance: number; bootId?: string }>();
+	#dispatchClosed = false;
 	#remoteUtterance: number | undefined;
 	#closed = new WeakSet<ChildProcessWithoutNullStreams>();
 	#remoteGeneration = 0;
@@ -91,6 +92,7 @@ export class VoiceWorkerClient {
 	sendSegment(utterance: number, segmentId: number, text: string, config: VoiceConfig): void {
 		this.setTtsWorkers(config.ttsWorkers);
 		this.#activeUtterance = utterance;
+		this.#dispatchClosed = false;
 		this.#send({
 			type: "segment",
 			utterance,
@@ -132,6 +134,7 @@ export class VoiceWorkerClient {
 	}
 
 	cancel(): number | undefined {
+		this.#dispatchClosed = true;
 		this.#rejectTimingRetries(new Error("Speech timing retry interrupted"));
 		this.#paused = false;
 		for (const pending of this.#pendingMeasurements.values()) {
@@ -277,6 +280,7 @@ export class VoiceWorkerClient {
 
 	/** Escalation after a missing cancel ACK (e.g. 1s). Rejection means keep the speech lease. */
 	terminate(): Promise<void> {
+		this.#dispatchClosed = true;
 		if (this.#termination) return this.#termination;
 		const pending = this.#terminate();
 		this.#termination = pending;
@@ -428,9 +432,17 @@ export class VoiceWorkerClient {
 		}
 		if (event.type === "remote-handle") {
 			if (validStreamId(event.id) && /^(tcp|unix):/.test(event.output)) {
-				this.#remoteHandles.set(event.id, { output: event.output, id: event.id, utterance: event.utterance });
+				this.#remoteHandles.set(event.id, { output: event.output, id: event.id, utterance: event.utterance, bootId: event.bootId });
 				this.#remoteUnconfirmed = true;
-				this.#onEvent(event); // Host journals the original scope for explicit restart recovery.
+				const generation = this.#remoteGeneration;
+				const source = this.#child;
+				let granted = false;
+				delete event.grant; // Wire data never supplies executable admission authority.
+				this.#onEvent({ ...event, ...(validBootId(event.bootId) ? { grant: () => {
+					if (granted || retired || !source || this.#child !== source || this.#closed.has(source) || this.#dispatchClosed || generation !== this.#remoteGeneration || event.utterance !== this.#activeUtterance) return;
+					granted = true;
+					this.#send({ type: "output-grant", id: event.id, bootId: event.bootId });
+				} } : {}) }); // Grant only after the host durably journals the exact scope.
 			}
 			return;
 		}

@@ -7,7 +7,7 @@ import * as readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import { env as transformersEnv, pipeline } from "@huggingface/transformers";
 import { KokoroTTS } from "kokoro-js";
-import { stopRemotePlayback, validStreamId, RemotePlaybackUnconfirmedError } from "./remote-playback.mjs";
+import { stopRemotePlayback, validStreamId, validBootId, RemotePlaybackUnconfirmedError } from "./remote-playback.mjs";
 import { createPlaybackController } from "./playback-controller.mjs";
 import { generateSentenceAudio } from "./sentence-audio.mjs";
 import { SentencePool } from "./sentence-pool.mjs";
@@ -35,6 +35,7 @@ const loadedTtsModels = new Set();
 let synthesisJobId;
 const sttModels = new Map();
 let epoch = 0;
+const outputGrants = new Map();
 let queue = [];
 let pumping = false;
 let cancelBarrier = Promise.resolve();
@@ -695,6 +696,8 @@ function createNetworkSink(output, sampleRate, utterance) {
 	let noAudio = false;
 	let audioAdmitted = false;
 	let session;
+	let bootId;
+	const dispatchEpoch = epoch;
 	const exited = new Promise((resolve, reject) => {
 		child.once("error", reject);
 		child.once("close", (code, signal) => code === 0 || code === 2 && noAudio && !audioAdmitted ? resolve() : reject(new RemotePlaybackUnconfirmedError(`helper exited ${code ?? signal}${stderr.trim() ? `: ${stderr.trim()}` : ""}`)));
@@ -704,7 +707,19 @@ function createNetworkSink(output, sampleRate, utterance) {
 	const control = child.stdio[3];
 	const controlLines = readline.createInterface({ input: control });
 	controlLines.on("line", line => {
-		if (line.startsWith("session ") && validStreamId(line.slice(8))) { session = line.slice(8); return; }
+		if (line.startsWith("prepared ")) {
+			const [, id, boot] = line.split(" ");
+			if (session || !validStreamId(id) || !validBootId(boot)) return;
+			session = id;
+			bootId = boot;
+			outputGrants.set(id, expectedBoot => {
+				if (expectedBoot !== bootId || intentionallyStopped || dispatchEpoch !== epoch || shuttingDown) return;
+				outputGrants.delete(id);
+				control.write(`grant ${id} ${bootId}\n`);
+			});
+			send({ type: "remote-handle", output, id, bootId, utterance });
+			return;
+		}
 		if (line === "no-audio") { noAudio = true; return; }
 		if (line === "ready") audioAdmitted = true;
 		if (readySettled) return;
@@ -763,7 +778,7 @@ function createNetworkSink(output, sampleRate, utterance) {
 			killTimer.unref?.();
 			return exited.catch(async error => {
 				if (!session) throw error;
-				await stopRemotePlayback({ output, id: session });
+				await stopRemotePlayback({ output, id: session, bootId });
 				send({ type: "remote-released", id: session });
 			}).finally(() => clearTimeout(killTimer));
 		},
@@ -782,6 +797,7 @@ function createNetworkSink(output, sampleRate, utterance) {
 		}
 	});
 	child.on("close", code => {
+		if (session) outputGrants.delete(session);
 		// Classify only after fd3 drains; exit can precede the no-audio marker.
 		// Keep failed remote transports owned: helper death is not sink stop proof.
 		if (code === 2 && noAudio && !audioAdmitted && session) send({ type: "remote-not-admitted", id: session });
@@ -970,6 +986,7 @@ function scheduleCancel(cancelId) {
 	// Invalidate queued/current synthesis synchronously so segment messages that
 	// arrive in the same stdin chunk are stamped with the replacement epoch.
 	epoch += 1;
+	outputGrants.clear();
 	cancelTimingRetry();
 	playbackPaused = false;
 	sentencePool.cancel();
@@ -1026,6 +1043,9 @@ lines.on("line", line => {
 		return;
 	}
 	switch (message.type) {
+		case "output-grant":
+			if (validStreamId(message.id) && validBootId(message.bootId)) outputGrants.get(message.id)?.(message.bootId);
+			break;
 		case "retry-timing":
 			void retryTiming(message);
 			break;

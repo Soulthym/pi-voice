@@ -400,11 +400,14 @@ export default async function (pi: ExtensionAPI) {
 	const captureRecoveryRoute = (direction: "input" | "output", route: ReturnType<DeviceRouter["routeMetadata"]>): void => {
 		recoveryRoutes[direction].set(route.endpoint, { selection: route.kind === "device" ? route.device.id : "local", configured: config[direction], device: route.kind === "device" ? route.device.name : selectedDeviceLabel });
 	};
-	const retainRecoveryHandle = (direction: "input" | "output", endpoint: string, id: string): void => {
-		if (!stopRecovery || !/^(tcp|unix):/.test(endpoint)) return;
+	const retainRecoveryHandle = (direction: "input" | "output", endpoint: string, id: string, bootId?: string): void => {
+		if (!stopRecovery || !/^(tcp|unix):/.test(endpoint)) {
+			if (direction === "output") throw new Error("Recovery journal unavailable; dispatch denied");
+			return;
+		}
 		const route = recoveryRoutes[direction].get(endpoint);
 		if (!route) throw new Error("Original recovery route not captured; ownership retained");
-		stopRecovery.retain(direction, { endpoint, id, selection: route.selection, configured: route.configured }, route.device);
+		stopRecovery.retain(direction, { endpoint, id, selection: route.selection, configured: route.configured, ...(bootId ? { bootId } : {}) }, route.device);
 	};
 	const restoreStopRecovery = (initialize = false): void => {
 		const previousRecovery = orphanRecovery;
@@ -1687,7 +1690,10 @@ export default async function (pi: ExtensionAPI) {
 	let lastPlaybackTick: { utterance: number; position: number } | undefined;
 	const handleWorkerEvent = (event: WorkerEvent): void => {
 		if (event.type === "remote-handle") {
-			try { retainRecoveryHandle("output", event.output, event.id); }
+			try {
+				retainRecoveryHandle("output", event.output, event.id, event.bootId);
+				event.grant?.();
+			}
 			catch (error) { notifyStopFailure(error); }
 			return;
 		}

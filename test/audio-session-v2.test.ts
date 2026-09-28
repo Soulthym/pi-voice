@@ -93,18 +93,22 @@ exec /usr/bin/sync "$@"
 			if (loseAck) session.child.stdout.destroy();
 			session.child.stdin.end(`PI_VOICE_CONTROL${command}\n`);
 			await until(() => session.child.exitCode !== null);
-			return session.output();
+			return session.output().replace(/,"boot_id":"[0-9a-f-]+"/g, "");
 		}
 		async function audio(scriptPath = script) {
 			const session = start(scriptPath, true);
 			session.child.stdin.write("PI_VOICE_CONTROLhello\n");
 			await until(() => session.output().includes('"type":"protocol"'));
-			assert.deepEqual(JSON.parse(session.output().trim()), { type: "protocol", version: 2 });
+			assert.deepEqual(JSON.parse(session.output().trim()), { type: "protocol", version: 3 });
 			assert.equal(fs.readdirSync(root).some(f => f === `fake-${session.child.pid}.pid`), false);
-			session.child.stdin.write("PI_VOICE_AUDIO\n");
+			session.child.stdin.write("PI_VOICE_PREPARE\n");
+			await until(() => session.output().includes('"type":"prepared"'));
+			const prepared = session.output().trim().split("\n").map(l => JSON.parse(l)).find(e => e.type === "prepared");
+			assert.equal(fs.existsSync(path.join(root, `fake-${prepared.id}.pid`)), false, "prepare must not open physical output");
+			session.child.stdin.write(`PI_VOICE_COMMIT ${prepared.id} ${prepared.boot_id}\n`);
 			await until(() => session.output().includes('"type":"session"'));
 			const event = session.output().trim().split("\n").map(l => JSON.parse(l)).find(e => e.type === "session");
-			assert.equal(event.version, 2);
+			assert.equal(event.version, 3);
 			assert.ok(event.boot_id === null || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(event.boot_id));
 			assert.match(event.id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
 			return { ...session, id: event.id as string, base: path.join(root, `fake-${event.id}`) };
@@ -137,6 +141,15 @@ exec /usr/bin/sync "$@"
 				});
 				children.push(helper);
 				helper.stdout.resume(); helper.stderr.resume();
+				let preparation = "";
+				(helper.stdio[3] as net.Socket).on("data", chunk => {
+					preparation += chunk;
+					const match = /^prepared ([0-9a-f-]+) ([0-9a-f-]+)$/m.exec(preparation);
+					if (match) {
+						(helper.stdio[3] as net.Socket).write(`grant ${match[1]} ${match[2]}\n`);
+						preparation = "";
+					}
+				});
 				const exit = once(helper, "exit");
 				try {
 					if (scriptPath === script) (helper.stdio[3] as net.Socket).write("pause\n");
@@ -158,13 +171,42 @@ exec /usr/bin/sync "$@"
 					server.close();
 				}
 			}
+			// Reservation crash boundaries: no grant means no physical dispatch, and a
+			// durable stop tombstone wins over a later commit on the original socket.
+			for (const boundary of ["host-death", "stop-before-commit", "wrong-boot", "commit-crash"]) {
+				let scriptPath = script;
+				if (boundary === "commit-crash") {
+					scriptPath = path.join(root, "pi-voice-audio-session-commit-crash");
+					fs.writeFileSync(scriptPath, fs.readFileSync(script, "utf8").replace(
+						'# Starting a new stream atomically', () => 'kill -KILL "$$"\n# Starting a new stream atomically'));
+				}
+				const reserved = start(scriptPath);
+				reserved.child.stdin.write("PI_VOICE_CONTROLhello\nPI_VOICE_PREPARE\n");
+				await until(() => reserved.output().includes('"prepared"'));
+				const scope = reserved.output().split("\n").filter(Boolean).map(l => JSON.parse(l)).find(e => e.type === "prepared");
+				assert.equal(fs.existsSync(path.join(root, `fake-${scope.id}.pid`)), false);
+				if (boundary === "host-death") {
+					reserved.child.kill("SIGKILL");
+					await until(() => reserved.child.signalCode !== null);
+					assert.match(await control(`stop ${scope.id}`), /stopped/);
+				} else {
+					if (boundary === "stop-before-commit") assert.match(await control(`stop ${scope.id}`), /stopped/);
+					reserved.child.stdin.end(`PI_VOICE_COMMIT ${scope.id} ${boundary === "wrong-boot" ? scope.id : scope.boot_id}\n`);
+					await until(() => reserved.child.exitCode !== null || reserved.child.signalCode !== null).catch(error => { throw new Error(`${boundary}: ${reserved.output()}`, { cause: error }); });
+					if (boundary === "commit-crash") assert.equal(await control(`stop ${scope.id}`), "", "persisted possible spawn without own-child wait remains fenced");
+				}
+				assert.equal(fs.existsSync(path.join(root, `fake-${scope.id}.pid`)), false, boundary);
+			}
 			assert.equal(await control("unknown"), "");
 			const statesBeforeAdmission = fs.readdirSync(playback);
-			const bad = start();
-			bad.child.stdin.end("PI_VOICE_CONTROLhello\nnot audio\n");
-			await until(() => bad.child.exitCode !== null);
-			assert.equal(bad.output().includes('"session"'), false);
-			assert.equal(fs.existsSync(path.join(root, `fake-${bad.child.pid}.pid`)), false);
+			for (const header of ["PI_VOICE_CONTROLhello\nnot audio\n", "PI_VOICE_CONTROLhello\nPI_VOICE_AUDIO\n", "legacy raw PCM must never start a player"]) {
+				const playersBefore = fs.readdirSync(root).filter(file => file.startsWith("fake-") && file.endsWith(".pid"));
+				const bad = start();
+				bad.child.stdin.end(header);
+				await until(() => bad.child.exitCode !== null);
+				assert.equal(bad.output().includes('"session"'), false);
+				assert.deepEqual(fs.readdirSync(root).filter(file => file.startsWith("fake-") && file.endsWith(".pid")), playersBefore);
+			}
 			assert.equal(await control("stop 99999999"), "", "absence is not a receipt");
 			assert.equal(await control("stop aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"), "", "unknown UUID is not exit proof");
 			assert.deepEqual(fs.readdirSync(playback), statesBeforeAdmission,
@@ -177,7 +219,7 @@ exec /usr/bin/sync "$@"
 				const probe = start();
 				probe.child.stdin.end(request);
 				await until(() => probe.child.exitCode !== null);
-				assert.equal(probe.output(), request ? '{"type":"protocol","version":2}\n' : "");
+				assert.equal(probe.output(), request ? '{"type":"protocol","version":3}\n' : "");
 				assert.equal(fs.existsSync(path.join(root, `fake-${probe.child.pid}.pid`)), false, "probe must not spawn a player");
 				assert.equal(fs.readFileSync(playerFile, "utf8"), playingPid);
 				process.kill(Number(playingPid.trim().split(" ")[1]), 0);
@@ -193,7 +235,7 @@ exec /usr/bin/sync "$@"
 			assert.equal(fs.existsSync(receipt(natural.id)), false, "EOF is not exit proof");
 			fs.writeFileSync(natural.base + ".release", "");
 			await until(() => natural.child.exitCode !== null);
-			assert.ok(natural.output().includes(`{"type":"complete","id":"${natural.id}"}`));
+			assert.ok(natural.output().includes(`{"type":"complete","id":"${natural.id}","boot_id":`));
 			assert.equal(await control(`stop ${natural.id}`), `{"type":"stopped","id":"${natural.id}"}\n`);
 
 			const kernelBoot = fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
@@ -243,6 +285,13 @@ exec /usr/bin/sync "$@"
 				if (value !== undefined) fs.writeFileSync(bootFile, value);
 				const injected = path.join(root, "pi-voice-audio-session-boot");
 				fs.writeFileSync(injected, source.replace("/proc/sys/kernel/random/boot_id", bootFile));
+				if (value === undefined || value === "not-a-boot-id") {
+					const denied = start(injected);
+					denied.child.stdin.end("PI_VOICE_CONTROLhello\nPI_VOICE_PREPARE\n");
+					await until(() => denied.child.exitCode !== null);
+					assert.equal(denied.output().includes('"prepared"'), false, "missing kernel boot must deny preparation");
+					continue;
+				}
 				const session = await audio(injected);
 				session.child.stdin.end(Buffer.alloc(32));
 				await until(() => fs.existsSync(session.base + ".eof"));

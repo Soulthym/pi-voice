@@ -1,5 +1,13 @@
 # Tests
 
+## Stage B remote-output prepare/grant checkpoint (partial)
+
+Typecheck passed; **122 focused tests passed, zero failures/skips** using `node --experimental-test-module-mocks --import tsx --test` with the audio-session, TCP playback, worker grant/network/non-admission/recovery/transport, StopRecovery, coordinator and index stop-proof/recovery files. Final runs used `env -i`, temporary HOME/XDG roots and short temporary socket paths. Logs: `/tmp/pi-voice-stage-b-{check,focused}.log`. An initial sanitized run exceeded Unix socket path limits; the short-root rerun passed. LSP is not configured.
+
+Tests use fake mpv/socat, mocked synthesis, temporary journals and loopback/Unix sockets. They cover prepare without player I/O, journal fsync failure withholding grants, boot mismatch, delayed grants after cancellation, old/raw-client rejection, host death before commit, stop-before-commit, possible-dispatch crash fencing, durable receipts and lost ACKs. Earlier exploratory focused runs inherited the harness environment; only the final run is claimed environment-sanitized. No real inference, provider calls, hardware, live session restarts or deployment occurred.
+
+This checkpoint does **not** claim complete Stage B: complete dispatch/all-idle accounting, local-output resource journaling and verified same-device reboot recovery remain fenced gaps. See [protocol scope](endpoint-protocol.md#stage-b-scope-and-remaining-gaps). Full npm/native/isolated SSH validation is left to the parent review.
+
 ## Current checkpoint — never-admitted orphan recovery
 
 `npm run check` passed. Final isolated checkout `npm test`: **1098 passed / 33 compatibility skips / zero failures (1131 total)**. Full installed-native suite: **1131 passed / zero skips or failures**. Logs: `/tmp/voice-idle-final-{check,test,native}.log`. LSP is unavailable. Native checks use inert terminals and mocked providers/transports, not live hardware or real inference.

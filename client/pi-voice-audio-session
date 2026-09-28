@@ -69,11 +69,11 @@ if cmp -s "$header_file" <(printf 'PI_VOICE_CONTROL'); then
   target_id=
   IFS=' ' read -r command target_id <&3 || true
   if [[ $command == hello && -z $target_id ]]; then
-    protocol=2
-    printf '{"type":"protocol","version":2}\n' || exit 1
+    protocol=3
+    printf '{"type":"protocol","version":3}\n' || exit 1
     audio_header=
-    IFS= read -r audio_header <&3 || exit 1
-    [[ $audio_header == PI_VOICE_AUDIO ]] || exit 1
+    IFS= read -r -n 128 audio_header <&3 || exit 1
+    [[ $audio_header == PI_VOICE_PREPARE && $boot_id != null ]] || exit 1
   else
     [[ $target_id =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || exit 0
     target_socket="$runtime_dir/pi-voice-mpv-$target_id.sock"
@@ -85,9 +85,20 @@ if cmp -s "$header_file" <(printf 'PI_VOICE_CONTROL'); then
       printf '{"command":["set_property","pause",%s]}\n' "$paused" |
         socat -T 1 - "UNIX-CONNECT:$target_socket" >/dev/null 2>&1 || true
     elif [[ $command == stop ]]; then
-      for target in "$target_state" "$legacy_state"; do
-        [[ -d $target ]] && (umask 077; touch "$target/stopped")
-      done
+      # The same scope lock covers commit/spawn and stop's durable tombstone.
+      if [[ -d $target_state && -f $target_state/prepared ]]; then
+        exec 9>"$target_state/lock" || exit 1
+        flock -x -w 5 9 || exit 1
+        (umask 077; touch "$target_state/stopped") && sync "$target_state/stopped" "$target_state" || exit 1
+        if [[ ! -f $target_state/committed ]]; then
+          session_id=$target_id state_dir=$target_state boot_id="$(cat "$target_state/prepared")" publish_exit || exit 1
+        fi
+        flock -u 9
+      else
+        for target in "$target_state" "$legacy_state"; do
+          [[ -d $target ]] && (umask 077; touch "$target/stopped")
+        done
+      fi
       if [[ -S $target_socket ]]; then
         printf '{"command":["quit"]}\n' |
           socat -T 1 - "UNIX-CONNECT:$target_socket" >/dev/null 2>&1 || true
@@ -96,7 +107,12 @@ if cmp -s "$header_file" <(printf 'PI_VOICE_CONTROL'); then
       # for retries when a stop ACK (or natural completion) was lost.
       for _ in {1..100}; do
         if { [[ -f $target_state/exited ]] && sync "$target_state/exited" "$target_state"; } || [[ -f $legacy_state/exited ]]; then
-          printf '{"type":"stopped","id":"%s"}\n' "$target_id" || true
+          if [[ -f $target_state/exited ]]; then
+            receipt=$(cat "$target_state/exited")
+            printf '{"type":"stopped",%s\n' "${receipt:1}" || true
+          else
+            printf '{"type":"stopped","id":"%s"}\n' "$target_id" || true
+          fi
           break
         fi
         [[ -d $target_state || -d $legacy_state ]] || break
@@ -106,6 +122,39 @@ if cmp -s "$header_file" <(printf 'PI_VOICE_CONTROL'); then
     exit 0
   fi
 fi
+
+# Raw PCM and v2 clients may not start physical output.
+[[ $protocol == 3 ]] || exit 1
+
+# Reserve a durable opaque scope before any player I/O.
+(
+  umask 077
+  durable_parent=$state_home
+  while [[ ! -d $durable_parent ]]; do durable_parent=$(dirname "$durable_parent"); done
+  mkdir -p "$state_home" || exit 1
+  for directory in "$state_home/pi-voice" "$playback_dir"; do
+    [[ ! -L $directory ]] || exit 1
+    mkdir -p "$directory" && [[ -O $directory ]] && chmod 700 "$directory" || exit 1
+  done
+  mkdir -m 700 "$state_dir" || exit 1
+  printf '%s\n' "$boot_id" >"$state_dir/prepared" || exit 1
+  sync "$state_dir/prepared" || exit 1
+  directory=$state_dir
+  while :; do
+    sync "$directory" || exit 1
+    [[ $directory -ef $durable_parent ]] && break
+    directory=$(dirname "$directory")
+  done
+) || exit 1
+printf '{"type":"prepared","version":3,"id":"%s","boot_id":%s}\n' "$session_id" "$boot_id" || exit 1
+commit=
+IFS= read -r -n 128 commit <&3 || exit 1
+[[ $commit == "PI_VOICE_COMMIT $session_id ${boot_id//\"/}" ]] || exit 1
+exec 9>"$state_dir/lock" || exit 1
+flock -x -w 5 9 || exit 1
+[[ ! -f $state_dir/stopped ]] || exit 1
+# Persist possible dispatch BEFORE spawn; a crash here remains conservatively fenced.
+(umask 077; touch "$state_dir/committed") && sync "$state_dir/committed" "$state_dir" || exit 1
 
 # Starting a new stream atomically replaces any prior Pi Voice player. This is
 # an endpoint-level safety net for rapid seeks and cross-session preemption.
@@ -139,26 +188,6 @@ if [[ $old_player =~ ^[0-9]+$ ]] && [[ $old_id =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9
 fi
 
 # ponytail: retain receipts indefinitely; add expiry only with a safe retry horizon.
-(
-  umask 077
-  durable_parent=$state_home
-  while [[ ! -d $durable_parent ]]; do
-    durable_parent=$(dirname "$durable_parent")
-  done
-  mkdir -p "$state_home" || exit 1
-  for directory in "$state_home/pi-voice" "$playback_dir"; do
-    [[ ! -L $directory ]] || exit 1
-    mkdir -p "$directory" && [[ -O $directory ]] && chmod 700 "$directory" || exit 1
-  done
-  mkdir -m 700 "$state_dir" || exit 1
-  # Persist every newly created ancestor, including the HOME fallback hierarchy.
-  directory=$state_dir
-  while :; do
-    sync "$directory" || exit 1
-    [[ $directory -ef $durable_parent ]] && break
-    directory=$(dirname "$directory")
-  done
-) || exit 1
 rm -f "$ipc_socket" "$audio_fifo"
 mkfifo "$audio_fifo"
 
@@ -168,20 +197,17 @@ mpv --really-quiet --no-video --cache=no \
   --demuxer-rawaudio-format=floatle \
   --demuxer-rawaudio-rate=24000 \
   --demuxer-rawaudio-channels=mono \
-  "$audio_fifo" > /dev/null 2>/dev/null &
+  "$audio_fifo" 9>&- > /dev/null 2>/dev/null &
 mpv_pid=$!
+flock -u 9
+exec 9>&-
 printf '%s %s\n' "$session_id" "$mpv_pid" >"$active_player_file"
 rm -rf "$player_lock" 2>/dev/null || true
 lock_held=false
 
 # stdin is the TCP audio direction. stdout is deliberately kept free for JSON
 # playback-position feedback over the reverse direction of the same socket.
-# Preserve bytes consumed during control-header detection, then stream the rest.
-if [[ $protocol == 1 ]]; then
-  cat "$header_file" - <&3 >"$audio_fifo" &
-else
-  cat <&3 >"$audio_fifo" &
-fi
+cat <&3 >"$audio_fifo" &
 feeder_pid=$!
 
 for _ in {1..50}; do
@@ -190,11 +216,8 @@ for _ in {1..50}; do
   sleep 0.02
 done
 [[ -S "$ipc_socket" ]] || exit 1
-if [[ $protocol == 2 ]]; then
-  printf '{"type":"session","version":2,"id":"%s","boot_id":%s}\n' "$session_id" "$boot_id" || true
-else
-  printf '{"type":"session","id":"%s","boot_id":%s}\n' "$session_id" "$boot_id" || true
-fi
+[[ ! -f $state_dir/stopped ]] || exit 0
+printf '{"type":"session","version":3,"id":"%s","boot_id":%s}\n' "$session_id" "$boot_id" || true
 
 request_id=0
 while kill -0 "$mpv_pid" 2>/dev/null; do
@@ -228,6 +251,6 @@ if [[ $(cat "$active_player_file" 2>/dev/null || true) == "$session_id $mpv_pid"
 fi
 mpv_pid=
 publish_exit || exit 1
-if [[ $protocol == 2 && $player_status == 0 && $feeder_status == 0 && ! -f $state_dir/stopped ]]; then
-  printf '{"type":"complete","id":"%s"}\n' "$session_id" || true
+if [[ $protocol == 3 && $player_status == 0 && $feeder_status == 0 && ! -f $state_dir/stopped ]]; then
+  printf '{"type":"complete","id":"%s","boot_id":%s}\n' "$session_id" "$boot_id" || true
 fi

@@ -2,6 +2,8 @@ import * as net from "node:net";
 
 export const validStreamId = id => typeof id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id);
 
+export const validBootId = id => typeof id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id);
+
 export class RemotePlaybackUnconfirmedError extends Error {
 	code = "REMOTE_PLAYBACK_UNCONFIRMED";
 	constructor(message, options) {
@@ -11,9 +13,9 @@ export class RemotePlaybackUnconfirmedError extends Error {
 }
 
 /** Only an exact opaque stream receipt is proof; endpoint/PID disappearance is not. */
-export function stopRemotePlayback({ output, id }) {
+export function stopRemotePlayback({ output, id, bootId }) {
 	return new Promise((resolve, reject) => {
-		if (!validStreamId(id)) return reject(new RemotePlaybackUnconfirmedError("invalid stream ID"));
+		if (!validStreamId(id) || bootId !== undefined && !validBootId(bootId)) return reject(new RemotePlaybackUnconfirmedError("invalid stream ID"));
 		let endpoint;
 		try {
 			endpoint = new URL(output);
@@ -36,7 +38,7 @@ export function stopRemotePlayback({ output, id }) {
 				if (end < 0) break;
 				try {
 					const event = JSON.parse(reply.slice(0, end));
-					if (event.type === "stopped" && event.id === id) ack = true;
+					if (event.type === "stopped" && event.id === id && (bootId === undefined || event.boot_id === bootId)) ack = true;
 				} catch {}
 				reply = reply.slice(end + 1);
 			}

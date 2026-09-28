@@ -11,8 +11,9 @@ const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 test("network padding cancellation waits for confirmed helper exit", { timeout: 5000 }, async t => {
 	const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+	const bootId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 	let receipt = false;
-	const server = net.createServer(socket => socket.on("data", () => socket.end(receipt ? JSON.stringify({ type: "stopped", id }) + "\n" : "")));
+	const server = net.createServer(socket => socket.on("data", () => socket.end(receipt ? JSON.stringify({ type: "stopped", id, boot_id: bootId }) + "\n" : "")));
 	await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
 	t.after(() => server.close());
 	const output = `tcp://127.0.0.1:${(server.address() as net.AddressInfo).port}`;
@@ -143,8 +144,20 @@ test("network padding cancellation waits for confirmed helper exit", { timeout: 
 			assert.equal(child.stdin.writableEnded, false);
 			assert.ok(!events.some(e => e.type === "idle"));
 
-			if (name === "nonzero exit" || name === "refusal after audio admission") child.stdio[3].write(`session ${id}\n`);
+			if (name === "nonzero exit" || name === "refusal after audio admission") {
+				child.stdio[3].write(`prepared ${id} ${bootId}\n`);
+				send({ type: "output-grant", id, bootId: id });
+				assert.ok(!child.commands.some((command: string) => command.startsWith("grant ")), "worker must reject mismatched expected boot");
+				if (name === "nonzero exit") {
+					send({ type: "output-grant", id, bootId });
+					assert.ok(child.commands.includes(`grant ${id} ${bootId}\n`));
+				}
+			}
 			send({ type: "cancel", cancelId: 42 });
+			if (name === "refusal after audio admission") {
+				send({ type: "output-grant", id, bootId });
+				assert.ok(!child.commands.some((command: string) => command.startsWith("grant ")), "cancellation closes the worker grant gate synchronously");
+			}
 			await wait(20); // Let destroyed-stdin close and the cancelled end operation settle.
 			assert.ok(child.commands.includes("stop\n"));
 			assert.equal(child.stdin.destroyed, true);

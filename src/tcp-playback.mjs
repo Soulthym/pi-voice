@@ -1,5 +1,5 @@
 import * as net from "node:net";
-import { validStreamId, RemotePlaybackUnconfirmedError } from "./remote-playback.mjs";
+import { validStreamId, validBootId, RemotePlaybackUnconfirmedError } from "./remote-playback.mjs";
 
 const [output, rate, utteranceValue] = process.argv.slice(2);
 const utterance = Number(utteranceValue);
@@ -11,6 +11,8 @@ const control = new net.Socket({ fd: 3, readable: true, writable: true });
 const input = control;
 control.on("error", fail);
 let session;
+let bootId;
+let committed = false;
 let audioAdmitted = false;
 let negotiated = false;
 let complete = false;
@@ -25,7 +27,7 @@ const connect = () => endpoint.protocol === "unix:"
 	? net.createConnection({ path: decodeURIComponent(endpoint.pathname) })
 	: net.createConnection({ host: endpoint.hostname.replace(/^\[|\]$/g, ""), port: Number(endpoint.port) });
 const socket = connect();
-const deadline = setTimeout(() => fail(new Error("Audio client v2 session readiness timed out; upgrade the client")), 5000);
+const deadline = setTimeout(() => fail(new Error("Audio client v3 prepare/commit timed out; upgrade the client")), 5000);
 function finish(code) {
 	if (finished) return;
 	finished = true;
@@ -63,7 +65,7 @@ function command(command) {
 				if (end < 0) break;
 				try {
 					const event = JSON.parse(reply.slice(0, end));
-					if (event.type === "stopped" && event.id === session) ack = true;
+					if (event.type === "stopped" && event.id === session && event.boot_id === bootId) ack = true;
 				} catch {}
 				reply = reply.slice(end + 1);
 			}
@@ -86,12 +88,20 @@ input.on("data", chunk => {
 		if (end < 0) break;
 		const value = commands.slice(0, end).trim();
 		commands = commands.slice(end + 1);
+		if (value === `grant ${session} ${bootId}` && session && !committed && !stopping && !failing) {
+			committed = true;
+			// Commit can open physical output even before PCM: death now needs a receipt.
+			audioAdmitted = true;
+			socket.write(`PI_VOICE_COMMIT ${session} ${bootId}\n`);
+			continue;
+		}
 		if (!["pause", "resume", "stop"].includes(value)) continue;
 		if (value === "stop") stopping = true;
 		else pendingPause = value === "pause";
 		command(value);
 	}
 });
+control.on("end", () => { stopping = true; void command("stop"); });
 // This is an existing control header, not an audio probe. V1 safely ignores hello.
 socket.on("connect", () => socket.write("PI_VOICE_CONTROLhello\n"));
 socket.on("error", error => { if (!complete) fail(error); });
@@ -105,31 +115,31 @@ socket.on("data", chunk => {
 		feedback = feedback.slice(end + 1);
 		let event;
 		try { event = JSON.parse(line); } catch { continue; }
-		if (!negotiated && event.type === "protocol" && event.version === 2) {
+		if (!negotiated && event.type === "protocol") {
+			if (event.version !== 3) return fail(new Error("Audio client requires v3 prepare/commit; upgrade the client"));
 			negotiated = true;
-			socket.write("PI_VOICE_AUDIO\n");
-		} else if (negotiated && event.type === "session") {
-			if (session || event.version !== 2 || !validStreamId(event.id)) return fail(new Error("Audio client requires opaque v2 stream IDs; upgrade the client and host"));
+			socket.write("PI_VOICE_PREPARE\n");
+		} else if (negotiated && event.type === "prepared") {
+			if (session || event.version !== 3 || !validStreamId(event.id) || !validBootId(event.boot_id)) return fail(new Error("Invalid prepared output scope or kernel boot ID"));
 			session = event.id;
-			control.write(`session ${session}\n`);
-			process.stdout.write(`${JSON.stringify({ type: "remote-handle", output, id: session, utterance })}\n`);
+			bootId = event.boot_id;
+			control.write(`prepared ${session} ${bootId}\n`);
+			if (stopping) void command("stop");
+		} else if (negotiated && event.type === "session") {
+			if (!committed || event.version !== 3 || event.id !== session || event.boot_id !== bootId) return fail(new Error("Output commit identity mismatch"));
 			clearTimeout(deadline);
 			if (stopping) command("stop");
 			else {
 				const start = () => {
 					if (stopping || finished || failing) return;
-					audioAdmitted = true;
-					// Flush the retained identity before admitting PCM, including if the helper dies.
-					process.stdout.write("", () => {
-						if (stopping || finished || failing) return;
-						control.write("ready\n");
-						process.stdin.pipe(socket);
-					});
+					// Physical dispatch was already journaled before commit.
+					control.write("ready\n");
+					process.stdin.pipe(socket);
 				};
 				if (pendingPause) void command("pause").then(start);
 				else start();
 			}
-		} else if (session && event.type === "complete" && event.id === session) {
+		} else if (session && event.type === "complete" && event.id === session && event.boot_id === bootId) {
 			complete = true;
 		} else if (session && event.type === "playback" && Number.isFinite(event.position) && event.position >= 0) {
 			process.stdout.write(`${JSON.stringify({ type: "playback", position: event.position, utterance })}\n`);
@@ -139,6 +149,6 @@ socket.on("data", chunk => {
 socket.on("close", () => {
 	if (stopping) return; // Only the separate stop receipt proves remote termination.
 	if (complete) process.stdout.write(`${JSON.stringify({ type: "remote-released", id: session })}\n`, () => finish(0));
-	else fail(new Error("Audio client closed without v2 readiness/completion proof; upgrade client or repair forwarding (no replay)"));
+	else fail(new Error("Audio client closed without v3 readiness/completion proof; upgrade client or repair forwarding (no replay)"));
 });
 process.stdin.on("error", fail);

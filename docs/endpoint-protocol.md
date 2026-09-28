@@ -8,19 +8,21 @@ Endpoints may use `tcp://host:port` or `unix:///absolute/path`. Explicit TCP is 
 
 ## Output connection
 
-Audio protocol v2 requires a handshake on the actual output connection (never an empty connection probe):
+Audio protocol v3 requires a handshake on the actual output connection (never an empty connection probe):
 
 1. Host sends `PI_VOICE_CONTROLhello\n` (the existing 16-byte control prefix).
-2. Client replies `{"type":"protocol","version":2}\n`.
-3. Host sends `PI_VOICE_AUDIO\n`.
-4. After player startup, client replies `{"type":"session","version":2,"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}\n` (example ID).
-5. Only then does the host send mono little-endian Float32 PCM at 24 kHz.
+2. Client replies `{"type":"protocol","version":3}\n`.
+3. Host sends `PI_VOICE_PREPARE\n`.
+4. Client durably reserves a random UUID v4 **without opening a player**, then replies `{"type":"prepared","version":3,"id":"<uuid>","boot_id":"<kernel-boot-uuid>"}\n`. Boot identity comes only from `/proc/sys/kernel/random/boot_id`; missing/invalid boot identity denies admission.
+5. The host fsyncs the original endpoint, selection/configuration, ID and boot ID to its recovery journal. Only successful journal publication permits `output-grant` to the worker. The worker checks the expected boot and cancellation epoch before forwarding the grant.
+6. Host sends `PI_VOICE_COMMIT <uuid> <kernel-boot-uuid>\n` on that same connection. The client verifies both identities, takes the scope lock, checks the durable stop tombstone, and persists possible dispatch before spawning mpv.
+7. After player startup, client replies `{"type":"session","version":3,"id":"<uuid>","boot_id":"<kernel-boot-uuid>"}\n`. Only then does the host send mono little-endian Float32 PCM at 24 kHz.
 
 The client keeps the reverse direction open for newline-delimited JSON `{"type":"playback","position":1.234}`. Position is the actual player position in seconds. The client-generated session ID scopes control to this player. Generate a secure random lowercase UUID v4 once per stream, independent of its PID; preserve it as an opaque string. All scoped commands and completion/stop receipts must match that exact ID. Numeric IDs (including numeric strings), malformed IDs and path components are rejected.
 
-The host appends approximately one second of silence before clean EOF. After feeder EOF and successful player exit, the client sends `{"type":"complete","id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}` and closes. TCP acceptance, EOF, helper exit by signal, and elapsed duration are not completion proof. Premature close fails without automatic replay.
+The host appends approximately one second of silence before clean EOF. After feeder EOF and successful player exit, the client sends `{"type":"complete","id":"<uuid>","boot_id":"<kernel-boot-uuid>"}` and closes. TCP acceptance, EOF, helper exit by signal, and elapsed duration are not completion proof. Premature close fails without automatic replay.
 
-**Migration:** upgrade to the latest host and all client audio-script copies together. Earlier v2 clients using PID/numeric IDs are incompatible: the host rejects readiness before sending PCM and requests an upgrade. A failed pre-audio handshake is not a playback completion or remote stop proof; cancellation can release ownership only because no audio was admitted. Old numeric receipts cannot confirm modern streams. A v1 bundled client safely ignores the existing control command `hello`; the new host fails clearly without sending PCM or unknown raw headers. Custom clients must implement this safe control negotiation before use. New bundled clients retain legacy raw-input support for older hosts, but new hosts never accept legacy non-proof feedback.
+**Migration:** upgrade the host and all client audio-script copies together. V1/v2 negotiation, old `PI_VOICE_AUDIO`, and raw PCM cannot start a player; there is no fallback. A failure **before commit** can prove non-admission. After commit, even zero PCM requires an exact player-exit receipt. Old numeric receipts cannot confirm modern streams. V1 safely ignores `hello`; v2 is rejected without sending its audio header. Existing durable receipts are retained for scoped legacy cleanup, never for new admission.
 
 ## Pause/resume control connection
 
@@ -32,17 +34,25 @@ PI_VOICE_CONTROLresume aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\n
 PI_VOICE_CONTROLstop aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\n
 ```
 
-The bundled client maps pause/resume to mpv's `pause` property and stop to mpv's `quit` command. Stop replies `{"type":"stopped","id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}` only after the owning session has waited for actual player exit. Missing socket/PID alone is not proof. Exit receipts remain in the runtime directory so a scoped retry can recover a lost ACK. Control connections carry no PCM. Starting a new stream also replaces the previous endpoint player.
+The bundled client maps pause/resume to mpv's `pause` property and stop to mpv's `quit` command. Stop replies `{"type":"stopped","id":"<uuid>","boot_id":"<kernel-boot-uuid>"}` after actual player exit, or after durably closing an uncommitted reservation under the same lock as commit/spawn. Missing socket/PID alone is not proof. Exit receipts remain under `${XDG_STATE_HOME:-$HOME/.local/state}/pi-voice/playback` so a scoped retry can recover a lost ACK across runtime-directory loss. A persisted possible dispatch without the owner's child-wait receipt stays fenced. Control connections carry no PCM. Starting a new stream also replaces the previous endpoint player.
 
 ### Host cancellation API and limitations
 
 `VoiceWorkerClient.cancel()` returns a cancel ID; only matching `idle.cancelId` confirms stop. Integration may wait one second, then await `VoiceWorkerClient.terminate()`. Termination cleans up its owned detached local worker group, including descendants after unexpected worker exit. **A rejected termination retains the speech lease in the extension integration.**
 
-Before PCM admission, the helper publishes the original endpoint and opaque stream ID to `VoiceWorkerClient`. This handle survives helper/worker failure. Retry `terminate()` on that **same client instance** after restoring the original connection: it cleans owned local descendants and requests `stop` for the retained stream, never a newly routed endpoint or PID. Only its exact receipt clears the failure latch and permits a replacement worker; disconnected or foreign-session responses retain ownership. Do not discard the failed client during reconnect. Remote failures expose `code: "REMOTE_PLAYBACK_UNCONFIRMED"` on errors/events for episode-level UI handling, rather than relying on error-message matching.
+Before physical dispatch, the worker publishes the original endpoint, opaque stream ID and actual boot ID to `VoiceWorkerClient`. Its in-process `remote-handle.grant()` callback must only be called after durable host journaling; merely observing the event does not authorize playback. This handle survives helper/worker failure. Retry `terminate()` on that **same client instance** after restoring the original connection: it cleans owned local descendants and requests `stop` for the retained stream, never a newly routed endpoint or PID. Only its exact receipt clears the failure latch and permits a replacement worker; disconnected or foreign-session responses retain ownership. Do not discard the failed client during reconnect. Remote failures expose `code: "REMOTE_PLAYBACK_UNCONFIRMED"` on errors/events for episode-level UI handling, rather than relying on error-message matching.
 
 The original live EPIPE cause remains **unobserved**. An EPIPE/helper-exit report establishes transport failure, not its underlying network/device cause. Mocked disconnect, broken-pipe and lost-ACK tests demonstrate retained-handle/receipt retry semantics, not reproduction or diagnosis of that incident. UI failure notices are deduplicated per resource and error episode: input and output failures remain independently visible; only matching confirmed cleanup resets that resource's episode. An older cleanup cannot clear a newer failure.
 
 Forced local termination cannot confirm remote buffered audio stopped. This implementation deliberately rejects termination and blocks replacement worker creation when remote completion/stop proof is missing; it does not claim that killing SSH/helper/worker stops the phone. A lost ACK, disconnected endpoint, stuck player, or unconfirmed local cleanup therefore requires recovery rather than lease release. Local cleanup is bounded and retains retiring handles on failure. Process-group cleanup is POSIX-only; Windows lacks descendant group confirmation. Player-exit proof does not measure physical speaker latency or hardware buffers. Runtime receipt cleanup must not occur while stop confirmation is outstanding.
+
+### Stage B scope and remaining gaps
+
+This is the production remote-output **prepare/journal/commit portion** of Stage B, not complete orphan reclamation. Output reservations are limited to 256 unresolved host-journal scopes; exceeding the limit denies grants. Cancellation closes worker grants synchronously; delayed grants cannot reopen that epoch. Original-route recovery remains mandatory, and v3 receipts must match the saved boot as well as the opaque ID.
+
+The existing admission ledger still marks output uncertain before worker dispatch and cannot durably account for every queued/non-admitted operation. Exact receipts retire saved scopes, but do **not** reset that uncertainty to idle. Therefore interrupted admitted owners remain fenced even after all saved receipts; generation-locked orphan reclamation still only accepts owners whose **every** direction is already proven idle. Unused input stays idle, not a synthetic input episode. Unknown/legacy journals remain fenced. No reboot-based discharge is implemented: a changed boot, endpoint, process or runtime directory is never treated as stop proof.
+
+Local output still uses owned-process cleanup, not a prepared durable per-resource output ledger. Completing the dispatch ledger (including local output), durable all-idle retirement, and verified same-device reboot proof is follow-up work. This change deliberately does not unlock those cases. Receipts are retained indefinitely; do not delete them while recovery is outstanding.
 
 ## Input commands
 

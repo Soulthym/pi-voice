@@ -1,0 +1,52 @@
+import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+import * as os from "node:os";
+import * as path from "node:path";
+import { mock, test } from "node:test";
+import { DEFAULT_VOICE_CONFIG } from "../src/config.js";
+import { StopRecovery } from "../src/stop-recovery.js";
+
+test("output grant requires durable exact reservation; cancellation closes late grants", async t => {
+ const root = fs.mkdtempSync(path.join(os.tmpdir(), "voice-output-grant-"));
+ t.after(() => { mock.reset(); fs.rmSync(root, { recursive: true, force: true }); });
+ const journal = new StopRecovery(root, "test-owner"); journal.initialize(); journal.beforeIO("output");
+ const child = Object.assign(new EventEmitter(), { pid: 12345, exitCode: null, signalCode: null,
+  stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough() });
+ mock.module("node:child_process", { namedExports: { spawn: () => child } });
+ const { VoiceWorkerClient } = await import("../src/worker-client.js");
+ const events: any[] = [], messages: any[] = [];
+ child.stdin.on("data", bytes => messages.push(JSON.parse(String(bytes))));
+ const worker = new VoiceWorkerClient(event => events.push(event));
+ const output = "unix:///test-only-output";
+ worker.sendSegment(1, 1, "No inference", { ...DEFAULT_VOICE_CONFIG, output });
+ const handle = { type: "remote-handle", output, id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", bootId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", utterance: 1 };
+ child.stdout.write(JSON.stringify(handle) + "\n");
+ assert.equal(messages.some(m => m.type === "output-grant"), false, "event delivery is not journal ACK");
+ const retain = () => journal.retain("output", { endpoint: output, id: handle.id, bootId: handle.bootId, selection: "device", configured: "auto" }, "Test output");
+ const failing = mock.method(fs, "fsyncSync", () => { throw new Error("injected fsync failure"); });
+ syncBuiltinESMExports();
+ assert.throws(retain, /fsync failure/); failing.mock.restore(); syncBuiltinESMExports();
+ assert.equal(messages.some(m => m.type === "output-grant"), false);
+ retain();
+ assert.equal(new StopRecovery(root, "test-owner").episode("output")?.handles[0]?.bootId, handle.bootId);
+ events[0].grant(); events[0].grant();
+ assert.deepEqual(messages.filter(m => m.type === "output-grant"), [{ type: "output-grant", id: handle.id, bootId: handle.bootId }]);
+ child.stdout.write(JSON.stringify({ ...handle, id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc" }) + "\n");
+ worker.cancel(); events.at(-1).grant();
+ assert.equal(messages.filter(m => m.type === "output-grant").length, 1);
+ assert.equal(journal.isIdle("input"), true, "unused input must not acquire a fake episode");
+ journal.retire("output", handle.id, output);
+ assert.equal(journal.isIdle("output"), false, "partial Stage B does not invent complete dispatch coverage");
+ const saved = JSON.parse(fs.readFileSync(journal.file, "utf8"));
+ saved.output.handles = Array.from({ length: 256 }, (_, n) => ({ endpoint: output,
+  id: `${n.toString(16).padStart(8, "0")}-aaaa-4aaa-8aaa-aaaaaaaaaaaa`, bootId: handle.bootId, selection: "device", configured: "auto" }));
+ fs.writeFileSync(journal.file, JSON.stringify(saved));
+ const bounded = new StopRecovery(root, "test-owner");
+ assert.throws(() => bounded.retain("output", { ...saved.output.handles[0], id: handle.id }, "Output"), /scope limit/);
+ assert.throws(() => bounded.retain("output", { ...saved.output.handles[0], bootId: handle.id }, "Output"), /identity changed/);
+ assert.equal(bounded.episode("output")?.handles.length, 256);
+ child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy();
+});

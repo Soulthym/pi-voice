@@ -7,17 +7,17 @@ import { DEFAULT_VOICE_CONFIG } from "../src/config.js";
 
 const tick = () => new Promise(resolve => setTimeout(resolve, 10));
 
-test("real helper startup pause refusal releases only verified non-admitted ownership through worker/client", { timeout: 10000 }, async t => {
+test("real helper ungranted reservation releases only verified non-admitted ownership through worker/client", { timeout: 10000 }, async t => {
 	const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 	let pcm = 0;
 	const server = net.createServer(socket => {
 		socket.on("error", () => {});
 		socket.on("data", bytes => {
-			if (String(bytes) === "PI_VOICE_CONTROLhello\n") socket.write('{"type":"protocol","version":2}\n');
-			else if (String(bytes) === "PI_VOICE_AUDIO\n") {
-				// Remove the endpoint after assigning a handle, before startup pause.
+			if (String(bytes) === "PI_VOICE_CONTROLhello\n") socket.write('{"type":"protocol","version":3}\n');
+			else if (String(bytes) === "PI_VOICE_PREPARE\n") {
+				// Lose the endpoint after reservation but before any durable host grant.
 				server.close();
-				socket.write(JSON.stringify({ type: "session", version: 2, id }) + "\n");
+				socket.end(JSON.stringify({ type: "prepared", version: 3, id, boot_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" }) + "\n");
 			} else pcm += bytes.length;
 		});
 	});
