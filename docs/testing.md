@@ -1,6 +1,6 @@
 # Tests
 
-## User-deployed fp5 migration check — 2026-09-29
+## User-deployed phone migration check — 2026-09-29
 
 The user restarted Pi/wrappers and supplied local Termux checks. All five installed
 `client/pi-voice-*` hashes match the updated checkout. No listed legacy microphone
@@ -95,7 +95,7 @@ Host regressions cover original-route retired/journal-only scope replay, durable
 clear failure, healthy capture review/manual-edit preservation and clearing proved
 input cancellation barriers. Helper checks cover pidfd cancellation, durable retirement
 replay, saved canonical recording paths and absent versus literal `"null"` identity.
-Fresh fp5-style network input/output are covered for completed normal start/stop
+Fresh phone-style network input/output are covered for completed normal start/stop
 and eligible same-device changed-boot proof, not all failure schedules. Local OUTPUT
 accounting remains unsupported; unknown Android same-boot dispatch stays fenced.
 Unknown saved/current kernel boot is receipt-stop-only, and uncertain/legacy journals
@@ -237,7 +237,7 @@ Final runs used short isolated HOME, TMPDIR, XDG config/cache/runtime roots. An 
 
 `npm run check` passed; full checkout `npm test`: **1055 passed / 33 compatibility skips / zero failures (1088 total)**; full installed-native `npm test`: **1088 passed / zero skips or failures**. Logs: `/tmp/voice-ui-trim-tests.log`, `/tmp/voice-ui-trim-native.log`. LSP unavailable; TypeScript supplies diagnostics.
 
-Mounted native frames at 40/80/120 columns keep the right-aligned badge and omit the word-quality row, pre-bar separator and `message ` label. At 80 columns the live content is `▶ Playing [━━━━━━━━━━━━━━━━━━━━━━━●] ● live · 702/702`, padded before `[🎧:fp5]`; at 40 columns it is `▶ Playing [●] ● live · 702/702 [🎧:fp5]`. Narrow timed rows may still omit the count to preserve time and device identity. Progress-layout tests verify one fewer row; `/voice timing` still verifies unknown, estimated, mixed, refined and restored coverage. Retry/refinement behavior and badge/picker controls are unchanged.
+Mounted native frames at 40/80/120 columns keep the right-aligned badge and omit the word-quality row, pre-bar separator and `message ` label. At 80 columns the live content is `▶ Playing [━━━━━━━━━━━━━━━━━━━━━━━●] ● live · 702/702`, padded before `[🎧:dev]`; at 40 columns it is `▶ Playing [●] ● live · 702/702 [🎧:dev]`. Narrow timed rows may still omit the count to preserve time and device identity. Progress-layout tests verify one fewer row; `/voice timing` still verifies unknown, estimated, mixed, refined and restored coverage. Retry/refinement behavior and badge/picker controls are unchanged.
 
 These are inert native frames and mocked transport/provider checks, not hardware or live-session proof. No runtime settings or sessions were changed. Operator: run `/reload` in the host Pi session to load this checkout; no client/SSH restart is needed for this UI-only change.
 
@@ -462,13 +462,16 @@ capture stop (if unconfirmed, restore the original route and retry Stop; do not
 force-clear leases), close all that desktop's voice wrappers normally, then:
 
 ```sh
-HOST='your-existing-ssh-host-alias' # same host that holds this checkout
-mkdir -p "$HOME/.local/bin"
-scp "$HOST:/home/curiosithy/code/pi/pi-voice/client/pi-voice-*" "$HOME/.local/bin/"
-chmod 755 "$HOME"/.local/bin/pi-voice-*
-"$HOME/.local/bin/pi-voice-ssh" "$HOST"
+VOICE_HOST='your-ssh-host' # existing SSH alias or user@hostname of the server
+VOICE_REPO='/absolute/path/to/pi-voice' # checkout on that server, not the local client
+CLIENT_BIN="$HOME/.local/bin" # local helper directory used by PATH/custom launcher
+mkdir -p "$CLIENT_BIN"
+scp "$VOICE_HOST:$VOICE_REPO/client/pi-voice-*" "$CLIENT_BIN/"
+chmod 755 "$CLIENT_BIN"/pi-voice-*
+"$CLIENT_BIN/pi-voice-ssh" "$VOICE_HOST"
 ```
 
+Replace the example host and server checkout; override `CLIENT_BIN` for your local installation. The quoted SCP wildcard matches remote files, not local ones.
 Use the usual SSH options/remote command if required; reattach the existing remote
 tmux session. This copies the **host checkout**, not unpushed GitHub content. Update
 custom installed script paths too. Wrapper restart is required after verified stop;
@@ -505,12 +508,13 @@ Automatic-bottom tests cover exact arrival, in-band suppression, growth, resize 
 
 These fixture tests use inert terminals, temporary files, subprocesses and some loopback sockets, not live phone sessions, real inference or end-to-end latency measurements. The user now reports the newest batch “seems fixed” and confirms native bottom-follow/banner behavior, supplementing earlier windowed-follow, ASR, fast-UI and no-flicker feedback. This is limited live confirmation, not all-device/error-cause validation.
 
-Full installed-native rerun (adjust the global installation path on other hosts; `npm test` sanitizes inherited connection/voice variables while retaining test overrides):
+Full installed-native rerun on the test machine: `PI_AGENT_ROOT` auto-discovers global Pi in the active Node environment; override it with the installed package root if Pi lives elsewhere. `npm test` sanitizes inherited connection/voice variables while retaining test overrides:
 
 ```sh
+PI_AGENT_ROOT="$(npm root -g)/@earendil-works/pi-coding-agent"
 env -u SSH_CONNECTION -u SSH_CLIENT -u SSH_TTY -u TMUX -u TMUX_PANE \
-  PI_VOICE_TEST_TUI_MODULE=/home/curiosithy/.nvm/versions/node/v26.7.0/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui/dist/index.js \
-  PI_VOICE_TEST_KEYBINDINGS_MODULE=/home/curiosithy/.nvm/versions/node/v26.7.0/lib/node_modules/@earendil-works/pi-coding-agent/dist/core/keybindings.js \
+  PI_VOICE_TEST_TUI_MODULE="$PI_AGENT_ROOT/node_modules/@earendil-works/pi-tui/dist/index.js" \
+  PI_VOICE_TEST_KEYBINDINGS_MODULE="$PI_AGENT_ROOT/dist/core/keybindings.js" \
   npm test
 ```
 

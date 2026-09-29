@@ -168,14 +168,20 @@ recoverable. This does not mean every input/output failure now recovers.
 After confirmed playback/capture stop and closure of every old wrapper, install the
 complete shared set using the exact [checkout/SCP commands below](#upgrade-device-name-support).
 If a separate Termux helper set is installed, replace that complete set too, on the
-client, substituting its actual installed directory:
+local client, replacing the example SSH host/server checkout and setting `CLIENT_BIN`
+to the directory your custom launcher actually uses (not the remote installation):
 
 ```bash
-scp 'YOUR_HOST:/path/to/pi-voice/termux/pi-voice-*' /absolute/custom/bin/
-chmod 755 /absolute/custom/bin/pi-voice-*
+VOICE_HOST='your-ssh-host' # existing SSH alias or user@hostname of the server
+VOICE_REPO='/absolute/path/to/pi-voice' # checkout on that server, not local Termux
+CLIENT_BIN="$HOME/.local/bin" # override for your separate local Termux helper set
+mkdir -p "$CLIENT_BIN"
+scp "$VOICE_HOST:$VOICE_REPO/termux/pi-voice-*" "$CLIENT_BIN/"
+chmod 755 "$CLIENT_BIN"/pi-voice-*
 ```
 
-Only then reconnect with `pi-voice-ssh YOUR_HOST` and run `/reload` in Pi when safe.
+The quoted SCP wildcard is matched remotely, not expanded by the local shell.
+Only then reconnect with `"$CLIENT_BIN/pi-voice-ssh" "$VOICE_HOST"` and run `/reload` in Pi when safe.
 These are operator-run upgrade instructions, not deployment or stop-proof shortcuts.
 
 Desktop capture now requires Python 3 with `os.pidfd_open` and `signal.pidfd_send_signal`, plus Linux pidfd support (normally Python ≥3.9 / Linux ≥5.3). Install/verify this on local Linux Pi hosts and every desktop capture client before upgrading; Termux's Android recorder path does not use Python. The recorder acquires its own incarnation-safe signal handle before opening the device; unavailable support fails closed rather than signalling a potentially reused PID.
@@ -215,19 +221,25 @@ mkdir -p "$HOME/.local/bin"
 install -m755 client/pi-voice-* "$HOME/.local/bin/"
 ```
 
-If the checkout exists only on the Pi host, run this **on each client**, desktop or Termux:
+If the checkout exists only on the Pi host, run this **on each local client**, desktop or Termux, not in the remote SSH shell. Replace the example host/server checkout and override `CLIENT_BIN` if your PATH or custom launcher uses another local helper directory. The quoted wildcard matches files on the server:
 
 ```bash
-mkdir -p "$HOME/.local/bin"
-scp 'YOUR_HOST:/path/to/pi-voice/client/pi-voice-*' "$HOME/.local/bin/"
-chmod 755 "$HOME"/.local/bin/pi-voice-*
+VOICE_HOST='your-ssh-host' # existing SSH alias or user@hostname of the server
+VOICE_REPO='/absolute/path/to/pi-voice' # server checkout, not local Termux/desktop
+CLIENT_BIN="$HOME/.local/bin" # local helper installation directory
+mkdir -p "$CLIENT_BIN"
+scp "$VOICE_HOST:$VOICE_REPO/client/pi-voice-*" "$CLIENT_BIN/"
+chmod 755 "$CLIENT_BIN"/pi-voice-*
 ```
 
 Use the host's updated local checkout when the changes are not yet published upstream. For an installation that deliberately invokes the alternative `termux/pi-voice-ssh`, also replace that exact installed wrapper from the matching `termux/pi-voice-ssh` source; the standard `client/` copy above does not update a separate custom path. For example, on that Termux client:
 
+Reuse `VOICE_HOST` and `VOICE_REPO` from the preceding local-client block; set `CLIENT_BIN` below to the local directory containing the wrapper your custom launcher executes:
+
 ```bash
-scp 'YOUR_HOST:/path/to/pi-voice/termux/pi-voice-ssh' /absolute/custom/path/pi-voice-ssh
-chmod 755 /absolute/custom/path/pi-voice-ssh
+CLIENT_BIN='/absolute/path/to/custom/bin' # replace with the local custom wrapper directory
+scp "$VOICE_HOST:$VOICE_REPO/termux/pi-voice-ssh" "$CLIENT_BIN/pi-voice-ssh"
+chmod 755 "$CLIENT_BIN/pi-voice-ssh"
 ```
 
 Substitute the actual host checkout and installed paths. Update the underlying wrapper custom launchers execute. Reconnect interactively, answer the first-run name prompt if the file is missing, and run `/reload` in Pi. Check the `Connected as <name>` client identity message; it is not a playback or microphone test. Do not delete `device-id`, registrations, or runtime state to rename a device.
@@ -242,32 +254,29 @@ Before replacing scripts or exiting wrappers, explicitly stop active playback/ca
 
 After confirmed stop, exit every old wrapper, update all copies together, reconnect and reload the host extension. The microphone now requires origin-scoped random-epoch tickets (`<epoch>.<counter>`, UUID-like identity, not numeric-only), an actual kernel boot ID echoed in START, and explicit capability-scoped stop receipts (`stopped N` for Termux, `stopped-wait N B` for desktop). Audio requires v3 prepare/journal/commit with opaque UUID stream IDs and boot-bound completion/stop proof. All v1/v2 clients are rejected before PCM; upgrade every helper and SSH wrapper copy together, not just the host or audio helper. Retained numeric receipts are not valid modern proof. Retain current durable epoch-qualified ticket state. Legacy runtime recorder paths—including idle epoch `.tickets` and `.fence` files—are refused by the new helper. Only after independently confirming all old captures and outstanding API dispatches stopped and closing all old sessions, archive those recorder-only paths under supervision as described in the protocol migration. Preserve durable audio/microphone receipts, device IDs and host leases. Never unconditionally remove runtime state, blanket-delete configuration/TMPDIR or remove a fence while any session may use it. See [protocol migration](endpoint-protocol.md#microphone-protocol-migration).
 
-For later published updates, update the host checkout:
+For later published updates, run on the Pi host; replace `VOICE_REPO` with that host's checkout:
 
 ```bash
-cd /path/to/pi-voice
+VOICE_REPO='/absolute/path/to/pi-voice' # checkout on the Pi host
+cd "$VOICE_REPO"
 git pull
 npm install
 ```
 
-Reinstall client scripts whenever files under `client/` changed:
+Reinstall client scripts whenever files under `client/` changed. Run on the local client with a local checkout; replace `VOICE_REPO` with that client's checkout and `CLIENT_BIN` if your PATH/custom launcher uses another helper directory:
 
 ```bash
-cd /path/to/pi-voice
-install -m755 client/pi-voice-* "$HOME/.local/bin/"
+VOICE_REPO='/absolute/path/to/pi-voice' # local client checkout for this non-SCP install
+CLIENT_BIN="$HOME/.local/bin" # local helper installation directory
+cd "$VOICE_REPO"
+install -m755 client/pi-voice-* "$CLIENT_BIN/"
 ```
 
 For the Unix-socket-to-TCP migration, first confirm old devices stopped, update the Pi host and reinstall all client scripts, then exit every existing `pi-voice-ssh` shell before reconnecting. Run `/reload` in Pi. No `--tailscale` option or endpoint configuration is needed.
 
 Exit every existing `pi-voice-ssh` shell before testing a new bridge. Multiple wrappers share a bridge and ControlMaster, so the old bridge remains alive until the final wrapper exits. Current wrappers use owner-tagged locks and recover locks left by crashes; reinstalling all scripts together is required because an already-running legacy wrapper still executes its old locking and endpoint logic.
 
-If the checkout is not available on the client, copy scripts directly from the Pi host:
-
-```bash
-mkdir -p "$HOME/.local/bin"
-scp 'YOUR_HOST:/path/to/pi-voice/client/pi-voice-*' "$HOME/.local/bin/"
-chmod 755 "$HOME"/.local/bin/pi-voice-*
-```
+If the checkout is not available on the client, use the [local-client SCP block above](#upgrade-device-name-support): there `VOICE_REPO` is the **server** checkout and `CLIENT_BIN` remains the **local** installation directory.
 
 ## Platform status
 
