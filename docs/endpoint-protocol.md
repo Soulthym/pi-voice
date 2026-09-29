@@ -56,24 +56,31 @@ Fresh owners initialize the v4 ledger before acquiring a lease (v3 remote-output
 
 Endpoint-owner `SIGKILL` after durable commit remains conservatively fenced, including the committed-before-spawn crash window. A replacement handler cannot perform the original owner's child wait: missing PID/socket state, elapsed time, or a synthetic wait result cannot become an exit receipt. A verified same-device reboot can close this window for boot-fenced scopes; otherwise reconnect does not invent evidence.
 
-Local output still uses owned-process cleanup, not a prepared durable per-resource output ledger. Any local output admission keeps that owner's output direction uncertain for orphan recovery, even after known scopes retire. Network/legacy input likewise remains uncertain. Fresh v4 owners using the bundled Linux **local input** wait protocol below can establish complete input accounting; this does not clear an uncertain output direction. Receipts are retained indefinitely; do not delete them while recovery is outstanding.
+Local output still uses owned-process cleanup, not a prepared durable per-resource output ledger. Any local output admission keeps that owner's output direction uncertain for orphan recovery, even after known scopes retire. Legacy input remains uncertain. Fresh v4 owners using bundled local/network desktop `wait-v1` or network Termux `admit-v1` can establish complete input accounting; this does not clear an uncertain output direction. Version 4 alone is not proof: input must have persisted `covered` admission and each saved scope must carry `desktopWait:true` or `networkAdmission:true` with a valid boot ID. Receipts are retained indefinitely; do not delete them while recovery is outstanding.
 
-**Local-output integration boundary (not implemented):** `worker.mjs#createLocalSink` directly spawns the selected `PI_VOICE_PLAYER`, `pw-play`, `mpv`, or `ffplay` with its sample rate. The inspected durable guardian, `client/pi-voice-audio-session`, belongs to the remote v3 path: it launches fixed-rate mpv, controls it through its IPC socket, and replaces endpoint players through shared runtime state. It is not a guardian around local worker children. Routing local output through it unchanged would silently change backend/rate/pause/replacement semantics. Completing this requires a local command/rate/control adapter, pre-grant host scope retention for every queued/replacement/draining sink, local receipt retry routing, and worker-termination integration that cannot mistake killing the guardian's process group for its player's wait. No PID/group-disappearance shortcut or coverage promotion was added. This is a remaining implementation task, not a claim that local guardians are impossible.
+**Bounded local-output guardian integration (not implemented):** `worker.mjs#createLocalSink` directly spawns the selected `PI_VOICE_PLAYER`, `pw-play`, `mpv`, or `ffplay` with its sample rate. The inspected durable guardian, `client/pi-voice-audio-session`, belongs to the remote v3 path: it launches fixed-rate mpv, controls it through its IPC socket, and replaces endpoint players through shared runtime state. It is not a guardian around local worker children. Local worker players (including an `aplay` override) lack durable pre-grant admission and per-scope child-wait receipts. Routing local output through it unchanged would silently change backend/rate/pause/replacement semantics. Completing this requires a local command/rate/control adapter, pre-grant host scope retention for every queued/replacement/draining sink, local receipt retry routing, and worker-termination integration that cannot mistake killing the guardian's process group for its player's wait. No PID/group-disappearance shortcut or coverage promotion was added. This is a remaining implementation task, not a claim that local guardians are impossible.
 
 ## Input commands
 
-The host opens a recording connection and sends `ticket\n`. The server replies
-`ticket N B\n`, where N is `<epoch>.<counter>`: a 32-character lowercase random hex
+The host opens a network recording connection and sends `ticket-admit\n`.
+Desktop replies `ticket N B wait-v1\n`; Termux replies
+`ticket N B admit-v1 D\n`, where D is the independently read stable identity from
+`${XDG_CONFIG_HOME:-$HOME/.config}/pi-voice/device-id` (1–128 ASCII letters,
+digits, dots, underscores or hyphens). Local desktop uses `ticket-wait\n` and
+requires `wait-v1`. Plain legacy `ticket N B` replies are rejected before START.
+N is `<epoch>.<counter>`: a 32-character lowercase random hex
 server-state epoch and a positive monotonically increasing safe integer (maximum
 9007199254740991). B is the actual kernel UUID from `/proc/sys/kernel/random/boot_id`,
 not a process-start identity. Missing/invalid boot identity denies admission.
-The host durably retains endpoint, ticket, boot and route identity before sending
+The host durably marks fresh v4 input covered before ticket acquisition, then retains
+endpoint, ticket, boot, route identity and the explicit admission capability before sending
 `record N B\n` **on that same connection**. Old bootless replies fail with an upgrade
 error before START; there is no compatibility fallback. Keep its
 write side open throughout capture; EOF triggers generation-scoped cleanup.
 Cancellation before receiving a ticket must close the connection without sending record.
 
-A separate control connection sends `stop N\n`. It cancels that pending request
+A separate control connection sends `stop N\n` for Termux admission or
+`stop-wait N B\n` for desktop wait scopes. It cancels that pending request
 before admission/publication, or stops only the active recording bearing N. A late
 old stop cannot stop a newer recording. Bare `record` / `stop` are rejected.
 
@@ -139,17 +146,34 @@ ok <base64-text>\n
 error <base64-error-message>\n
 ```
 
-For `stop`, the only successful response is exactly:
+For ordinary Termux `stop`, the only successful response is exactly:
 
 ```text
 ok <base64 UTF-8 of "stopped N">\n
 ```
 
-The decoded payload must be exactly `stopped N`, echoing the full origin-scoped `<epoch>.<counter>` ticket requested by the host. Generic `stopped`, foreign epochs, and different counters are rejected without releasing ownership. Validate the ticket against persistent server state before acknowledging it; blindly echoing a foreign request is not proof. This protocol trusts the recorder implementation, not an unauthenticated echo as cryptographic attestation. Send it **only after actual microphone stop is confirmed**, or after cancelling an admitted pre-start generation so it can never start. Accepting a stop request, closing a socket, or observing a dead API client is not confirmation. The bundled Linux helper directly owns and waits for the recorder and encoder children before publishing durable retirement; arbitrary daemonizing replacement tools are not supported. Android requires a persisted successful, exact-path stock API start response, successful quit-call completion, and subsequent `isRecording: false`. Quit dispatch is durably marked before the call; a failed, timed-out or interrupted quit leaves a same-boot fence even if info reports idle, since a delayed quit could stop the next capture. A timed-out, failed, interrupted or unrecognized start response remains uncertain on the same boot even if info reports idle. A later explicit Android stop can retire a completed-start scope after its original helper exits only if no uncertain quit remains; it cannot invent dispatch completion. No native Android ticket enforcement or cancellation watermark is claimed. An unconfirmed stop returns `error <base64-error-message>` and retains ownership. Disconnect cleanup is generation-scoped too.
+The decoded payload must be exactly `stopped N`, echoing the full origin-scoped `<epoch>.<counter>` ticket requested by the host. Generic `stopped`, foreign epochs, and different counters are rejected without releasing ownership. Validate the ticket against persistent server state before acknowledging it; blindly echoing a foreign request is not proof. This protocol trusts the recorder implementation, not an unauthenticated echo as cryptographic attestation. Send it **only after actual microphone stop is confirmed**, or after cancelling an admitted pre-start generation so it can never start. Accepting a stop request, closing a socket, or observing a dead API client is not confirmation. The bundled Linux helper directly owns and waits for the recorder and encoder children before publishing durable retirement; arbitrary daemonizing replacement tools are not supported. Android requires a persisted successful, exact-path stock API start response, successful recognized quit-call completion, and subsequent `isRecording: false`. Current stock quit stdout is `Recording finished: <exact recording path>` or `No recording to stop`. These acknowledge the quit call, not MediaRecorder destruction, and cannot replace closed start dispatch plus fresh idle confirmation. Quit dispatch is durably marked before the call; a failed, timed-out or interrupted quit leaves a same-boot fence even if info reports idle, since a delayed quit could stop the next capture. A timed-out, failed, interrupted or unrecognized start response remains uncertain on the same boot even if info reports idle. A later explicit Android stop can retire a completed-start scope after its original helper exits only if no uncertain quit remains; it cannot invent dispatch completion. No native Android ticket enforcement or cancellation watermark is claimed. An unconfirmed stop returns `error <base64-error-message>` and retains ownership. Disconnect cleanup is generation-scoped too.
 
 For `record`, an `ok` response is treated as direct recognized text for compatibility.
+Every network recording response—`stream`, `audio`, `ok`, `error`, or EOF—still
+requires an explicit matching stop receipt before retiring its saved scope; response
+completion is not microphone-stop proof.
 
-### Local desktop child-wait protocol
+### Termux same-device reboot proof
+
+Eligible recovery sends `stop-admit N B D\n`. On the same boot it requires the
+ordinary exact `stopped N` receipt. A different known kernel boot may return
+`ok <base64 of "stopped-reboot N B CURRENT_BOOT D">\n` without stopping a new
+capture. The host requires saved `networkAdmission:true` and `rebootSafe:true`,
+the original registered device resolved to its current endpoint, and the helper's
+matching device identity. `rebootSafe` is saved only when admission independently
+reports the original registered ID under auto configuration. Custom endpoints,
+`legacy-loopback`, missing capabilities or unknown boots cannot use this proof.
+It closes old-boot dispatch, not unknown host coverage; legacy/uncertain journals
+are never promoted by a new helper or reboot.
+
+
+### Desktop child-wait protocol
 
 The bundled Linux `local` transport requests `ticket-wait\n`, requiring
 `ticket N B wait-v1\n`; it never falls back to legacy admission. Before replying,
@@ -176,8 +200,8 @@ receipt publication, remain fenced even when every PID has disappeared. Legacy
 shared idle state is never converted into a wait receipt. Receipts remain unbounded
 until a safe retry/retention horizon is defined.
 
-This stage is local Linux desktop input only. TCP/Unix desktop capture still uses
-the legacy input wire protocol and remains host-uncertain, as does Termux input.
+TCP/Unix desktop capture requests `ticket-admit` and receives the same `wait-v1`
+capability, durable scope and `stop-wait` receipt as local Linux capture.
 A local helper that delegates to Termux or lacks `wait-v1` is rejected before record;
 there is no complete-coverage compatibility fallback.
 
@@ -186,13 +210,18 @@ there is no complete-coverage compatibility fallback.
 `PhoneInputClient.capture(endpoint, options)` acquires the ticket internally.
 Its synchronous retention callback must finish durable publication before START.
 The extension journals both local and remote input identities, rejects changed scope
-metadata. Fresh v4 local Linux captures are `covered`, including the pre-ticket
-window; every possible record dispatch has its saved `desktopWait` scope. Original
-local scopes can be retried after owner death, then input becomes idle only when
-all saved scopes retire. Lease reclamation still checks both directions, owner death
+metadata. Fresh v4 local/network desktop and network Termux captures are `covered`,
+including the pre-ticket window; every possible record dispatch has its saved
+`desktopWait` or `networkAdmission` scope. Original scopes can be retried after
+owner death, then input becomes idle only when all saved scopes retire and dispatch
+is closed. Version alone, empty handles or EOF do not establish coverage. Lease reclamation still checks both directions, owner death
 and acquisition generation under the mutation lock. Unused input stays idle.
-Network and legacy input admission remains **uncertain**; old journals are never
-migrated or promoted, even if a new helper can return stronger evidence.
+Legacy or already-uncertain input admission remains **uncertain**; old journals are
+never migrated or promoted, even if a new helper can return stronger evidence.
+Live `/voice reconnect` closes the capture grant channel before retrying retained
+input scopes through their original routes, including a registered device's current
+endpoint; it does not substitute the new selection or restart capture. Failure keeps
+ownership. Successful cleanup permits release only when no remaining work owns it.
 `stop(endpoint?)` keeps its legacy optional argument for source compatibility but
 always uses the active capture's saved endpoint and ticket, never a newly routed
 endpoint. With no owned capture it is a no-op; before ticket acquisition it cancels
@@ -215,7 +244,7 @@ do not delete unrelated playback state, device identity or host leases. An idle 
 snapshot after a timed-out start is insufficient for that confirmation. An upgrade or
 new helper process cannot clear an existing uncertain host direction.
 
-Older documentation defined stop `ok` as acceptance only. That contract is **not safe or compatible** with the current host: `ok` with `stopping`, generic `stopped` (including older epoch-aware bridges), an empty payload, or any payload other than the exact `stopped N` is rejected. Do not merely echo the requested ticket onto an acceptance response; implement origin validation, confirmation and pre-start cancellation fencing first. Upgrade host and all recorder copies together. If this earlier migration is still outstanding, copy the full script set from the host's local checkout when it is not available upstream; see [safe upgrade steps](installation.md#upgrading). The historical batch after `ade0670` through `d4cf759` was host-only; that exemption does not apply to Stage C. Existing epoch-qualified state files need no reset for this receipt-only upgrade; retain them for outstanding retries. Epoch-qualified ticket negotiation is mandatory; upgrade both host and recorder scripts. Numeric-only hosts, tickets and old two-counter state files are incompatible. After confirming all old microphones stopped and exiting old sessions, remove the old `.tickets` state file before using the upgraded scripts; never migrate an outstanding numeric ticket into the new epoch. Upgrade all recorder-script copies on the client together, with no old recorder sessions still running. The bundled scripts require `flock` (util-linux on Linux/Termux); its persistent fence file must not be deleted while sessions may use it. No host compatibility switch permits acceptance-only ACKs.
+Older documentation defined stop `ok` as acceptance only. That contract is **not safe or compatible** with the current host: `ok` with `stopping`, generic `stopped` (including older epoch-aware bridges), an empty payload, or any payload other than the exact receipt required by the requested stop command is rejected (`stopped N`, `stopped-wait N B`, or eligible `stopped-reboot` proof above). Do not merely echo the requested ticket onto an acceptance response; implement origin validation, confirmation and pre-start cancellation fencing first. Upgrade host and all recorder copies together. If this earlier migration is still outstanding, copy the full script set from the host's local checkout when it is not available upstream; see [safe upgrade steps](installation.md#upgrading). The historical batch after `ade0670` through `d4cf759` was host-only; that exemption does not apply to Stage C. Existing epoch-qualified state files need no reset for this receipt-only upgrade; retain them for outstanding retries. Epoch-qualified ticket negotiation is mandatory; upgrade both host and recorder scripts. Numeric-only hosts, tickets and old two-counter state files are incompatible. After confirming all old microphones stopped and exiting old sessions, remove the old `.tickets` state file before using the upgraded scripts; never migrate an outstanding numeric ticket into the new epoch. Upgrade all recorder-script copies on the client together, with no old recorder sessions still running. The bundled scripts require `flock` (util-linux on Linux/Termux); its persistent fence file must not be deleted while sessions may use it. No host compatibility switch permits acceptance-only ACKs.
 
 `/voice stop` remains an immediate UI/processing cancellation escape hatch: it need not wait for transcription or editing to finish. Microphone cleanup continues separately and must report failure honestly. Network loss/timeouts are **unconfirmed**, never proof the microphone stopped; a new capture must wait for a successful explicit stop retry after reconnection.
 

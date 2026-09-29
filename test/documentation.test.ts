@@ -52,7 +52,7 @@ test("playback and protocol docs retain current behavior and safe upgrade guidan
 	const installation = read("docs/installation.md");
 	assert.match(installation, /host's \*\*local checkout\*\*/);
 	assert.match(installation, /flock/);
-	assert.match(installation, /exact `stopped N` receipts/);
+	assert.match(installation, /capability-scoped stop receipts \(`stopped N` for Termux, `stopped-wait N B` for desktop\)/);
 	assert.match(installation, /Never unconditionally remove runtime state/);
 	assert.match(read("docs/troubleshooting.md"), /original device connection/);
 });

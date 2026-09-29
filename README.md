@@ -76,6 +76,8 @@ pi
 
 **Device-name update:** recopy the SSH wrapper on every desktop/Termux client using the [upgrade commands](docs/installation.md#upgrade-device-name-support). `pi-voice-ssh --set-device-name` prompts visibly; `pi-voice-ssh --set-device-name "My device"` provisions/renames headlessly without SSH or changing the ID. No target or other options are allowed. Normal first-connection prompts are visible too. The editable name uses a one-row tail preview (`<` means earlier text is hidden); the full name is saved. Existing connections are not restarted; after confirmed stop, close all wrappers and reconnect to use the new name. If you have not completed the earlier protocol migration, its [safe upgrade steps](docs/installation.md#upgrading) still apply. Never discard outstanding [stop-recovery proof](docs/troubleshooting.md#unconfirmed-stop).
 
+**Microphone protocol update:** update the host and every installed desktop/Termux helper together, only after confirmed stops and closing old wrappers; use the [exact upgrade commands](docs/installation.md#stage-c-boot-bound-microphone-upgrade), then reconnect and reload. Network input now requires `ticket-admit` (`wait-v1` on desktop, `admit-v1` plus device identity on Termux). Fresh v4 covered input supports original-route live/orphan recovery and eligible same-device reboot proof; version alone does not establish coverage. Unknown Android start/quit and legacy uncertainty stay fenced. Local output still lacks a durable admission/child-wait guardian. See [stop recovery](docs/troubleshooting.md#unconfirmed-stop).
+
 See [Installation](docs/installation.md) for permissions, dependencies, SSH server settings, and local-only setups.
 
 ## Default configuration

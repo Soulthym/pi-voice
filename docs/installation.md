@@ -129,7 +129,10 @@ Validate with `sshd -t`, then reload `sshd` after changing its configuration. Th
 ### Stage C boot-bound microphone upgrade
 
 Update the host and every desktop/Termux recorder helper together; bootless ticket
-replies now fail before recording with an explicit upgrade error. This is not a
+or capability-less ticket replies now fail before recording with an explicit upgrade error.
+Network capture requires `ticket-admit`: Termux reports `admit-v1` plus its existing
+stable device ID, while desktop reports `wait-v1` with scoped child-wait receipts.
+Local desktop retains `ticket-wait`/`wait-v1`. Preserve `device-id`; do not regenerate it. This is not a
 host-only update. Follow the confirmed-stop/full-helper procedure below at a time
 you choose; no deployment or restart is automatic.
 
@@ -145,7 +148,29 @@ Android API timeout/interruption remains uncertain on the same boot; quit plus a
 idle info snapshot alone cannot close an outstanding start or quit. An uncertain quit
 stays fenced because it could stop a later capture. Ordinary completed stock
 API responses are tracked separately. No APK/dependency change or native service
-cancellation guarantee is added. Complete host input orphan recovery remains fenced.
+cancellation guarantee is added. Current stock quit stdout is `Recording finished: <exact recording path>`
+or `No recording to stop`; neither alone proves recorder destruction. Unknown start
+or quit responses stay fenced on the same boot.
+
+Fresh v4 owners with explicit covered input and saved `networkAdmission` or
+`desktopWait` capabilities can recover original input scopes on reconnect, including
+a live owner's original registered device at its current endpoint. Eligible Termux
+`stop-admit` recovery also accepts same-device changed-kernel-boot proof. Orphan
+release still requires both directions durably idle; version 4 alone is insufficient.
+Existing uncertain/legacy input and local-output admission remain fenced.
+
+After confirmed playback/capture stop and closure of every old wrapper, install the
+complete shared set using the exact [checkout/SCP commands below](#upgrade-device-name-support).
+If a separate Termux helper set is installed, replace that complete set too, on the
+client, substituting its actual installed directory:
+
+```bash
+scp 'YOUR_HOST:/path/to/pi-voice/termux/pi-voice-*' /absolute/custom/bin/
+chmod 755 /absolute/custom/bin/pi-voice-*
+```
+
+Only then reconnect with `pi-voice-ssh YOUR_HOST` and run `/reload` in Pi when safe.
+These are operator-run upgrade instructions, not deployment or stop-proof shortcuts.
 
 ### Audio protocol v3 (host and every client)
 
@@ -157,7 +182,7 @@ Before replacing scripts or exiting wrappers, explicitly stop playback/capture a
 
 ### Never-admitted orphan recovery
 
-This change is host-only; **no client scripts or endpoint protocol changed**. Load the updated extension when it is safe to do so; no SSH/client restart or hardware test is needed for this change. New owners get durable pre-dispatch admission evidence. Old journals are not upgraded, and an existing unresolved fence is not cleared by `/reload` or updating clients. Read the [legacy incident limitations](troubleshooting.md#disconnected-replay-incident-2026-09-27) before attempting recovery. Do not interrupt live sessions or delete coordination/runtime state to install this update.
+This earlier change was host-only; **no client scripts or endpoint protocol changed**. Load the updated extension when it is safe to do so; no SSH/client restart or hardware test is needed for this change. New owners get durable pre-dispatch admission evidence. Old journals are not upgraded, and an existing unresolved fence is not cleared by `/reload` or updating clients. Read the [legacy incident limitations](troubleshooting.md#disconnected-replay-incident-2026-09-27) before attempting recovery. Do not interrupt live sessions or delete coordination/runtime state to install this update.
 
 ### Sticky device selection and selected-device badge
 
@@ -205,9 +230,9 @@ Substitute the actual host checkout and installed paths. Update the underlying w
 
 **Earlier protocol migration, if outstanding:** use the Pi host's **local checkout** as the source for every client script when those changes are not available upstream; a client-side `git pull` is then insufficient. Copy the complete `client/pi-voice-*` set using the `scp` example below, including any alternative installed copies/custom client paths; do not mix old and new helpers. Install `flock` (`util-linux`) on Linux/Termux.
 
-Before replacing scripts or exiting wrappers, explicitly stop active playback/capture and confirm actual device stop. If stop is unconfirmed, preserve the original connection, runtime state, tickets, receipts and leases; restore that connection and retry `/voice stop` (or `/voice reconnect` for retained output stop). Do not kill host processes or delete leases as proof. See [recovery](troubleshooting.md#unconfirmed-stop).
+Before replacing scripts or exiting wrappers, explicitly stop active playback/capture and confirm actual device stop. If stop is unconfirmed, preserve the original connection, runtime state, tickets, receipts and leases; restore that connection and retry `/voice stop` (or `/voice reconnect` for retained input/output stop). Do not kill host processes or delete leases as proof. See [recovery](troubleshooting.md#unconfirmed-stop).
 
-After confirmed stop, exit every old wrapper, update all copies together, reconnect and reload the host extension. The microphone now requires origin-scoped random-epoch tickets (`<epoch>.<counter>`, UUID-like identity, not numeric-only), an actual kernel boot ID echoed in START, and exact `stopped N` receipts. Audio requires v3 prepare/journal/commit with opaque UUID stream IDs and boot-bound completion/stop proof. All v1/v2 clients are rejected before PCM; upgrade every helper and SSH wrapper copy together, not just the host or audio helper. Retained numeric receipts are not valid modern proof. Existing epoch-qualified ticket state must be retained; only incompatible numeric-era `.tickets` state may be removed **after all old captures are confirmed stopped and old sessions exited**. Never unconditionally remove runtime state or the persistent `flock` fence. See [protocol migration](endpoint-protocol.md#microphone-protocol-migration).
+After confirmed stop, exit every old wrapper, update all copies together, reconnect and reload the host extension. The microphone now requires origin-scoped random-epoch tickets (`<epoch>.<counter>`, UUID-like identity, not numeric-only), an actual kernel boot ID echoed in START, and explicit capability-scoped stop receipts (`stopped N` for Termux, `stopped-wait N B` for desktop). Audio requires v3 prepare/journal/commit with opaque UUID stream IDs and boot-bound completion/stop proof. All v1/v2 clients are rejected before PCM; upgrade every helper and SSH wrapper copy together, not just the host or audio helper. Retained numeric receipts are not valid modern proof. Existing epoch-qualified ticket state must be retained; only incompatible numeric-era `.tickets` state may be removed **after all old captures are confirmed stopped and old sessions exited**. Never unconditionally remove runtime state or the persistent `flock` fence. See [protocol migration](endpoint-protocol.md#microphone-protocol-migration).
 
 For later published updates, update the host checkout:
 
