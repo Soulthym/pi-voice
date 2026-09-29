@@ -2385,6 +2385,14 @@ export default async function (pi: ExtensionAPI) {
 					stopUnconfirmed = previousStopUnconfirmed;
 				}
 				if (epoch !== playbackRequestEpoch || ctx !== activeContext) return false;
+				if (recover && stopRecovery?.episode("output")?.handles.length) {
+					// Retry the original identity before resolving a possibly different/ambiguous attachment.
+					const recovery = stopRecovery;
+					stopUnconfirmed = true;
+					await trackStop("output", vocalizer.shutdown(scope => recovery.stopOutputScope(scope, deviceRouter, config.output)));
+					if (stopResources.output.episode || stopResources.output.cleanup) throw new Error("Retained output scopes remain unconfirmed");
+					stopUnconfirmed = false;
+				}
 				const connection = origin ?? await deviceRouter.resolveCurrentConnection();
 				if (!current() || epoch !== playbackRequestEpoch || ctx !== activeContext || !interactiveVoiceSession) return false;
 				const selection = connection.kind === "device" ? connection.id : "local";

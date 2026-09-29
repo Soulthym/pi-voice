@@ -7,6 +7,8 @@ import { normalizeWorkerCount, type VoiceConfig } from "./config.js";
 
 import type { AlignmentWord, TimingQuality } from "./narration-progress.js";
 
+export type RemoteOutputStop = (scope: { output: string; id: string; bootId?: string | null }) => Promise<void>;
+
 export type MeasurementPhase = "cache-decode" | "synthesis";
 
 export type TimingRetryResult =
@@ -91,6 +93,7 @@ export class VoiceWorkerClient {
 	}
 
 	sendSegment(utterance: number, segmentId: number, text: string, config: VoiceConfig): void {
+		if (this.#termination || this.#retiring.size) throw new Error("Voice worker transport cleanup is in progress");
 		this.setTtsWorkers(config.ttsWorkers);
 		this.#activeUtterance = utterance;
 		this.#grantUtterances.add(utterance);
@@ -282,17 +285,21 @@ export class VoiceWorkerClient {
 	}
 
 	/** Escalation after a missing cancel ACK (e.g. 1s). Rejection means keep the speech lease. */
-	terminate(): Promise<void> {
+	terminate(stopScope?: RemoteOutputStop): Promise<void> {
 		this.#dispatchClosed = true;
 		this.#grantUtterances.clear();
-		if (this.#termination) return this.#termination;
-		const pending = this.#terminate();
+		// A reconnect joins in-flight cancellation before retrying its retained scopes.
+		if (this.#termination) return stopScope
+			? this.#termination.catch(() => {}).then(() => this.terminate(stopScope))
+			: this.#termination;
+		const pending = this.#terminate(stopScope);
 		this.#termination = pending;
 		void pending.finally(() => { if (this.#termination === pending) this.#termination = undefined; }).catch(() => {});
 		return pending;
 	}
 
-	async #terminate(): Promise<void> {
+	async #terminate(stopScope: RemoteOutputStop = stopRemotePlayback): Promise<void> {
+		const generation = this.#remoteGeneration;
 		this.#rejectTimingRetries(new Error("Voice worker stopped"));
 		const child = this.#child;
 		this.#child = null;
@@ -316,11 +323,11 @@ export class VoiceWorkerClient {
 		// Retained identities survive worker/helper death and bridge metadata changes.
 		const hadHandles = this.#remoteHandles.size > 0;
 		for (const [id, handle] of this.#remoteHandles) {
-			await stopRemotePlayback(handle);
-			this.#remoteHandles.delete(id);
-			this.#onEvent({ type: "remote-released", id });
+			await stopScope(handle);
+			if (generation !== this.#remoteGeneration || this.#remoteHandles.has(id) && this.#remoteHandles.get(id) !== handle) throw new RemotePlaybackUnconfirmedError("Output scope changed during cleanup");
+			if (this.#remoteHandles.delete(id)) this.#onEvent({ type: "remote-released", id });
 		}
-		if (hadHandles) this.#remoteUnconfirmed = false;
+		if (hadHandles && generation === this.#remoteGeneration && !this.#remoteHandles.size) this.#remoteUnconfirmed = false;
 		if (this.#remoteUnconfirmed) throw new RemotePlaybackUnconfirmedError("no scoped remote receipt available");
 	}
 

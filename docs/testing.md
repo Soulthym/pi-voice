@@ -1,5 +1,27 @@
 # Tests
 
+## Live-owner remote output reconnect
+
+Explicit reconnect now passes the shared durable StopRecovery route proof into
+worker shutdown, after queued delivery/grants and owned descendants are closed.
+Temporary socket/journal tests cover a moved endpoint, changed kernel boot,
+foreign identity refusal, concurrent termination/cancellation, a late prepared
+handle, withheld late grants, delayed scoped receipts and stale cancellation ACKs.
+An extension-host regression verifies the reconnect wiring, original-device cleanup
+before an ambiguous new-attachment lookup, and blocked foreground replay until
+proof, without resuming playback. Local output uncertainty and legacy
+exact-endpoint cleanup are unchanged; no helper/wire protocol changed.
+
+Validation: typecheck passed; full checkout **1214 passed / 33 compatibility skips**;
+installed-native full suite **1247 passed / zero skips**, both with zero failures.
+Logs: `/tmp/vl.qPJMtm/{check,full,native}.log`. Final runs used `env -i`, owned
+HOME/XDG roots and a short owned TMPDIR. The first full run exceeded a Unix socket
+path limit; shortening the temporary root passed without a production change.
+LSP is unavailable. Isolated SSH was not rerun because the protocol/helpers are
+unchanged. No live sessions/devices, providers, inference or runtime settings were
+used; native UI and worker transports were synthetic. These checks do not establish
+hardware reboot behavior or upgrade uncertain admission into complete coverage.
+
 ## Local desktop input wait receipts (partial desktop coverage)
 
 Fresh v4 host journals cover the bundled Linux **local input** path: durable

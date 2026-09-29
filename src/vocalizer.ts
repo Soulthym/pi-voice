@@ -293,9 +293,9 @@ export class Vocalizer {
 		await Promise.all([this.preload(), this.preloadAlignment()]);
 	}
 
-	async shutdown(): Promise<void> {
+	async shutdown(stopScope?: Parameters<VoiceWorkerClient["terminate"]>[0]): Promise<void> {
 		this.clear();
-		await this.#worker.terminate();
+		await this.#worker.terminate(stopScope);
 	}
 
 	#pushItems(items: SpeakableItem[]): void {

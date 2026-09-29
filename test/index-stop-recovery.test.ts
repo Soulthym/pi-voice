@@ -3,6 +3,8 @@ import * as fs from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as net from "node:net";
+import type { RemoteOutputStop } from "../src/worker-client.js";
 import test, { mock } from "node:test";
 import { DeviceRouter } from "../src/device-router.js";
 import { normalizeVoiceOutput } from "../src/config.js";
@@ -12,6 +14,73 @@ import { SessionCoordinator } from "../src/session-coordinator.js";
 import { FakeVoiceHost, MockedVoiceWorkerClient, assistant } from "./helpers/fake-voice-host.js";
 
 mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: MockedVoiceWorkerClient } });
+
+test("live reconnect supplies durable recovery to shutdown and fences foreground until scoped proof", async t => {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-live-index-"));
+	const env = { PI_VOICE_CONFIG: path.join(root, "config"), PI_VOICE_DEVICE_DIR: path.join(root, "devices"), PI_VOICE_COORDINATOR_DIR: path.join(root, "coordinator"), PI_VOICE_DEVICE_ID: "A" };
+	const old = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
+	Object.assign(process.env, env);
+	const host = new FakeVoiceHost(root, "live-owner");
+	let stopped = false;
+	t.after(async () => {
+		stopped = true;
+		await host.shutdown().catch(() => {});
+		for (const [key, value] of Object.entries(old)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+		await fs.rm(root, { recursive: true, force: true });
+	});
+	const original = `unix://${path.join(root, "old.sock")}`;
+	const current = `unix://${path.join(root, "new.sock")}`;
+	const id = "11111111-1111-4111-8111-111111111111";
+	const bootId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+	let identity = "B";
+	const commands: string[] = [];
+	const server = net.createServer(socket => socket.on("data", data => {
+		commands.push(String(data));
+		socket.end(`${JSON.stringify({ type: "stopped", id, proof: "reboot", expected_boot_id: bootId,
+			boot_id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", device_id: identity })}\n`);
+	}));
+	await new Promise<void>(resolve => server.listen(current.slice(7), resolve));
+	t.after(() => new Promise<void>(resolve => server.close(() => resolve())));
+	await fs.mkdir(env.PI_VOICE_DEVICE_DIR);
+	const registration = (endpoint: string) => fs.writeFile(path.join(env.PI_VOICE_DEVICE_DIR, "A.json"), JSON.stringify({ version: 1, id: "A", name: "Original", platform: "linux", audioEndpoint: endpoint, inputEndpoint: endpoint, connectedAt: 2, lastActive: 2 }));
+	await registration(original);
+	await fs.writeFile(env.PI_VOICE_CONFIG, JSON.stringify({ enabled: true, input: "disabled", audioCache: false, timingPreprocessConcurrency: 0, codeDescriptionPreprocessConcurrency: 0 }));
+	const lookup = t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", async () => ({ kind: "device" as const, id: "A" }));
+	t.mock.method(DeviceRouter.prototype, "route", async function(this: DeviceRouter, ...args: Parameters<DeviceRouter["route"]>) { return this.routeMetadata(...args); });
+	host.addMessage("answer", null, assistant("A replayable answer."));
+	const index = MockedVoiceWorkerClient.instances.length;
+	await host.start();
+	const worker = MockedVoiceWorkerClient.instances[index]!;
+	await host.shortcut("f5");
+	for (let i = 0; i < 30; i++) await new Promise(resolve => setImmediate(resolve));
+	assert.ok(worker.sent.length);
+	worker.emit({ type: "remote-handle", output: original, id, utterance: 1, bootId, rebootSafe: true, deviceId: "A" });
+	t.mock.method(worker, "terminate", async (stopScope?: RemoteOutputStop) => {
+		if (stopped) return;
+		if (!stopScope) throw new Error("saved endpoint unavailable");
+		await stopScope({ output: original, id, bootId });
+		stopped = true;
+		worker.emit({ type: "remote-released", id });
+	});
+	await registration(current);
+	await host.command("reconnect");
+	assert.equal(stopped, false);
+	assert.match(host.widgetLines()!.join("\n"), /Output stop unconfirmed/);
+	await fs.stat(path.join(env.PI_VOICE_COORDINATOR_DIR, "speech.lock", "lease.json"));
+	const sent = worker.sent.length;
+	await host.shortcut("f5");
+	for (let i = 0; i < 30; i++) await new Promise(resolve => setImmediate(resolve));
+	assert.equal(worker.sent.length, sent, "replay cannot bypass failed recovery");
+	identity = "A";
+	lookup.mock.mockImplementation(async () => { throw new Error("ambiguous current attachment"); });
+	await host.command("reconnect");
+	assert.equal(stopped, true, "original-device cleanup precedes unrelated current-attachment lookup");
+	lookup.mock.mockImplementation(async () => ({ kind: "device" as const, id: "A" }));
+	await host.command("reconnect");
+	assert.ok(commands.length >= 2);
+	assert.doesNotMatch(host.widgetLines()!.join("\n"), /Output stop unconfirmed/);
+	assert.equal(worker.sent.length, sent, "reconnect does not resume playback");
+});
 
 test("single-slash Unix config normalizes to the sink's remote prefix", () => {
 	assert.equal(normalizeVoiceOutput("unix:/test-output"), "unix:///test-output");

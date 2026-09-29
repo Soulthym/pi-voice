@@ -113,6 +113,30 @@ export class StopRecovery {
 		try { this.#save(); } catch (error) { this.#journal = previous; throw error; }
 	}
 
+	/** Live cleanup may use this only after worker dispatch and descendants are closed.
+	 * Persist only this receipt before the worker forgets the matching scope. */
+	async stopOutputScope(scope: { output: string; id: string; bootId?: string | null }, router: DeviceRouter, configured: string): Promise<void> {
+		const handle = this.#journal.output?.handles.find(handle => handle.id === scope.id && handle.endpoint === scope.output && handle.bootId === scope.bootId);
+		if (!handle) throw new Error("No matching durable output scope; ownership retained");
+		if (handle.rebootSafe !== true) await stopRemotePlayback(scope); // Preserve legacy exact-endpoint cleanup.
+		else await this.#stopScope("output", handle, router, configured);
+		this.retire("output", handle.id, handle.endpoint);
+	}
+
+	async #stopScope(direction: DeviceDirection, handle: RecoveryHandle, router: DeviceRouter, configured: string): Promise<void> {
+		if (handle.configured !== configured) throw new Error(`${direction} configuration changed; ownership retained`);
+		const route = router.routeMetadata(handle.selection, direction, configured);
+		const desktopWait = direction === "input" && this.#journal.version === 4 && handle.endpoint === "local" && handle.desktopWait === true && route.kind === "intentional_local";
+		if (route.kind === "disabled" || route.kind === "intentional_local" && !desktopWait ||
+			(route.kind === "custom" && route.endpoint !== handle.endpoint)) throw new Error("Original recovery route unavailable");
+		if (direction === "input") await PhoneInputClient.retryStop({ endpoint: route.endpoint, ticket: handle.id, ...(desktopWait ? { bootId: handle.bootId, desktopWait: true } : {}) });
+		else await stopRemotePlayback({ output: route.endpoint, id: handle.id, bootId: handle.bootId, deviceId: handle.selection,
+			// Only the original registered identity can attest a moved endpoint/reboot.
+			allowReboot: this.#journal.version !== 1 && this.#journal.version >= 3 && handle.rebootSafe === true &&
+				route.kind === "device" && route.device.id === handle.selection && handle.selection !== "legacy-loopback",
+		});
+	}
+
 	/** Only retry a dead owner's scopes, using original selection, never the new pin. */
 	async retry(direction: DeviceDirection, router: DeviceRouter, configured: string): Promise<void> {
 		const episode = this.#journal[direction];
@@ -120,21 +144,7 @@ export class StopRecovery {
 		if (!episode) return;
 		if (!episode.handles.length) throw new Error(`${episode.device}: no retained ${direction} scope; ownership retained`);
 		for (const handle of [...episode.handles]) {
-			if (handle.configured !== configured) throw new Error(`${episode.device}: ${direction} configuration changed; ownership retained`);
-			const route = router.routeMetadata(handle.selection, direction, configured);
-			// A different socket can be the same registered device after reconnect, but custom
-			// endpoints must remain exact. Local input retries require the new wait protocol;
-			// never reconstruct a child or promote an old local scope.
-			const desktopWait = direction === "input" && this.#journal.version === 4 && handle.endpoint === "local" && handle.desktopWait === true && route.kind === "intentional_local";
-			if (route.kind === "disabled" || route.kind === "intentional_local" && !desktopWait ||
-				(route.kind === "custom" && route.endpoint !== handle.endpoint)) throw new Error("Original recovery route unavailable");
-			if (direction === "input") await PhoneInputClient.retryStop({ endpoint: route.endpoint, ticket: handle.id, ...(desktopWait ? { bootId: handle.bootId, desktopWait: true } : {}) });
-			else await stopRemotePlayback({ output: route.endpoint, id: handle.id, bootId: handle.bootId, deviceId: handle.selection,
-				// Only an original registered identity can attest a moved endpoint. Legacy
-				// loopback/custom addresses are not device identities, even when unchanged.
-				allowReboot: this.#journal.version !== 1 && this.#journal.version >= 3 && handle.rebootSafe === true &&
-					route.kind === "device" && route.device.id === handle.selection && handle.selection !== "legacy-loopback",
-			});
+			await this.#stopScope(direction, handle, router, configured);
 			this.retire(direction, handle.id, handle.endpoint);
 			episode.cause = "Saved scope stopped; interrupted transport coverage remains unproven; ownership retained";
 			this.#save();
