@@ -7,6 +7,7 @@ import test from "node:test";
 import { SessionCoordinator } from "../src/session-coordinator.js";
 import { StopRecovery } from "../src/stop-recovery.js";
 import { PhoneInputClient } from "../src/phone-input.js";
+import { DeviceRouter } from "../src/device-router.js";
 
 for (const evidence of ["idle", "input", "output", "legacy", "missing", "malformed"] as const) {
 	test(`only durable never-admitted owners recover: ${evidence}`, t => {
@@ -78,6 +79,44 @@ test("ledger initialization failure prevents ownership", t => {
 	assert.throws(() => owner.start());
 	assert.throws(() => owner.tryAcquireSpeech());
 	assert.equal(fs.existsSync(path.join(root, "speech.lock")), false);
+});
+
+for (const outputUncertain of [false, true]) test(`desktop input scoped reclaim requires other direction idle (output uncertain: ${outputUncertain})`, async t => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "voice-input-orphan-"));
+	const first = new SessionCoordinator(root, "first", root);
+	const second = new SessionCoordinator(root, "second", root);
+	t.after(() => { first.shutdown(); second.shutdown(); fs.rmSync(root, { recursive: true, force: true }); });
+	first.start(); second.start(); assert.equal(first.tryAcquireSpeech(), true);
+	first.recovery.beforeIO("input", false, true);
+	const handle = { endpoint: "local", id: `${"a".repeat(32)}.1`, bootId: "12345678-1234-1234-1234-123456789abc", desktopWait: true, selection: "local", configured: "local" };
+	first.recovery.retain("input", handle, "Desktop");
+	if (outputUncertain) first.recovery.beforeIO("output");
+	const file = path.join(root, "speech.lock", "lease.json");
+	fs.writeFileSync(file, JSON.stringify({ ...second.speechOwner(), pid: 2147483647, updatedAt: 0 }));
+	const dead = second.speechOwner()!;
+	assert.equal(second.recoverIdleSpeech(dead), false);
+	const receipt = t.mock.method(PhoneInputClient, "retryStop", async () => { throw new Error("missing wait receipt"); });
+	const recovered = new StopRecovery(root, first.instanceId);
+	await assert.rejects(recovered.retry("input", new DeviceRouter(root), "local"), /missing wait/);
+	assert.equal(second.recoverIdleSpeech(dead), false);
+	receipt.mock.restore();
+	t.mock.method(PhoneInputClient, "retryStop", async (value: Parameters<typeof PhoneInputClient.retryStop>[0]) => { assert.deepEqual(value, { endpoint: "local", ticket: handle.id, bootId: handle.bootId, desktopWait: true }); });
+	await recovered.retry("input", new DeviceRouter(root), "local");
+	assert.equal(second.recoverIdleSpeech({ ...dead, speechGeneration: "wrong" }), false);
+	// Local output remains uncertain even when every capture has a receipt.
+	assert.equal(second.recoverIdleSpeech(dead), !outputUncertain);
+});
+
+for (const version of [2, 3]) test(`desktop wait handles do not upgrade v${version} input coverage`, async t => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "voice-input-legacy-"));
+	t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+	const fresh = new StopRecovery(root, "owner"); fresh.initialize();
+	fs.writeFileSync(fresh.file, JSON.stringify({ version, owner: "owner", admission: { input: "uncertain", output: "idle" } }));
+	const legacy = new StopRecovery(root, "owner");
+	legacy.beforeIO("input", false, true); legacy.clear("input");
+	await legacy.retry("input", new DeviceRouter(root), "local");
+	assert.equal(legacy.isIdle("input"), false);
+	assert.equal(JSON.parse(fs.readFileSync(fresh.file, "utf8")).version, version);
 });
 
 test("malformed or empty speech fences are never stale-cleaned", t => {

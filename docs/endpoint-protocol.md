@@ -52,11 +52,13 @@ Forced local termination cannot confirm remote buffered audio stopped. This impl
 
 Stage B remote output uses **prepare/journal/commit and a complete v3 admission ledger**, including orphan reclamation when every direction is proven idle. Output reservations are limited to 256 unresolved host-journal scopes; exceeding the limit denies grants. Cancellation closes worker grants synchronously; delayed grants cannot reopen that epoch. Original-route recovery remains mandatory, and v3 receipts must match the saved boot as well as the opaque ID.
 
-Fresh owners initialize the v3 ledger before acquiring a lease. Remote dispatch durably marks output `covered` before preparation; no physical player can exist without its exact scope being journaled before the grant. Queued work and ungranted preparations therefore cannot hide a player. Matching receipts durably retire scopes; confirmed cancellation with no remaining scopes returns covered output to `idle`. After owner death, explicit reconnect retries original scopes and durably clears covered empty output. Reclamation then rechecks death, owner, PID, acquisition generation and **every** direction's durable idle proof under the speech mutation lock. Unused input stays idle, not a synthetic input episode. Unknown/legacy uncertainty is never upgraded. Output reboot discharge is allowed only for a saved v3 scope advertising `boot_fenced:true`, with a known saved boot and a different known current boot on the original registered device. Recovery resolves that original device ID to its current endpoint, never the new selection. Custom endpoints and synthetic `legacy-loopback` IDs cannot establish same-device reboot proof. Historical scopes without the saved capability require their original exact receipts.
+Fresh owners initialize the v4 ledger before acquiring a lease (v3 remote-output accounting is retained). Remote dispatch durably marks output `covered` before preparation; no physical player can exist without its exact scope being journaled before the grant. Queued work and ungranted preparations therefore cannot hide a player. Matching receipts durably retire scopes; confirmed cancellation with no remaining scopes returns covered output to `idle`. After owner death, explicit reconnect retries original scopes and durably clears covered empty output. Reclamation then rechecks death, owner, PID, acquisition generation and **every** direction's durable idle proof under the speech mutation lock. Unused input stays idle, not a synthetic input episode. Unknown/legacy uncertainty is never upgraded. Output reboot discharge is allowed only for a saved v3 scope advertising `boot_fenced:true`, with a known saved boot and a different known current boot on the original registered device. Recovery resolves that original device ID to its current endpoint, never the new selection. Custom endpoints and synthetic `legacy-loopback` IDs cannot establish same-device reboot proof. Historical scopes without the saved capability require their original exact receipts.
 
 Endpoint-owner `SIGKILL` after durable commit remains conservatively fenced, including the committed-before-spawn crash window. A replacement handler cannot perform the original owner's child wait: missing PID/socket state, elapsed time, or a synthetic wait result cannot become an exit receipt. A verified same-device reboot can close this window for boot-fenced scopes; otherwise reconnect does not invent evidence.
 
-Local output still uses owned-process cleanup, not a prepared durable per-resource output ledger. Any local output admission or input admission keeps that owner's direction uncertain for orphan recovery, even after known scopes retire. Durable local/input all-idle accounting remains follow-up work; these cases stay fenced despite output reboot proof and the helper-level microphone boot checks below. Receipts are retained indefinitely; do not delete them while recovery is outstanding.
+Local output still uses owned-process cleanup, not a prepared durable per-resource output ledger. Any local output admission keeps that owner's output direction uncertain for orphan recovery, even after known scopes retire. Network/legacy input likewise remains uncertain. Fresh v4 owners using the bundled Linux **local input** wait protocol below can establish complete input accounting; this does not clear an uncertain output direction. Receipts are retained indefinitely; do not delete them while recovery is outstanding.
+
+**Local-output integration boundary (not implemented):** `worker.mjs#createLocalSink` directly spawns the selected `PI_VOICE_PLAYER`, `pw-play`, `mpv`, or `ffplay` with its sample rate. The inspected durable guardian, `client/pi-voice-audio-session`, belongs to the remote v3 path: it launches fixed-rate mpv, controls it through its IPC socket, and replaces endpoint players through shared runtime state. It is not a guardian around local worker children. Routing local output through it unchanged would silently change backend/rate/pause/replacement semantics. Completing this requires a local command/rate/control adapter, pre-grant host scope retention for every queued/replacement/draining sink, local receipt retry routing, and worker-termination integration that cannot mistake killing the guardian's process group for its player's wait. No PID/group-disappearance shortcut or coverage promotion was added. This is a remaining implementation task, not a claim that local guardians are impossible.
 
 ## Input commands
 
@@ -147,14 +149,50 @@ The decoded payload must be exactly `stopped N`, echoing the full origin-scoped 
 
 For `record`, an `ok` response is treated as direct recognized text for compatibility.
 
+### Local desktop child-wait protocol
+
+The bundled Linux `local` transport requests `ticket-wait\n`, requiring
+`ticket N B wait-v1\n`; it never falls back to legacy admission. Before replying,
+the helper durably creates `microphone-desktop/scope-N/prepared`. The host fsyncs
+v4 input coverage before launching the helper and the exact ticket/boot/capability
+before sending `record N B`. Preparation cannot open a microphone.
+
+Under the existing ticket fence, the helper persists the capture incarnation and
+an atomic `pending` → `admitted` scope state before dispatch. Each directly owned
+child persists its PID and Linux `/proc` start ticks before `exec` of the recorder
+or encoder. Only their original parent's explicit waits publish the atomic synced
+`exited` receipt binding ticket, boot, capture incarnation and both child identities.
+This assumes foreground recorder/encoder commands; daemonizing replacements are
+not supported. Child identity is evidence binding, not permission to signal a
+reconstructed PID from another process.
+
+Recovery sends `stop-wait N B\n` and requires exactly base64 `stopped-wait N B`.
+The same fence durably advances cancellation before acknowledging non-admission.
+Admitted same-boot scopes require the matching durable child-wait receipt; it can
+recover a crash after receipt publication but before shared idle publication.
+A verified different kernel boot can retire the original scope. Missing/corrupt
+scope identity or receipt, and guardian death after possible dispatch but before
+receipt publication, remain fenced even when every PID has disappeared. Legacy
+shared idle state is never converted into a wait receipt. Receipts remain unbounded
+until a safe retry/retention horizon is defined.
+
+This stage is local Linux desktop input only. TCP/Unix desktop capture still uses
+the legacy input wire protocol and remains host-uncertain, as does Termux input.
+A local helper that delegates to Termux or lacks `wait-v1` is rejected before record;
+there is no complete-coverage compatibility fallback.
+
 ### Host input API
 
 `PhoneInputClient.capture(endpoint, options)` acquires the ticket internally.
 Its synchronous retention callback must finish durable publication before START.
 The extension journals both local and remote input identities, rejects changed scope
-metadata, and keeps input admission **uncertain**, not `covered`: pre-ticket accounting
-and complete input all-idle/orphan recovery are not implemented. Local orphan scopes
-are retained for diagnosis, not automatically retried.
+metadata. Fresh v4 local Linux captures are `covered`, including the pre-ticket
+window; every possible record dispatch has its saved `desktopWait` scope. Original
+local scopes can be retried after owner death, then input becomes idle only when
+all saved scopes retire. Lease reclamation still checks both directions, owner death
+and acquisition generation under the mutation lock. Unused input stays idle.
+Network and legacy input admission remains **uncertain**; old journals are never
+migrated or promoted, even if a new helper can return stronger evidence.
 `stop(endpoint?)` keeps its legacy optional argument for source compatibility but
 always uses the active capture's saved endpoint and ticket, never a newly routed
 endpoint. With no owned capture it is a no-op; before ticket acquisition it cancels

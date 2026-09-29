@@ -91,39 +91,96 @@ flock -u 9
 IFS= read -r command || exit 1
 flock -x 9 || exit 1
 load_tickets
+# A receipt names both directly owned PID incarnations, never shared idle state.
+# Legacy ticket/stop remains a separate protocol.
+scope_identity() {
+  local scope=$1 ticket=$2 boot=$3 incarnation recorder encoder
+  incarnation=$(cat "$scope/admitted") && [[ $incarnation =~ ^[0-9a-f]{32}$ ]] || return 1
+  recorder=$(cat "$scope/recorder") && [[ $recorder =~ ^[1-9][0-9]*\ [0-9]+$ ]] || return 1
+  encoder=$(cat "$scope/encoder") && [[ $encoder =~ ^[1-9][0-9]*\ [0-9]+$ ]] || return 1
+  printf 'wait-v1 %s %s %s\n%s\n%s\n' "$ticket" "$boot" "$incarnation" "$recorder" "$encoder"
+}
 issued_ticket=
-if [[ $command == ticket ]]; then
+wait_scope=
+if [[ $command == ticket || $command == ticket-wait ]]; then
+  wait_protocol=false
+  [[ $command == ticket-wait ]] && wait_protocol=true
   (( latest < 9007199254740991 )) || fail 'Microphone ticket space exhausted'
   (( latest += 1 ))
   save_tickets
   issued_ticket="$epoch.$latest"
   issued_boot=$boot_id
+  if [[ $wait_protocol == true ]]; then
+    # ponytail: retain scopes indefinitely; expiry needs a safe host retry horizon.
+    wait_scope="$state_dir/scope-$issued_ticket"
+    mkdir -m 700 "$wait_scope" || exit 1
+    printf '%s pending\n' "$issued_boot" >"$wait_scope/prepared" &&
+      sync "$wait_scope/prepared" "$wait_scope" "$state_dir" || exit 1
+  fi
   flock -u 9
-  printf 'ticket %s %s\n' "$issued_ticket" "$issued_boot"
+  if [[ $wait_protocol == true ]]; then
+    printf 'ticket %s %s wait-v1\n' "$issued_ticket" "$issued_boot"
+  else
+    printf 'ticket %s %s\n' "$issued_ticket" "$issued_boot"
+  fi
   IFS= read -r command || exit 1
   [[ $command == "record $issued_ticket $issued_boot" ]] || exit 1
   flock -x 9 || exit 1
   load_tickets
   [[ $issued_boot == "$boot_id" ]] || fail 'Microphone boot changed'
 fi
-if [[ $command == stop\ * && -z $issued_ticket ]]; then
-  ticket=${command#stop }
+if [[ ( $command == stop\ * || $command == stop-wait\ * ) && -z $issued_ticket ]]; then
+  stop_boot=
+  if [[ $command == stop-wait\ * ]]; then
+    read -r _ ticket stop_boot extra <<<"$command"
+    valid_boot "$stop_boot" && [[ -z ${extra:-} ]] || fail 'Invalid microphone wait scope'
+  else
+    ticket=${command#stop }
+  fi
   counter=${ticket#*.}
   [[ $ticket == "$epoch.$counter" ]] && valid_counter "$counter" && (( counter > 0 && counter <= latest )) || fail 'Invalid microphone ticket'
+  if [[ -n $stop_boot ]]; then
+    wait_scope="$state_dir/scope-$ticket"
+    [[ -d $wait_scope && ! -L $wait_scope ]] || fail 'Microphone wait scope unavailable'
+    scope_state=$(cat "$wait_scope/prepared" 2>/dev/null) || fail 'Microphone wait scope unavailable'
+    [[ $scope_state == "$stop_boot pending" || $scope_state == "$stop_boot admitted" ]] || fail 'Microphone wait scope unavailable'
+  fi
   (( counter > watermark )) && watermark=$counter
   if (( active == counter )) && [[ $phase == pending ]]; then
     active=0 incarnation=- phase=idle
   fi
   save_tickets
+  if [[ -n $stop_boot ]]; then
+    # The ticket fence closes delayed record dispatch before non-admission proof.
+    touch "$wait_scope/stopped" && sync "$wait_scope/stopped" "$wait_scope" || exit 1
+  fi
   if (( active == counter )); then : >"$stop_file" || exit 1; fi
   flock -u 9
   for _ in {1..90}; do
     flock -x 9 || exit 1
     load_tickets
+    if [[ -n $stop_boot && -f $wait_scope/admitted && -f $wait_scope/exited && $stop_boot == "$boot_id" ]] && (( active == counter )); then
+      expected=$(scope_identity "$wait_scope" "$ticket" "$stop_boot") || fail 'Microphone child identity unavailable'
+      if [[ $(cat "$wait_scope/exited") == "$expected" && $(cat "$wait_scope/admitted") == "$incarnation" ]]; then
+        sync "$wait_scope/exited" "$wait_scope" || exit 1
+        active=0 incarnation=- phase=idle
+        save_tickets
+      fi
+    fi
     if (( active != counter )); then
       # Durable state proves non-admission or owner-published retirement.
       sync "$ticket_state" "$state_dir" || exit 1
-      printf 'ok %s\n' "$(encode_message "stopped $ticket")"
+      if [[ -n $stop_boot ]]; then
+        if [[ $scope_state == "$stop_boot admitted" && $stop_boot == "$boot_id" ]]; then
+          # Shared ticket retirement or PID disappearance is NOT a scoped wait.
+          expected=$(scope_identity "$wait_scope" "$ticket" "$stop_boot") || fail 'Microphone child identity unavailable'
+          [[ $(cat "$wait_scope/exited" 2>/dev/null) == "$expected" ]] || fail 'Microphone child wait receipt unavailable'
+          sync "$wait_scope/exited" "$wait_scope" || exit 1
+        fi
+        printf 'ok %s\n' "$(encode_message "stopped-wait $ticket $stop_boot")"
+      else
+        printf 'ok %s\n' "$(encode_message "stopped $ticket")"
+      fi
       exit 0
     fi
     flock -u 9
@@ -157,6 +214,12 @@ cleanup() {
   # Recorder EOF lets the encoder flush its final packets before retirement.
   [[ -n ${encoder_pid:-} ]] && wait "$encoder_pid" 2>/dev/null || true
   rm -f "$audio_fifo"
+  if [[ -n $wait_scope && -n $recorder_pid && -n $encoder_pid ]]; then
+    # Only this parent, after both explicit waits, may publish retirement.
+    scope_identity "$wait_scope" "$issued_ticket" "$issued_boot" >"$wait_scope/exited.tmp" &&
+      sync "$wait_scope/exited.tmp" && mv "$wait_scope/exited.tmp" "$wait_scope/exited" &&
+      sync "$wait_scope" || exit 1
+  fi
   flock -x 9 || exit 1
   load_tickets
   if [[ $incarnation == "$recording_incarnation" ]]; then
@@ -211,17 +274,39 @@ exec 4>&-
 phase=admitted
 # Crash anywhere after this write remains fenced until the owner waits or reboot.
 save_tickets
+if [[ -n $wait_scope ]]; then
+  printf '%s\n' "$recording_incarnation" >"$wait_scope/admitted" &&
+    sync "$wait_scope/admitted" "$wait_scope" || exit 1
+  printf '%s admitted\n' "$issued_boot" >"$wait_scope/prepared.tmp" &&
+    sync "$wait_scope/prepared.tmp" && mv "$wait_scope/prepared.tmp" "$wait_scope/prepared" &&
+    sync "$wait_scope" || exit 1
+fi
+# Persist the wrapper's kernel incarnation before exec opens the device.
+# exec preserves PID/start time; the guardian waits this child, not a pipeline.
+scoped_child() {
+  local role=$1 stat
+  shift
+  if [[ -n $wait_scope ]]; then
+    local -a fields
+    IFS= read -r stat <"/proc/$BASHPID/stat" || exit 1
+    read -r -a fields <<<"${stat##*) }"
+    [[ ${fields[19]:-} =~ ^[0-9]+$ ]] || exit 1
+    printf '%s %s\n' "$BASHPID" "${fields[19]}" >"$wait_scope/$role" &&
+      sync "$wait_scope/$role" "$wait_scope" || exit 1
+  fi
+  exec "$@"
+}
 printf 'stream\n'
 # Defer signals across spawn/PID publication rather than losing an owned child.
 trap 'interrupted=true' INT TERM HUP
 interrupted=false
 if [[ $recorder == pw-record ]]; then
-  pw-record "${pw_raw[@]}" --format s16 --rate 16000 --channels 1 - >&6 5<&- 6>&- 3<&- 9>&- 2>/dev/null &
+  scoped_child recorder pw-record "${pw_raw[@]}" --format s16 --rate 16000 --channels 1 - >&6 5<&- 6>&- 3<&- 9>&- 2>/dev/null &
 else
-  parec --raw --format=s16le --rate=16000 --channels=1 >&6 5<&- 6>&- 3<&- 9>&- 2>/dev/null &
+  scoped_child recorder parec --raw --format=s16le --rate=16000 --channels=1 >&6 5<&- 6>&- 3<&- 9>&- 2>/dev/null &
 fi
 recorder_pid=$!
-ffmpeg -hide_banner -loglevel error -f s16le -ar 16000 -ac 1 -i pipe:0 \
+scoped_child encoder ffmpeg -hide_banner -loglevel error -f s16le -ar 16000 -ac 1 -i pipe:0 \
   -c:a libopus -application voip -b:a 32k -vbr on -f ogg pipe:1 <&5 5<&- 6>&- 3<&- 9>&- 2>/dev/null &
 encoder_pid=$!
 exec 5<&- 6>&-

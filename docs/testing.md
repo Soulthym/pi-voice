@@ -1,5 +1,34 @@
 # Tests
 
+## Local desktop input wait receipts (partial desktop coverage)
+
+Fresh v4 host journals cover the bundled Linux **local input** path: durable
+pre-helper pending accounting, exact scope retention before record, per-child
+PID/start-time publication before device exec, cancellation fencing and durable
+parent-owned wait receipts. Real helper tests use synthetic children and cover
+non-admission, delayed device checks, missing/mismatched evidence, legacy refusal,
+guardian death before/after spawn, receipt fsync failure, and recovery after durable
+wait publication but before shared idle state. Coordinator tests require matching
+owner/generation and both directions idle; uncertain local output still blocks.
+Network desktop and Termux input remain host-uncertain; existing journals are never
+migrated. Local output is **not implemented** in this stage. The inspected existing
+remote guardian and precise local adapter/ownership boundary are documented in
+[remaining gaps](endpoint-protocol.md#stage-b-scope-and-remaining-gaps).
+
+Final typecheck passed; full checkout **1210 passed / 33 compatibility skips / zero
+failures (1243 total)**; installed-native full suite **1243 passed, zero skips/failures**.
+Isolated rootless SSH harness: **12/12 synthetic cases**, no speaker/player invocation.
+SSH exercises the unchanged network input contract, not complete input coverage.
+Logs: `/tmp/vi.ELouXy/{check,full-short,native,ssh}.log`. Runs used `env -i`, owned
+temporary HOME/TMPDIR/XDG roots and inert native UI. The first full run exceeded a
+Unix socket path limit; using the shorter owned TMPDIR passed without production
+changes. Early focused tests caught a test-string escape and crash-injection hook;
+the final real sync-boundary crash fixture passes. LSP is not configured; Bash
+syntax and diff whitespace checks passed. Only temporary containers, synthetic
+PCM and test-owned configuration were used; no live sessions, devices, application
+providers/inference, deployment, settings changes or pushes occurred.
+
+
 ## Stage C review safety fixes
 
 Typecheck passed; isolated full checkout **1175 passed / 33 compatibility skips / zero

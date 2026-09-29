@@ -401,13 +401,13 @@ export default async function (pi: ExtensionAPI) {
 	const captureRecoveryRoute = (direction: "input" | "output", route: ReturnType<DeviceRouter["routeMetadata"]>): void => {
 		recoveryRoutes[direction].set(route.endpoint, { selection: route.kind === "device" ? route.device.id : "local", configured: config[direction], device: route.kind === "device" ? route.device.name : selectedDeviceLabel });
 	};
-	const retainRecoveryHandle = (direction: "input" | "output", endpoint: string, id: string, bootId?: string | null, rebootSafe?: boolean, deviceId?: string): void => {
+	const retainRecoveryHandle = (direction: "input" | "output", endpoint: string, id: string, bootId?: string | null, rebootSafe?: boolean, deviceId?: string, desktopWait?: true): void => {
 		if (!stopRecovery || (!/^(tcp|unix):\/\//.test(endpoint) && !(direction === "input" && endpoint === "local"))) {
 			throw new Error("Recovery journal unavailable; dispatch denied");
 		}
 		const route = recoveryRoutes[direction].get(endpoint);
 		if (!route) throw new Error("Original recovery route not captured; ownership retained");
-		stopRecovery.retain(direction, { endpoint, id, selection: route.selection, configured: route.configured, ...(bootId !== undefined ? { bootId } : {}), ...(rebootSafe === true && route.configured === "auto" && deviceId === route.selection && deviceId !== "local" && deviceId !== "legacy-loopback" ? { rebootSafe } : {}) }, route.device);
+		stopRecovery.retain(direction, { endpoint, id, selection: route.selection, configured: route.configured, ...(bootId !== undefined ? { bootId } : {}), ...(desktopWait ? { desktopWait } : {}), ...(rebootSafe === true && route.configured === "auto" && deviceId === route.selection && deviceId !== "local" && deviceId !== "legacy-loopback" ? { rebootSafe } : {}) }, route.device);
 	};
 	const restoreStopRecovery = (initialize = false): void => {
 		const previousRecovery = orphanRecovery;
@@ -464,7 +464,7 @@ export default async function (pi: ExtensionAPI) {
 		if (!coordinator?.ownsSpeech() || stopRecovery !== coordinator.recovery) {
 			throw new Error("Physical voice IO requires the current durable owner");
 		}
-		stopRecovery.beforeIO(direction, direction === "output" && /^(tcp|unix):\/\//.test(routedVoiceConfig().output));
+		stopRecovery.beforeIO(direction, direction === "output" && /^(tcp|unix):\/\//.test(routedVoiceConfig().output), direction === "input" && routedVoiceConfig().input === "local");
 	};
 	const reportedStopErrors = new WeakSet<object>();
 	let stopDiagnostic = { cause: "", notified: false };
@@ -1957,7 +1957,7 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	const phoneInput = new PhoneInputClient(
-		handle => retainRecoveryHandle("input", handle.endpoint, handle.ticket, handle.bootId),
+		handle => retainRecoveryHandle("input", handle.endpoint, handle.ticket, handle.bootId, undefined, undefined, handle.desktopWait),
 		handle => retireStopHandle("input", handle.ticket, handle.endpoint),
 		() => beforePhysicalIO("input"),
 	);

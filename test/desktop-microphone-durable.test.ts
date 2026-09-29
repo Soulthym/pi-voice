@@ -4,6 +4,9 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import test, { type TestContext } from "node:test";
+import { PhoneInputClient } from "../src/phone-input.js";
+import { StopRecovery } from "../src/stop-recovery.js";
+import { DeviceRouter } from "../src/device-router.js";
 
 const helper = path.resolve("client/pi-voice-stt-session");
 const boot = (await fs.readFile("/proc/sys/kernel/random/boot_id", "utf8")).trim();
@@ -30,9 +33,9 @@ async function fixture(t: TestContext) {
 		return { child, done, output: () => Buffer.concat(chunks).toString(), bytes: () => Buffer.concat(chunks) };
 	}
 	async function exchange(command: string) { const session = start(`${command}\n`); session.child.stdin.end(); await session.done; return session.output(); }
-	async function ticket() {
-		const session = start(); await until(async () => session.output().includes("\n"), "ticket reply");
-		const match = /^ticket ([0-9a-f]{32}\.[1-9][0-9]*) ([0-9a-f-]{36})\n$/.exec(session.output()); assert.ok(match, session.output()); assert.equal(match[2], boot);
+	async function ticket(wait = false) {
+		const session = start(wait ? "ticket-wait\n" : "ticket\n"); await until(async () => session.output().includes("\n"), "ticket reply");
+		const match = /^ticket ([0-9a-f]{32}\.[1-9][0-9]*) ([0-9a-f-]{36})(?: wait-v1)?\n$/.exec(session.output()); assert.ok(match, session.output()); assert.equal(match[2], boot);
 		return { ...session, id: match[1], boot: match[2], record: () => session.child.stdin.write(`record ${match[1]} ${match[2]}\n`) };
 	}
 	t.after(async () => {
@@ -41,7 +44,13 @@ async function fixture(t: TestContext) {
 		await Promise.all(children.map(child => child.exitCode !== null || child.signalCode !== null ? Promise.resolve() : new Promise<void>(resolve => child.once("close", () => resolve()))));
 		await fs.rm(root, { recursive: true, force: true });
 	});
-	return { root, state, env, mock, start, exchange, ticket };
+	function hostEnvironment() {
+		const previous = { ...process.env };
+		for (const key of Object.keys(process.env)) delete process.env[key];
+		Object.assign(process.env, env);
+		t.after(() => { for (const key of Object.keys(process.env)) delete process.env[key]; Object.assign(process.env, previous); });
+	}
+	return { root, state, env, mock, start, exchange, ticket, hostEnvironment };
 }
 
 test("desktop durable microphone: boot ticket, cancellation, replay, private state and restart", async t => {
@@ -95,7 +104,7 @@ test("desktop durable microphone: immediate cancellation before encoder spawn ca
 	// Deterministically schedule recorder death and cancellation before the reader
 	// starts, rather than hoping the asynchronous FIFO opens race in our favour.
 	f.env.BASH_ENV = `${f.root}/early-cancel`;
-	await fs.writeFile(f.env.BASH_ENV, `trap 'if [[ $BASH_COMMAND == "ffmpeg -hide_banner"* && $BASHPID == $$ ]]; then
+	await fs.writeFile(f.env.BASH_ENV, `trap 'if [[ $BASH_COMMAND == "scoped_child encoder ffmpeg -hide_banner"* && $BASHPID == $$ ]]; then
   kill "$recorder_pid" 2>/dev/null || true
   wait "$recorder_pid" 2>/dev/null || true
   touch "$TMPDIR/cancelled"
@@ -234,4 +243,101 @@ test("desktop durable microphone: stop waits for owned recorder, not just encode
 	assert.equal(stop.output(), "", "must not certify retirement while owned recorder lives, even during repeated cleanup signals");
 	await fs.writeFile(`${f.root}/release`, ""); await session.done; await stop.done;
 	assert.match(stop.output(), /^ok /);
+});
+
+for (const admitted of [false, true]) test(`desktop wait-v1: recover exact ${admitted ? "child waits" : "non-admission"} after host loss`, async t => {
+	const f = await fixture(t); const session = await f.ticket(true);
+	const scope = `${f.state}/scope-${session.id}`;
+	assert.match(session.output(), / wait-v1\n$/);
+	const journal = new StopRecovery(f.root, "owner"); journal.initialize(); journal.beforeIO("input", false, true);
+	journal.retain("input", { endpoint: "local", id: session.id, bootId: session.boot, desktopWait: true, selection: "local", configured: "local" }, "Desktop");
+	if (admitted) {
+		session.record(); await session.done;
+		const receipt = await fs.readFile(`${scope}/exited`, "utf8");
+		assert.match(receipt, new RegExp(`^wait-v1 ${session.id} ${boot} [0-9a-f]{32}\\n[1-9][0-9]* [0-9]+\\n[1-9][0-9]* [0-9]+\\n$`));
+		assert.equal(receipt.split("\n")[1], (await fs.readFile(`${scope}/recorder`, "utf8")).trim());
+		const encoder = await fs.readFile(`${scope}/encoder`, "utf8");
+		assert.equal(receipt.split("\n")[2], encoder.trim());
+		await fs.writeFile(`${scope}/encoder`, "2147483647 0\n");
+		assert.match(await f.exchange(`stop-wait ${session.id} ${boot}`), /^error /, "different child incarnation is not a matching wait");
+		await fs.writeFile(`${scope}/encoder`, encoder);
+	} else { session.child.stdin.end(); await session.done; }
+	assert.match(await f.exchange(`stop-wait ${session.id} 00000000-0000-0000-0000-000000000000`), /^error /, "foreign boot is not this scope");
+	f.hostEnvironment();
+	const recovered = new StopRecovery(f.root, "owner");
+	await recovered.retry("input", new DeviceRouter(`${f.root}/devices`), "local");
+	assert.equal(new StopRecovery(f.root, "owner").isIdle("input"), true);
+	assert.equal(recovered.isIdle("output"), true, "unused direction remains idle");
+	if (!admitted) assert.equal(await fs.stat(`${f.root}/spawned`).catch(() => false), false);
+});
+
+for (const damage of ["exited", "recorder", "admitted", "prepared"]) test(`desktop wait-v1: missing ${damage} never becomes legacy idle proof`, async t => {
+	const f = await fixture(t); const session = await f.ticket(true); session.record(); await session.done;
+	await fs.unlink(`${f.state}/scope-${session.id}/${damage}`);
+	assert.match(await f.exchange(`stop-wait ${session.id} ${boot}`), /^error /);
+});
+
+test("desktop wait-v1: legacy ticket cannot be upgraded", async t => {
+	const f = await fixture(t); const session = await f.ticket(); session.record(); await session.done;
+	assert.match(await f.exchange(`stop-wait ${session.id} ${boot}`), /^error /);
+});
+
+test("desktop wait-v1: scope cancellation closes delayed recorder dispatch", async t => {
+	const f = await fixture(t);
+	await f.mock("wpctl", 'touch "$TMPDIR/checking"; while [[ ! -e $TMPDIR/release ]]; do sleep .02; done');
+	const session = await f.ticket(true); session.record();
+	await until(async () => !!await fs.stat(`${f.root}/checking`).catch(() => false), "device check");
+	assert.match(await f.exchange(`stop-wait ${session.id} ${boot}`), /^ok /);
+	await fs.writeFile(`${f.root}/release`, ""); await session.done;
+	assert.equal(await fs.stat(`${f.root}/spawned`).catch(() => false), false);
+});
+
+test("desktop wait-v1: guardian death after spawn stays fenced despite child disappearance", async t => {
+	const f = await fixture(t);
+	await f.mock("pw-record", '[[ $1 == --help ]] && { echo Usage; exit; }; touch "$TMPDIR/spawned"; while [[ ! -e $TMPDIR/release ]]; do sleep .02; done');
+	const session = await f.ticket(true); session.record();
+	await until(async () => !!await fs.stat(`${f.root}/spawned`).catch(() => false), "recorder spawn");
+	session.child.kill("SIGKILL"); session.child.stdin.end();
+	await fs.writeFile(`${f.root}/release`, ""); await session.done;
+	await f.mock("sleep", "exec /bin/sleep .001");
+	assert.match(await f.exchange(`stop-wait ${session.id} ${boot}`), /^error /);
+	assert.equal(await fs.stat(`${f.state}/scope-${session.id}/exited`).catch(() => false), false);
+});
+
+test("desktop wait-v1: durable waits survive guardian death before shared idle publication", async t => {
+	const f = await fixture(t);
+	await f.mock("sync", '/bin/sync "$@" || exit 1; if [[ -d $1 && $1 == *scope-* && -f $1/exited ]]; then kill -KILL "$PPID"; fi');
+	const session = await f.ticket(true); session.record(); await session.done;
+	assert.equal(session.child.signalCode, "SIGKILL");
+	assert.match(await fs.readFile(`${f.state}/tickets`, "utf8"), / admitted\n$/);
+	await f.mock("sync", 'exec /bin/sync "$@"');
+	assert.match(await f.exchange(`stop-wait ${session.id} ${boot}`), /^ok /);
+	assert.match(await fs.readFile(`${f.state}/tickets`, "utf8"), / 0 - idle\n$/);
+});
+
+for (const boundary of ["before-spawn", "receipt-sync"]) test(`desktop wait-v1: ${boundary} crash gap remains fenced`, async t => {
+	const f = await fixture(t);
+	await f.mock("sync", boundary === "before-spawn"
+		? '/bin/sync "$@" || exit 1; if [[ -d $1 && -f $1/prepared ]] && grep -q " admitted$" "$1/prepared"; then kill -KILL "$PPID"; fi'
+		: '[[ $1 == */exited.tmp ]] && exit 1; exec /bin/sync "$@"');
+	const session = await f.ticket(true); session.record(); await session.done;
+	await f.mock("sync", 'exec /bin/sync "$@"'); await f.mock("sleep", "exec /bin/sleep .001");
+	assert.match(await f.exchange(`stop-wait ${session.id} ${boot}`), /^error /);
+	assert.equal(await fs.stat(`${f.state}/scope-${session.id}/exited`).catch(() => false), false);
+	if (boundary === "before-spawn") assert.equal(await fs.stat(`${f.root}/spawned`).catch(() => false), false);
+});
+
+test("desktop wait-v1: production local capture journals before record and retires only scoped ACK", async t => {
+	const f = await fixture(t); f.hostEnvironment();
+	const journal = new StopRecovery(f.root, "owner"); journal.initialize();
+	const client = new PhoneInputClient(handle => {
+		assert.equal(handle.desktopWait, true);
+		assert.match(handle.ticket, /^[0-9a-f]{32}\.1$/);
+		journal.retain("input", { endpoint: handle.endpoint, id: handle.ticket, bootId: handle.bootId, desktopWait: handle.desktopWait, selection: "local", configured: "local" }, "Desktop");
+	}, handle => journal.retire("input", handle.ticket, handle.endpoint), () => journal.beforeIO("input", false, true));
+	// Synthetic bytes deliberately fail decoding; cancellation still needs the wait ACK.
+	await assert.rejects(client.capture("local"), /no decodable audio|decoding failed/);
+	await client.cancel();
+	assert.equal(journal.episode("input")?.handles.length, 0);
+	journal.clear("input"); assert.equal(journal.isIdle("input"), true);
 });
