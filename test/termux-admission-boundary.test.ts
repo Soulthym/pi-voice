@@ -5,10 +5,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 
-// Characterization, NOT a safety regression: stock Android commands have no
-// ticket/watermark barrier. A queued start can outlive its shell caller.
+// Shell-only service schedules, not Android/hardware dispatch-closure evidence.
+// A failed/timed-out caller can leave a queued native request after it exits.
 for (const script of ["client/pi-voice-termux-stt-session", "termux/pi-voice-stt-session"]) {
-	test(`${script}: Android dispatch closure is required beyond an idle status`, async t => {
+	for (const outcome of ["failed", "timeout", "interrupted", "empty-success", "unknown", "json", "wrong-path", "error", "success", "success-no-space", "success-retained"]) test(`${script}: ${outcome} start completion gates idle stop proof`, async t => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-android-boundary-"));
 		const bin = path.join(root, "bin");
 		await fs.mkdir(bin);
@@ -19,9 +19,26 @@ for (const script of ["client/pi-voice-termux-stt-session", "termux/pi-voice-stt
 		// Completion is explicitly driven below, never by a timing assumption.
 		await fs.writeFile(path.join(bin, "termux-microphone-record"), `#!/bin/bash
 case "$1" in
--f) printf '%s' "$2" > "$TMPDIR/queued-start"; exit 1;;
--q) rm -f "$TMPDIR/running";;
--i) printf '{"isRecording":false}';;
+-f) printf '%s' "$2" > "$TMPDIR/queued-start"
+    case ${outcome} in
+      success*) printf audio > "$2"; touch "$TMPDIR/running";;
+    esac
+    case ${outcome} in
+      empty-success) exit 0;;
+      unknown) printf 'Unknown response\\n';;
+      json) printf '{"message":"Recording started: %s"}\\n' "$2";;
+      wrong-path) printf 'Recording started: %s.other \\nMax Duration: 00:01\\n' "$2";;
+      error) printf '{"error":"Recording start error"}\\n';;
+      success-no-space) printf 'Recording started: %s\\nMax Duration: 00:01\\n' "$2";;
+      *) printf 'Recording started: %s \\nMax Duration: 00:01\\n' "$2";;
+    esac
+    case ${outcome} in
+      failed) exit 1;;
+      timeout) sleep 5;;
+      interrupted) kill -TERM $$;;
+    esac;;
+-q) ${outcome === "success-retained" ? '[[ -e "$TMPDIR/allow-stop" ]] &&' : ""} rm -f "$TMPDIR/running";;
+-i) if [[ -e "$TMPDIR/running" ]]; then printf '{"isRecording":true}'; else printf '{"isRecording":false}'; fi;;
 esac
 `, { mode: 0o700 });
 		const children: ReturnType<typeof spawn>[] = [];
@@ -46,11 +63,13 @@ esac
 			return { child, closed };
 		}
 		const owner = connect("ticket\n");
-		const ticket = await new Promise<string>(resolve => {
+		const admission = await new Promise<string>(resolve => {
 			owner.child.stdout.once("data", data => resolve(String(data).trim().slice(7)));
 		});
+		const [ticket, boot] = admission.split(" ");
 		assert.match(ticket, /^[0-9a-f]{32}\.1$/);
-		owner.child.stdin.write(`record ${ticket}\n`);
+		assert.equal(boot, (await fs.readFile("/proc/sys/kernel/random/boot_id", "utf8")).trim());
+		owner.child.stdin.write(`record ${admission}\n`);
 		for (let i = 0; i < 400; i++) {
 			if (await fs.stat(path.join(root, "queued-start")).catch(() => false)) break;
 			await new Promise(resolve => setTimeout(resolve, 10));
@@ -60,12 +79,41 @@ esac
 		await owner.closed;
 		const stop = connect(`stop ${ticket}\n`);
 		stop.child.stdin.end();
-		assert.equal(await stop.closed, `ok ${Buffer.from(`stopped ${ticket}`).toString("base64")}\n`);
+		const reply = await stop.closed;
+		const state = path.join(root, "pi-voice/microphone/termux");
+		if (outcome === "success" || outcome === "success-no-space") {
+			assert.equal(reply, `ok ${Buffer.from(`stopped ${ticket}`).toString("base64")}\n`);
+			assert.match(await fs.readFile(path.join(state, "start-completed"), "utf8"), new RegExp(`^${ticket}:`));
+			assert.equal(await fs.stat(path.join(state, "active")).catch(() => false), false);
+			return;
+		}
+		assert.match(reply, /^error /);
+		assert.match(await fs.readFile(path.join(state, "active"), "utf8"), new RegExp(`^${ticket}:`));
+		if (outcome === "success-retained") {
+			assert.match(await fs.readFile(path.join(state, "start-completed"), "utf8"), new RegExp(`^${ticket}:`));
+			await fs.writeFile(path.join(root, "allow-stop"), "");
+			const retry = connect(`stop ${ticket}\n`); retry.child.stdin.end();
+			assert.equal(await retry.closed, `ok ${Buffer.from(`stopped ${ticket}`).toString("base64")}\n`);
+			assert.equal(await fs.stat(path.join(state, "active")).catch(() => false), false);
+			return;
+		}
+		assert.equal(await fs.stat(path.join(state, "start-completed")).catch(() => false), false);
 		// Same boot; no new helper, ticket, tunnel or host admission. A service
 		// request not covered by the receipt is still capable of physical work.
 		await fs.writeFile(recording, "synthetic queued Android start");
 		await fs.writeFile(path.join(root, "running"), ticket);
 		assert.equal(await fs.readFile(path.join(root, "running"), "utf8"), ticket);
-		assert.equal(await fs.stat(path.join(root, "pi-voice-recording-active")).catch(() => false), false);
+		assert.ok(await fs.stat(path.join(state, "active")));
+		// Runtime loss does not erase durable uncertainty or rotate the epoch.
+		const nextRuntime = path.join(root, "new-runtime"); await fs.mkdir(nextRuntime);
+		env.TMPDIR = nextRuntime;
+		const retry = connect(`stop ${ticket}\n`); retry.child.stdin.end();
+		assert.match(await retry.closed, /^error /);
+		const blocked = connect("ticket\n");
+		const next = await new Promise<string>(resolve => blocked.child.stdout.once("data", data => resolve(String(data).trim().slice(7))));
+		assert.equal(next, `${ticket.split(".")[0]}.2 ${boot}`);
+		blocked.child.stdin.end(`record ${next}\n`);
+		assert.match(await blocked.closed, /\nerror /);
+		assert.equal(await fs.stat(path.join(nextRuntime, "queued-start")).catch(() => false), false);
 	});
 }

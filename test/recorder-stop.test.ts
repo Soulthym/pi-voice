@@ -7,6 +7,16 @@ import * as path from "node:path";
 import test from "node:test";
 import { PhoneInputClient } from "../src/phone-input.js";
 
+const BOOT = (await fs.readFile("/proc/sys/kernel/random/boot_id", "utf8")).trim();
+
+function fixtureEnv(root: string): NodeJS.ProcessEnv {
+	return { HOME: root, XDG_STATE_HOME: path.join(root, "state"), PREFIX: "", PATH: "/usr/bin:/bin", TMPDIR: root, XDG_RUNTIME_DIR: root };
+}
+
+function stateDir(root: string, script: string): string {
+	return path.join(root, "state/pi-voice", script === "client/pi-voice-stt-session" ? "microphone-desktop" : "microphone/termux");
+}
+
 function receipt(ticket: string): string {
 	return `ok ${Buffer.from(`stopped ${ticket}`).toString("base64")}\n`;
 }
@@ -27,12 +37,13 @@ function session(script: string, env: NodeJS.ProcessEnv, command: string) {
 	child.stdout.on("data", chunk => {
 		output += chunk;
 		if (admission && output.includes("\n")) {
-			const match = /^ticket ([0-9a-f]{32}\.[1-9][0-9]*)\n/.exec(output);
+			const match = /^ticket ([0-9a-f]{32}\.[1-9][0-9]*) ([0-9a-f-]{36})\n/.exec(output);
 			if (!match) return;
 			ticket = match[1];
 			admission = false;
 			output = output.slice(match[0].length);
-			child.stdin.write(`record ${match[1]}\n`);
+			assert.equal(match[2], BOOT);
+			child.stdin.write(`record ${match[1]} ${match[2]}\n`);
 		}
 	});
 	child.stderr.resume();
@@ -53,17 +64,17 @@ for (const script of ["client/pi-voice-stt-session", "client/pi-voice-termux-stt
 			"termux-microphone-record": `case "$1" in
 -q) sleep 0.2; rm -f "$TMPDIR/running";;
 -i) if [[ -e "$TMPDIR/running" ]]; then printf '{"isRecording":true}'; else printf '{"isRecording":false}'; fi;;
--f) printf 'fake audio' > "$2"; touch "$TMPDIR/running";;
+-f) printf 'fake audio' > "$2"; touch "$TMPDIR/running"; printf 'Recording started: %s\nMax Duration: 00:02:00\n' "$2";;
 esac`,
 		};
 		for (const [name, body] of Object.entries(tools)) await fs.writeFile(path.join(bin, name), `#!/bin/bash\n${body}\n`, { mode: 0o755 });
-		const env = { ...process.env, PREFIX: "", PATH: `${bin}:/usr/bin:/bin`, TMPDIR: root, XDG_RUNTIME_DIR: root, PI_VOICE_MAX_RECORD_SECONDS: "5" };
+		const env = { ...fixtureEnv(root), PATH: `${bin}:/usr/bin:/bin`, PI_VOICE_MAX_RECORD_SECONDS: "5" };
 		const child = spawn("bash", [path.resolve(script)], { env, stdio: ["pipe", "pipe", "pipe"] });
 		let output = ""; child.stdout.on("data", chunk => { output += chunk; }); child.stderr.resume();
 		const closed = new Promise<void>(resolve => child.once("close", () => resolve()));
 		t.after(async () => { child.stdin.end(); await closed; await fs.rm(root, { recursive: true, force: true }); });
 		child.stdin.write("ticket\n");
-	child.stdout.once("data", chunk => child.stdin.write(`record ${String(chunk).trim().slice(7)}\n`));
+		child.stdout.once("data", chunk => child.stdin.write(`record ${String(chunk).trim().slice(7)}\n`));
 		for (let i = 0; i < 300 && !await fs.stat(path.join(root, "running")).catch(() => false); i++) await new Promise(resolve => setTimeout(resolve, 5));
 		assert.ok(await fs.stat(path.join(root, "running")));
 		if (disconnect) child.stdin.end();
@@ -71,15 +82,15 @@ esac`,
 			const stop = spawn("bash", [path.resolve(script)], { env });
 			let ack = ""; stop.stdout.on("data", chunk => { ack += chunk; }); stop.stderr.resume();
 			const stopped = new Promise<void>(resolve => stop.once("close", () => resolve()));
-			stop.stdin.end(`stop ${output.split("\n")[0].slice(7)}\n`);
+			stop.stdin.end(`stop ${output.split(" ")[1]}\n`);
 			await new Promise(resolve => setTimeout(resolve, 50));
 			assert.equal(ack, "", "must not acknowledge the stop request before stopping");
 			await stopped;
-			assert.equal(ack, receipt(output.split("\n")[0].slice(7)));
+			assert.equal(ack, receipt(output.split(" ")[1]));
 			assert.equal(await fs.stat(path.join(root, "running")).catch(() => false), false);
 		}
 		await closed;
-		assert.match(output, /^ticket [0-9a-f]{32}\.1\nstream\n/);
+		assert.match(output, /^ticket [0-9a-f]{32}\.1 [0-9a-f-]{36}\nstream\n/);
 		assert.equal(await fs.stat(path.join(root, "running")).catch(() => false), false);
 	});
 }
@@ -87,8 +98,8 @@ esac`,
 for (const script of ["client/pi-voice-stt-session", "client/pi-voice-termux-stt-session", "termux/pi-voice-stt-session"]) test(`${script}: reassigned generic bridge cannot release the host's origin ticket`, async t => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-reassigned-"));
 	const other = path.join(root, "other"); await fs.mkdir(other);
-	const env = { ...process.env, PREFIX: "", PATH: "/usr/bin:/bin", TMPDIR: root, XDG_RUNTIME_DIR: root };
-	const otherEnv = { ...env, TMPDIR: other, XDG_RUNTIME_DIR: other };
+	const env = fixtureEnv(root);
+	const otherEnv = fixtureEnv(other);
 	for (let i = 0; i < 2; i++) {
 		const issued = session(script, otherEnv, "ticket"); issued.child.stdin.end();
 		assert.match(await issued.closed, /^ticket /);
@@ -105,10 +116,10 @@ for (const script of ["client/pi-voice-stt-session", "client/pi-voice-termux-stt
 			if (command === "ticket") {
 				const child = spawn("bash", [path.resolve(script)], { env }); children.push(child);
 				child.stderr.resume();
-				child.stdout.once("data", data => { ticket = String(data).trim().slice(7); socket.write(data); });
+				child.stdout.once("data", data => { ticket = String(data).trim().split(" ")[1]; socket.write(data); });
 				child.stdin.write("ticket\n");
 				// Hold before record/admission: exercise real ticket state without any hardware.
-				socket.once("data", data => { assert.equal(String(data), `record ${ticket}\n`); recorded.resolve(); });
+				socket.once("data", data => { assert.equal(String(data), `record ${ticket} ${BOOT}\n`); recorded.resolve(); });
 				socket.on("close", () => child.stdin.end());
 			} else {
 				stops.push(command);
@@ -141,7 +152,7 @@ for (const script of ["client/pi-voice-stt-session", "client/pi-voice-termux-stt
 	assert.deepEqual(stops, Array(4).fill(`stop ${ticket}`));
 });
 
-for (const script of ["client/pi-voice-termux-stt-session", "termux/pi-voice-stt-session"]) test(`${script}: an unconfirmed Android stop retains the recording marker`, async t => {
+for (const script of ["client/pi-voice-termux-stt-session", "termux/pi-voice-stt-session"]) for (const recording of [true, false]) test(`${script}: unconfirmed start retains ownership even when Android reports recording=${recording}`, async t => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-recorder-failure-"));
 	t.after(() => fs.rm(root, { recursive: true, force: true }));
 	const bin = path.join(root, "bin"); await fs.mkdir(bin);
@@ -149,10 +160,10 @@ for (const script of ["client/pi-voice-termux-stt-session", "termux/pi-voice-stt
 case "$1" in
 -f) printf 'fake audio' > "$2"; touch "$TMPDIR/running";;
 -q) exit 0;;
--i) printf '{"isRecording":true}';;
+-i) printf '{"isRecording":${recording}}';;
 esac
 `, { mode: 0o755 });
-	const child = spawn("bash", [path.resolve(script)], { env: { ...process.env, PATH: `${bin}:/usr/bin:/bin`, TMPDIR: root } });
+	const child = spawn("bash", [path.resolve(script)], { env: { ...fixtureEnv(root), PATH: `${bin}:/usr/bin:/bin` } });
 	child.stdout.resume(); child.stderr.resume();
 	const closed = new Promise<number | null>(resolve => child.once("close", resolve));
 	child.stdin.write("ticket\n");
@@ -160,12 +171,19 @@ esac
 	await waitFor(() => fs.stat(path.join(root, "running")));
 	child.stdin.end();
 	assert.equal(await closed, 1);
-	assert.ok(await fs.stat(path.join(root, "pi-voice-recording-active")));
-	assert.ok(await fs.stat(path.join(root, "pi-voice-recording-lock")));
+	assert.ok(await fs.stat(path.join(stateDir(root, script), "active")));
+	assert.ok(await fs.stat(path.join(stateDir(root, script), "recording")));
+	const owner = await fs.readFile(path.join(stateDir(root, script), "active"), "utf8");
+	const env = { ...fixtureEnv(root), PATH: `${bin}:/usr/bin:/bin` };
+	const retry = session(script, env, `stop ${owner.trim().split(":")[0]}`); retry.child.stdin.end();
+	assert.match(await retry.closed, /^error /, "idle alone is not proof that an uncertain start cannot arrive later");
+	const fresh = session(script, env, "record");
+	assert.match(await fresh.closed, /^error /, "uncertain ownership must block new capture");
+	assert.equal(await fs.readFile(path.join(stateDir(root, script), "active"), "utf8"), owner);
 });
 
 for (const script of ["client/pi-voice-stt-session", "client/pi-voice-termux-stt-session", "termux/pi-voice-stt-session"]) {
-	for (const block of ["pending", "admission", "mkdir-crash", ...(script === "client/pi-voice-stt-session" ? ["help"] : [])]) test(`${script}: ${block} cancellation and delayed stop preserve a newer generation`, async t => {
+	for (const block of ["pending", "admission", ...(script === "client/pi-voice-stt-session" ? ["help", "pending-crash"] : ["mkdir-crash"])]) test(`${script}: ${block} cancellation and delayed stop preserve a newer generation`, async t => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-prestart-"));
 		const bin = path.join(root, "bin"); await fs.mkdir(bin);
 		const linux = script === "client/pi-voice-stt-session";
@@ -177,7 +195,7 @@ for (const script of ["client/pi-voice-stt-session", "client/pi-voice-termux-stt
 fi; exec '${process.execPath}' -e 'require("fs").writeFileSync(process.env.TMPDIR + "/running", "yes"); setInterval(() => {}, 100);'`,
 		} : {
 			"termux-microphone-record": `case "$1" in
--f) touch "$TMPDIR/running"; printf audio > "$2";;
+-f) touch "$TMPDIR/running"; printf audio > "$2"; printf 'Recording started: %s\nMax Duration: 00:02:00\n' "$2";;
 -q) rm -f "$TMPDIR/running";;
 -i) printf '{"isRecording":false}';;
 esac`,
@@ -198,14 +216,21 @@ flock() {
   fi
   builtin command flock "$@"
 }
+sync() {
+  builtin command sync "$@" || return
+  if [[ \${BLOCK_CHECK:-} == pending-crash && $* == */microphone-desktop ]] && grep -q ' pending$' "$1/tickets"; then
+    touch "$TMPDIR/check-blocked"
+    kill -KILL "$BASHPID"
+  fi
+}
 mkdir() {
   builtin command mkdir "$@" || return
-  if [[ \${BLOCK_CHECK:-} == mkdir-crash && $* == *recording-lock ]]; then
+  if [[ \${BLOCK_CHECK:-} == mkdir-crash && $* == */recording ]]; then
     touch "$TMPDIR/check-blocked"
     kill -KILL "$BASHPID"
   fi
 }\n`);
-		const env = { ...process.env, PREFIX: "", BASH_ENV: hook, PATH: `${bin}:/usr/bin:/bin`, TMPDIR: root, XDG_RUNTIME_DIR: root, PI_VOICE_MAX_RECORD_SECONDS: "5" };
+		const env = { ...fixtureEnv(root), BASH_ENV: hook, PATH: `${bin}:/usr/bin:/bin`, PI_VOICE_MAX_RECORD_SECONDS: "5" };
 		const old = session(script, { ...env, BLOCK_CHECK: block }, "record");
 		let fresh: ReturnType<typeof session> | undefined;
 		t.after(async () => {
@@ -220,9 +245,9 @@ mkdir() {
 		assert.equal(await fs.stat(path.join(root, "running")).catch(() => false), false);
 		fresh = session(script, env, "record");
 		await waitFor(() => fs.stat(path.join(root, "running")));
-		const marker = path.join(root, linux ? `pi-voice-client-${process.getuid!()}/recording-active` : "pi-voice-recording-active");
+		const marker = path.join(stateDir(root, script), linux ? "tickets" : "active");
 		const owner = await fs.readFile(marker, "utf8");
-		assert.match(owner, /^[0-9a-f]{32}\.2:[0-9]+\n$/);
+		assert.match(owner, linux ? / 2 1 2 [0-9a-f]{32} admitted\n$/ : /^[0-9a-f]{32}\.2:[0-9]+\n$/);
 		const delayedStop = session(script, env, `stop ${old.ticket}`); delayedStop.child.stdin.end();
 		assert.equal(await delayedStop.closed, receipt(old.ticket));
 		assert.equal(await fs.readFile(marker, "utf8"), owner);
@@ -241,7 +266,7 @@ for (const script of ["client/pi-voice-termux-stt-session", "termux/pi-voice-stt
 		const bin = path.join(root, "bin"); await fs.mkdir(bin);
 		await fs.writeFile(path.join(bin, "termux-microphone-record"), `#!/bin/bash
 case "$1" in
--f) printf audio > "$2"; touch "$TMPDIR/running";;
+-f) printf audio > "$2"; touch "$TMPDIR/running"; printf 'Recording started: %s\nMax Duration: 00:02:00\n' "$2";;
 -q) if [[ -e "$TMPDIR/allow-stop" ]]; then
       touch "$TMPDIR/stop-blocked"
       while [[ ! -e "$TMPDIR/release-stop" ]]; do sleep 0.01; done
@@ -249,7 +274,7 @@ case "$1" in
     fi;;
 -i) if [[ -e "$TMPDIR/running" ]]; then printf '{"isRecording":true}'; else printf '{"isRecording":false}'; fi;;
 esac\n`, { mode: 0o755 });
-		const env = { ...process.env, PATH: `${bin}:/usr/bin:/bin`, TMPDIR: root, PI_VOICE_MAX_RECORD_SECONDS: "5" };
+		const env = { ...fixtureEnv(root), PATH: `${bin}:/usr/bin:/bin`, PI_VOICE_MAX_RECORD_SECONDS: "5" };
 		const old = session(script, env, "record");
 		let fresh: ReturnType<typeof session> | undefined;
 		t.after(async () => {
@@ -261,7 +286,7 @@ esac\n`, { mode: 0o755 });
 		});
 		await waitFor(() => fs.stat(path.join(root, "running")));
 		old.child.stdin.end(); await old.closed;
-		const marker = path.join(root, "pi-voice-recording-active");
+		const marker = path.join(stateDir(root, script), "active");
 		const staleOwner = await fs.readFile(marker, "utf8");
 		// First explicit retry still cannot confirm: retain the lease, never fake ACK.
 		const failed = session(script, env, `stop ${old.ticket}`); failed.child.stdin.end();
@@ -269,7 +294,7 @@ esac\n`, { mode: 0o755 });
 		assert.equal(await fs.readFile(marker, "utf8"), staleOwner);
 		// A forwarded endpoint reassigned to B must not confirm A, even at a higher counter.
 		const otherRoot = path.join(root, "other"); await fs.mkdir(otherRoot);
-		const otherEnv = { ...env, TMPDIR: otherRoot };
+		const otherEnv = { ...env, ...fixtureEnv(otherRoot) };
 		for (let i = 0; i < 2; i++) {
 			const issued = session(script, otherEnv, "ticket"); issued.child.stdin.end();
 			assert.match(await issued.closed, /^ticket /);
@@ -297,7 +322,7 @@ esac\n`, { mode: 0o755 });
 for (const script of ["client/pi-voice-stt-session", "client/pi-voice-termux-stt-session", "termux/pi-voice-stt-session"]) {
 	test(`${script}: tickets are connection-bound, persistent, bounded and monotonic`, async t => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-tickets-"));
-		const env = { ...process.env, PREFIX: "", PATH: "/usr/bin:/bin", TMPDIR: root, XDG_RUNTIME_DIR: root };
+		const env = fixtureEnv(root);
 		const connections: ReturnType<typeof session>[] = [];
 		t.after(async () => {
 			for (const connection of connections) connection.child.stdin.end();
@@ -314,51 +339,77 @@ for (const script of ["client/pi-voice-stt-session", "client/pi-voice-termux-stt
 			return connection.closed;
 		}
 		const first = connect("ticket");
-		await waitFor(async () => /^ticket [0-9a-f]{32}\.1\n$/.test(first.output));
+		await waitFor(async () => /^ticket [0-9a-f]{32}\.1 [0-9a-f-]{36}\n$/.test(first.output));
 		const epoch = first.output.slice(7, 39);
+		const handshake = (counter: number) => `ticket ${epoch}.${counter} ${BOOT}\n`;
+		const linux = script === "client/pi-voice-stt-session";
+		const lock = path.join(stateDir(root, script), "recording");
+		const tickets = path.join(stateDir(root, script), linux ? "tickets" : "recording.tickets");
+		const saved = (latest: number, watermark: number) => linux
+			? `${BOOT} ${epoch} ${latest} ${watermark} 0 - idle\n`
+			: `${epoch} ${latest} ${watermark} ${BOOT}\n`;
 		const second = connect("ticket");
-		await waitFor(async () => second.output === `ticket ${epoch}.2\n`);
-		first.child.stdin.end(`record ${epoch}.1\n`);
-		assert.equal(await first.closed, `ticket ${epoch}.1\n`, "superseded tickets cannot record");
-		second.child.stdin.end(`record ${epoch}.1\n`);
-		assert.equal(await second.closed, `ticket ${epoch}.2\n`, "ticket must match its connection");
-		assert.match(await exchange(`record ${epoch}.2`), /^error /, "another connection cannot replay a ticket");
+		await waitFor(async () => second.output === handshake(2));
+		first.child.stdin.end(`record ${epoch}.1 ${BOOT}\n`);
+		assert.equal(await first.closed, handshake(1), "superseded tickets cannot record");
+		second.child.stdin.end(`record ${epoch}.1 ${BOOT}\n`);
+		assert.equal(await second.closed, handshake(2), "ticket must match its connection");
+		assert.match(await exchange(`record ${epoch}.2 ${BOOT}`), /^error /, "another connection cannot replay a ticket");
 		for (const ticket of ["0", "3", "-1", "01", "1+1", "9007199254740992", "999999999999999999999999", "2 extra"]) {
 			assert.match(await exchange(`stop ${ticket}`), /^error /);
 		}
 		assert.equal(await exchange(`stop ${epoch}.2`), receipt(`${epoch}.2`));
 		assert.equal(await exchange(`stop ${epoch}.1`), receipt(`${epoch}.1`));
-		const lock = path.join(root, script === "client/pi-voice-stt-session"
-			? `pi-voice-client-${process.getuid!()}/recording-lock` : "pi-voice-recording-lock");
-		assert.equal(await fs.readFile(`${lock}.tickets`, "utf8"), `${epoch} 2 2\n`);
+		assert.equal(await fs.readFile(tickets, "utf8"), saved(2, 2));
 		const cancelled = connect("ticket");
-		await waitFor(async () => cancelled.output === `ticket ${epoch}.3\n`);
+		await waitFor(async () => cancelled.output === handshake(3));
 		assert.equal(await exchange(`stop ${epoch}.3`), receipt(`${epoch}.3`));
-		cancelled.child.stdin.end(`record ${epoch}.3\n`);
-		assert.equal(await cancelled.closed, `ticket ${epoch}.3\n`, "watermark rejects even the latest ticket");
-		// Ownerless recovery must never recursively delete an unexpected directory.
-		await fs.mkdir(lock);
-		await fs.writeFile(path.join(lock, "keep"), "keep");
-		const blocked = connect("record");
-		assert.match(await blocked.closed, /^error /);
-		assert.equal(await fs.readFile(path.join(lock, "keep"), "utf8"), "keep");
-		await fs.writeFile(`${lock}.tickets`, `${epoch} 9007199254740990 2\n`);
-		assert.equal(await exchange("ticket"), `ticket ${epoch}.9007199254740991\n`);
+		cancelled.child.stdin.end(`record ${epoch}.3 ${BOOT}\n`);
+		assert.equal(await cancelled.closed, handshake(3), "watermark rejects even the latest ticket");
+		// Termux ownerless recovery must never recursively delete an unexpected directory.
+		if (!linux) {
+			await fs.mkdir(lock);
+			await fs.writeFile(path.join(lock, "keep"), "keep");
+			const blocked = connect("record");
+			assert.match(await blocked.closed, /^error /);
+			assert.equal(await fs.readFile(path.join(lock, "keep"), "utf8"), "keep");
+			await fs.rm(lock, { recursive: true });
+		}
+		await fs.writeFile(tickets, saved(9007199254740990, 2));
+		assert.equal(await exchange("ticket"), handshake(9007199254740991));
 		assert.match(await exchange("ticket"), /^error /, "ticket exhaustion must not wrap");
-		assert.equal(await fs.readFile(`${lock}.tickets`, "utf8"), `${epoch} 9007199254740991 2\n`);
+		assert.equal(await fs.readFile(tickets, "utf8"), saved(9007199254740991, 2));
 		for (const reset of ["loss", "rollover"]) {
-			await fs.rm(`${lock}.tickets`, { force: true });
+			// Restore known idle state solely to set up each independent corruption case.
+			await fs.writeFile(tickets, saved(3, 3));
+			const pending = connect("ticket");
+			await waitFor(async () => pending.output === handshake(4));
+			if (reset === "loss") await fs.rm(tickets);
+			else await fs.writeFile(tickets, saved(100, 0).replace(epoch, "f".repeat(32)));
+			assert.match(await exchange(`stop ${epoch}.4`), /^error /);
+			pending.child.stdin.end(`record ${epoch}.4 ${BOOT}\n`);
+			const rejected = await pending.closed;
+			assert.ok(rejected.startsWith(handshake(4)));
+			assert.ok(!rejected.includes("stream\n"), "reset between issuance and record fails closed");
+			assert.match(await exchange(`stop ${epoch}.1`), /^error /);
+			if (reset === "loss") {
+				const issued = await exchange("ticket");
+				if (linux) assert.match(issued, /^error /, "desktop state loss must not silently mint a new epoch");
+				else {
+					assert.match(issued, /^ticket [0-9a-f]{32}\.1 [0-9a-f-]{36}\n$/);
+					assert.notEqual(issued.slice(7, 39), epoch, "idle Termux state loss creates a distinct epoch");
+					assert.match(await exchange(`stop ${epoch}.1`), /^error /);
+				}
+			}
+		}
+		await fs.writeFile(tickets, saved(4, 4));
+		for (const boot of ["", "00000000-0000-0000-0000-000000000000"]) {
 			const pending = connect("ticket");
 			await waitFor(async () => pending.output.startsWith("ticket "));
-			const ticket = pending.output.trim().slice(7);
-			assert.notEqual(ticket.split(".")[0], epoch);
-			if (reset === "loss") await fs.rm(`${lock}.tickets`);
-			else await fs.writeFile(`${lock}.tickets`, `${"f".repeat(32)} 100 0\n`);
-			assert.match(await exchange(`stop ${ticket}`), /^error /);
-			pending.child.stdin.end(`record ${ticket}\n`);
-			assert.equal(await pending.closed, `ticket ${ticket}\n`, "reset between issuance and record fails closed");
-			assert.match(await exchange(`stop ${epoch}.1`), /^error /);
+			const ticket = pending.output.split(" ")[1];
+			const issued = pending.output;
+			pending.child.stdin.end(`record ${ticket}${boot ? ` ${boot}` : ""}\n`);
+			assert.equal(await pending.closed, issued, "record requires the issued boot as well as its ticket");
 		}
-
 	});
 }

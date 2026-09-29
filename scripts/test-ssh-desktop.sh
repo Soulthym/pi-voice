@@ -52,6 +52,7 @@ fs.writeFileSync(process.argv[2], ts.transpileModule(fs.readFileSync('src/phone-
 JS
 podman exec "$name-server" mkdir -p /work/src
 podman cp "$root/phone-input.mjs" "$name-server:/work/src/phone-input.mjs"
+podman cp src/remote-playback.mjs "$name-server:/work/src/remote-playback.mjs"
 podman cp scripts/ssh-desktop/check.mjs "$name-server:/work/check.mjs"
 podman cp scripts/ssh-desktop/read-line.mjs "$name-server:/work/read-line.mjs"
 podman cp scripts/ssh-desktop/client.sh "$name-client:/work/run.sh"

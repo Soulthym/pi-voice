@@ -402,9 +402,8 @@ export default async function (pi: ExtensionAPI) {
 		recoveryRoutes[direction].set(route.endpoint, { selection: route.kind === "device" ? route.device.id : "local", configured: config[direction], device: route.kind === "device" ? route.device.name : selectedDeviceLabel });
 	};
 	const retainRecoveryHandle = (direction: "input" | "output", endpoint: string, id: string, bootId?: string): void => {
-		if (!stopRecovery || !/^(tcp|unix):\/\//.test(endpoint)) {
-			if (direction === "output") throw new Error("Recovery journal unavailable; dispatch denied");
-			return;
+		if (!stopRecovery || (!/^(tcp|unix):\/\//.test(endpoint) && !(direction === "input" && endpoint === "local"))) {
+			throw new Error("Recovery journal unavailable; dispatch denied");
 		}
 		const route = recoveryRoutes[direction].get(endpoint);
 		if (!route) throw new Error("Original recovery route not captured; ownership retained");
@@ -1958,7 +1957,7 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	const phoneInput = new PhoneInputClient(
-		handle => retainRecoveryHandle("input", handle.endpoint, handle.ticket),
+		handle => retainRecoveryHandle("input", handle.endpoint, handle.ticket, handle.bootId),
 		handle => retireStopHandle("input", handle.ticket, handle.endpoint),
 		() => beforePhysicalIO("input"),
 	);

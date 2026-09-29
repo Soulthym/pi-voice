@@ -25,10 +25,11 @@ async function sockets(t: TestContext) {
 test('desktop ticket reader waits for fragmented newline and preserves the socket and surplus bytes', { timeout: 5000 }, async t => {
  const { client, peer, assertClean } = await sockets(t);
  const ticket = `${'a'.repeat(32)}.123`;
+ const bootId = '12345678-1234-1234-1234-123456789abc';
  let settled = false;
  const line = readLine(client).then((value: string) => { settled = true; return value; });
  // Wait for delivery before sending the next fragment: these cannot be coalesced.
- for (const fragment of ['tick', `et ${ticket}`, '\r']) {
+ for (const fragment of ['tick', `et ${ticket}`, ` ${bootId}`, '\r']) {
   const delivered = once(client, 'data');
   peer.write(fragment);
   await delivered;
@@ -36,14 +37,14 @@ test('desktop ticket reader waits for fragmented newline and preserves the socke
  }
  const extra = Buffer.from([0, 255, 10, 128]);
  peer.write(Buffer.concat([Buffer.from('\n'), extra]));
- assert.equal(await line, `ticket ${ticket}\r`);
+ assert.equal(await line, `ticket ${ticket} ${bootId}\r`);
  assertClean();
  assert.equal(client.destroyed, false);
  assert.equal(client.isPaused(), true);
  assert.deepEqual(client.read(extra.length), extra);
  const command = once(peer, 'data');
- client.write(`record ${ticket}\n`);
- assert.equal((await command)[0].toString(), `record ${ticket}\n`);
+ client.write(`record ${ticket} ${bootId}\n`);
+ assert.equal((await command)[0].toString(), `record ${ticket} ${bootId}\n`);
  const reply = once(client, 'data');
  client.resume();
  peer.write('still open');

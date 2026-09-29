@@ -809,7 +809,7 @@ test("normal microphone receipt retires config A before recovery retries config 
   socket.on("error", () => {});
   socket.on("data", raw => {
    const command = String(raw).trim();
-   if (command === "ticket") socket.write(`ticket ${ticket}\n`);
+   if (command === "ticket") socket.write(`ticket ${ticket} 11111111-2222-3333-4444-555555555555\n`);
    else if (command.startsWith("record ")) { active = socket; recorded.resolve(); }
    else socket.end(`ok ${Buffer.from(`stopped ${ticket}`).toString("base64")}\n`);
   });

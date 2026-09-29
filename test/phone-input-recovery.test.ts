@@ -9,6 +9,7 @@ import { PhoneInputClient } from "../src/phone-input.js";
 import { StopRecovery } from "../src/stop-recovery.js";
 
 const ticket = `${"a".repeat(32)}.1`;
+const bootId = "12345678-1234-1234-1234-123456789abc";
 
 async function fixture(t: import("node:test").TestContext, response: string | null) {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-input-recovery-"));
@@ -25,8 +26,8 @@ async function fixture(t: import("node:test").TestContext, response: string | nu
 		socket.on("data", chunk => {
 			const command = String(chunk).trim();
 			commands.push(command);
-			if (command === "ticket") socket.write(`ticket ${ticket}\n`);
-			else if (command === `record ${ticket}`) {
+			if (command === "ticket") socket.write(`ticket ${ticket} ${bootId}\n`);
+			else if (command === `record ${ticket} ${bootId}`) {
 				admitted.resolve();
 				if (response !== null) socket.end(response);
 			} else if (command === `stop ${ticket}`) {
@@ -42,7 +43,7 @@ async function fixture(t: import("node:test").TestContext, response: string | nu
 	const endpoint = `unix://${socketPath}`;
 	const journal = new StopRecovery(root, "owner");
 	const client = new PhoneInputClient(
-		handle => journal.retain("input", { endpoint: handle.endpoint, id: handle.ticket, selection: "local", configured: handle.endpoint }, "Custom input"),
+		handle => journal.retain("input", { endpoint: handle.endpoint, id: handle.ticket, bootId: handle.bootId, selection: "local", configured: handle.endpoint }, "Custom input"),
 		handle => journal.retire("input", handle.ticket, handle.endpoint),
 	);
 	return { root, endpoint, journal, client, commands, admitted, confirmStop() { confirmStop = true; } };
@@ -54,22 +55,46 @@ for (const status of ["audio", "ok"]) test(`accepted single-response ${status} r
 	assert.deepEqual(await a.client.capture(a.endpoint), { type: status === "audio" ? "audio" : "text", data: status === "audio" ? Buffer.from("capture") : "capture" });
 	assert.deepEqual(new StopRecovery(a.root, "owner").episode("input")!.handles, []);
 	await a.client.stop();
-	assert.deepEqual(a.commands, ["ticket", `record ${ticket}`], "successful completion cleared the ticket without an extra stop");
+	assert.deepEqual(a.commands, ["ticket", `record ${ticket} ${bootId}`], "successful completion cleared the ticket without an extra stop");
 
 	// Use the same durable journal for the next endpoint, as the application does.
 	const active = new PhoneInputClient(handle => a.journal.retain("input", {
-		endpoint: handle.endpoint, id: handle.ticket, selection: "local", configured: handle.endpoint,
+		endpoint: handle.endpoint, id: handle.ticket, bootId: handle.bootId, selection: "local", configured: handle.endpoint,
 	}, "Custom B"));
 	const capture = assert.rejects(active.capture(b.endpoint), /cancelled/);
 	await b.admitted.promise;
 	const restored = new StopRecovery(a.root, "owner");
-	assert.deepEqual(restored.episode("input")!.handles.map(handle => handle.endpoint), [b.endpoint]);
+	assert.deepEqual(restored.episode("input")!.handles, [{ endpoint: b.endpoint, id: ticket, bootId, selection: "local", configured: b.endpoint }]);
 	b.confirmStop();
 	await restored.retry("input", new DeviceRouter(path.join(a.root, "devices"), "owner", {}), b.endpoint);
 	assert.deepEqual(new StopRecovery(a.root, "owner").episode("input")!.handles, []);
-	assert.deepEqual(b.commands, ["ticket", `record ${ticket}`, `stop ${ticket}`]);
+	assert.deepEqual(b.commands, ["ticket", `record ${ticket} ${bootId}`, `stop ${ticket}`]);
 	await active.cancel();
 	await capture;
+});
+
+test("retains the boot-bound handle durably before START", async t => {
+	const f = await fixture(t, "ok Y2FwdHVyZQ==\n");
+	const retain = f.journal.retain.bind(f.journal);
+	const retained = t.mock.method(f.journal, "retain", (...args: Parameters<StopRecovery["retain"]>) => {
+		retain(...args);
+		assert.deepEqual(f.commands, ["ticket"], "START must wait for durable retention");
+		assert.deepEqual(new StopRecovery(f.root, "owner").episode("input")!.handles, [
+			{ endpoint: f.endpoint, id: ticket, bootId, selection: "local", configured: f.endpoint },
+		]);
+	});
+	assert.deepEqual(await f.client.capture(f.endpoint), { type: "text", data: "capture" });
+	assert.equal(retained.mock.callCount(), 1);
+	assert.deepEqual(f.commands, ["ticket", `record ${ticket} ${bootId}`]);
+});
+
+test("durable retain failure sends no record", async t => {
+	const f = await fixture(t, null);
+	// Force journal publication to fail, rather than merely throwing in the callback.
+	await fs.mkdir(f.journal.file, { recursive: true });
+	await assert.rejects(f.client.capture(f.endpoint), { code: "EISDIR" });
+	await assert.rejects(f.client.cancel(), /unconfirmed/);
+	assert.deepEqual(f.commands, ["ticket", `stop ${ticket}`], "failed retention must never send START");
 });
 
 for (const response of ["audio \n", "error cmVqZWN0ZWQ=\n", ""]) test(`rejected response ${JSON.stringify(response)} cannot retire a ticket`, async t => {

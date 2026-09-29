@@ -1,141 +1,183 @@
 #!/usr/bin/env bash
 set -u
+umask 077
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 if [[ ${PREFIX:-} == *com.termux* ]] || command -v termux-microphone-record >/dev/null 2>&1; then
   exec "$SCRIPT_DIR/pi-voice-termux-stt-session"
 fi
 
-runtime_dir=${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}
-state_dir="$runtime_dir/pi-voice-client-${UID:-$(id -u)}"
-stop_file="$state_dir/stop-recording"
-active_file="$state_dir/recording-active"
-recording_lock="$state_dir/recording-lock"
-pending_file="$state_dir/recording-pending"
-mkdir -p "$state_dir"
-
-encode_message() {
-  printf '%s' "$1" | base64 | tr -d '\n'
+encode_message() { printf '%s' "$1" | base64 | tr -d '\n'; }
+fail() { printf 'error %s\n' "$(encode_message "$1")"; exit 1; }
+valid_boot() { [[ $1 =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; }
+actual_boot() {
+  boot_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null) && valid_boot "$boot_id" || fail 'Kernel boot identity unavailable'
 }
-
-# Epoch and both counters are replaced together under the persistent fence.
-ticket_state="$recording_lock.tickets"
-valid_counter() {
-  [[ $1 =~ ^(0|[1-9][0-9]{0,15})$ ]] && (( $1 <= 9007199254740991 ))
+valid_counter() { [[ $1 =~ ^(0|[1-9][0-9]{0,15})$ ]] && (( $1 <= 9007199254740991 )); }
+random_id() { od -An -N16 -tx1 /dev/urandom | tr -d ' \n'; }
+actual_boot
+runtime_dir=${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}
+legacy_dir="$runtime_dir/pi-voice-client-${UID:-$(id -u)}"
+state_home=${XDG_STATE_HOME:-${HOME:?}/.local/state}
+state_dir="$state_home/pi-voice/microphone-desktop"
+ticket_state="$state_dir/tickets"
+stop_file="$state_dir/stop-recording"
+# Publish new directory entries only through the first existing parent.
+durable_parent=$(dirname "$state_dir")
+while [[ ! -d $durable_parent ]]; do durable_parent=$(dirname "$durable_parent"); done
+# Runtime witness detects loss of durable state while this boot may still own work.
+# Total loss of both stores is indistinguishable from first install; old epochs
+# still fail closed, and host input accounting remains uncertain.
+for directory in "$state_home/pi-voice" "$legacy_dir"; do
+  [[ ! -L $directory ]] || fail 'Unsafe microphone state directory'
+  mkdir -p "$directory" && [[ -O $directory ]] && chmod 700 "$directory" || exit 1
+done
+exec 8>"$legacy_dir/desktop-durable.fence" || exit 1
+flock -x 8 || exit 1
+new_state=false
+if [[ ! -e $state_dir ]]; then
+  for evidence in "$legacy_dir"/recording-* "$legacy_dir/stop-recording" "$legacy_dir/desktop-durable"; do
+    [[ ! -e $evidence && ! -L $evidence ]] || fail 'Legacy or lost microphone state requires explicit recovery'
+  done
+  mkdir -m 700 "$state_dir" || exit 1
+  new_state=true
+fi
+[[ -d $state_dir && ! -L $state_dir && -O $state_dir ]] && chmod 700 "$state_dir" || exit 1
+[[ ! -L $state_dir/fence && ! -L $ticket_state && ! -L $ticket_state.tmp && ! -L $legacy_dir/desktop-durable ]] || exit 1
+# Never unlink this fence: all durable transitions share its inode.
+exec 9>"$state_dir/fence" || exit 1
+flock -x 9 || exit 1
+save_tickets() {
+  printf '%s %s %s %s %s %s %s\n' "$state_boot" "$epoch" "$latest" "$watermark" "$active" "$incarnation" "$phase" >"$ticket_state.tmp" &&
+    sync "$ticket_state.tmp" && mv -f "$ticket_state.tmp" "$ticket_state" && sync "$state_dir" || exit 1
 }
 load_tickets() {
-  epoch= latest=0 watermark=0
-  if [[ -e $ticket_state ]]; then
-    IFS=' ' read -r epoch latest watermark extra <"$ticket_state" || exit 1
-    [[ $epoch =~ ^[0-9a-f]{32}$ ]] && valid_counter "$latest" && valid_counter "$watermark" && [[ -z $extra ]] && (( watermark <= latest )) || exit 1
+  local extra
+  [[ -f $ticket_state && $(wc -l <"$ticket_state") == 1 ]] || fail 'Microphone state lost or invalid'
+  IFS=' ' read -r state_boot epoch latest watermark active incarnation phase extra <"$ticket_state" || fail 'Microphone state lost or invalid'
+  valid_boot "$state_boot" && [[ $epoch =~ ^[0-9a-f]{32}$ ]] && valid_counter "$latest" && valid_counter "$watermark" &&
+    valid_counter "$active" && (( watermark <= latest && active <= latest )) && [[ -z $extra ]] || fail 'Microphone state invalid'
+  if (( active == 0 )); then
+    [[ $incarnation == - && $phase == idle ]] || fail 'Microphone state invalid'
+  else
+    [[ $incarnation =~ ^[0-9a-f]{32}$ && ( $phase == pending || $phase == admitted ) ]] || fail 'Microphone state invalid'
+  fi
+  actual_boot
+  if [[ $state_boot != "$boot_id" ]]; then
+    # Only a verified different kernel boot retires an orphan, never PID absence.
+    state_boot=$boot_id watermark=$latest active=0 incarnation=- phase=idle
+    save_tickets
   fi
 }
-save_tickets() {
-  printf '%s %s %s\n' "$epoch" "$latest" "$watermark" >"$ticket_state.tmp" &&
-    mv -f "$ticket_state.tmp" "$ticket_state" || exit 1
-}
-
-# Never unlink this fence: admission, cancellation and start share its inode.
-exec 9>"$recording_lock.fence"
+if [[ $new_state == true ]]; then
+  state_boot=$boot_id epoch=$(random_id) latest=0 watermark=0 active=0 incarnation=- phase=idle
+  [[ $epoch =~ ^[0-9a-f]{32}$ ]] || exit 1
+  save_tickets
+  directory=$state_dir
+  while :; do
+    sync "$directory" || exit 1
+    [[ $directory -ef $durable_parent ]] && break
+    directory=$(dirname "$directory")
+  done
+fi
+load_tickets
+printf '%s\n' "$epoch" >"$legacy_dir/desktop-durable" && sync "$legacy_dir/desktop-durable" "$legacy_dir" || exit 1
+flock -u 8
+exec 8>&-
+flock -u 9
 IFS= read -r command || exit 1
 flock -x 9 || exit 1
 load_tickets
 issued_ticket=
 if [[ $command == ticket ]]; then
-  if [[ -z $epoch ]]; then
-    epoch=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
-    [[ $epoch =~ ^[0-9a-f]{32}$ ]] || exit 1
-  fi
-  if (( latest == 9007199254740991 )); then
-    printf 'error %s\n' "$(encode_message 'Microphone ticket space exhausted')"
-    exit 0
-  fi
+  (( latest < 9007199254740991 )) || fail 'Microphone ticket space exhausted'
   (( latest += 1 ))
   save_tickets
   issued_ticket="$epoch.$latest"
+  issued_boot=$boot_id
   flock -u 9
-  printf 'ticket %s\n' "$issued_ticket"
+  printf 'ticket %s %s\n' "$issued_ticket" "$issued_boot"
   IFS= read -r command || exit 1
-  [[ $command == "record $issued_ticket" ]] || exit 1
+  [[ $command == "record $issued_ticket $issued_boot" ]] || exit 1
   flock -x 9 || exit 1
   load_tickets
+  [[ $issued_boot == "$boot_id" ]] || fail 'Microphone boot changed'
 fi
 if [[ $command == stop\ * && -z $issued_ticket ]]; then
   ticket=${command#stop }
   counter=${ticket#*.}
-  if [[ $ticket != "$epoch.$counter" || -z $epoch ]] || ! valid_counter "$counter" || (( counter == 0 || counter > latest )); then
-    printf 'error %s\n' "$(encode_message 'Invalid microphone ticket')"
-    exit 0
-  fi
+  [[ $ticket == "$epoch.$counter" ]] && valid_counter "$counter" && (( counter > 0 && counter <= latest )) || fail 'Invalid microphone ticket'
   (( counter > watermark )) && watermark=$counter
-  save_tickets
-  owner=$(cat "$active_file" 2>/dev/null || true)
-  [[ ${owner%%:*} == "$ticket" ]] || owner=
-  if [[ -n $owner ]]; then
-    : >"$stop_file"
-    if [[ -e $pending_file ]]; then
-      # A blocked device check can finish, but cannot start this generation.
-      rm -f "$active_file" "$stop_file" "$pending_file"
-      rmdir "$recording_lock" 2>/dev/null || true
-    fi
+  if (( active == counter )) && [[ $phase == pending ]]; then
+    active=0 incarnation=- phase=idle
   fi
+  save_tickets
+  if (( active == counter )); then : >"$stop_file" || exit 1; fi
   flock -u 9
   for _ in {1..90}; do
-    [[ -z $owner || $(cat "$active_file" 2>/dev/null || true) != "$owner" ]] && break
+    flock -x 9 || exit 1
+    load_tickets
+    if (( active != counter )); then
+      # Durable state proves non-admission or owner-published retirement.
+      sync "$ticket_state" "$state_dir" || exit 1
+      printf 'ok %s\n' "$(encode_message "stopped $ticket")"
+      exit 0
+    fi
+    flock -u 9
     sleep 0.1
   done
-  if [[ -z $owner || $(cat "$active_file" 2>/dev/null || true) != "$owner" ]]; then
-    printf 'ok %s\n' "$(encode_message "stopped $ticket")"
-  else
-    printf 'error %s\n' "$(encode_message 'Microphone stop not confirmed')"
-  fi
-  exit 0
+  fail 'Microphone stop not confirmed'
 fi
-if [[ -z $issued_ticket ]]; then
-  printf 'error %s\n' "$(encode_message "Unsupported local voice command: $command")"
-  exit 0
-fi
+[[ -n $issued_ticket ]] || fail "Unsupported local voice command: $command"
 [[ $issued_ticket == "$epoch.$latest" ]] && (( latest > watermark )) || exit 1
-# A crash between mkdir and marker publication leaves only an empty directory.
-[[ -e $active_file ]] || rmdir "$recording_lock" 2>/dev/null || true
-if [[ -e $active_file ]] || ! mkdir "$recording_lock" 2>/dev/null; then
-  printf 'error %s\n' "$(encode_message 'The local microphone is already recording')"
-  exit 0
-fi
-recording_owner="$issued_ticket:${BASHPID:-$$}"
+(( active == 0 )) || fail 'The local microphone has an unresolved recording'
+recording_incarnation=$(random_id)
+[[ $recording_incarnation =~ ^[0-9a-f]{32}$ ]] || exit 1
+recording_counter=$latest
+active=$recording_counter incarnation=$recording_incarnation phase=pending
 rm -f "$stop_file"
-printf '%s\n' "$recording_owner" >"$active_file" || exit 1
-: >"$pending_file" || exit 1
-producer_pid=
+save_tickets
+recorder_pid=
+encoder_pid=
+audio_fifo="$state_dir/pcm-$recording_incarnation"
 disconnect_pid=
 cleanup() {
-  trap - EXIT INT TERM
+  trap - EXIT
+  trap '' INT TERM HUP
+  exec 4>&- 5<&- 6>&-
   [[ -n ${disconnect_pid:-} ]] && kill "$disconnect_pid" 2>/dev/null || true
-  [[ -n ${producer_pid:-} ]] && kill -- "-$producer_pid" 2>/dev/null || true
-  [[ -n ${producer_pid:-} ]] && wait "$producer_pid" 2>/dev/null || true
-  flock -x 9
-  if [[ $(cat "$active_file" 2>/dev/null || true) == "$recording_owner" ]]; then
-    rm -f "$active_file" "$stop_file" "$pending_file"
-    rmdir "$recording_lock" 2>/dev/null || true
+  [[ -n ${disconnect_pid:-} ]] && wait "$disconnect_pid" 2>/dev/null || true
+  [[ -n ${recorder_pid:-} ]] && kill "$recorder_pid" 2>/dev/null || true
+  # Own the recorder directly: waiting a pipeline shell cannot prove that its
+  # recorder exited if that shell was killed. Never infer exit from kill -0.
+  [[ -n ${recorder_pid:-} ]] && wait "$recorder_pid" 2>/dev/null || true
+  # Recorder EOF lets the encoder flush its final packets before retirement.
+  [[ -n ${encoder_pid:-} ]] && wait "$encoder_pid" 2>/dev/null || true
+  rm -f "$audio_fifo"
+  flock -x 9 || exit 1
+  load_tickets
+  if [[ $incarnation == "$recording_incarnation" ]]; then
+    active=0 incarnation=- phase=idle
+    save_tickets
+    rm -f "$stop_file"
   fi
   flock -u 9
 }
 trap cleanup EXIT
-trap 'exit 1' INT TERM
+trap 'exit 1' INT TERM HUP
 flock -u 9
-# EOF means the capture client disconnected. Only stop this recording generation.
 exec 3<&0
-( exec 9>"$recording_lock.fence"
+( exec 9>"$state_dir/fence"
   while IFS= read -r _ <&3; do :; done
-  flock -x 9
-  [[ $(cat "$active_file" 2>/dev/null || true) == "$recording_owner" ]] && : >"$stop_file"
+  flock -x 9 || exit 1
+  load_tickets
+  [[ $incarnation == "$recording_incarnation" ]] && : >"$stop_file"
 ) &
 disconnect_pid=$!
 
 # Publish admission before any potentially blocking dependency/device check.
 if ! command -v ffmpeg >/dev/null 2>&1; then
-  printf 'error %s\n' "$(encode_message 'ffmpeg is required for local microphone capture')"
-  exit 0
+  fail 'ffmpeg is required for local microphone capture'
 fi
 pulse_source=
 command -v pactl >/dev/null 2>&1 && pulse_source=$(pactl get-default-source 2>/dev/null || true)
@@ -144,49 +186,48 @@ if command -v pw-record >/dev/null 2>&1 && command -v wpctl >/dev/null 2>&1 && w
 elif command -v parec >/dev/null 2>&1 && { [[ -z $pulse_source ]] || [[ $pulse_source != *.monitor ]]; }; then
   recorder=parec
 else
-  printf 'error %s\n' "$(encode_message 'No usable default Linux microphone found; connect one and install PipeWire or PulseAudio utilities')"
-  exit 0
+  fail 'No usable default Linux microphone found; connect one and install PipeWire or PulseAudio utilities'
 fi
-# Probe capabilities, not versions (distributions backport options). Keep this
-# bounded and outside the fence so stop can cancel admission during the probe.
 pw_raw=()
 if [[ $recorder == pw-record ]]; then
   if ! pw_help=$(timeout -k 1 2 bash -o pipefail -c 'pw-record --help 2>&1 | head -c 65537' 9>&-) || (( ${#pw_help} > 65536 )); then
-    printf 'error %s\n' "$(encode_message 'Could not inspect pw-record raw PCM support (help failed or exceeded limits)')"
-    exit 0
+    fail 'Could not inspect pw-record raw PCM support (help failed or exceeded limits)'
   fi
-  # No grep -q pipeline: an early reader exit can SIGPIPE a valid help writer.
   [[ $pw_help =~ (^|[[:space:]])--raw([[:space:]=,]|$) ]] && pw_raw=(--raw)
 fi
 max_record_seconds=${PI_VOICE_MAX_RECORD_SECONDS:-120}
-flock -x 9
-[[ $(cat "$active_file" 2>/dev/null || true) == "$recording_owner" && ! -e $stop_file ]] || exit 1
-rm -f "$pending_file"
+flock -x 9 || exit 1
+load_tickets
+[[ $incarnation == "$recording_incarnation" && $issued_boot == "$boot_id" && ! -e $stop_file ]] && (( recording_counter > watermark )) || exit 1
+mkfifo "$audio_fifo" || exit 1
+# Bootstrap both ends before spawning: an early recorder death must not leave
+# the encoder blocked opening its reader. No child retains an unused writer.
+exec 4<>"$audio_fifo" || exit 1
+exec 5<"$audio_fifo" 6>"$audio_fifo" || exit 1
+exec 4>&-
+phase=admitted
+# Crash anywhere after this write remains fenced until the owner waits or reboot.
+save_tickets
 printf 'stream\n'
+# Defer signals across spawn/PID publication rather than losing an owned child.
+trap 'interrupted=true' INT TERM HUP
+interrupted=false
 if [[ $recorder == pw-record ]]; then
-  setsid bash -c '
-    trap "wait; exit" TERM
-    # Older native writers implicitly emit raw; libsndfile writers need --raw.
-    pw-record "$@" --format s16 --rate 16000 --channels 1 - 2>/dev/null |
-      ffmpeg -hide_banner -loglevel error -f s16le -ar 16000 -ac 1 -i pipe:0 \
-        -c:a libopus -application voip -b:a 32k -vbr on -f ogg pipe:1 2>/dev/null
-  ' bash "${pw_raw[@]}" 9>&- &
+  pw-record "${pw_raw[@]}" --format s16 --rate 16000 --channels 1 - >&6 5<&- 6>&- 3<&- 9>&- 2>/dev/null &
 else
-  setsid bash -c '
-    trap "wait; exit" TERM
-    parec --raw --format=s16le --rate=16000 --channels=1 2>/dev/null |
-      ffmpeg -hide_banner -loglevel error -f s16le -ar 16000 -ac 1 -i pipe:0 \
-        -c:a libopus -application voip -b:a 32k -vbr on -f ogg pipe:1 2>/dev/null
-  ' 9>&- &
+  parec --raw --format=s16le --rate=16000 --channels=1 >&6 5<&- 6>&- 3<&- 9>&- 2>/dev/null &
 fi
-producer_pid=$!
+recorder_pid=$!
+ffmpeg -hide_banner -loglevel error -f s16le -ar 16000 -ac 1 -i pipe:0 \
+  -c:a libopus -application voip -b:a 32k -vbr on -f ogg pipe:1 <&5 5<&- 6>&- 3<&- 9>&- 2>/dev/null &
+encoder_pid=$!
+exec 5<&- 6>&-
+trap 'exit 1' INT TERM HUP
 flock -u 9
-
+[[ $interrupted == false ]] || exit 1
 for ((tick = 0; tick < max_record_seconds * 10; tick += 1)); do
   [[ -e $stop_file ]] && break
-  kill -0 "$producer_pid" 2>/dev/null || break
+  kill -0 "$encoder_pid" 2>/dev/null || break
   sleep 0.1
 done
-kill -TERM -- "-$producer_pid" 2>/dev/null || true
-wait "$producer_pid" 2>/dev/null || true
-producer_pid=
+# EXIT cleanup performs the uninterruptible owned-child wait and durable retirement.

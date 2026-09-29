@@ -91,6 +91,24 @@ test("receipt retirement matches endpoint and ticket and survives persistence fa
 	assert.deepEqual(new StopRecovery(root, "owner").episode("input")!.handles, []);
 });
 
+test("boot-bound input scopes persist locally and remotely but never claim complete coverage", async t => {
+	const { root, endpoint } = await setup(t);
+	for (const input of ["local", endpoint]) {
+		const owner = input === "local" ? "local-owner" : "remote-owner";
+		const journal = new StopRecovery(root, owner);
+		journal.initialize();
+		journal.beforeIO("input");
+		const handle = { endpoint: input, id: ticket, selection: "local", configured: input, bootId: outputId };
+		journal.retain("input", handle, "Microphone");
+		assert.deepEqual(new StopRecovery(root, owner).episode("input")?.handles, [handle]);
+		assert.throws(() => journal.retain("input", { ...handle, bootId: "bad" }, "Microphone"), /Invalid recovery handle/);
+		assert.throws(() => journal.retain("input", { ...handle, bootId: "22222222-2222-2222-2222-222222222222" }, "Microphone"), /identity changed/);
+		journal.retire("input", ticket, input);
+		journal.clear("input");
+		assert.equal(new StopRecovery(root, owner).isIdle("input"), false);
+	}
+});
+
 test("input persistence failure aborts before recording admission", async t => {
 	const { root } = await setup(t);
 	const commands: string[] = [];
@@ -98,7 +116,7 @@ test("input persistence failure aborts before recording admission", async t => {
 	const server = net.createServer(socket => socket.on("data", chunk => {
 		const command = String(chunk).trim();
 		commands.push(command);
-		if (command === "ticket") socket.write(`ticket ${ticket}\n`);
+		if (command === "ticket") socket.write(`ticket ${ticket} ${outputId}\n`);
 		else if (command === `stop ${ticket}`) socket.end(`ok ${Buffer.from(`stopped ${ticket}`).toString("base64")}\n`);
 	}));
 	await new Promise<void>(resolve => server.listen(endpoint, resolve));

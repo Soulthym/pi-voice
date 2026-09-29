@@ -45,14 +45,16 @@ if(mode==='drift') while(!await fs.stat('/work/holding').catch(()=>false)) await
 const pending=connect(device.inputEndpoint);
 const ticketLine=readLine(pending);
 pending.once('connect',()=>pending.write('ticket\n'));
-const ticket=(await ticketLine.catch(error=>{pending.destroy(); throw error;})).trim().split(' ')[1];
-assert.match(ticket,/^[a-f0-9]{32}\.\d+$/);
+const reply=await ticketLine.catch(error=>{pending.destroy(); throw error;});
+assert.match(reply,/^ticket [a-f0-9]{32}\.[1-9][0-9]{0,15} [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+const [,ticket,bootId]=reply.split(' ');
+assert.ok(Number.isSafeInteger(Number(ticket.split('.')[1])));
 const ack=await request(device.inputEndpoint,`stop ${ticket}`);
 assert.equal(Buffer.from(ack.slice(3),'base64').toString(),`stopped ${ticket}`);
 let late=''; pending.on('data',b=>late+=b);
 const closed=new Promise(resolve=>pending.once('close',resolve));
 pending.resume();
-pending.write(`record ${ticket}\n`); await closed;
+pending.write(`record ${ticket} ${bootId}\n`); await closed;
 assert.equal(late,'','cancelled ticket must not start a recorder');
 // A server-local recorder must never be invoked for this registered TCP endpoint.
 const client=new PhoneInputClient(); let samples=0, energy=0, action;
@@ -74,4 +76,4 @@ await action;
 await client.stop();
 assert.equal(await fs.stat('/work/host-capture-called').catch(()=>false), false, 'no server-local capture fallback');
 if(mode==='drift') await fs.writeFile('/work/release', 'done');
-console.log(`PASS ${process.argv[2]}: real SSH dynamic forwarding, ticket cancellation/ACK, playback hello, samples=${samples}`);
+console.log(`PASS ${process.argv[2]}: real SSH dynamic forwarding, boot-bound ticket cancellation/ACK, playback hello, samples=${samples}`);

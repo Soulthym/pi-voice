@@ -34,6 +34,7 @@ function startFakeSttServer(socketPath: string): Promise<net.Server> {
 		const clients = new Map<string, net.Socket>();
 		let nextTicket = 0;
 		const epoch = randomUUID().replaceAll("-", "");
+		const bootId = randomUUID();
 		const server = net.createServer(socket => {
 			let ticket: string | undefined;
 			socket.on("close", () => { if (ticket) clients.delete(ticket); });
@@ -42,14 +43,14 @@ function startFakeSttServer(socketPath: string): Promise<net.Server> {
 				if (command === "ticket") {
 					ticket = `${epoch}.${++nextTicket}`;
 					clients.set(ticket, socket);
-					socket.write(`ticket ${ticket}\n`);
+					socket.write(`ticket ${ticket} ${bootId}\n`);
 				} else if (command.startsWith("stop ")) {
 					assert.match(command, /^stop [0-9a-f]{32}\.[1-9][0-9]*$/);
 					clients.get(command.slice(5))?.destroy();
 					socket.end(`ok ${Buffer.from(`stopped ${command.slice(5)}`).toString("base64")}\n`);
 				} else {
 					assert.ok(ticket);
-					assert.equal(command, `record ${ticket}`);
+					assert.equal(command, `record ${ticket} ${bootId}`);
 					socket.write("stream\n");
 				}
 			});

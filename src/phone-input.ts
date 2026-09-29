@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 import * as net from "node:net";
 import { fileURLToPath } from "node:url";
+import { validBootId } from "./remote-playback.mjs";
 
 const RECORDING_TIMEOUT_MS = 2 * 60_000;
 const MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
@@ -173,7 +174,7 @@ export class PhoneInputClient {
 	#stopPending: Promise<void> | null = null;
 
 	constructor(
-		private readonly retainHandle?: (handle: { endpoint: string; ticket: string }) => void,
+		private readonly retainHandle?: (handle: { endpoint: string; ticket: string; bootId: string }) => void,
 		private readonly retireHandle?: (handle: { endpoint: string; ticket: string }) => void,
 		private readonly beforeCapture?: () => void,
 	) {}
@@ -333,16 +334,17 @@ export class PhoneInputClient {
 				const header = headerBuffer.subarray(0, newline).toString("utf8").trim();
 				const remainder = headerBuffer.subarray(newline + 1);
 				if (!ticketReceived) {
-					if (!/^ticket [0-9a-f]{32}\.[1-9][0-9]{0,15}$/.test(header) || !Number.isSafeInteger(Number(header.slice(40))) || remainder.length) {
-						finish(new Error("Microphone admission ticket missing; update the recorder client"));
+					const [kind, ticket = "", bootId, extra] = header.split(" ");
+					if (kind !== "ticket" || !/^[0-9a-f]{32}\.[1-9][0-9]{0,15}$/.test(ticket) || !Number.isSafeInteger(Number(ticket.split(".")[1])) || !validBootId(bootId) || extra !== undefined || remainder.length) {
+						finish(new Error("Boot-bound microphone admission unavailable; update the recorder client and host together before recording (no START sent)"));
 						return;
 					}
 					ticketReceived = true;
-					this.#ticket = header.slice(7);
-					try { this.retainHandle?.({ endpoint, ticket: this.#ticket }); }
+					this.#ticket = ticket;
+					try { this.retainHandle?.({ endpoint, ticket, bootId }); }
 					catch (error) { finish(error instanceof Error ? error : new Error(String(error))); return; }
 					headerBuffer = Buffer.alloc(0);
-					socket.write(`record ${this.#ticket}\n`);
+					socket.write(`record ${ticket} ${bootId}\n`);
 					return;
 				}
 				if (header === "stream") {

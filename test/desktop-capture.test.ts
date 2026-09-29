@@ -31,7 +31,7 @@ ${family === "native" ? '[[ $1 != --raw ]] || exit 2' : `if [[ $1 != --raw ]]; t
 [[ "$*" == "--format s16 --rate 16000 --channels 1 -" ]] || exit 2` : ""}
 ${body}
 `, { mode: 0o755 });
-	const env = { ...process.env, PREFIX: "", PATH: `${bin}:/usr/bin:/bin`, TMPDIR: root, XDG_RUNTIME_DIR: root, PI_VOICE_MAX_RECORD_SECONDS: "5" };
+	const env = { HOME: root, XDG_STATE_HOME: path.join(root, "state"), PREFIX: "", PATH: `${bin}:/usr/bin:/bin`, TMPDIR: root, XDG_RUNTIME_DIR: root, PI_VOICE_MAX_RECORD_SECONDS: "5" };
 	const children: Promise<void>[] = [];
 	const wire: Buffer[] = [];
 	const server = net.createServer(socket => {
