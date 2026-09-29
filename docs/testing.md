@@ -1,5 +1,13 @@
 # Tests
 
+## Output resilience final validation
+
+Stage A durable output receipts and Stage B remote prepare/grant/covered-ledger validation: `npm run check` passed; full checkout **1114 passed, 33 compatibility skips, zero failures (1147 total)**; installed-native full suite **1147 passed, zero skips/failures**. Logs: `/tmp/voice-output-{check,test,native}.log`. All final runs used `env -i` and owned temporary HOME/TMPDIR/XDG roots. LSP is not configured. An initial run exposed an obsolete raw-playback fixture and an overlong temporary Unix socket path; the v3 fixture and short-root reruns pass.
+
+Isolated synthetic SSH: **12/12 cases passed**, now checking v3 preparation, durable pre-commit cancellation and rejection of late commit as well as microphone forwarding; player invocation remains a tripwire. Log: `/tmp/voice-output-ssh.log`. Podman used temporary HOME/config/cache/data/runtime/state and private container networking, with no host mounts or devices. An initial isolated build required test-only `cgroupfs` configuration; a subsequent run exposed and fixed the wrappers' obsolete v2 readiness check. Final owned containers/image tag were removed by the harness. No live sessions, caches, devices, settings, provider calls or inference were used.
+
+Remaining limitations are explicit: local-output/input all-idle resource coverage, verified same-device reboot discharge, and endpoint-owner death after possible dispatch remain fenced. Non-admission receipts are distinct from actual child-wait receipts. These tests do not establish physical playback latency or Android hardware behavior.
+
 ## Stage B remote-output covered ledger
 
 The v3 ledger now covers every remote output grant and supports durable all-idle retirement and generation-locked dead-owner reclamation. Focused ledger tests use temporary journals and a Unix-socket fake receipt service: multiple scopes, persistence failure, pre-prepare death, stale generation, mismatched boot, exact receipt, untouched input, and legacy/local/input uncertainty. Local-output/input all-idle accounting and reboot discharge remain fenced. Final validation: `npm run check` passed; **120 focused tests passed, zero failures/skips** across output-ledger, StopRecovery, idle orphan, index recovery/stop-proof/input-cancellation, physical admission and coordinator durability tests. The test run used `env -i`, temporary HOME/TMPDIR/XDG roots and `node --experimental-test-module-mocks --import tsx --test`; log: `/tmp/output-ledger-tests.log`. LSP is unavailable. No inference, provider calls or live session changes. Parent-owned helper/harness and full-suite validation are separate.
@@ -186,7 +194,7 @@ drift, rejected monitor source, unavailable PulseAudio, real PipeWire synthetic
 source, unavailable audio-server environment, finite synthetic PCM/natural EOF,
 empty source, and startup failure. The last three substitute only `pw-record`;
 SSH, protocol, encoder and decoder remain real. Every case checks dynamic reverse
-forwarding, v2 playback hello and admission-ticket cancellation/ACK. No server-local
+forwarding, v3 playback prepare/cancel/late-commit rejection and admission-ticket cancellation/ACK. No server-local
 recorder invocation is allowed. Natural EOF must decode all 240,000 synthetic
 samples; successful live virtual sources require finite, nonzero-energy PCM.
 
@@ -200,7 +208,7 @@ server-local fallback. Router/identity/tmux policy and Termux parity are separat
 covered by the existing `npm test` fixtures (`device-router`, `connection-device`,
 `ssh-wrapper`, `client-scripts`, `recorder-stop`, `phone-input`). These are **not** an
 Android emulator, real microphone, ASR accuracy, or Mint hardware-cause test.
-Playback is hello-only; the player is a tripwire, not a virtual playback smoke test.
+Playback exercises hello and cancelled preparation only; the player is a tripwire, not a virtual playback smoke test.
 
 Cleanup traps remove the dependent client **before** its server, then the run's
 image tag and temporary keys. Failures retain their exit status and print bounded

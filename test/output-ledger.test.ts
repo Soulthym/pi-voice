@@ -15,6 +15,15 @@ function rootFor(t: import("node:test").TestContext) {
 	return root;
 }
 
+test("public output scopes bound endpoint and configuration sizes before journaling", t => {
+	const ledger = new StopRecovery(rootFor(t), "owner");
+	ledger.initialize();
+	for (const field of ["endpoint", "configured"] as const) {
+		assert.throws(() => ledger.retain("output", { ...handle, [field]: `unix:///${"x".repeat(4096)}` }, "device"), /Invalid recovery handle/);
+	}
+	assert.equal(ledger.isIdle("output"), true);
+});
+
 test("covered output remains fenced until all receipts and closed dispatch are durable", t => {
 	const root = rootFor(t);
 	const ledger = new StopRecovery(root, "owner");

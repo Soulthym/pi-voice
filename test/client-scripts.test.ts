@@ -462,10 +462,18 @@ wait $!`,
 			stdio: ["pipe", "pipe", "pipe"],
 			detached: true,
 		});
-		child.stdin.write(Buffer.alloc(64, 3));
+		child.stdin.write("PI_VOICE_CONTROLhello\nPI_VOICE_PREPARE\n");
 		let stdout = "";
+		let committed = false;
+		child.stdin.on("error", () => {});
 		child.stdout.on("data", chunk => {
 			stdout += chunk.toString("utf8");
+			const prepared = stdout.split("\n").find(line => line.includes('"type":"prepared"'));
+			if (prepared && !committed) {
+				const scope = JSON.parse(prepared);
+				committed = true;
+				child.stdin.write(`PI_VOICE_COMMIT ${scope.id} ${scope.boot_id}\n`);
+			}
 		});
 		let stderr = "";
 		child.stderr.on("data", chunk => {
@@ -485,7 +493,7 @@ wait $!`,
 			poll();
 		});
 
-		assert.match(stdout, /"type":"session","id":"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"/);
+		assert.match(stdout, /"type":"session","version":3,"id":"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"/);
 		assert.match(stdout, /"type":"playback","position":1\.25/);
 		const socatLog = fs.readFileSync(path.join(root, "socat.log"), "utf8");
 		assert.match(socatLog, /get_property.*time-pos/);

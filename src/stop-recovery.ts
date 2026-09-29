@@ -154,8 +154,8 @@ export class StopRecovery {
 }
 
 function validHandle(direction: DeviceDirection, value: RecoveryHandle): boolean {
-	return !!value && typeof value.endpoint === "string" && /^(tcp|unix):/.test(value.endpoint) &&
+	return !!value && typeof value.endpoint === "string" && value.endpoint.length <= 4096 && /^(tcp|unix):/.test(value.endpoint) &&
 		typeof value.selection === "string" && /^[a-zA-Z0-9._-]{1,128}$/.test(value.selection) && value.selection !== "auto" &&
-		typeof value.configured === "string" && (direction === "output" ? validStreamId(value.id) && (value.bootId === undefined || validBootId(value.bootId)) :
+		typeof value.configured === "string" && value.configured.length <= 4096 && (direction === "output" ? validStreamId(value.id) && (value.bootId === undefined || validBootId(value.bootId)) :
 			typeof value.id === "string" && /^[0-9a-f]{32}\.[1-9][0-9]{0,15}$/.test(value.id) && Number.isSafeInteger(Number(value.id.split(".")[1])));
 }

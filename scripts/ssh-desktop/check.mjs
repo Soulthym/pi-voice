@@ -17,7 +17,23 @@ async function request(endpoint, command) {
   s.on('data',b=>{data+=b; if(data.includes('\n')) resolve(data.trim());});
  }); } finally { s.destroy(); }
 }
-assert.equal(await request(device.audioEndpoint,'PI_VOICE_CONTROLhello'), '{"type":"protocol","version":2}');
+assert.equal(await request(device.audioEndpoint,'PI_VOICE_CONTROLhello'), '{"type":"protocol","version":3}');
+// Reserve/cancel over the real SSH tunnel without granting physical output.
+const output = connect(device.audioEndpoint);
+const hello = readLine(output);
+output.once('connect', () => output.write('PI_VOICE_CONTROLhello\n'));
+assert.equal(JSON.parse(await hello).version, 3);
+const preparedLine = readLine(output);
+output.write('PI_VOICE_PREPARE\n');
+const prepared = JSON.parse(await preparedLine);
+assert.equal(prepared.type, 'prepared');
+assert.match(prepared.id, /^[0-9a-f-]{36}$/);
+assert.match(prepared.boot_id, /^[0-9a-f-]{36}$/);
+assert.deepEqual(JSON.parse(await request(device.audioEndpoint, `PI_VOICE_CONTROLstop ${prepared.id}`)),
+ {type:'stopped', id:prepared.id, boot_id:prepared.boot_id});
+const outputClosed = new Promise(resolve => output.once('close', resolve));
+output.end(`PI_VOICE_COMMIT ${prepared.id} ${prepared.boot_id}\n`);
+await outputClosed; // The durable stop tombstone must defeat this late grant.
 const mode=process.argv[2];
 if(mode==='hold') {
  await fs.writeFile('/work/holding', 'ready');

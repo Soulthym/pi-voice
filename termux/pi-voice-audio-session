@@ -67,7 +67,7 @@ dd iflag=fullblock bs=16 count=1 of="$header_file" status=none <&3 2>/dev/null |
 if cmp -s "$header_file" <(printf 'PI_VOICE_CONTROL'); then
   command=
   target_id=
-  IFS=' ' read -r command target_id <&3 || true
+  IFS=' ' read -r -n 128 command target_id <&3 || true
   if [[ $command == hello && -z $target_id ]]; then
     protocol=3
     printf '{"type":"protocol","version":3}\n' || exit 1
@@ -91,7 +91,13 @@ if cmp -s "$header_file" <(printf 'PI_VOICE_CONTROL'); then
         flock -x -w 5 9 || exit 1
         (umask 077; touch "$target_state/stopped") && sync "$target_state/stopped" "$target_state" || exit 1
         if [[ ! -f $target_state/committed ]]; then
-          session_id=$target_id state_dir=$target_state boot_id="$(cat "$target_state/prepared")" publish_exit || exit 1
+          # Non-admission is not child-wait proof: never forge an exited receipt.
+          (umask 077
+            printf '{"id":"%s","boot_id":%s}\n' "$target_id" "$(cat "$target_state/prepared")" >"$target_state/not-admitted.tmp" &&
+              sync "$target_state/not-admitted.tmp" &&
+              mv -f "$target_state/not-admitted.tmp" "$target_state/not-admitted" &&
+              sync "$target_state"
+          ) || exit 1
         fi
         flock -u 9
       else
@@ -106,9 +112,11 @@ if cmp -s "$header_file" <(printf 'PI_VOICE_CONTROL'); then
       # A missing socket/PID is not proof of exit. Retain the owner's receipt
       # for retries when a stop ACK (or natural completion) was lost.
       for _ in {1..100}; do
-        if { [[ -f $target_state/exited ]] && sync "$target_state/exited" "$target_state"; } || [[ -f $legacy_state/exited ]]; then
-          if [[ -f $target_state/exited ]]; then
-            receipt=$(cat "$target_state/exited")
+        proof_file="$target_state/exited"
+        [[ -f $target_state/not-admitted ]] && proof_file="$target_state/not-admitted"
+        if { [[ -f $proof_file ]] && sync "$proof_file" "$target_state"; } || [[ -f $legacy_state/exited ]]; then
+          if [[ -f $proof_file ]]; then
+            receipt=$(cat "$proof_file")
             printf '{"type":"stopped",%s\n' "${receipt:1}" || true
           else
             printf '{"type":"stopped","id":"%s"}\n' "$target_id" || true

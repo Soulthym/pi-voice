@@ -196,6 +196,10 @@ exec /usr/bin/sync "$@"
 					if (boundary === "commit-crash") assert.equal(await control(`stop ${scope.id}`), "", "persisted possible spawn without own-child wait remains fenced");
 				}
 				assert.equal(fs.existsSync(path.join(root, `fake-${scope.id}.pid`)), false, boundary);
+				assert.equal(fs.existsSync(receipt(scope.id)), false, "non-admission must never fabricate child-wait proof");
+				if (["host-death", "stop-before-commit"].includes(boundary)) {
+					assert.ok(fs.existsSync(path.join(playback, scope.id, "not-admitted")));
+				}
 			}
 			assert.equal(await control("unknown"), "");
 			const statesBeforeAdmission = fs.readdirSync(playback);

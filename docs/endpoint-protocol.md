@@ -34,7 +34,7 @@ PI_VOICE_CONTROLresume aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\n
 PI_VOICE_CONTROLstop aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\n
 ```
 
-The bundled client maps pause/resume to mpv's `pause` property and stop to mpv's `quit` command. Stop replies `{"type":"stopped","id":"<uuid>","boot_id":"<kernel-boot-uuid>"}` after actual player exit, or after durably closing an uncommitted reservation under the same lock as commit/spawn. Missing socket/PID alone is not proof. Exit receipts remain under `${XDG_STATE_HOME:-$HOME/.local/state}/pi-voice/playback` so a scoped retry can recover a lost ACK across runtime-directory loss. A persisted possible dispatch without the owner's child-wait receipt stays fenced. Control connections carry no PCM. Starting a new stream also replaces the previous endpoint player.
+The bundled client maps pause/resume to mpv's `pause` property and stop to mpv's `quit` command. Stop replies `{"type":"stopped","id":"<uuid>","boot_id":"<kernel-boot-uuid>"}` after actual player exit, or after durably closing an uncommitted reservation under the same lock as commit/spawn. Missing socket/PID alone is not proof. Exit receipts remain under `${XDG_STATE_HOME:-$HOME/.local/state}/pi-voice/playback` so a scoped retry can recover a lost ACK across runtime-directory loss. Non-admission has its own durable `not-admitted` receipt; only the actual owner's child wait may publish `exited`. A persisted possible dispatch without the owner's child-wait receipt stays fenced. Control connections carry no PCM. Starting a new stream also replaces the previous endpoint player.
 
 ### Host cancellation API and limitations
 
