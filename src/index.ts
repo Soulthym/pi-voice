@@ -2380,6 +2380,13 @@ export default async function (pi: ExtensionAPI) {
 				// Explicit reconnect retries stop proof; ordinary playback still waits on the failure.
 				if (previous) await previous.catch(() => { stopUnconfirmed = unconfirmedDeviceStops.has(previous); });
 				if (epoch !== playbackRequestEpoch || ctx !== activeContext || !interactiveVoiceSession) return false;
+				// A retained capture ticket is normal admission, not a failed stop.
+				if (recover && inputInProgress && stopRecovery?.episode("input")?.handles.length && !inputStopPending && !stopResources.input.episode) {
+					try {
+						await trackStop("input", finishInputForPlayback());
+						recoveredInput = true;
+					} catch { /* A failed finish may now use scoped stop recovery below. */ }
+				}
 				if (recover) restoreStopRecovery();
 				if (orphanRecoveryBlocked) {
 					const previousStopUnconfirmed = stopUnconfirmed;
@@ -2409,6 +2416,8 @@ export default async function (pi: ExtensionAPI) {
 					await cancelActiveInput().catch(() => {});
 					await trackStop("input", phoneInput.recover(() => recovery.retry("input", deviceRouter, config.input)));
 					if (stopResources.input.episode || stopResources.input.cleanup) throw new Error("Retained input scopes remain unconfirmed");
+					inputStopBarrier = Promise.resolve();
+					inputStopPending = false;
 					recoveredInput = true;
 					stopUnconfirmed = false;
 				}
@@ -3949,6 +3958,10 @@ export default async function (pi: ExtensionAPI) {
 		const inputCancelled = cancelActiveInput();
 		const workers = timingWorkers.splice(0);
 		const retiringRebind = deviceRebind;
+		const ownerRecovery = stopRecovery;
+		const ownerRouter = deviceRouter;
+		const ownerInput = config.input;
+		const ownerOutput = config.output;
 		let stopping: Promise<void> | undefined;
 		const cleanup = (): Promise<void> => stopping ??= Promise.all([
 			trackStop("input", ownerRecovery?.episode("input")?.handles.length
@@ -3959,10 +3972,6 @@ export default async function (pi: ExtensionAPI) {
 			retiringCoordinator?.shutdown();
 			retiredStops.delete(cleanup);
 		}).finally(() => { stopping = undefined; });
-		const ownerRecovery = stopRecovery;
-		const ownerRouter = deviceRouter;
-		const ownerInput = config.input;
-		const ownerOutput = config.output;
 		retiredStops.add(cleanup);
 		try {
 			await Promise.all([inputCancelled, cleanup()]);
