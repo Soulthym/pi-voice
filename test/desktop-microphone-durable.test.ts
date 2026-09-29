@@ -129,6 +129,49 @@ fi' DEBUG\n`);
 	}
 });
 
+for (const lostWait of [false, true]) test(`desktop cleanup: reaped recorder and blocked encoder (lost wait: ${lostWait})`, async t => {
+	const f = await fixture(t);
+	f.env.PI_VOICE_MAX_RECORD_SECONDS = "30";
+	// Catch all numeric signaling, including a stale disconnect watcher PID.
+	f.env.BASH_ENV = `${f.root}/trace-signals`;
+	await fs.writeFile(f.env.BASH_ENV, `kill() { printf '%s\\n' "$*" >>"$TMPDIR/signals"; builtin kill "$@"; }
+${lostWait ? 'wait() { [[ $1 == ${recorder_pid:-} ]] && return 127; builtin wait "$@"; }' : ""}
+`);
+	await f.mock("ffmpeg", 'cat; touch "$TMPDIR/encoder-blocked"; while [[ ! -e $TMPDIR/release ]]; do sleep .02; done');
+	const session = await f.ticket(true); session.record();
+	const scope = `${f.state}/scope-${session.id}`;
+	await until(async () => !!await fs.stat(`${f.root}/encoder-blocked`).catch(() => false), "encoder blocked after recorder EOF");
+	const recorder = (await fs.readFile(`${scope}/recorder`, "utf8")).split(" ")[0];
+	await until(async () => !await fs.stat(`/proc/${recorder}`).catch(() => false), "Bash reaped recorder");
+	session.child.kill("SIGTERM");
+	await new Promise(resolve => setTimeout(resolve, 200));
+	assert.equal(await fs.stat(`${scope}/exited`).catch(() => false), false, "encoder has not been waited");
+	await fs.writeFile(`${f.root}/release`, ""); await session.done;
+	const signals = await fs.readFile(`${f.root}/signals`, "utf8").catch(() => "");
+	assert.ok(signals.trim().split("\n").every(line => !line || line.startsWith("-0 ")), signals);
+	if (lostWait) {
+		assert.equal(await fs.stat(`${scope}/exited`).catch(() => false), false);
+		assert.match(await fs.readFile(`${f.state}/tickets`, "utf8"), / admitted\n$/);
+	} else {
+		assert.match(await f.exchange(`stop-wait ${session.id} ${boot}`), /^ok /);
+		assert.match(await fs.readFile(`${scope}/exited`, "utf8"), /^wait-v1 /);
+	}
+});
+
+test("desktop cleanup: unavailable pidfd cannot open the recorder", async t => {
+	const f = await fixture(t);
+	await f.mock("python3", `exec /usr/bin/python3 -c 'import os, sys
+code = sys.argv.pop(1)
+def unavailable(*args):
+    raise OSError("pidfd unavailable")
+os.pidfd_open = unavailable
+exec(code)' "$2" "\${@:3}"`);
+	const session = await f.ticket(true); session.record(); await session.done;
+	assert.equal(await fs.stat(`${f.root}/spawned`).catch(() => false), false);
+	// Both directly owned children exited without opening the device.
+	assert.match(await f.exchange(`stop-wait ${session.id} ${boot}`), /^ok /);
+});
+
 test("desktop durable microphone: own child exit publishes retirement across runtime loss", async t => {
 	const f = await fixture(t); const session = await f.ticket(); session.record(); await session.done;
 	assert.ok(session.output().includes("stream\npcm"));

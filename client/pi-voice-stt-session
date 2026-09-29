@@ -200,20 +200,28 @@ save_tickets
 recorder_pid=
 encoder_pid=
 audio_fifo="$state_dir/pcm-$recording_incarnation"
+cleanup_file="$state_dir/cleanup-$recording_incarnation"
 disconnect_pid=
 cleanup() {
   trap - EXIT
   trap '' INT TERM HUP
   exec 4>&- 5<&- 6>&-
-  [[ -n ${disconnect_pid:-} ]] && kill "$disconnect_pid" 2>/dev/null || true
+  # Request shutdown without ever signaling a saved numeric PID.
+  : >"$cleanup_file" || exit 1
+  flock -u 9 # A disconnected watcher may already be waiting on this fence.
   [[ -n ${disconnect_pid:-} ]] && wait "$disconnect_pid" 2>/dev/null || true
-  [[ -n ${recorder_pid:-} ]] && kill "$recorder_pid" 2>/dev/null || true
   # Own the recorder directly: waiting a pipeline shell cannot prove that its
   # recorder exited if that shell was killed. Never infer exit from kill -0.
-  [[ -n ${recorder_pid:-} ]] && wait "$recorder_pid" 2>/dev/null || true
+  if [[ -n ${recorder_pid:-} ]]; then
+    wait "$recorder_pid" 2>/dev/null
+    [[ $? != 127 ]] || exit 1 # No owned-child wait proof: retain the fence.
+  fi
   # Recorder EOF lets the encoder flush its final packets before retirement.
-  [[ -n ${encoder_pid:-} ]] && wait "$encoder_pid" 2>/dev/null || true
-  rm -f "$audio_fifo"
+  if [[ -n ${encoder_pid:-} ]]; then
+    wait "$encoder_pid" 2>/dev/null
+    [[ $? != 127 ]] || exit 1
+  fi
+  rm -f "$audio_fifo" "$cleanup_file"
   if [[ -n $wait_scope && -n $recorder_pid && -n $encoder_pid ]]; then
     # Only this parent, after both explicit waits, may publish retirement.
     scope_identity "$wait_scope" "$issued_ticket" "$issued_boot" >"$wait_scope/exited.tmp" &&
@@ -234,7 +242,11 @@ trap 'exit 1' INT TERM HUP
 flock -u 9
 exec 3<&0
 ( exec 9>"$state_dir/fence"
-  while IFS= read -r _ <&3; do :; done
+  while [[ ! -e $cleanup_file ]]; do
+    IFS= read -r -t 0.1 _ <&3
+    status=$?
+    (( status == 0 || status > 128 )) || break
+  done
   flock -x 9 || exit 1
   load_tickets
   [[ $incarnation == "$recording_incarnation" ]] && : >"$stop_file"
@@ -293,6 +305,39 @@ scoped_child() {
     [[ ${fields[19]:-} =~ ^[0-9]+$ ]] || exit 1
     printf '%s %s\n' "$BASHPID" "${fields[19]}" >"$wait_scope/$role" &&
       sync "$wait_scope/$role" "$wait_scope" || exit 1
+  fi
+  if [[ $role == recorder ]]; then
+    # Capture our own incarnation before exec; the monitor inherits this pidfd.
+    # Bash still directly owns/waits the recorder (same PID across both execs).
+    # No pidfd support => no device open, never fall back to kill(saved_pid).
+    exec python3 -c '
+import os, select, signal, sys
+stop, *command = sys.argv[1:]
+fd = os.pidfd_open(os.getpid())
+signal.pidfd_send_signal(fd, 0)
+if os.fork() == 0:
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, signal.SIG_IGN)
+    for entry in os.listdir("/proc/self/fd"):
+        other = int(entry)
+        if other != fd:
+            try:
+                os.close(other)
+            except OSError:
+                pass
+    poll = select.poll()
+    poll.register(fd, select.POLLIN)
+    while not poll.poll(100):
+        if os.path.exists(stop):
+            try:
+                signal.pidfd_send_signal(fd, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            break
+    os._exit(0)
+os.close(fd)
+os.execvp(command[0], command)
+' "$cleanup_file" "$@"
   fi
   exec "$@"
 }
