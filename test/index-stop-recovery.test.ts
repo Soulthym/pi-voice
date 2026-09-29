@@ -255,6 +255,119 @@ for (const manual of [false, true]) for (const outcome of ["same-route", "identi
 	}
 });
 
+for (const flow of ["manual-switch", "retired-asr"] as const) for (const outcome of ["success", "identity-error", "withheld-stop", "new-input", "playback"] as const) test(`input release survives rebind without retained-handle finalization: ${flow}, ${outcome}`, { timeout: 10_000 }, async t => {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-release-"));
+	const env = { PI_VOICE_CONFIG: path.join(root, "config"), PI_VOICE_DEVICE_DIR: path.join(root, "devices"), PI_VOICE_COORDINATOR_DIR: path.join(root, "coordinator") };
+	const old = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
+	Object.assign(process.env, env);
+	const host = new FakeVoiceHost(root, "input-release");
+	const endpoint = `unix://${path.join(root, "input.sock")}`;
+	const ticket = `${"a".repeat(32)}.1`;
+	const boot = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+	let capture: net.Socket | undefined;
+	let admitted = Promise.withResolvers<void>();
+	const server = net.createServer(socket => socket.on("data", data => {
+		const command = String(data).trim();
+		if (command === "ticket-admit") socket.write(`ticket ${ticket} ${boot} admit-v1 "A"\n`);
+		else if (command === `record ${ticket} ${boot}`) { capture = socket; admitted.resolve(); }
+		else if (command === `stop ${ticket}`) {
+			capture?.end(flow === "retired-asr" ? "audio YXVkaW8=\n" : `ok ${Buffer.from("Finished dictation.").toString("base64")}\n`);
+			socket.end(`ok ${Buffer.from(`stopped ${ticket}`).toString("base64")}\n`);
+		} else socket.end("error dW5jb25maXJtZWQ=\n");
+	}));
+	await new Promise<void>(resolve => server.listen(endpoint.slice(7), resolve));
+	t.after(async () => {
+		t.mock.restoreAll();
+		await host.shutdown().catch(() => {});
+		await new Promise<void>(resolve => server.close(() => resolve()));
+		for (const [key, value] of Object.entries(old)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+		await fs.rm(root, { recursive: true, force: true });
+	});
+	await fs.mkdir(env.PI_VOICE_DEVICE_DIR);
+	await fs.writeFile(path.join(env.PI_VOICE_DEVICE_DIR, "A.json"), JSON.stringify({ version: 1, id: "A", name: "A", platform: "linux", audioEndpoint: endpoint, inputEndpoint: endpoint, connectedAt: 2, lastActive: 2 }));
+	await fs.writeFile(env.PI_VOICE_CONFIG, JSON.stringify({ enabled: true, input: "auto", output: "local", editMode: "append", submitMode: "auto", audioCache: false, timingPreprocessConcurrency: 0, codeDescriptionPreprocessConcurrency: 0 }));
+	const lookup = t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", async () => ({ kind: "device" as const, id: "A" }));
+	t.mock.method(DeviceRouter.prototype, "route", async function(this: DeviceRouter, ...args: Parameters<DeviceRouter["route"]>) { return this.routeMetadata(...args); });
+	let editor = "";
+	let submitted = 0;
+	host.ctx.ui.getEditorText = () => editor;
+	host.ctx.ui.setEditorText = (text: string) => { editor = text; };
+	host.api.sendUserMessage = () => { submitted++; };
+	const index = MockedVoiceWorkerClient.instances.length;
+	await host.start();
+	const worker = MockedVoiceWorkerClient.instances[index]!;
+	const asr = Promise.withResolvers<string[]>();
+	const transcribing = Promise.withResolvers<void>();
+	t.mock.method(worker, "transcribe", () => { transcribing.resolve(); return asr.promise; });
+	await host.shortcut("f4"); await admitted.promise;
+	const fence = path.join(env.PI_VOICE_COORDINATOR_DIR, "speech.lock", "lease.json");
+	const owner = JSON.parse(await fs.readFile(fence, "utf8"));
+	const journal = () => new StopRecovery(env.PI_VOICE_COORDINATOR_DIR, owner.instanceId);
+	if (flow === "retired-asr") {
+		await host.shortcut("f4"); await transcribing.promise;
+		assert.equal(journal().episode("input")?.handles.length ?? 0, 0, "normal stop retired the handle before ASR completed");
+	}
+	const stopped = Promise.withResolvers<void>();
+	const stopping = Promise.withResolvers<void>();
+	const terminate = t.mock.method(worker, "terminate", () => { stopping.resolve(); return stopped.promise; });
+	const identity = Promise.withResolvers<{ kind: "device"; id: string }>();
+	const resolving = Promise.withResolvers<void>();
+	if (flow === "retired-asr") lookup.mock.mockImplementation(() => { resolving.resolve(); return identity.promise; });
+	let playback: Promise<void> | undefined;
+	const rebind = host.command(flow === "manual-switch" ? "device A" : "reconnect");
+	if (flow === "retired-asr") {
+		await resolving.promise;
+		if (outcome !== "identity-error") identity.resolve({ kind: "device", id: "A" });
+		for (let i = 0; i < 15; i++) await new Promise(resolve => setImmediate(resolve));
+		asr.resolve(["Finished dictation."]);
+		// Let finalization request release while identity adoption is still fenced.
+		for (let i = 0; i < 15; i++) await new Promise(resolve => setImmediate(resolve));
+		if (outcome === "identity-error") identity.reject(new Error("ambiguous attachment after retired ASR"));
+	}
+	if (!(flow === "retired-asr" && outcome === "identity-error")) {
+		await stopping.promise;
+		await fs.stat(fence);
+		assert.match(editor, /Finished dictation/);
+		if (outcome === "new-input") { admitted = Promise.withResolvers<void>(); await host.shortcut("f4"); }
+		if (outcome === "playback") {
+			playback = host.command("test Unrelated active playback.");
+			for (let i = 0; i < 15; i++) await new Promise(resolve => setImmediate(resolve));
+			assert.equal(worker.sent.length, 0, "superseding playback still waits for old stop proof");
+		}
+		if (outcome === "withheld-stop") stopped.reject(new Error("output stop proof withheld"));
+		else stopped.resolve();
+	}
+	await rebind;
+	assert.equal(submitted, 0, "explicit device intent leaves dictation for review");
+	if (playback) {
+		await playback;
+		assert.ok(worker.sent.length > 0, "explicit superseding playback starts after proof");
+		await fs.stat(fence);
+		lookup.mock.mockImplementation(async () => { throw new Error("ambiguous attachment during unrelated playback"); });
+		await host.command("reconnect");
+		await fs.stat(fence);
+		return;
+	}
+	assert.equal(worker.sent.length, 0, "cleanup never starts playback");
+	if (outcome === "withheld-stop") {
+		await fs.stat(fence);
+		terminate.mock.mockImplementation(async () => {});
+		await host.command("reconnect");
+	} else if (outcome === "new-input") {
+		await admitted.promise;
+		assert.equal(JSON.parse(await fs.readFile(fence, "utf8")).instanceId, owner.instanceId);
+		assert.equal(journal().episode("input")?.handles[0].id, ticket);
+		return;
+	}
+	for (let i = 0; i < 15; i++) await new Promise(resolve => setImmediate(resolve));
+	await assert.rejects(fs.stat(fence), { code: "ENOENT" }, "completed input must not leave an orphan active owner");
+	if (outcome === "identity-error") {
+		lookup.mock.mockImplementation(async () => { throw new Error("ambiguous attachment after switch"); });
+		await host.command("reconnect");
+		await assert.rejects(fs.stat(fence), { code: "ENOENT" });
+	}
+});
+
 test("single-slash Unix config normalizes to the sink's remote prefix", () => {
 	assert.equal(normalizeVoiceOutput("unix:/test-output"), "unix:///test-output");
 });

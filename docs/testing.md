@@ -1,5 +1,40 @@
 # Tests
 
+## Shared input-release lifecycle after `263959c`
+
+Input-owned release requests now survive rebind and stop-proof barriers independently
+of retained-handle recovery. A single deferred request replaces `recoveredInput`;
+input/lease/session epochs, current input/reservation state and actual playback
+ownership fence its consumption. Cancellation carries only the matching input's
+request forward. Completion retires the reservation without waiting for adoption;
+failed stop proof keeps ownership until recovery, including across retry.
+
+Source review traced all `releaseSpeechOwnership` callers, normal/empty/manual-edit/
+review/error/cancel input completion, automatic submission, playback/attention,
+manual/adopt/reconnect recovery and session lifecycle paths. Four independent static
+reviews found no concrete introduced source defect. The testing review identified
+that the playback fixture initially started playback only after old lease removal
+(`test/index-stop-recovery.test.ts`, then lines 347–353); it now requests playback
+while the old rebind barrier is pending and verifies ownership after cleanup and an
+unrelated identity error. This is scoped source review, not exhaustive race proof.
+
+Ten new synthetic socket/worker cases exercise manual switching during capture and
+reconnect during ASR after normal handle retirement: success, identity error,
+withheld output-stop proof plus retry, superseding input and queued explicit playback.
+Both success cases fail on `263959c` at the missing lease-removal assertion. Existing
+healthy retained-handle/manual-draft cases continue passing. No real ASR is run.
+
+Final validation: `npm run check` passed; focused **113 passed / zero failures**;
+full default **1309 passed / 33 compatibility skips / zero failures (1342 total)**;
+full installed-native **1342 passed / zero skips/failures**. Final suites ran
+sequentially with `env -i`, private HOME/TMPDIR/XDG roots and inert native UI.
+Logs: `/tmp/lr.2FSX/{check-final,focus-final,full-final,native-final,regression-before}.log`.
+The initial full run had one Unix-socket-path-length failure under the longer temp
+root; shortening the private TMPDIR fixed it, and both final full suites passed.
+LSP is unavailable; TypeScript and whitespace checks used instead. No helpers or
+protocols changed; SSH was not rerun. No live device/session/SSH/config/cache changes,
+provider/inference calls, issue-file/demo edits, deployment or push were performed.
+
 ## Healthy reconnect lease release after `bc2fed5`
 
 A finished capture now retires its input reservation only while its input/session

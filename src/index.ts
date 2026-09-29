@@ -381,6 +381,8 @@ export default async function (pi: ExtensionAPI) {
 	let handleCoordinatedIdle: (utterance: number | undefined) => void = () => {};
 	let playRequestedAttention: (ctx: ExtensionContext, request: AttentionRequest) => void = () => {};
 	let releaseSpeechOwnership: (announceNext?: boolean) => void = () => {};
+	let deferredRelease: { input: number; lease: number; context: number; announceNext: boolean } | undefined;
+	let flushDeferredRelease = (): void => {};
 	let pendingSpeechPreemption:
 		| { purpose: SpeechPurpose | undefined; wasComplete: boolean; spokenText: string; cancelId?: number; request: number; context: number; input: number }
 		| undefined;
@@ -489,6 +491,7 @@ export default async function (pi: ExtensionAPI) {
 			stopRecovery?.clear(resource);
 			state.episode = undefined;
 			finishSpeechPreemption();
+			flushDeferredRelease();
 			refreshProgressWidget();
 		}
 	};
@@ -519,6 +522,7 @@ export default async function (pi: ExtensionAPI) {
 			if (journal === stopRecovery && state.episode && (state.episode === cleanup.episode || !cleanup.episode)) state.episode.cancelled = true;
 			state.cleanup = undefined;
 			finishSpeechPreemption();
+			flushDeferredRelease();
 			refreshProgressWidget();
 		}, error => {
 			const cause = error instanceof Error ? error.message : String(error);
@@ -1627,6 +1631,7 @@ export default async function (pi: ExtensionAPI) {
 		if (inputProgressTimer) clearInterval(inputProgressTimer);
 		inputProgressTimer = null;
 		setInputProgress(undefined);
+		flushDeferredRelease();
 	};
 
 	const finishInputHint = (): string => `${[...effectiveTalkShortcuts][0] ?? "/voice talk"} to ${inputPhase === "acquiring" ? "cancel" : "finish"}`;
@@ -1941,6 +1946,7 @@ export default async function (pi: ExtensionAPI) {
 			if (cancelId !== undefined) transportStops.delete(cancelId);
 			if (transportStopBarrier === barrier) {
 				transportStopPending = false;
+				flushDeferredRelease();
 			}
 		}, notifyStopFailure);
 		return barrier;
@@ -1979,6 +1985,8 @@ export default async function (pi: ExtensionAPI) {
 	const cancelActiveInput = (): Promise<void> => {
 		devicePicker?.abort();
 		if (inputPhase === "acquiring" && !ownsSpeech) coordinator?.releaseSpeech();
+		// Cancellation retires this input, not a new acquisition. Carry its release request forward.
+		if (deferredRelease?.input === inputEpoch) deferredRelease.input += 1;
 		inputEpoch += 1;
 		cancelPendingDictation?.();
 		cancelPendingDictation = undefined;
@@ -1986,10 +1994,16 @@ export default async function (pi: ExtensionAPI) {
 		inputStopPending = true;
 		const cancelled = trackStop("input", phoneInput.cancel());
 		inputStopBarrier = cancelled;
-		void cancelled.then(() => { if (inputStopBarrier === cancelled) inputStopPending = false; }, () => {});
+		void cancelled.then(() => {
+			if (inputStopBarrier === cancelled) inputStopPending = false;
+			flushDeferredRelease();
+		}, () => {});
 		if (speechReservedForInput) {
+			if (lastOwnerUtterance === undefined) {
+				releaseSpeechOwnership(false);
+				releaseAfterTransportCancellation(undefined, false, cancelled);
+			}
 			speechReservedForInput = false;
-			if (lastOwnerUtterance === undefined) releaseAfterTransportCancellation(undefined, false, cancelled);
 		}
 		activeInputEndpoint = undefined;
 		clearInputProgress();
@@ -2060,8 +2074,28 @@ export default async function (pi: ExtensionAPI) {
 		);
 	};
 
+	flushDeferredRelease = (): void => {
+		const pending = deferredRelease;
+		if (!pending) return;
+		if (pending.input !== inputEpoch || pending.lease !== speechLeaseEpoch || pending.context !== contextEpoch || !ownsSpeech || lastOwnerUtterance !== undefined) {
+			deferredRelease = undefined;
+			return;
+		}
+		if (inputInProgress || speechReservedForInput || deviceRebind || transportStopPending || inputStopPending || stopsUnresolved()) return;
+		deferredRelease = undefined;
+		releaseSpeechOwnership(pending.announceNext);
+	};
+
 	releaseSpeechOwnership = (announceNext = true): void => {
-		if (!ownsSpeech || !coordinator || deviceRebind || transportStopPending || inputStopPending || stopsUnresolved()) return;
+		if (!ownsSpeech || !coordinator) return;
+		// A finished input's release survives every barrier, not only retained-handle recovery.
+		if (speechReservedForInput && lastOwnerUtterance === undefined) {
+			deferredRelease = { input: inputEpoch, lease: speechLeaseEpoch, context: contextEpoch, announceNext };
+			speechReservedForInput = false;
+			flushDeferredRelease();
+			return;
+		}
+		if (deviceRebind || transportStopPending || inputStopPending || stopsUnresolved()) return;
 		if (pendingSpeechPreemption) {
 			finishSpeechPreemption();
 			return;
@@ -2373,7 +2407,6 @@ export default async function (pi: ExtensionAPI) {
 		handoffConnecting = true;
 		refreshProgressWidget();
 		let stopUnconfirmed = false;
-		let recoveredInput = false;
 		const adoption = (async () => {
 			try {
 				// Fence the whole adoption, including resolution, stop proof and both route metadata updates.
@@ -2384,7 +2417,6 @@ export default async function (pi: ExtensionAPI) {
 				if (recover && inputInProgress && stopRecovery?.episode("input")?.handles.length && !inputStopPending && !stopResources.input.episode) {
 					try {
 						await trackStop("input", finishInputForPlayback());
-						recoveredInput = true;
 					} catch { /* A failed finish may now use scoped stop recovery below. */ }
 				}
 				if (recover) restoreStopRecovery();
@@ -2418,7 +2450,6 @@ export default async function (pi: ExtensionAPI) {
 					if (stopResources.input.episode || stopResources.input.cleanup) throw new Error("Retained input scopes remain unconfirmed");
 					inputStopBarrier = Promise.resolve();
 					inputStopPending = false;
-					recoveredInput = true;
 					stopUnconfirmed = false;
 				}
 				const connection = origin ?? await deviceRouter.resolveCurrentConnection();
@@ -2496,7 +2527,7 @@ export default async function (pi: ExtensionAPI) {
 			if (deviceRebind === barrier) {
 				deviceRebind = undefined;
 				finishSpeechPreemption();
-				if (recoveredInput && !inputInProgress && !speechReservedForInput && lastOwnerUtterance === undefined) releaseSpeechOwnership(false);
+				flushDeferredRelease();
 			}
 		};
 		void adoption.finally(() => {
@@ -3607,8 +3638,6 @@ export default async function (pi: ExtensionAPI) {
 			if (!stopCapture) return;
 			if (inputPhase === "recording") await phoneInput.stop(activeInputEndpoint ?? routed.input);
 			await finished.promise;
-			// Finalization may defer lease release behind deviceRebind; retire only this input's reservation.
-			if (current()) speechReservedForInput = false;
 		};
 		finishPendingDictation = finishForPlayback;
 		try {
