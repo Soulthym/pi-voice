@@ -1,5 +1,18 @@
 # Tests
 
+## User-deployed fp5 migration check — 2026-09-29
+
+The user restarted Pi/wrappers and supplied local Termux checks. All five installed
+`client/pi-voice-*` hashes match the updated checkout. No listed legacy microphone
+runtime paths were found; `/proc/sys/kernel/random/boot_id` is readable. Read-only
+host inspection found one live Pi instance using the v4 recovery ledger, no old
+dead-owner fence, and a covered output scope that retired during inspection.
+
+This confirms installation/state migration only. Microphone operation and live
+SSH-disconnect/phone-reboot recovery have not been validated by these checks;
+other clients remain unverified. No test recording, playback probe, provider call,
+settings change or assistant-initiated restart was performed.
+
 ## Shared input-release lifecycle after `263959c`
 
 Input-owned release requests now survive rebind and stop-proof barriers independently
