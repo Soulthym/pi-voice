@@ -80,6 +80,9 @@ if [[ $new_state == true ]]; then
     directory=$(dirname "$directory")
   done
 fi
+# Retry must also publish ancestors left behind by an interrupted initialization.
+# syncfs covers those entries even when they now look like existing parents.
+sync -f "$state_dir" || exit 1
 load_tickets
 printf '%s\n' "$epoch" >"$legacy_dir/desktop-durable" && sync "$legacy_dir/desktop-durable" "$legacy_dir" || exit 1
 flock -u 8

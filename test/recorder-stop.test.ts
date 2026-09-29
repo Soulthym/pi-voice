@@ -347,7 +347,7 @@ for (const script of ["client/pi-voice-stt-session", "client/pi-voice-termux-stt
 		const tickets = path.join(stateDir(root, script), linux ? "tickets" : "recording.tickets");
 		const saved = (latest: number, watermark: number) => linux
 			? `${BOOT} ${epoch} ${latest} ${watermark} 0 - idle\n`
-			: `${epoch} ${latest} ${watermark} ${BOOT}\n`;
+			: `${epoch} ${latest} ${watermark} ${BOOT} -\n`;
 		const second = connect("ticket");
 		await waitFor(async () => second.output === handshake(2));
 		first.child.stdin.end(`record ${epoch}.1 ${BOOT}\n`);

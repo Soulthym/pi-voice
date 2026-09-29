@@ -81,7 +81,7 @@ rm -f "$HOME/pi-voice-test.ogg"
 timeout 2s termux-microphone-record -f "$HOME/pi-voice-test.ogg" -l 5 -e opus
 ```
 
-Do not retry or replace scripts over an uncertain permission-test start. After a timed-out/interrupted API call, `termux-microphone-record -q` plus `isRecording: false` is not dispatch-closure proof; a queued start may still be outstanding. Preserve the fence and evidence. Verified reboot can close old-boot helper work, but does not by itself reclaim an uncertain host lease.
+Do not retry or replace scripts over an uncertain permission-test start. After a timed-out/interrupted API call, `termux-microphone-record -q` plus `isRecording: false` is not dispatch-closure proof; a queued start may still be outstanding. A failed, timed-out or interrupted quit also retains a durable fence: that quit may arrive after an idle snapshot and stop a replacement capture. Missing ownership evidence and older Termux ticket files without dispatch proof are not idle proof. Preserve the fence and evidence. Verified reboot can close old-boot helper work, but does not by itself reclaim an uncertain host lease.
 
 If direct recording works, reinstall all `client/pi-voice-*` scripts together and restart every wrapper. Do not mix a new `pi-voice-ssh` with an older bridge/helper set.
 

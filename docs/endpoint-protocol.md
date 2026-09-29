@@ -93,6 +93,10 @@ protection or hardware power-loss validation. Desktop state lives under
 `${XDG_STATE_HOME:-$HOME/.local/state}/pi-voice/microphone-desktop`, and Termux state
 under `pi-voice/microphone/termux` in the same state root. Runtime audio files are not
 ownership proof. Preserve durable state even when runtime directories are cleaned.
+Desktop initialization retries sync the containing filesystem before issuing tickets,
+including ancestors left behind by an interrupted initialization. Termux tickets also
+persist the admitted owner; missing or mismatched `active` evidence remains fenced,
+not acknowledged as stopped or reclaimed as an empty lock.
 
 START rechecks its expected kernel boot and cancellation under the admission fence.
 A verified different kernel boot cancels all previously issued tickets and retires
@@ -137,7 +141,7 @@ For `stop`, the only successful response is exactly:
 ok <base64 UTF-8 of "stopped N">\n
 ```
 
-The decoded payload must be exactly `stopped N`, echoing the full origin-scoped `<epoch>.<counter>` ticket requested by the host. Generic `stopped`, foreign epochs, and different counters are rejected without releasing ownership. Validate the ticket against persistent server state before acknowledging it; blindly echoing a foreign request is not proof. This protocol trusts the recorder implementation, not an unauthenticated echo as cryptographic attestation. Send it **only after actual microphone stop is confirmed**, or after cancelling an admitted pre-start generation so it can never start. Accepting a stop request, closing a socket, or observing a dead API client is not confirmation. The bundled Linux helper directly owns and waits for the recorder and encoder children before publishing durable retirement; arbitrary daemonizing replacement tools are not supported. Android requires both a persisted successful, exact-path stock API start response and subsequent `isRecording: false` after quit. A timed-out, failed, interrupted or unrecognized start response remains uncertain on the same boot even if info reports idle. A later explicit Android stop can retire a completed-start scope after its original helper exits, but cannot invent dispatch completion. No native Android ticket enforcement or cancellation watermark is claimed. An unconfirmed stop returns `error <base64-error-message>` and retains ownership. Disconnect cleanup is generation-scoped too.
+The decoded payload must be exactly `stopped N`, echoing the full origin-scoped `<epoch>.<counter>` ticket requested by the host. Generic `stopped`, foreign epochs, and different counters are rejected without releasing ownership. Validate the ticket against persistent server state before acknowledging it; blindly echoing a foreign request is not proof. This protocol trusts the recorder implementation, not an unauthenticated echo as cryptographic attestation. Send it **only after actual microphone stop is confirmed**, or after cancelling an admitted pre-start generation so it can never start. Accepting a stop request, closing a socket, or observing a dead API client is not confirmation. The bundled Linux helper directly owns and waits for the recorder and encoder children before publishing durable retirement; arbitrary daemonizing replacement tools are not supported. Android requires a persisted successful, exact-path stock API start response, successful quit-call completion, and subsequent `isRecording: false`. Quit dispatch is durably marked before the call; a failed, timed-out or interrupted quit leaves a same-boot fence even if info reports idle, since a delayed quit could stop the next capture. A timed-out, failed, interrupted or unrecognized start response remains uncertain on the same boot even if info reports idle. A later explicit Android stop can retire a completed-start scope after its original helper exits only if no uncertain quit remains; it cannot invent dispatch completion. No native Android ticket enforcement or cancellation watermark is claimed. An unconfirmed stop returns `error <base64-error-message>` and retains ownership. Disconnect cleanup is generation-scoped too.
 
 For `record`, an `ok` response is treated as direct recognized text for compatibility.
 
@@ -162,7 +166,8 @@ a control request reaching a different server is not proof about the old server.
 
 **Stage C requires another coordinated host/recorder upgrade**, including both
 installed Termux helper copies and the desktop helper. Bootless epoch-aware clients
-are now incompatible before START. Existing legacy runtime recorder evidence is
+are now incompatible before START. Earlier four-field Termux ticket files lack durable
+owner proof and are also refused rather than upgraded to idle. Existing legacy runtime recorder evidence is
 refused, not silently migrated to idle: after independently confirming all old capture
 and outstanding API dispatches have stopped and ending old sessions, explicitly
 archive the old recorder-only state under operator supervision. Preserve it as evidence;

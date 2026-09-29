@@ -8,7 +8,7 @@ import test from "node:test";
 // Shell-only service schedules, not Android/hardware dispatch-closure evidence.
 // A failed/timed-out caller can leave a queued native request after it exits.
 for (const script of ["client/pi-voice-termux-stt-session", "termux/pi-voice-stt-session"]) {
-	for (const outcome of ["failed", "timeout", "interrupted", "empty-success", "unknown", "json", "wrong-path", "error", "success", "success-no-space", "success-retained"]) test(`${script}: ${outcome} start completion gates idle stop proof`, async t => {
+	for (const outcome of ["failed", "timeout", "interrupted", "empty-success", "unknown", "json", "wrong-path", "error", "success", "success-no-space", "success-retained", "success-missing-active", "success-delayed-quit"]) test(`${script}: ${outcome} start completion gates idle stop proof`, async t => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-android-boundary-"));
 		const bin = path.join(root, "bin");
 		await fs.mkdir(bin);
@@ -37,7 +37,8 @@ case "$1" in
       timeout) sleep 5;;
       interrupted) kill -TERM $$;;
     esac;;
--q) ${outcome === "success-retained" ? '[[ -e "$TMPDIR/allow-stop" ]] &&' : ""} rm -f "$TMPDIR/running";;
+-q) ${outcome === "success-delayed-quit" ? 'touch "$TMPDIR/queued-quit"; rm -f "$TMPDIR/running"; sleep 5;' : ""}
+    ${["success-retained", "success-missing-active"].includes(outcome) ? '[[ -e "$TMPDIR/allow-stop" ]] &&' : ""} rm -f "$TMPDIR/running"; exit 0;;
 -i) if [[ -e "$TMPDIR/running" ]]; then printf '{"isRecording":true}'; else printf '{"isRecording":false}'; fi;;
 esac
 `, { mode: 0o700 });
@@ -77,10 +78,21 @@ esac
 		const recording = await fs.readFile(path.join(root, "queued-start"), "utf8");
 		owner.child.stdin.end();
 		await owner.closed;
+		const state = path.join(root, "pi-voice/microphone/termux");
+		if (outcome === "success-missing-active") {
+			assert.ok(await fs.stat(path.join(root, "running")));
+			await fs.unlink(path.join(state, "active"));
+			for (const command of [`stop ${ticket}\n`, "ticket\n"]) {
+				const rejected = connect(command); rejected.child.stdin.end();
+				assert.equal(await rejected.closed, "", "missing owner must neither acknowledge stop nor admit");
+			}
+			assert.ok(await fs.stat(path.join(state, "recording")));
+			assert.ok(await fs.stat(path.join(root, "running")));
+			return;
+		}
 		const stop = connect(`stop ${ticket}\n`);
 		stop.child.stdin.end();
 		const reply = await stop.closed;
-		const state = path.join(root, "pi-voice/microphone/termux");
 		if (outcome === "success" || outcome === "success-no-space") {
 			assert.equal(reply, `ok ${Buffer.from(`stopped ${ticket}`).toString("base64")}\n`);
 			assert.match(await fs.readFile(path.join(state, "start-completed"), "utf8"), new RegExp(`^${ticket}:`));
@@ -89,6 +101,21 @@ esac
 		}
 		assert.match(reply, /^error /);
 		assert.match(await fs.readFile(path.join(state, "active"), "utf8"), new RegExp(`^${ticket}:`));
+		if (outcome === "success-delayed-quit") {
+			assert.ok(await fs.stat(path.join(state, "quit-uncertain")));
+			assert.ok(await fs.stat(path.join(state, "start-completed")));
+			assert.equal(await fs.stat(path.join(root, "running")).catch(() => false), false, "idle snapshot does not close the queued quit");
+			const blocked = connect("ticket\n");
+			const next = await new Promise<string>(resolve => blocked.child.stdout.once("data", data => resolve(String(data).trim().slice(7))));
+			blocked.child.stdin.end(`record ${next}\n`);
+			assert.match(await blocked.closed, /\nerror /);
+			// Deliver the service's outstanding quit only after replacement was attempted.
+			await fs.rename(path.join(root, "queued-quit"), path.join(root, "delivered-quit"));
+			const retry = connect(`stop ${ticket}\n`); retry.child.stdin.end();
+			assert.match(await retry.closed, /^error /, "no completion evidence can be invented on retry");
+			assert.ok(await fs.stat(path.join(state, "active")));
+			return;
+		}
 		if (outcome === "success-retained") {
 			assert.match(await fs.readFile(path.join(state, "start-completed"), "utf8"), new RegExp(`^${ticket}:`));
 			await fs.writeFile(path.join(root, "allow-stop"), "");

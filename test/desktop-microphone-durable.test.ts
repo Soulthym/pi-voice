@@ -63,7 +63,8 @@ for (const nested of [false, true]) test(`desktop durable microphone: publicatio
 	else await fs.mkdir(`${f.root}/state/pi-voice`);
 	const state = `${f.env.XDG_STATE_HOME}/pi-voice/microphone-desktop`;
 	const boundary = nested ? f.root : `${f.root}/state/pi-voice`;
-	await f.mock("sync", `for target in "$@"; do
+	await f.mock("sync", `[[ $1 == -f ]] && exec /bin/sync "$@"
+for target in "$@"; do
   [[ $target == "${boundary}" || $target == "${boundary}/"* || $target == "$TMPDIR/runtime/"* ]] || exit 1
   [[ -d $target && $target != "$TMPDIR/runtime/"* ]] && printf '%s\\n' "$target" >>"$TMPDIR/synced"
 done
@@ -72,6 +73,21 @@ exec /bin/sync "$@"`);
 	const expected = [state];
 	while (expected.at(-1) !== boundary) expected.push(path.dirname(expected.at(-1)!));
 	assert.deepEqual([...new Set((await fs.readFile(`${f.root}/synced`, "utf8")).trim().split("\n"))], expected);
+});
+
+test("desktop durable microphone: interrupted ancestor publication is retried before ticket issuance", async t => {
+	const f = await fixture(t);
+	f.env.XDG_STATE_HOME = `${f.root}/missing/nested/state`;
+	const state = `${f.env.XDG_STATE_HOME}/pi-voice/microphone-desktop`;
+	await f.mock("sync", '[[ $1 == "$XDG_STATE_HOME/pi-voice" ]] && exit 1; exec /bin/sync "$@"');
+	assert.equal(await f.exchange("ticket"), "");
+	assert.ok(await fs.stat(`${state}/tickets`), "initialization saved tickets before ancestor sync failed");
+	await f.mock("sync", '[[ $1 == -f ]] && { touch "$TMPDIR/retried-publication"; exit 1; }; exec /bin/sync "$@"');
+	assert.equal(await f.exchange("ticket"), "", "retry must not issue a ticket when filesystem publication fails");
+	assert.ok(await fs.stat(`${f.root}/retried-publication`));
+	await f.mock("sync", 'exec /bin/sync "$@"');
+	assert.match(await f.exchange("ticket"), /^ticket /);
+	assert.equal(await fs.stat(`${f.root}/spawned`).catch(() => false), false);
 });
 
 test("desktop durable microphone: immediate cancellation before encoder spawn cannot strand its FIFO reader", async t => {

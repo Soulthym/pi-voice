@@ -1,5 +1,23 @@
 # Tests
 
+## Stage C review safety fixes
+
+Typecheck passed; isolated full checkout **1175 passed / 33 compatibility skips / zero
+failures**; installed-native full suite **1208 passed / zero skips or failures**.
+Logs: `/tmp/vr.5rBz04/{check,full}.log`, `/tmp/vn.T3rIvw/native.log`.
+Runs used `env -i` and owned temporary HOME/TMPDIR/XDG roots, mocked transports and
+inert native UI. An initial full run found an obsolete four-field Termux fixture;
+the updated fixture and both final full runs pass. LSP unavailable; Bash syntax,
+helper-copy parity and diff whitespace checks passed.
+
+New regressions cover lost Termux ownership before and during stop, old ticket files
+without dispatch proof, interrupted desktop ancestor publication and retry sync failure,
+and a completed Android start plus idle snapshot while quit remains outstanding.
+No live endpoints, SSH, devices, providers/inference, deployment, session restarts or
+runtime settings were used. These are synthetic dispatch schedules, not Android
+hardware or power-loss validation; no new host orphan-recovery guarantee is claimed.
+The earlier SSH results below were not rerun for this follow-up.
+
 ## Stage C microphone validation (partial recovery coverage)
 
 Final typecheck passed; full checkout **1168 passed / 33 compatibility skips / zero failures**;

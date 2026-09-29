@@ -40,6 +40,31 @@ exec /usr/bin/sync "$@"
 		assert.deepEqual(synced.slice(0, publication.length), publication);
 		assert.ok(synced.every(target => target === root || target.startsWith(`${root}/`)));
 	});
+	test(`${script}: ownership loss while stop waits cannot acknowledge retirement`, async t => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-termux-owner-loss-"));
+		t.after(() => fs.rm(root, { recursive: true, force: true }));
+		const state = path.join(root, "pi-voice/microphone/termux");
+		await fs.mkdir(path.join(state, "recording"), { recursive: true, mode: 0o700 });
+		const boot = (await fs.readFile("/proc/sys/kernel/random/boot_id", "utf8")).trim();
+		const epoch = "a".repeat(32), ticket = `${epoch}.1`, owner = `${ticket}:${process.pid}`;
+		await fs.writeFile(path.join(state, "recording.tickets"), `${epoch} 1 0 ${boot} ${owner}\n`);
+		await fs.writeFile(path.join(state, "active"), owner);
+		const child = spawn("bash", [path.resolve(script)], {
+			env: { PATH: "/usr/bin:/bin", HOME: root, TMPDIR: root, XDG_STATE_HOME: root },
+		});
+		let output = ""; child.stdout.on("data", chunk => { output += chunk; }); child.stderr.resume();
+		const closed = new Promise(resolve => child.once("close", resolve));
+		t.after(async () => { child.kill("SIGTERM"); await closed; });
+		child.stdin.end(`stop ${ticket}\n`);
+		for (let i = 0; i < 200 && !await fs.stat(path.join(state, "stop")).catch(() => false); i++) {
+			await new Promise(resolve => setTimeout(resolve, 10));
+		}
+		assert.ok(await fs.stat(path.join(state, "stop")));
+		await fs.unlink(path.join(state, "active"));
+		await closed;
+		assert.equal(output, "", "marker disappearance is not durable retirement");
+		assert.match(await fs.readFile(path.join(state, "recording.tickets"), "utf8"), new RegExp(`${owner}\\n$`));
+	});
 	test(`${script}: durable boot-bound tickets, cancellation and legacy refusal`, async t => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-termux-state-"));
 		t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -74,12 +99,17 @@ exec /usr/bin/sync "$@"
 		assert.equal(await run("ticket\n", line => `record ${line.split(" ")[1]} 00000000-0000-0000-0000-000000000000\n`), `ticket ${epoch}.2 ${boot}\n`);
 		assert.equal(await run("ticket\n", line => `record ${line.split(" ")[1]}\n`), `ticket ${epoch}.3 ${boot}\n`);
 		// A persisted prior-boot dispatch is reclaimable without invoking Android.
-		await fs.writeFile(path.join(state, "recording.tickets"), `${epoch} 3 1 00000000-0000-0000-0000-000000000000\n`);
+		await fs.writeFile(path.join(state, "recording.tickets"), `${epoch} 3 1 00000000-0000-0000-0000-000000000000 ${epoch}.3:99999999\n`);
 		await fs.writeFile(path.join(state, "active"), `${epoch}.3:99999999\n`);
 		assert.equal(await run(`stop ${epoch}.3\n`), `ok ${Buffer.from(`stopped ${epoch}.3`).toString("base64")}\n`);
 		assert.equal(await fs.stat(path.join(state, "active")).catch(() => false), false);
-		assert.equal(await fs.readFile(path.join(state, "recording.tickets"), "utf8"), `${epoch} 3 3 ${boot}\n`);
+		assert.equal(await fs.readFile(path.join(state, "recording.tickets"), "utf8"), `${epoch} 3 3 ${boot} -\n`);
 		assert.equal(await run("ticket\n"), `ticket ${epoch}.4 ${boot}\n`);
+		const saved = await fs.readFile(path.join(state, "recording.tickets"), "utf8");
+		await fs.writeFile(path.join(state, "recording.tickets"), `${epoch} 4 3 ${boot}\n`);
+		assert.equal(await run(`stop ${epoch}.4\n`), "", "old state without dispatch proof is not idle proof");
+		assert.equal(await run("ticket\n"), "");
+		await fs.writeFile(path.join(state, "recording.tickets"), saved);
 		await fs.writeFile(path.join(root, "pi-voice-recording-active"), "legacy-owner");
 		assert.equal(await run("ticket\n"), "");
 		await fs.unlink(path.join(root, "pi-voice-recording-active"));

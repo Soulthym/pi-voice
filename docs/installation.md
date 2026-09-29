@@ -137,11 +137,13 @@ Microphone ownership now uses private durable state under
 `${XDG_STATE_HOME:-$HOME/.local/state}/pi-voice/microphone-desktop` (desktop) or
 `pi-voice/microphone/termux` (Termux). Keep these directories and host journals.
 Legacy runtime recorder state is deliberately refused, including idle old ticket/fence
-files. Archive only those old recorder files after confirmed stop and ended old sessions,
+files. Earlier four-field Termux ticket files are also refused because they lack
+persisted owner proof. Archive only those old recorder files after confirmed stop and ended old sessions,
 never as a way to bypass uncertainty. See [microphone migration](endpoint-protocol.md#microphone-protocol-migration).
 
 Android API timeout/interruption remains uncertain on the same boot; quit plus an
-idle info snapshot alone cannot close an outstanding start. Ordinary completed stock
+idle info snapshot alone cannot close an outstanding start or quit. An uncertain quit
+stays fenced because it could stop a later capture. Ordinary completed stock
 API responses are tracked separately. No APK/dependency change or native service
 cancellation guarantee is added. Complete host input orphan recovery remains fenced.
 

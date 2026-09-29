@@ -214,7 +214,7 @@ test("microphone sessions reject a second concurrent recorder", async () => {
 		const termuxState = path.join(termuxRuntime, "state/pi-voice/microphone/termux");
 		fs.mkdirSync(path.join(termuxState, "recording"), { recursive: true, mode: 0o700 });
 		fs.writeFileSync(path.join(termuxState, "active"), `${MIC_EPOCH}.1:${owner.pid}\n`);
-		fs.writeFileSync(path.join(termuxState, "recording.tickets"), `${MIC_EPOCH} 1 0 ${MIC_BOOT}\n`);
+		fs.writeFileSync(path.join(termuxState, "recording.tickets"), `${MIC_EPOCH} 1 0 ${MIC_BOOT} ${MIC_EPOCH}.1:${owner.pid}\n`);
 		const termuxBin = restrictedPath(path.join(root, "termux-tools"), {
 			"termux-microphone-record": "exit 0",
 		});

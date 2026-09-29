@@ -30,6 +30,7 @@ active_file="$state_dir/active"
 recording_lock="$state_dir/recording"
 pending_file="$state_dir/pending"
 completed_file="$state_dir/start-completed"
+quit_file="$state_dir/quit-uncertain"
 
 encode_message() {
   printf '%s' "$1" | base64 | tr -d '\n'
@@ -41,16 +42,17 @@ valid_counter() {
   [[ $1 =~ ^(0|[1-9][0-9]{0,15})$ ]] && (( $1 <= 9007199254740991 ))
 }
 load_tickets() {
-  epoch= latest=0 watermark=0 saved_boot=$boot_id
+  epoch= latest=0 watermark=0 saved_boot=$boot_id dispatch=-
   if [[ -e $ticket_state ]]; then
-    IFS=' ' read -r epoch latest watermark saved_boot extra <"$ticket_state" || exit 1
+    IFS=' ' read -r epoch latest watermark saved_boot dispatch extra <"$ticket_state" || exit 1
     [[ $epoch =~ ^[0-9a-f]{32}$ ]] && valid_counter "$latest" && valid_counter "$watermark" && [[ -z $extra ]] && valid_boot "$saved_boot" && (( watermark <= latest )) || exit 1
+    [[ $dispatch == - || $dispatch =~ ^[0-9a-f]{32}\.[1-9][0-9]{0,15}:[1-9][0-9]*$ ]] || exit 1
     if [[ $saved_boot != "$boot_id" ]]; then
       # Kernel reboot closes old dispatches; same-boot idle snapshots do not.
       watermark=$latest
-      rm -f "$active_file" "$stop_file" "$pending_file" "$completed_file" || exit 1
+      rm -f "$active_file" "$stop_file" "$pending_file" "$completed_file" "$quit_file" || exit 1
       rmdir "$recording_lock" 2>/dev/null || true
-      saved_boot=$boot_id
+      saved_boot=$boot_id dispatch=-
       save_tickets
     fi
   elif [[ -e $active_file || -e $pending_file || -e $recording_lock ]]; then
@@ -58,12 +60,30 @@ load_tickets() {
   fi
   if [[ -e $active_file ]]; then
     owner=$(cat "$active_file") || exit 1
-    [[ $owner =~ ^[0-9a-f]{32}\.[1-9][0-9]{0,15}:[1-9][0-9]*$ ]] || exit 1
+    [[ $owner == "$dispatch" && $dispatch != - ]] || exit 1
+  elif [[ $dispatch != - ]]; then
+    # Missing ownership evidence cannot prove a surviving Android capture idle.
+    exit 1
   fi
 }
 save_tickets() {
-  printf '%s %s %s %s\n' "$epoch" "$latest" "$watermark" "$saved_boot" >"$ticket_state.tmp" &&
+  printf '%s %s %s %s %s\n' "$epoch" "$latest" "$watermark" "$saved_boot" "$dispatch" >"$ticket_state.tmp" &&
     sync "$ticket_state.tmp" && mv -f "$ticket_state.tmp" "$ticket_state" && sync "$state_dir" || exit 1
+}
+
+retire_dispatch() {
+  load_tickets
+  dispatch=-
+  save_tickets
+  rm -f "$active_file" "$stop_file" "$pending_file"
+  rmdir "$recording_lock" 2>/dev/null || true
+}
+confirmed_quit() {
+  # A timed-out quit may execute against the next capture. Never retry past it.
+  [[ ! -e $quit_file ]] || return 1
+  : >"$quit_file" && sync "$quit_file" "$state_dir" || return 1
+  timeout 2s termux-microphone-record -q 9>&- >/dev/null 2>&1 || return 1
+  rm -f "$quit_file" && sync "$state_dir"
 }
 
 # Never unlink this fence: admission, cancellation and start share its inode.
@@ -106,16 +126,13 @@ if [[ $command == stop\ * && -z $issued_ticket ]]; then
     : >"$stop_file"
     if [[ -e $pending_file ]]; then
       # Cancel admission even when its dependency/device check is still blocked.
-      rm -f "$active_file" "$stop_file" "$pending_file"
-      rmdir "$recording_lock" 2>/dev/null || true
+      retire_dispatch
     elif ! kill -0 "${owner##*:}" 2>/dev/null; then
       # A dead API client does not imply a stopped Android MediaRecorder.
       # Hold the admission fence through confirmation and stale-lease retirement.
-      timeout 2s termux-microphone-record -q 9>&- >/dev/null 2>&1 || true
-      if [[ $(cat "$completed_file" 2>/dev/null || true) == "$owner" ]] &&
+      if confirmed_quit && [[ $(cat "$completed_file" 2>/dev/null || true) == "$owner" ]] &&
         timeout 2s termux-microphone-record -i 9>&- 2>/dev/null | grep -Eq '"isRecording"[[:space:]]*:[[:space:]]*false'; then
-        rm -f "$active_file" "$stop_file" "$pending_file"
-        rmdir "$recording_lock" 2>/dev/null || true
+        retire_dispatch
       else
         printf 'error %s\n' "$(encode_message 'Microphone stop not confirmed')"
         exit 0
@@ -129,6 +146,9 @@ if [[ $command == stop\ * && -z $issued_ticket ]]; then
     sleep 0.1
   done
   if [[ -z $owner || $(cat "$active_file" 2>/dev/null || true) != "$owner" ]]; then
+    flock -x 9 || exit 1
+    load_tickets
+    [[ ${dispatch%%:*} != "$ticket" ]] || exit 1
     sync "$state_dir" || exit 1
     printf 'ok %s\n' "$(encode_message "stopped $ticket")"
   else
@@ -148,6 +168,8 @@ if [[ -e $active_file ]] || ! mkdir "$recording_lock" 2>/dev/null; then
   exit 0
 fi
 recording_owner="$issued_ticket:$BASHPID"
+dispatch=$recording_owner
+save_tickets
 recording="$runtime_dir/pi-voice-recording-${recording_owner}.ogg"
 rm -f "$recording" "$stop_file" "$completed_file"
 printf '%s\n' "$recording_owner" >"$active_file.tmp" && sync "$active_file.tmp" &&
@@ -161,7 +183,7 @@ disconnect_pid=
 stop_recorder() {
   [[ $recorder_stopped == true ]] && return 0
   [[ $(cat "$active_file" 2>/dev/null || true) == "$recording_owner" ]] || return 1
-  timeout 2s termux-microphone-record -q 9>&- >/dev/null 2>&1 || true
+  confirmed_quit || return 1
   # Caller exit plus idle is not dispatch closure. Require positive completion.
   if [[ $(cat "$completed_file" 2>/dev/null || true) == "$recording_owner" ]] &&
     timeout 2s termux-microphone-record -i 9>&- 2>/dev/null | grep -Eq '"isRecording"[[:space:]]*:[[:space:]]*false'; then
@@ -179,8 +201,7 @@ cleanup() {
   [[ -n $tail_pid ]] && kill "$tail_pid" 2>/dev/null || true
   [[ -n $disconnect_pid ]] && kill "$disconnect_pid" 2>/dev/null || true
   if [[ $recorder_stopped == true && $(cat "$active_file" 2>/dev/null || true) == "$recording_owner" ]]; then
-    rm -f "$active_file" "$stop_file" "$pending_file"
-    rmdir "$recording_lock" 2>/dev/null || true
+    retire_dispatch
   fi
   sync "$state_dir" || exit 1
   flock -u 9
