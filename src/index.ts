@@ -508,8 +508,11 @@ export default async function (pi: ExtensionAPI) {
 			// receipts retire handles, including those admitted during this cleanup.
 			const unresolved = journal?.episode(resource)?.handles.length;
 			if (state.episode === cleanup.episode && journal === stopRecovery && !unresolved) {
-				state.episode = undefined;
-				try { journal?.clear(resource); } catch (error) { notifyStopFailure(error); }
+				try { journal?.clear(resource); state.episode = undefined; }
+				catch (error) {
+					state.episode = { device, cause: String(error), notified: false };
+					notifyStopFailure(error, state.episode);
+				}
 			} else if (!state.episode && journal === stopRecovery && unresolved) {
 				state.episode = { device, cause: "Newer transport scope remains unconfirmed", notified: false };
 			}
@@ -2343,6 +2346,12 @@ export default async function (pi: ExtensionAPI) {
 		}
 	};
 
+	// Seal dispatch and close descendants before replaying scopes only the journal still knows.
+	const shutdownOutput = async (recovery = stopRecovery, router = deviceRouter, configured = config.output): Promise<void> => {
+		await vocalizer.shutdown(recovery?.episode("output")?.handles.length
+			? scope => recovery.stopOutputScope(scope, router, configured) : undefined);
+		if (recovery?.episode("output")?.handles.length) await recovery.retry("output", router, configured);
+	};
 	let deviceRebind: Promise<void> | undefined;
 	let reconnectDiagnostic = { notified: false };
 	const unconfirmedDeviceStops = new WeakSet<Promise<void>>();
@@ -2380,17 +2389,16 @@ export default async function (pi: ExtensionAPI) {
 					stopUnconfirmed = previousStopUnconfirmed;
 				}
 				if (force && retiredStops.size) {
-					const previousStopUnconfirmed = stopUnconfirmed;
 					stopUnconfirmed = true;
 					await Promise.all([...retiredStops].map(cleanup => cleanup()));
-					stopUnconfirmed = previousStopUnconfirmed;
+					stopUnconfirmed = stopsUnresolved();
 				}
 				if (epoch !== playbackRequestEpoch || ctx !== activeContext) return false;
 				if (recover && stopRecovery?.episode("output")?.handles.length) {
 					// Retry the original identity before resolving a possibly different/ambiguous attachment.
 					const recovery = stopRecovery;
 					stopUnconfirmed = true;
-					await trackStop("output", vocalizer.shutdown(scope => recovery.stopOutputScope(scope, deviceRouter, config.output)));
+					await trackStop("output", shutdownOutput(recovery));
 					if (stopResources.output.episode || stopResources.output.cleanup) throw new Error("Retained output scopes remain unconfirmed");
 					stopUnconfirmed = false;
 				}
@@ -3943,13 +3951,18 @@ export default async function (pi: ExtensionAPI) {
 		const retiringRebind = deviceRebind;
 		let stopping: Promise<void> | undefined;
 		const cleanup = (): Promise<void> => stopping ??= Promise.all([
-			trackStop("input", phoneInput.cancel()), retiringRebind?.catch(() => {}),
-			...workers.map(worker => worker.terminate()), trackStop("output", vocalizer.shutdown()),
+			trackStop("input", ownerRecovery?.episode("input")?.handles.length
+				? phoneInput.recover(() => ownerRecovery.retry("input", ownerRouter, ownerInput)) : phoneInput.cancel()), retiringRebind?.catch(() => {}),
+			...workers.map(worker => worker.terminate()), trackStop("output", shutdownOutput(ownerRecovery, ownerRouter, ownerOutput)),
 		]).then(() => {
 			if (Object.values(stopResources).some(resource => resource.episode || resource.cleanup)) throw new Error("Newer stop remains unconfirmed");
 			retiringCoordinator?.shutdown();
 			retiredStops.delete(cleanup);
 		}).finally(() => { stopping = undefined; });
+		const ownerRecovery = stopRecovery;
+		const ownerRouter = deviceRouter;
+		const ownerInput = config.input;
+		const ownerOutput = config.output;
 		retiredStops.add(cleanup);
 		try {
 			await Promise.all([inputCancelled, cleanup()]);
