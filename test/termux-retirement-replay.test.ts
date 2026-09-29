@@ -21,7 +21,7 @@ for (const boundary of ["publish-before", "publish-after", "remove-before", "rem
 		await fs.writeFile(path.join(state, "recording.tickets"), `${epoch} 1 0 ${boot} ${owner}\n`);
 		await fs.writeFile(path.join(state, "active"), `${owner}\n`);
 		if (pending) await fs.writeFile(path.join(state, "pending"), "");
-		else await fs.writeFile(path.join(state, "start-completed"), `${owner}\n${recording}\nRecording started: ${recording}\nMax Duration: 00:30\n`);
+		else await fs.writeFile(path.join(state, "start-completed"), `${owner}\n${recording}\nRecording started: ${recording}\nMax Duration: 00:30\n`, { mode: 0o600 });
 		await fs.writeFile(path.join(bin, "termux-microphone-record"), `#!/bin/bash
 printf '%s\\n' "$1" >> "$HOME/calls"
 case "$1" in

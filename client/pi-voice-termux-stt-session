@@ -101,8 +101,10 @@ save_tickets() {
 # helper death. The receipt retains the actual stdout, not merely a client PID.
 start_completed() {
   local expected=$1 receipt ack_owner ack_path response
+  completed_path=
   for receipt in "$completed_file" "$completed_file.tmp"; do
-    [[ -f $receipt ]] || continue
+    [[ -f $receipt && ! -L $receipt && -O $receipt && $(stat -c %a "$receipt") == 600 &&
+       $(stat -c %s "$receipt") -le 16384 ]] || continue
     # Previous releases published this owner-only marker after validating stdout.
     if [[ $receipt == "$completed_file" && $(cat "$receipt") == "$expected" ]]; then
       sync "$receipt" "$state_dir"
@@ -113,16 +115,22 @@ start_completed() {
       IFS= read -r ack_path
       response=$(cat)
     } <"$receipt"
-    [[ $ack_owner == "$expected" && $ack_path == /*/pi-voice-recording-"$expected".ogg ]] || continue
+    [[ $ack_owner == "$expected" ]] && valid_recording_path "$ack_path" "$expected" || continue
     valid_start_response "$response" "$ack_path" || continue
     sync "$receipt" || return 1
     if [[ $receipt != "$completed_file" ]]; then
       mv -f "$receipt" "$completed_file" || return 1
     fi
     sync "$state_dir" || return 1
+    completed_path=$ack_path
     return 0
   done
   return 1
+}
+valid_recording_path() {
+  local LC_ALL=C
+  [[ ${#1} -le 4096 && $1 == /*/pi-voice-recording-"$2".ogg &&
+     $1 != *[[:cntrl:]]* && $1 != *//* && $1 != */./* && $1 != */../* ]]
 }
 valid_start_response() {
   [[ ( ${1%%$'\n'*} == "Recording started: $2" ||
@@ -150,7 +158,7 @@ confirmed_quit() {
   local response
   response=$(timeout 2s termux-microphone-record -q 9>&- 2>/dev/null) || return 1
   # Stock MicRecorderAPI returns the exact path, or idle; neither proves destruction.
-  [[ $response == "Recording finished: $runtime_dir/pi-voice-recording-$1.ogg" ||
+  [[ ( -n $completed_path && $response == "Recording finished: $completed_path" ) ||
      $response == 'No recording to stop' ]] || return 1
   # This acknowledges stopService(), not MediaRecorder destruction. The caller
   # must still observe fresh idle, and only after a closed start dispatch.
@@ -158,7 +166,7 @@ confirmed_quit() {
 }
 
 closed_recording() {
-  local start_closed=false
+  local start_closed=false completed_path=
   start_completed "$1" && start_closed=true
   # Best-effort stop is still useful for an unknown start, but cannot retire it.
   confirmed_quit "$1" || return 1
@@ -275,9 +283,11 @@ if [[ -e $active_file ]] || ! mkdir "$recording_lock" 2>/dev/null; then
   exit 0
 fi
 recording_owner="$issued_ticket:$BASHPID"
+# Stock termux-microphone-record canonicalizes the directory before calling Android.
+recording="$(realpath -e -- "$runtime_dir")/pi-voice-recording-${recording_owner}.ogg" || exit 1
+valid_recording_path "$recording" "$recording_owner" || exit 1
 dispatch=$recording_owner
 save_tickets
-recording="$runtime_dir/pi-voice-recording-${recording_owner}.ogg"
 rm -f "$stop_file" "$completed_file" "$completed_file.tmp"
 printf '%s\n' "$recording_owner" >"$active_file.tmp" && sync "$active_file.tmp" &&
   mv -f "$active_file.tmp" "$active_file" && sync "$state_dir" || exit 1
