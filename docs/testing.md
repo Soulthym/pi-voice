@@ -1,5 +1,32 @@
 # Tests
 
+## Stage C microphone validation (partial recovery coverage)
+
+Final typecheck passed; full checkout **1168 passed / 33 compatibility skips / zero failures**;
+installed-native full suite **1201 passed / zero skips or failures**. Logs:
+`/tmp/voice-stage-c-{check,full3,native}.log`. Runs used `env -i`, short temporary
+HOME/TMPDIR/XDG state/cache/config/runtime roots, synthetic transports/audio and
+inert native UI. LSP unavailable; Bash syntax, helper-copy parity and diff whitespace
+checks passed. Initial full validation found old bootless socket fixtures (one hung
+suite); the next run found one overlong temporary Unix socket path. Updated fixtures
+and a shorter isolated root yielded the final clean runs.
+
+Tests cover durable tickets/runtime loss, actual boot lookup failure and simulated
+changed boot, old/mismatched START, stop-before-start, private state, failed syncing,
+legacy refusal, direct child wait and early FIFO cancellation, host retention before
+START, persistence failure, malformed boot/upgrade rejection, immutable scope identity,
+and intentionally uncertain host input after retirement. Android deferred-start tests
+now retain the fence after failed/timed-out/interrupted/unknown completion even with
+idle info; recognized successful API completion plus actual stop retires normally.
+
+Final isolated synthetic SSH **12/12 passed**, including boot-bound microphone
+forwarding/cancellation and unchanged v3 output fences; no server-local capture or
+player invocation. Log: `/tmp/pi-voice-ssh-desktop-final.se19EX.log`. Owned containers,
+image tag and temporary runtime were cleaned up. No real endpoints, devices,
+providers/inference, deployment or session restarts. No Android native cancellation,
+hardware power-loss behavior, complete input all-idle accounting or host-level reboot
+reclamation is established by these checks.
+
 ## Output resilience final validation
 
 Stage A durable output receipts and Stage B remote prepare/grant/covered-ledger validation: `npm run check` passed; full checkout **1114 passed, 33 compatibility skips, zero failures (1147 total)**; installed-native full suite **1147 passed, zero skips/failures**. Logs: `/tmp/voice-output-{check,test,native}.log`. All final runs used `env -i` and owned temporary HOME/TMPDIR/XDG roots. LSP is not configured. An initial run exposed an obsolete raw-playback fixture and an overlong temporary Unix socket path; the v3 fixture and short-root reruns pass.

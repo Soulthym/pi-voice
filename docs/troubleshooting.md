@@ -46,6 +46,22 @@ The user reports F5 after device disconnection. The journal establishes that a s
 
 Do not remove coordinator leases, ticket state, recorder locks, persistent fences or receipts while confirmation is outstanding. Killing Pi, SSH, a helper or the host worker is not remote stop proof. Do not start a permission-test recording alongside an unconfirmed capture. Complete in-process cleanup permits a later explicit retry; it never automatically restarts playback/capture. Saved-scope receipts alone after process loss do not meet that complete-proof condition.
 
+### Stage C microphone fences
+
+`Boot-bound microphone admission unavailable` means the helper did not provide the
+required ticket plus actual kernel boot UUID; no START was sent. Upgrade host and
+all recorder helper copies together, preserving evidence and following the
+[confirmed-stop procedure](installation.md#stage-c-boot-bound-microphone-upgrade).
+Legacy runtime recorder state is refused rather than silently interpreted as idle.
+
+Desktop retirement now waits for the actual owned recorder and encoder children;
+an admitted orphan is not retired from PID absence. Termux persists successful API
+start completion separately: a timed-out/interrupted/failed/unknown response remains
+uncertain even when `-i` says false. Successful recognized completion plus actual
+stop permits ordinary retirement. Only verified kernel reboot closes old-boot helper
+work; changed process identity does not. Durable host input stays uncertain for orphan
+recovery even after saved ticket receipts succeed; this is not complete Stage C recovery.
+
 ## “Voice microphone connection closed before returning audio”
 
 This means the selected microphone bridge exited before sending a `stream`, `audio`, `ok`, or `error` response.
@@ -65,7 +81,7 @@ rm -f "$HOME/pi-voice-test.ogg"
 timeout 2s termux-microphone-record -f "$HOME/pi-voice-test.ogg" -l 5 -e opus
 ```
 
-Before retrying or replacing scripts, stop the permission-test recording with `termux-microphone-record -q` and confirm `termux-microphone-record -i` reports `isRecording: false`; the command timeout alone is not stop proof.
+Do not retry or replace scripts over an uncertain permission-test start. After a timed-out/interrupted API call, `termux-microphone-record -q` plus `isRecording: false` is not dispatch-closure proof; a queued start may still be outstanding. Preserve the fence and evidence. Verified reboot can close old-boot helper work, but does not by itself reclaim an uncertain host lease.
 
 If direct recording works, reinstall all `client/pi-voice-*` scripts together and restart every wrapper. Do not mix a new `pi-voice-ssh` with an older bridge/helper set.
 

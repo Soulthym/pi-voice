@@ -97,7 +97,7 @@ rm -f "$HOME/pi-voice-test.ogg"
 timeout 2s termux-microphone-record -f "$HOME/pi-voice-test.ogg" -l 5 -e opus
 ```
 
-Speak for five seconds. On some Android 15 builds, the API callback remains blocked even though recording works; the two-second timeout is intentional and recording continues to its configured limit. Before connecting or retrying, run `termux-microphone-record -q` and confirm `termux-microphone-record -i` reports `isRecording: false`; timeout alone is not stop proof.
+Speak for five seconds. On some Android 15 builds, the API callback remains blocked even though recording works; the two-second timeout is intentional and recording continues to its configured limit. A timeout leaves dispatch uncertain: `termux-microphone-record -q` followed by `isRecording: false` is only an idle snapshot, not proof that a queued start cannot execute later. Do not connect or retry capture over that uncertainty. Stage C deliberately retains the fence on interrupted/timed-out API starts; verified reboot closes old-boot dispatch, but does not automatically release an uncertain host lease.
 
 Connect using the wrapper:
 
@@ -125,6 +125,25 @@ GatewayPorts no
 Validate with `sshd -t`, then reload `sshd` after changing its configuration. These settings do not control Tailscale's built-in SSH server; its version and policy must permit TCP reverse forwarding. Managed endpoint metadata is stored under `~/.cache/pi-voice/devices` on the Pi host.
 
 ## Upgrading
+
+### Stage C boot-bound microphone upgrade
+
+Update the host and every desktop/Termux recorder helper together; bootless ticket
+replies now fail before recording with an explicit upgrade error. This is not a
+host-only update. Follow the confirmed-stop/full-helper procedure below at a time
+you choose; no deployment or restart is automatic.
+
+Microphone ownership now uses private durable state under
+`${XDG_STATE_HOME:-$HOME/.local/state}/pi-voice/microphone-desktop` (desktop) or
+`pi-voice/microphone/termux` (Termux). Keep these directories and host journals.
+Legacy runtime recorder state is deliberately refused, including idle old ticket/fence
+files. Archive only those old recorder files after confirmed stop and ended old sessions,
+never as a way to bypass uncertainty. See [microphone migration](endpoint-protocol.md#microphone-protocol-migration).
+
+Android API timeout/interruption remains uncertain on the same boot; quit plus an
+idle info snapshot alone cannot close an outstanding start. Ordinary completed stock
+API responses are tracked separately. No APK/dependency change or native service
+cancellation guarantee is added. Complete host input orphan recovery remains fenced.
 
 ### Audio protocol v3 (host and every client)
 
@@ -186,7 +205,7 @@ Substitute the actual host checkout and installed paths. Update the underlying w
 
 Before replacing scripts or exiting wrappers, explicitly stop active playback/capture and confirm actual device stop. If stop is unconfirmed, preserve the original connection, runtime state, tickets, receipts and leases; restore that connection and retry `/voice stop` (or `/voice reconnect` for retained output stop). Do not kill host processes or delete leases as proof. See [recovery](troubleshooting.md#unconfirmed-stop).
 
-After confirmed stop, exit every old wrapper, update all copies together, reconnect and reload the host extension. The microphone now requires origin-scoped random-epoch tickets (`<epoch>.<counter>`, UUID-like identity, not numeric-only) and exact `stopped N` receipts. Audio requires v3 prepare/journal/commit with opaque UUID stream IDs and boot-bound completion/stop proof. All v1/v2 clients are rejected before PCM; upgrade every helper and SSH wrapper copy together, not just the host or audio helper. Retained numeric receipts are not valid modern proof. Existing epoch-qualified ticket state must be retained; only incompatible numeric-era `.tickets` state may be removed **after all old captures are confirmed stopped and old sessions exited**. Never unconditionally remove runtime state or the persistent `flock` fence. See [protocol migration](endpoint-protocol.md#microphone-protocol-migration).
+After confirmed stop, exit every old wrapper, update all copies together, reconnect and reload the host extension. The microphone now requires origin-scoped random-epoch tickets (`<epoch>.<counter>`, UUID-like identity, not numeric-only), an actual kernel boot ID echoed in START, and exact `stopped N` receipts. Audio requires v3 prepare/journal/commit with opaque UUID stream IDs and boot-bound completion/stop proof. All v1/v2 clients are rejected before PCM; upgrade every helper and SSH wrapper copy together, not just the host or audio helper. Retained numeric receipts are not valid modern proof. Existing epoch-qualified ticket state must be retained; only incompatible numeric-era `.tickets` state may be removed **after all old captures are confirmed stopped and old sessions exited**. Never unconditionally remove runtime state or the persistent `flock` fence. See [protocol migration](endpoint-protocol.md#microphone-protocol-migration).
 
 For later published updates, update the host checkout:
 
