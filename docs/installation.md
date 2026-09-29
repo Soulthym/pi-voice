@@ -91,14 +91,9 @@ grep -qxF 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.bashrc" || \
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Grant microphone permission with a short test:
+Grant Termux:API microphone permission in Android app settings. Do not run a raw microphone/audio probe as an installation or upgrade check.
 
-```bash
-rm -f "$HOME/pi-voice-test.ogg"
-timeout 2s termux-microphone-record -f "$HOME/pi-voice-test.ogg" -l 5 -e opus
-```
-
-Speak for five seconds. On some Android 15 builds, the API callback remains blocked even though recording works; the two-second timeout is intentional and recording continues to its configured limit. A timeout leaves dispatch uncertain: `termux-microphone-record -q` followed by `isRecording: false` is only an idle snapshot, not proof that a queued start cannot execute later. Do not connect or retry capture over that uncertainty. Stage C deliberately retains the fence on interrupted/timed-out API starts; verified reboot closes old-boot dispatch, but does not automatically release an uncertain host lease.
+On some Android 15 builds, the API callback remains blocked even though recording works. A timed-out start leaves dispatch uncertain: `termux-microphone-record -q` followed by `isRecording: false` is only an idle snapshot, not proof that a queued start cannot execute later. Do not retry capture over that uncertainty. Stage C retains unknown same-boot dispatch fences. For **covered new-protocol scopes**, a matching scoped receipt or eligible same-device, validated changed-kernel-boot proof can retire the scope through recovery; host ownership releases only when both directions are durably idle. A reboot alone cannot promote legacy/uncertain journals or uncovered local output to covered proof.
 
 Connect using the wrapper:
 
@@ -142,8 +137,15 @@ Microphone ownership now uses private durable state under
 `pi-voice/microphone/termux` (Termux). Keep these directories and host journals.
 Legacy runtime recorder state is deliberately refused, including idle old ticket/fence
 files. Earlier four-field Termux ticket files are also refused because they lack
-persisted owner proof. Archive only those old recorder files after confirmed stop and ended old sessions,
-never as a way to bypass uncertainty. See [microphone migration](endpoint-protocol.md#microphone-protocol-migration).
+persisted owner proof. Before using the new microphone, independently confirm all old
+captures stopped **and outstanding Android start/quit dispatches drained**, then end
+all old sessions. Only then archive the specifically identified legacy recorder paths
+under supervision; copying helpers alone will still hit the legacy-state guard.
+An idle snapshot alone is insufficient. See [microphone migration](endpoint-protocol.md#microphone-protocol-migration)
+for the exact recorder-only paths; move those existing paths to a private evidence
+archive outside their old runtime locations, not a blanket TMPDIR/config cleanup.
+If dispatch closure cannot be independently confirmed, stop here and retain evidence;
+upgrade/reload is not a bypass. Keep current durable receipts, IDs and host leases.
 
 Android API timeout/interruption remains uncertain on the same boot; quit plus an
 idle info snapshot alone cannot close an outstanding start or quit. An uncertain quit
@@ -158,7 +160,10 @@ Fresh v4 owners with explicit covered input and saved `networkAdmission` or
 a live owner's original registered device at its current endpoint. Eligible Termux
 `stop-admit` recovery also accepts same-device changed-kernel-boot proof. Orphan
 release still requires both directions durably idle; version 4 alone is insufficient.
-Existing uncertain/legacy input and local-output admission remain fenced.
+Covered new-protocol input can retire on matching scoped receipts or eligible validated
+boot proof; unknown same-boot Android dispatch and legacy/uncovered input remain
+fenced. Local-output admission is still the remaining coverage gap, not automatically
+recoverable. This does not mean every input/output failure now recovers.
 
 After confirmed playback/capture stop and closure of every old wrapper, install the
 complete shared set using the exact [checkout/SCP commands below](#upgrade-device-name-support).
