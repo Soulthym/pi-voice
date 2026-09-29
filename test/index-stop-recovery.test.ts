@@ -183,7 +183,7 @@ for (const [stopFirst, replace] of [[false, false], [true, false], [true, true]]
 	await assert.rejects(fs.stat(fence), { code: "ENOENT" }, "proved reconnect must release the microphone ownership fence");
 });
 
-for (const manual of [false, true]) test(`healthy retained capture finishes to review before reconnect recovery (manual edit: ${manual})`, async t => {
+for (const manual of [false, true]) for (const outcome of ["same-route", "identity-failure", "new-input"]) test(`healthy retained capture finishes to review before reconnect recovery (manual edit: ${manual}, ${outcome})`, async t => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-healthy-capture-"));
 	const env = { PI_VOICE_CONFIG: path.join(root, "config"), PI_VOICE_DEVICE_DIR: path.join(root, "devices"), PI_VOICE_COORDINATOR_DIR: path.join(root, "coordinator"), PI_VOICE_DEVICE_ID: "A" };
 	const old = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
@@ -193,7 +193,7 @@ for (const manual of [false, true]) test(`healthy retained capture finishes to r
 	const ticket = `${"a".repeat(32)}.1`;
 	const boot = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
 	let capture: net.Socket | undefined;
-	const admitted = Promise.withResolvers<void>();
+	let admitted = Promise.withResolvers<void>();
 	const server = net.createServer(socket => socket.on("data", data => {
 		const command = String(data).trim();
 		if (command === "ticket-admit") socket.write(`ticket ${ticket} ${boot} admit-v1 "A"\n`);
@@ -225,11 +225,34 @@ for (const manual of [false, true]) test(`healthy retained capture finishes to r
 	const owner = JSON.parse(await fs.readFile(path.join(env.PI_VOICE_COORDINATOR_DIR, "speech.lock", "lease.json"), "utf8"));
 	assert.equal(new StopRecovery(env.PI_VOICE_COORDINATOR_DIR, owner.instanceId).episode("input")?.handles[0].id, ticket);
 	if (manual) editor = "Manual draft";
-	await host.command("reconnect");
+	const resolving = Promise.withResolvers<void>();
+	const identity = Promise.withResolvers<{ kind: "device"; id: string }>();
+	t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", () => {
+		resolving.resolve();
+		return identity.promise;
+	});
+	const reconnect = host.command("reconnect");
+	await resolving.promise;
+	const fence = path.join(env.PI_VOICE_COORDINATOR_DIR, "speech.lock", "lease.json");
+	await fs.stat(fence); // Finalized input still waits for the adoption barrier.
+	if (outcome === "new-input") {
+		admitted = Promise.withResolvers<void>();
+		await host.shortcut("f4");
+	}
+	if (outcome === "identity-failure") identity.reject(new Error("ambiguous attachment after healthy finalization"));
+	else identity.resolve({ kind: "device", id: "A" });
+	await reconnect;
 	assert.equal(submitted, 0);
 	if (manual) assert.equal(editor, "Manual draft");
 	else assert.match(editor, /Healthy dictation/);
-	assert.equal(new StopRecovery(env.PI_VOICE_COORDINATOR_DIR, owner.instanceId).isIdle("input"), true);
+	if (outcome === "new-input") {
+		await admitted.promise;
+		assert.equal(JSON.parse(await fs.readFile(fence, "utf8")).instanceId, owner.instanceId, "superseding input keeps its lease");
+		assert.equal(new StopRecovery(env.PI_VOICE_COORDINATOR_DIR, owner.instanceId).episode("input")?.handles[0].id, ticket);
+	} else {
+		assert.equal(new StopRecovery(env.PI_VOICE_COORDINATOR_DIR, owner.instanceId).isIdle("input"), true);
+		await assert.rejects(fs.stat(fence), { code: "ENOENT" }, "finished input releases ownership even if identity lookup fails");
+	}
 });
 
 test("single-slash Unix config normalizes to the sink's remote prefix", () => {

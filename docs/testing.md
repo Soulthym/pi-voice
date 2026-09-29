@@ -1,5 +1,25 @@
 # Tests
 
+## Healthy reconnect lease release after `bc2fed5`
+
+A finished capture now retires its input reservation only while its input/session
+identity still matches. The existing rebind barrier and stop-proof guards release
+the lease afterward, including when deferred attachment resolution fails; newer
+input and actual playback ownership remain protected. No stop proof was relaxed.
+Real PhoneInput retained-handle/socket regressions preserve review/manual drafts,
+assert `speech.lock/lease.json` removal on same-route success and identity failure,
+and retain ownership for superseding input. Without the fix, all four release
+assertions fail; the two newer-input cases pass.
+
+Validation: typecheck passed; focused **24/24 passed**; full default **1299 passed /
+33 compatibility skips / zero failures (1332 total)**; installed-native **1332
+passed / zero skips/failures**. Final runs used `env -i`, private HOME/TMPDIR/XDG
+roots, synthetic transports and inert native UI, sequentially. Logs:
+`/tmp/vh.Ed6C/{check,focus,full,native,regression-before}.log`. LSP unavailable;
+TypeScript and diff checks used instead. SSH was not rerun: helpers/protocols are
+unchanged. No live paths/sessions, hardware, providers/inference, runtime settings,
+push or `ISSUES.md` changes.
+
 ## Integrated host/helper recovery after `eac9b9e`
 
 Final typecheck passed; full default suite **1295 passed / 33 compatibility skips /

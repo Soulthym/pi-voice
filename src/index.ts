@@ -3607,6 +3607,8 @@ export default async function (pi: ExtensionAPI) {
 			if (!stopCapture) return;
 			if (inputPhase === "recording") await phoneInput.stop(activeInputEndpoint ?? routed.input);
 			await finished.promise;
+			// Finalization may defer lease release behind deviceRebind; retire only this input's reservation.
+			if (current()) speechReservedForInput = false;
 		};
 		finishPendingDictation = finishForPlayback;
 		try {
