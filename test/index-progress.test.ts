@@ -40,10 +40,10 @@ function startFakeSttServer(socketPath: string): Promise<net.Server> {
 			socket.on("close", () => { if (ticket) clients.delete(ticket); });
 			socket.on("data", chunk => {
 				const command = chunk.toString("utf8").trim();
-				if (command === "ticket") {
+				if (command === "ticket-admit") {
 					ticket = `${epoch}.${++nextTicket}`;
 					clients.set(ticket, socket);
-					socket.write(`ticket ${ticket} ${bootId}\n`);
+					socket.write(`ticket ${ticket} ${bootId} admit-v1 null\n`);
 				} else if (command.startsWith("stop ")) {
 					assert.match(command, /^stop [0-9a-f]{32}\.[1-9][0-9]*$/);
 					clients.get(command.slice(5))?.destroy();

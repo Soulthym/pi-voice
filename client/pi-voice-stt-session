@@ -102,9 +102,9 @@ scope_identity() {
 }
 issued_ticket=
 wait_scope=
-if [[ $command == ticket || $command == ticket-wait ]]; then
+if [[ $command == ticket || $command == ticket-wait || $command == ticket-admit ]]; then
   wait_protocol=false
-  [[ $command == ticket-wait ]] && wait_protocol=true
+  [[ $command != ticket ]] && wait_protocol=true
   (( latest < 9007199254740991 )) || fail 'Microphone ticket space exhausted'
   (( latest += 1 ))
   save_tickets

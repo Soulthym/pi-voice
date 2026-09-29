@@ -5,13 +5,13 @@ import { DeviceRouter, type DeviceDirection } from "./device-router.js";
 import { PhoneInputClient } from "./phone-input.js";
 import { stopRemotePlayback, validStreamId, validBootId } from "./remote-playback.mjs";
 
-export type RecoveryHandle = { endpoint: string; id: string; selection: string; configured: string; bootId?: string | null; rebootSafe?: boolean; desktopWait?: boolean };
+export type RecoveryHandle = { endpoint: string; id: string; selection: string; configured: string; bootId?: string | null; rebootSafe?: boolean; desktopWait?: boolean; networkAdmission?: boolean };
 export type RecoveryEpisode = { device: string; cause: string; handles: RecoveryHandle[] };
 type Journal = { input?: RecoveryEpisode; output?: RecoveryEpisode } & (
 	{ version: 1 } | { version: 2 | 3 | 4; owner: string; admission: Record<DeviceDirection, "idle" | "uncertain" | "covered"> }
 );
 
-/** v4 adds scoped desktop input waits; legacy and unknown admission stays fenced. */
+/** v4 requires explicit scoped input admission; legacy and unknown IO stays fenced. */
 export class StopRecovery {
 	readonly file: string;
 	#journal: Journal = { version: 1 };
@@ -38,7 +38,7 @@ export class StopRecovery {
 				}
 			}
 			if (value.version !== 1 && value.version >= 3 && value.admission.output === "covered" && value.output?.handles.some(handle => !(handle.bootId === null || validBootId(handle.bootId)))) throw new Error("Invalid covered output scope");
-			if (value.version === 4 && value.admission.input === "covered" && value.input?.handles.some(handle => handle.endpoint !== "local" || handle.desktopWait !== true || !validBootId(handle.bootId))) throw new Error("Invalid covered input scope");
+			if (value.version === 4 && value.admission.input === "covered" && value.input?.handles.some(handle => !coveredInput(handle))) throw new Error("Invalid covered input scope");
 			this.#journal = value;
 			this.#exists = true;
 		} catch (error) {
@@ -58,10 +58,10 @@ export class StopRecovery {
 	}
 
 	/** Must finish durably BEFORE sending work that could open a player or recorder. */
-	beforeIO(direction: DeviceDirection, preparedOutput = false, preparedDesktopInput = false): void {
+	beforeIO(direction: DeviceDirection, preparedOutput = false, preparedInput = false): void {
 		if (!this.#exists || this.#journal.version === 1) throw new Error("Admission ledger unavailable");
 		this.#journal.admission[direction] = this.#journal.admission[direction] !== "uncertain" &&
-			(direction === "output" && preparedOutput && this.#journal.version >= 3 || direction === "input" && preparedDesktopInput && this.#journal.version === 4) ? "covered" : "uncertain";
+			(direction === "output" && preparedOutput && this.#journal.version >= 3 || direction === "input" && preparedInput && this.#journal.version === 4) ? "covered" : "uncertain";
 		// Always persist, including retries after a failed fsync. Memory is not durability proof.
 		this.#save();
 	}
@@ -75,10 +75,10 @@ export class StopRecovery {
 		if (!validHandle(direction, handle)) throw new Error("Invalid recovery handle");
 		if (this.#journal.version !== 1) this.#journal.admission[direction] = this.#journal.admission[direction] !== "uncertain" &&
 			(direction === "output" && this.#journal.version >= 3 && (handle.bootId === null || validBootId(handle.bootId)) ||
-				direction === "input" && this.#journal.version === 4 && handle.endpoint === "local" && handle.desktopWait === true && validBootId(handle.bootId)) ? "covered" : "uncertain";
+				direction === "input" && this.#journal.version === 4 && coveredInput(handle)) ? "covered" : "uncertain";
 		const episode = this.#journal[direction] ??= { device, cause: "Original transport stop not yet confirmed", handles: [] };
 		const existing = episode.handles.find(existing => existing.id === handle.id);
-		if (existing && (existing.endpoint !== handle.endpoint || existing.bootId !== handle.bootId || existing.rebootSafe !== handle.rebootSafe || existing.desktopWait !== handle.desktopWait || existing.selection !== handle.selection || existing.configured !== handle.configured)) throw new Error("Recovery scope identity changed");
+		if (existing && (existing.endpoint !== handle.endpoint || existing.bootId !== handle.bootId || existing.rebootSafe !== handle.rebootSafe || existing.desktopWait !== handle.desktopWait || existing.networkAdmission !== handle.networkAdmission || existing.selection !== handle.selection || existing.configured !== handle.configured)) throw new Error("Recovery scope identity changed");
 		if (!existing) {
 			if (direction === "output" && episode.handles.length >= 256) throw new Error("Output recovery scope limit reached; dispatch denied");
 			episode.handles.push({ ...handle });
@@ -129,7 +129,7 @@ export class StopRecovery {
 		const desktopWait = direction === "input" && this.#journal.version === 4 && handle.endpoint === "local" && handle.desktopWait === true && route.kind === "intentional_local";
 		if (route.kind === "disabled" || route.kind === "intentional_local" && !desktopWait ||
 			(route.kind === "custom" && route.endpoint !== handle.endpoint)) throw new Error("Original recovery route unavailable");
-		if (direction === "input") await PhoneInputClient.retryStop({ endpoint: route.endpoint, ticket: handle.id, ...(desktopWait ? { bootId: handle.bootId, desktopWait: true } : {}) });
+		if (direction === "input") await PhoneInputClient.retryStop({ endpoint: route.endpoint, ticket: handle.id, bootId: handle.bootId, ...(handle.desktopWait ? { desktopWait: true } : { deviceId: handle.selection, allowReboot: handle.networkAdmission === true && handle.rebootSafe === true && route.kind === "device" && route.device.id === handle.selection && handle.selection !== "legacy-loopback" }) });
 		else await stopRemotePlayback({ output: route.endpoint, id: handle.id, bootId: handle.bootId, deviceId: handle.selection,
 			// Only the original registered identity can attest a moved endpoint/reboot.
 			allowReboot: this.#journal.version !== 1 && this.#journal.version >= 3 && handle.rebootSafe === true &&
@@ -179,5 +179,9 @@ function validHandle(direction: DeviceDirection, value: RecoveryHandle): boolean
 		typeof value.selection === "string" && /^[a-zA-Z0-9._-]{1,128}$/.test(value.selection) && value.selection !== "auto" &&
 		typeof value.configured === "string" && value.configured.length <= 4096 && (direction === "output" ? validStreamId(value.id) && (value.bootId === undefined || value.bootId === null || validBootId(value.bootId)) &&
 			(value.rebootSafe === undefined || typeof value.rebootSafe === "boolean") :
-			(value.desktopWait === undefined || value.desktopWait === true && value.endpoint === "local" && validBootId(value.bootId)) && typeof value.id === "string" && /^[0-9a-f]{32}\.[1-9][0-9]{0,15}$/.test(value.id) && Number.isSafeInteger(Number(value.id.split(".")[1])) && (value.bootId === undefined || validBootId(value.bootId)));
+			(value.networkAdmission === undefined || value.networkAdmission === true && /^(tcp|unix):/.test(value.endpoint) && validBootId(value.bootId)) && (value.desktopWait === undefined || value.desktopWait === true && validBootId(value.bootId)) && typeof value.id === "string" && /^[0-9a-f]{32}\.[1-9][0-9]{0,15}$/.test(value.id) && Number.isSafeInteger(Number(value.id.split(".")[1])) && (value.bootId === undefined || validBootId(value.bootId)));
+}
+
+function coveredInput(handle: RecoveryHandle): boolean {
+	return validBootId(handle.bootId) && (handle.desktopWait === true || handle.endpoint !== "local" && handle.networkAdmission === true);
 }

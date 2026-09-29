@@ -14,9 +14,9 @@ function ticketServer(handler: (socket: net.Socket, receipt: string) => void): n
 	return net.createServer(socket => {
 		socket.once("data", raw => {
 			const command = String(raw);
-			if (command === "ticket\n") {
+			if (command === "ticket-admit\n") {
 				const admission = `${epoch}.${++ticket}`;
-				socket.write(`ticket ${admission} ${bootId}\n`);
+				socket.write(`ticket ${admission} ${bootId} admit-v1 null\n`);
 				socket.once("data", raw => {
 					assert.equal(String(raw), `record ${admission} ${bootId}\n`);
 					handler(socket, ""); socket.emit("data", "record\n");
@@ -54,7 +54,8 @@ function wav(samples = 16000, overshoot = false): Buffer {
 
 test("requests a phone recording and decodes the returned audio", async () => {
 	const expectedAudio = Buffer.from([0, 1, 2, 3, 254, 255]);
-	const server = ticketServer(socket => {
+	const server = ticketServer((socket, receipt) => {
+		if (receipt) { socket.end(receipt); return; }
 		socket.setEncoding("utf8");
 		socket.once("data", command => {
 			assert.equal(command, "record\n");
@@ -107,7 +108,7 @@ test("cancellation finishes the old stop before a replacement capture starts", a
 		const result = await replacement;
 		assert.equal(result.type, "audio");
 		await new Promise(resolve => setTimeout(resolve, 100));
-		assert.deepEqual(commands, ["record\n", "stop\n", "record\n"], "cancelled decoder must not stop the replacement");
+		assert.deepEqual(commands, ["record\n", "stop\n", "record\n", "stop\n"], "cancelled decoder must not stop the replacement");
 	} finally {
 		activeRecord?.destroy();
 		await new Promise<void>(resolve => server.close(() => resolve()));
@@ -116,7 +117,8 @@ test("cancellation finishes the old stop before a replacement capture starts", a
 
 test("connects to microphone bridges forwarded over Unix sockets", async () => {
 	const socketPath = path.join(os.tmpdir(), `pi-voice-input-${process.pid}-${Date.now()}.sock`);
-	const server = ticketServer(socket => {
+	const server = ticketServer((socket, receipt) => {
+		if (receipt) { socket.end(receipt); return; }
 		socket.once("data", command => {
 			assert.equal(String(command), "record\n");
 			socket.end(`audio ${Buffer.from("unix-audio").toString("base64")}\n`);
@@ -252,9 +254,9 @@ for (const stop of [false, true]) test(`${stop ? "stop" : "cancel"} before ticke
 		const capture = assert.rejects(client.capture(`tcp://127.0.0.1:${port}`), /cancelled/);
 		const socket = await requested.promise;
 		await (stop ? client.stop("tcp://127.0.0.1:1") : client.cancel());
-		socket.end(`ticket ${"a".repeat(32)}.1 ${bootId}\n`);
+		socket.end(`ticket ${"a".repeat(32)}.1 ${bootId} admit-v1 null\n`);
 		await capture;
-		assert.deepEqual(commands, ["ticket\n"]);
+		assert.deepEqual(commands, ["ticket-admit\n"]);
 	} finally { await new Promise<void>(resolve => server.close(() => resolve())); }
 });
 
@@ -294,12 +296,12 @@ test("stop retires the exact original handle, not a newly routed endpoint", asyn
 for (const ticket of ["1", `${"a".repeat(32)}.0`, `${"a".repeat(32)}.9007199254740992`]) test(`rejects unsafe admission ${ticket}`, async () => {
 	const commands: string[] = [];
 	const server = net.createServer(socket => socket.on("data", raw => {
-		commands.push(String(raw)); socket.end(`ticket ${ticket} ${bootId}\n`);
+		commands.push(String(raw)); socket.end(`ticket ${ticket} ${bootId} admit-v1 null\n`);
 	}));
 	const port = await listen(server);
 	try {
 		await assert.rejects(new PhoneInputClient().capture(`tcp://127.0.0.1:${port}`), /update the recorder/);
-		assert.deepEqual(commands, ["ticket\n"]);
+		assert.deepEqual(commands, ["ticket-admit\n"]);
 	} finally { await new Promise<void>(resolve => server.close(() => resolve())); }
 });
 
@@ -307,16 +309,35 @@ for (const boot of ["", " not-a-uuid", ` ${"a".repeat(32)}`, ` ${bootId} extra`]
 	const commands: string[] = [];
 	const retained: unknown[] = [];
 	const server = net.createServer(socket => socket.on("data", raw => {
-		commands.push(String(raw)); socket.end(`ticket ${"a".repeat(32)}.1${boot}\n`);
+		commands.push(String(raw)); socket.end(`ticket ${"a".repeat(32)}.1${boot} admit-v1 null\n`);
 	}));
 	const port = await listen(server);
 	try {
 		const client = new PhoneInputClient(handle => retained.push(handle));
 		await assert.rejects(client.capture(`tcp://127.0.0.1:${port}`), /update the recorder client and host together.*no START sent/);
 		await client.cancel();
-		assert.deepEqual(commands, ["ticket\n"]);
+		assert.deepEqual(commands, ["ticket-admit\n"]);
 		assert.deepEqual(retained, []);
 	} finally { await new Promise<void>(resolve => server.close(() => resolve())); }
+});
+
+for (const proof of ["reboot", "wrong-identity", "same-boot", "unknown-same-boot", "not-authorized"] as const) test(`retryStop network receipt: ${proof}`, async t => {
+	const ticket = `${"a".repeat(32)}.1`;
+	const commands: string[] = [];
+	const currentBoot = proof === "same-boot" ? bootId : "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+	const server = net.createServer(socket => socket.once("data", raw => {
+		commands.push(String(raw).trim());
+		const message = proof === "unknown-same-boot" ? "Unknown ticket; stop unconfirmed"
+			: `stopped-reboot ${ticket} ${bootId} ${currentBoot} ${proof === "wrong-identity" ? "B" : "A"}`;
+		socket.end(`${proof === "unknown-same-boot" ? "error" : "ok"} ${Buffer.from(message).toString("base64")}\n`);
+	}));
+	const port = await listen(server);
+	t.after(() => new Promise<void>(resolve => server.close(() => resolve())));
+	const allowReboot = proof !== "not-authorized";
+	const stopped = PhoneInputClient.retryStop({ endpoint: `tcp://127.0.0.1:${port}`, ticket, bootId, deviceId: "A", allowReboot });
+	if (proof === "reboot") await stopped;
+	else await assert.rejects(stopped, /not confirmed|unconfirmed/);
+	assert.deepEqual(commands, [allowReboot ? `stop-admit ${ticket} ${bootId} A` : `stop ${ticket}`]);
 });
 
 test("reassigned endpoint cannot confirm an unconfirmed origin; retry at origin can", async () => {
@@ -328,7 +349,7 @@ test("reassigned endpoint cannot confirm an unconfirmed origin; retry at origin 
 		socket.on("error", () => {});
 		socket.on("data", raw => {
 			const command = String(raw).trim();
-			if (command === "ticket") socket.write(`ticket ${origin}.${latest} ${bootId}\n`);
+			if (command === "ticket-admit") socket.write(`ticket ${origin}.${latest} ${bootId} admit-v1 null\n`);
 			else if (command.startsWith("record ")) {
 				assert.equal(command, `record ${origin}.${latest} ${bootId}`);
 				recorded.resolve();

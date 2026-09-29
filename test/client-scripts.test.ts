@@ -315,6 +315,7 @@ if [[ "$1" == "-i" ]]; then printf '{"isRecording":false}'; exit 0; fi
 if [[ "$1" == "-q" ]]; then
   [[ -f "${root}/producer.pid" ]] && kill "$(cat "${root}/producer.pid")" 2>/dev/null || true
   rm -f "${root}/producer.pid"
+  printf 'Recording finished: %s\\n' "$(cat "${root}/recording-path")"
   exit 0
 fi
 file=
@@ -323,6 +324,7 @@ for arg in "$@"; do
   [[ $prev == "-f" ]] && file=$arg
   prev=$arg
 done
+printf '%s' "$file" > "${root}/recording-path"
 ( while :; do printf 'x' >> "$file"; sleep 0.05; done ) </dev/null >/dev/null 2>&1 &
 echo $! > "${root}/producer.pid"
 sleep 0.4
@@ -385,6 +387,7 @@ if [[ "$1" == "-i" ]]; then printf '{"isRecording":false}'; exit 0; fi
 if [[ "$1" == "-q" ]]; then
   [[ -f "${root}/producer.pid" ]] && kill "$(cat "${root}/producer.pid")" 2>/dev/null || true
   rm -f "${root}/producer.pid"
+  printf 'Recording finished: %s\\n' "$(cat "${root}/recording-path")"
   exit 0
 fi
 file=
@@ -393,6 +396,7 @@ for arg in "$@"; do
   [[ $prev == "-f" ]] && file=$arg
   prev=$arg
 done
+printf '%s' "$file" > "${root}/recording-path"
 ( while :; do printf 'x' >> "$file"; sleep 0.05; done ) </dev/null >/dev/null 2>&1 &
 echo $! > "${root}/producer.pid"
 sleep 0.3

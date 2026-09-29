@@ -62,9 +62,9 @@ for (const script of ["client/pi-voice-stt-session", "client/pi-voice-termux-stt
 			"pw-record": `[[ $1 == --help ]] && { echo "Usage: pw-record"; exit 0; }; exec '${process.execPath}' -e 'const fs = require("fs"); fs.writeFileSync(process.env.TMPDIR + "/running", "yes"); const timer = setInterval(() => {}, 100); process.on("SIGTERM", () => setTimeout(() => { fs.unlinkSync(process.env.TMPDIR + "/running"); clearInterval(timer); process.exit(0); }, 200));'`,
 		} : {
 			"termux-microphone-record": `case "$1" in
--q) sleep 0.2; rm -f "$TMPDIR/running";;
+-q) sleep 0.2; rm -f "$TMPDIR/running"; printf 'Recording finished: %s\\n' "$(cat "$TMPDIR/path")";;
 -i) if [[ -e "$TMPDIR/running" ]]; then printf '{"isRecording":true}'; else printf '{"isRecording":false}'; fi;;
--f) printf 'fake audio' > "$2"; touch "$TMPDIR/running"; printf 'Recording started: %s\nMax Duration: 00:02:00\n' "$2";;
+-f) printf '%s' "$2" > "$TMPDIR/path"; printf 'fake audio' > "$2"; touch "$TMPDIR/running"; printf 'Recording started: %s\nMax Duration: 00:02:00\n' "$2";;
 esac`,
 		};
 		for (const [name, body] of Object.entries(tools)) await fs.writeFile(path.join(bin, name), `#!/bin/bash\n${body}\n`, { mode: 0o755 });
@@ -113,11 +113,14 @@ for (const script of ["client/pi-voice-stt-session", "client/pi-voice-termux-stt
 		socket.on("error", () => {});
 		socket.once("data", raw => {
 			const command = String(raw).trim();
-			if (command === "ticket") {
+			if (command === "ticket-admit") {
 				const child = spawn("bash", [path.resolve(script)], { env }); children.push(child);
 				child.stderr.resume();
-				child.stdout.once("data", data => { ticket = String(data).trim().split(" ")[1]; socket.write(data); });
-				child.stdin.write("ticket\n");
+				child.stdout.once("data", data => {
+					ticket = String(data).trim().split(" ")[1];
+					socket.write(data);
+				});
+				child.stdin.write("ticket-admit\n");
 				// Hold before record/admission: exercise real ticket state without any hardware.
 				socket.once("data", data => { assert.equal(String(data), `record ${ticket} ${BOOT}\n`); recorded.resolve(); });
 				socket.on("close", () => child.stdin.end());
@@ -149,7 +152,7 @@ for (const script of ["client/pi-voice-stt-session", "client/pi-voice-termux-stt
 	route = "origin";
 	await client.stop();
 	await client.stop("invalid endpoint"); // Matching receipt cleared ownership.
-	assert.deepEqual(stops, Array(4).fill(`stop ${ticket}`));
+	assert.deepEqual(stops, Array(4).fill(script === "client/pi-voice-stt-session" ? `stop-wait ${ticket} ${BOOT}` : `stop ${ticket}`));
 });
 
 for (const script of ["client/pi-voice-termux-stt-session", "termux/pi-voice-stt-session"]) for (const recording of [true, false]) test(`${script}: unconfirmed start retains ownership even when Android reports recording=${recording}`, async t => {
@@ -195,8 +198,8 @@ for (const script of ["client/pi-voice-stt-session", "client/pi-voice-termux-stt
 fi; exec '${process.execPath}' -e 'require("fs").writeFileSync(process.env.TMPDIR + "/running", "yes"); setInterval(() => {}, 100);'`,
 		} : {
 			"termux-microphone-record": `case "$1" in
--f) touch "$TMPDIR/running"; printf audio > "$2"; printf 'Recording started: %s\nMax Duration: 00:02:00\n' "$2";;
--q) rm -f "$TMPDIR/running";;
+-f) printf '%s' "$2" > "$TMPDIR/path"; touch "$TMPDIR/running"; printf audio > "$2"; printf 'Recording started: %s\nMax Duration: 00:02:00\n' "$2";;
+-q) rm -f "$TMPDIR/running"; printf 'Recording finished: %s\\n' "$(cat "$TMPDIR/path")";;
 -i) printf '{"isRecording":false}';;
 esac`,
 		};
@@ -266,12 +269,13 @@ for (const script of ["client/pi-voice-termux-stt-session", "termux/pi-voice-stt
 		const bin = path.join(root, "bin"); await fs.mkdir(bin);
 		await fs.writeFile(path.join(bin, "termux-microphone-record"), `#!/bin/bash
 case "$1" in
--f) printf audio > "$2"; touch "$TMPDIR/running"; printf 'Recording started: %s\nMax Duration: 00:02:00\n' "$2";;
+-f) printf '%s' "$2" > "$TMPDIR/path"; printf audio > "$2"; touch "$TMPDIR/running"; printf 'Recording started: %s\nMax Duration: 00:02:00\n' "$2";;
 -q) if [[ -e "$TMPDIR/allow-stop" ]]; then
       touch "$TMPDIR/stop-blocked"
       while [[ ! -e "$TMPDIR/release-stop" ]]; do sleep 0.01; done
       rm -f "$TMPDIR/running"
-    fi;;
+    fi
+    printf 'Recording finished: %s\\n' "$(cat "$TMPDIR/path")";;
 -i) if [[ -e "$TMPDIR/running" ]]; then printf '{"isRecording":true}'; else printf '{"isRecording":false}'; fi;;
 esac\n`, { mode: 0o755 });
 		const env = { ...fixtureEnv(root), PATH: `${bin}:/usr/bin:/bin`, PI_VOICE_MAX_RECORD_SECONDS: "5" };

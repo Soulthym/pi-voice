@@ -7,7 +7,7 @@ import * as path from "node:path";
 import test from "node:test";
 import { PhoneInputClient } from "../src/phone-input.js";
 
-// Real desktop protocol + encoder + host decoder; only the microphone is fake.
+// Real desktop helper, encoder, network protocol and host decoder; fake microphone.
 // New libsndfile families are fixtures, not claims of a second installed version.
 for (const family of ["native", "WAV", "AU"]) for (const source of ["failed", "empty", "pcm", "stopped", "help-failed", "help-timeout", "help-large"]) test(`desktop capture: ${family} ${source} recorder with real ffmpeg`, async t => {
 	assert.equal(spawnSync("ffmpeg", ["-version"]).status, 0, "ffmpeg is required for this regression");
@@ -38,7 +38,8 @@ ${body}
 		const child = spawn("bash", [path.resolve("client/pi-voice-stt-session")], { env });
 		children.push(new Promise(resolve => child.once("close", () => resolve())));
 		child.stderr.resume(); child.stdin.on("error", () => {}); socket.on("error", () => {});
-		socket.pipe(child.stdin); child.stdout.pipe(socket);
+		socket.pipe(child.stdin);
+		child.stdout.pipe(socket);
 		child.stdout.on("data", chunk => wire.push(chunk));
 		socket.on("close", () => child.stdin.end());
 	});
@@ -78,5 +79,7 @@ ${body}
 		assert.ok(output.includes(Buffer.from("stream\nOggS")), "even a failed/empty source produces an Ogg header");
 	}
 	assert.ok(!output.includes(Buffer.from("private-recorder-diagnostic")));
-	assert.match(output.toString(), /ok /, "capture still requires the ticket-bound stop receipt");
+	const [, ticket, boot] = output.toString().split("\n")[0].split(" ");
+	assert.match(output.toString(), /^ticket \S+ \S+ wait-v1\n/);
+	assert.ok(output.includes(Buffer.from(`ok ${Buffer.from(`stopped-wait ${ticket} ${boot}`).toString("base64")}\n`)), "capture requires the scoped wait receipt");
 });

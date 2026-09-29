@@ -33,9 +33,10 @@ async function fixture(t: TestContext) {
 		return { child, done, output: () => Buffer.concat(chunks).toString(), bytes: () => Buffer.concat(chunks) };
 	}
 	async function exchange(command: string) { const session = start(`${command}\n`); session.child.stdin.end(); await session.done; return session.output(); }
-	async function ticket(wait = false) {
-		const session = start(wait ? "ticket-wait\n" : "ticket\n"); await until(async () => session.output().includes("\n"), "ticket reply");
+	async function ticket(wait: boolean | "network" = false) {
+		const session = start(wait === "network" ? "ticket-admit\n" : wait ? "ticket-wait\n" : "ticket\n"); await until(async () => session.output().includes("\n"), "ticket reply");
 		const match = /^ticket ([0-9a-f]{32}\.[1-9][0-9]*) ([0-9a-f-]{36})(?: wait-v1)?\n$/.exec(session.output()); assert.ok(match, session.output()); assert.equal(match[2], boot);
+		if (wait) assert.match(session.output(), / wait-v1\n$/);
 		return { ...session, id: match[1], boot: match[2], record: () => session.child.stdin.write(`record ${match[1]} ${match[2]}\n`) };
 	}
 	t.after(async () => {
@@ -271,8 +272,8 @@ for (const admitted of [false, true]) test(`desktop wait-v1: recover exact ${adm
 	if (!admitted) assert.equal(await fs.stat(`${f.root}/spawned`).catch(() => false), false);
 });
 
-for (const damage of ["exited", "recorder", "admitted", "prepared"]) test(`desktop wait-v1: missing ${damage} never becomes legacy idle proof`, async t => {
-	const f = await fixture(t); const session = await f.ticket(true); session.record(); await session.done;
+for (const wait of [true, "network"] as const) for (const damage of ["exited", "recorder", "admitted", "prepared"]) test(`desktop wait-v1 (${wait}): missing ${damage} never becomes legacy idle proof`, async t => {
+	const f = await fixture(t); const session = await f.ticket(wait); session.record(); await session.done;
 	await fs.unlink(`${f.state}/scope-${session.id}/${damage}`);
 	assert.match(await f.exchange(`stop-wait ${session.id} ${boot}`), /^error /);
 });
@@ -282,20 +283,20 @@ test("desktop wait-v1: legacy ticket cannot be upgraded", async t => {
 	assert.match(await f.exchange(`stop-wait ${session.id} ${boot}`), /^error /);
 });
 
-test("desktop wait-v1: scope cancellation closes delayed recorder dispatch", async t => {
+for (const wait of [true, "network"] as const) test(`desktop wait-v1 (${wait}): scope cancellation closes delayed recorder dispatch`, async t => {
 	const f = await fixture(t);
 	await f.mock("wpctl", 'touch "$TMPDIR/checking"; while [[ ! -e $TMPDIR/release ]]; do sleep .02; done');
-	const session = await f.ticket(true); session.record();
+	const session = await f.ticket(wait); session.record();
 	await until(async () => !!await fs.stat(`${f.root}/checking`).catch(() => false), "device check");
 	assert.match(await f.exchange(`stop-wait ${session.id} ${boot}`), /^ok /);
 	await fs.writeFile(`${f.root}/release`, ""); await session.done;
 	assert.equal(await fs.stat(`${f.root}/spawned`).catch(() => false), false);
 });
 
-test("desktop wait-v1: guardian death after spawn stays fenced despite child disappearance", async t => {
+for (const wait of [true, "network"] as const) test(`desktop wait-v1 (${wait}): guardian death after spawn stays fenced despite child disappearance`, async t => {
 	const f = await fixture(t);
 	await f.mock("pw-record", '[[ $1 == --help ]] && { echo Usage; exit; }; touch "$TMPDIR/spawned"; while [[ ! -e $TMPDIR/release ]]; do sleep .02; done');
-	const session = await f.ticket(true); session.record();
+	const session = await f.ticket(wait); session.record();
 	await until(async () => !!await fs.stat(`${f.root}/spawned`).catch(() => false), "recorder spawn");
 	session.child.kill("SIGKILL"); session.child.stdin.end();
 	await fs.writeFile(`${f.root}/release`, ""); await session.done;
@@ -304,10 +305,10 @@ test("desktop wait-v1: guardian death after spawn stays fenced despite child dis
 	assert.equal(await fs.stat(`${f.state}/scope-${session.id}/exited`).catch(() => false), false);
 });
 
-test("desktop wait-v1: durable waits survive guardian death before shared idle publication", async t => {
+for (const wait of [true, "network"] as const) test(`desktop wait-v1 (${wait}): durable waits survive guardian death before shared idle publication`, async t => {
 	const f = await fixture(t);
 	await f.mock("sync", '/bin/sync "$@" || exit 1; if [[ -d $1 && $1 == *scope-* && -f $1/exited ]]; then kill -KILL "$PPID"; fi');
-	const session = await f.ticket(true); session.record(); await session.done;
+	const session = await f.ticket(wait); session.record(); await session.done;
 	assert.equal(session.child.signalCode, "SIGKILL");
 	assert.match(await fs.readFile(`${f.state}/tickets`, "utf8"), / admitted\n$/);
 	await f.mock("sync", 'exec /bin/sync "$@"');

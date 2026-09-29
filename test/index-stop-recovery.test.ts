@@ -82,6 +82,97 @@ test("live reconnect supplies durable recovery to shutdown and fences foreground
 	assert.equal(worker.sent.length, sent, "reconnect does not resume playback");
 });
 
+for (const stopFirst of [false, true]) test(`live network input reconnect proves the original moved device before adopting a new pin (stop first: ${stopFirst})`, { timeout: 15_000 }, async t => {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-live-input-"));
+	const env = { PI_VOICE_CONFIG: path.join(root, "config"), PI_VOICE_DEVICE_DIR: path.join(root, "devices"), PI_VOICE_COORDINATOR_DIR: path.join(root, "coordinator"), PI_VOICE_DEVICE_ID: "A" };
+	const old = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
+	Object.assign(process.env, env);
+	const host = new FakeVoiceHost(root, "live-input-owner");
+	const ticket = `${"a".repeat(32)}.1`;
+	const boot = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+	const original = `unix://${path.join(root, "old.sock")}`;
+	const moved = `unix://${path.join(root, "moved.sock")}`;
+	const commands: string[] = [];
+	const sockets = new Set<net.Socket>();
+	const admitted = Promise.withResolvers<void>();
+	let identity = "B";
+	let grantClosed = false;
+	const servers: net.Server[] = [];
+	t.after(async () => {
+		identity = "A";
+		await host.command("reconnect").catch(() => {});
+		await host.shutdown().catch(() => {});
+		for (const socket of sockets) socket.destroy();
+		await Promise.all(servers.map(server => new Promise<void>(resolve => server.close(() => resolve()))));
+		for (const [key, value] of Object.entries(old)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+		await fs.rm(root, { recursive: true, force: true });
+	});
+	for (const endpoint of [original, moved]) {
+		const server = net.createServer(socket => {
+			sockets.add(socket);
+			socket.on("error", () => {});
+			socket.on("close", () => sockets.delete(socket));
+			socket.on("data", data => {
+				const command = String(data).trim();
+				commands.push(`${endpoint} ${command}`);
+				if (command === "ticket-admit") {
+					socket.on("end", () => { grantClosed = true; });
+					socket.write(`ticket ${ticket} ${boot} admit-v1 A\n`);
+				} else if (command === `record ${ticket} ${boot}`) admitted.resolve();
+				else if (endpoint === moved && command === `stop-admit ${ticket} ${boot} A`) {
+					assert.equal(grantClosed, true, "close the live grant before ledger recovery");
+					socket.end(`ok ${Buffer.from(`stopped-reboot ${ticket} ${boot} bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb ${identity}`).toString("base64")}\n`);
+				} else socket.end("error dW5jb25maXJtZWQ=\n");
+			});
+		});
+		servers.push(server);
+		await new Promise<void>(resolve => server.listen(endpoint.slice(7), resolve));
+	}
+	await fs.mkdir(env.PI_VOICE_DEVICE_DIR);
+	const register = (id: string, endpoint: string) => fs.writeFile(path.join(env.PI_VOICE_DEVICE_DIR, `${id}.json`), JSON.stringify({ version: 1, id, name: id, platform: "linux", audioEndpoint: endpoint, inputEndpoint: endpoint, connectedAt: 2, lastActive: 2 }));
+	await register("A", original);
+	await register("B", `unix://${path.join(root, "new-pin.sock")}`);
+	await fs.writeFile(env.PI_VOICE_CONFIG, JSON.stringify({ enabled: true, input: "auto", output: "local", audioCache: false, timingPreprocessConcurrency: 0, codeDescriptionPreprocessConcurrency: 0 }));
+	const lookup = t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", async () => ({ kind: "device" as const, id: "A" }));
+	t.mock.method(DeviceRouter.prototype, "route", async function(this: DeviceRouter, ...args: Parameters<DeviceRouter["route"]>) { return this.routeMetadata(...args); });
+	await host.start();
+	await host.shortcut("f4");
+	await admitted.promise;
+	const fence = path.join(env.PI_VOICE_COORDINATOR_DIR, "speech.lock", "lease.json");
+	const owner = JSON.parse(await fs.readFile(fence, "utf8"));
+	const ledger = () => new StopRecovery(env.PI_VOICE_COORDINATOR_DIR, owner.instanceId);
+	assert.equal(ledger().episode("input")!.handles[0].endpoint, original);
+	if (stopFirst) {
+		await host.command("stop");
+		for (let i = 0; i < 100 && !host.widgetLines()!.join("\n").includes("Input stop unconfirmed"); i++) await new Promise(resolve => setTimeout(resolve, 5));
+		assert.match(host.widgetLines()!.join("\n"), /Input stop unconfirmed/);
+	}
+	await register("A", moved);
+	lookup.mock.mockImplementation(async () => ({ kind: "device" as const, id: "B" }));
+	const lookups = lookup.mock.callCount();
+	const admissions = commands.filter(command => command.endsWith("ticket-admit")).length;
+	if (stopFirst) {
+		await host.command("reconnect");
+		assert.match(host.widgetLines()!.join("\n"), /Input stop unconfirmed/);
+		assert.equal(JSON.parse(await fs.readFile(fence, "utf8")).instanceId, owner.instanceId);
+		assert.equal(ledger().episode("input")!.handles[0].id, ticket);
+		assert.equal(lookup.mock.callCount(), lookups, "wrong-device proof cannot adopt the new pin");
+		await host.shortcut("f4");
+		assert.equal(commands.filter(command => command.endsWith("ticket-admit")).length, admissions, "failed recovery keeps capture fenced");
+	}
+	identity = "A";
+	await host.command("reconnect");
+	assert.equal(ledger().isIdle("input"), true);
+	for (let i = 0; i < 30; i++) await new Promise(resolve => setImmediate(resolve));
+	assert.doesNotMatch(host.widgetLines()!.join("\n"), /Input stop unconfirmed/);
+	assert.ok(lookup.mock.callCount() > lookups);
+	assert.equal(commands.filter(command => command === `${moved} stop-admit ${ticket} ${boot} A`).length, stopFirst ? 2 : 1);
+	assert.equal(commands.filter(command => command.endsWith("ticket-admit")).length, admissions, "reconnect never starts a new recording");
+	await host.command("input disabled");
+	assert.equal(JSON.parse(await fs.readFile(env.PI_VOICE_CONFIG, "utf8")).input, "disabled", "proved recovery clears rejected cancellation");
+	await assert.rejects(fs.stat(fence), { code: "ENOENT" }, "proved reconnect must release the microphone ownership fence");
+});
+
 test("single-slash Unix config normalizes to the sink's remote prefix", () => {
 	assert.equal(normalizeVoiceOutput("unix:/test-output"), "unix:///test-output");
 });
@@ -135,7 +226,7 @@ for (const diesAfterStartup of [false, true]) for (const journalAvailable of [tr
 	await host.command("reconnect");
 	assert.ok(host.notices.some(notice => notice.message.includes("Interrupted transport coverage remains unproven. Ownership retained; reconnect cannot reconstruct missing admission evidence. Preserve the original device receipts and see docs/troubleshooting.md#unconfirmed-stop; restarting or deleting the fence is not stop proof.")), JSON.stringify(host.notices));
 	assert.equal(input.mock.callCount(), journalAvailable ? 1 : 0);
-	if (journalAvailable) assert.deepEqual(input.mock.calls[0].arguments, [{ endpoint: "unix:///reconnected-input", ticket }]);
+	if (journalAvailable) assert.deepEqual(input.mock.calls[0].arguments, [{ endpoint: "unix:///reconnected-input", ticket, bootId: undefined, deviceId: "A", allowReboot: false }]);
 	assert.equal(await fs.readFile(fence, "utf8"), owner);
 	assert.match(rows(), /Output stop unconfirmed/);
 	const before = input.mock.callCount();

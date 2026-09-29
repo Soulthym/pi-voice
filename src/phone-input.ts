@@ -169,26 +169,28 @@ export class PhoneInputClient {
 	#activeEndpoint: string | null = null;
 	#ticket: string | null = null;
 	#waitBoot: string | undefined;
+	#rebootScope: { bootId: string; deviceId: string } | undefined;
 	#generation = 0;
 	#cancellation: Promise<void> = Promise.resolve();
 	#cancelCapture: (() => void) | null = null;
 	#stopPending: Promise<void> | null = null;
 
 	constructor(
-		private readonly retainHandle?: (handle: { endpoint: string; ticket: string; bootId: string; desktopWait?: true }) => void,
+		private readonly retainHandle?: (handle: { endpoint: string; ticket: string; bootId: string; desktopWait?: true; networkAdmission?: true; deviceId?: string }) => void,
 		private readonly retireHandle?: (handle: { endpoint: string; ticket: string }) => void,
 		private readonly beforeCapture?: () => void,
 	) {}
 
 	/** Opaque original scope only; never substitute a newly issued recording ticket. */
-	static retryStop(handle: { endpoint: string; ticket: string; bootId?: string | null; desktopWait?: boolean }): Promise<void> {
+	static retryStop(handle: { endpoint: string; ticket: string; bootId?: string | null; desktopWait?: boolean; deviceId?: string; allowReboot?: boolean }): Promise<void> {
 		if (!(handle.endpoint === "local" && handle.desktopWait === true && validBootId(handle.bootId) || /^(tcp|unix):/.test(handle.endpoint)) || !/^[0-9a-f]{32}\.[1-9][0-9]{0,15}$/.test(handle.ticket) || !Number.isSafeInteger(Number(handle.ticket.split(".")[1]))) {
 			return Promise.reject(new Error("Invalid retained microphone scope"));
 		}
 		const client = new PhoneInputClient();
 		client.#activeEndpoint = handle.endpoint;
 		client.#ticket = handle.ticket;
-		if (handle.endpoint === "local" && handle.desktopWait) client.#waitBoot = handle.bootId!;
+		if (handle.desktopWait && validBootId(handle.bootId)) client.#waitBoot = handle.bootId!;
+		if (handle.allowReboot && validBootId(handle.bootId) && handle.deviceId && /^[a-zA-Z0-9._-]{1,128}$/.test(handle.deviceId) && handle.deviceId !== "legacy-loopback") client.#rebootScope = { bootId: handle.bootId!, deviceId: handle.deviceId };
 		return client.stop();
 	}
 
@@ -202,10 +204,20 @@ export class PhoneInputClient {
 		return this.#cancellation;
 	}
 
+	/** Close the grant channel before recovering all retained scopes through their original routes. */
+	async recover(stopScopes: () => Promise<void>): Promise<void> {
+		await this.cancel().catch(() => {});
+		await stopScopes();
+		this.#activeEndpoint = null;
+		this.#ticket = null;
+		this.#cancellation = Promise.resolve();
+	}
+
 	stop(_endpoint?: string): Promise<void> {
 		const endpoint = this.#activeEndpoint;
 		const ticket = this.#ticket;
 		const waitBoot = this.#waitBoot;
+		const reboot = this.#rebootScope;
 		if (!endpoint || !ticket) {
 			this.#generation++;
 			this.#cancelCapture?.();
@@ -233,7 +245,7 @@ export class PhoneInputClient {
 			const timer = setTimeout(() => finish(new Error("Voice microphone stop timed out")), 10_000);
 			timer.unref?.();
 			socket.setEncoding?.("utf8");
-			socket.on("connect", () => socket.write(waitBoot ? `stop-wait ${ticket} ${waitBoot}\n` : `stop ${ticket}\n`));
+			socket.on("connect", () => socket.write(reboot ? `stop-admit ${ticket} ${reboot.bootId} ${reboot.deviceId}\n` : waitBoot ? `stop-wait ${ticket} ${waitBoot}\n` : `stop ${ticket}\n`));
 			socket.on("data", chunk => {
 				response += chunk;
 				const newline = response.indexOf("\n");
@@ -241,7 +253,9 @@ export class PhoneInputClient {
 				const line = response.slice(0, newline).trim();
 				const [status, payload = ""] = line.split(" ", 2);
 				const message = Buffer.from(payload, "base64").toString("utf8");
-				if (status === "ok" && message === (waitBoot ? `stopped-wait ${ticket} ${waitBoot}` : `stopped ${ticket}`)) finish();
+				const proof = message.split(" ");
+				const rebooted = reboot && proof.length === 5 && proof[0] === "stopped-reboot" && proof[1] === ticket && proof[2] === reboot.bootId && validBootId(proof[3]) && proof[3] !== reboot.bootId && proof[4] === reboot.deviceId;
+				if (status === "ok" && (rebooted || message === (waitBoot ? `stopped-wait ${ticket} ${waitBoot}` : `stopped ${ticket}`))) finish();
 				else finish(new Error(status === "ok" ? "Microphone stop not confirmed; update the recorder client" : message || "Unable to stop phone microphone"));
 			});
 			socket.on("error", finish);
@@ -268,6 +282,7 @@ export class PhoneInputClient {
 		this.#activeEndpoint = endpoint;
 		this.#ticket = null;
 		this.#waitBoot = undefined;
+		this.#rebootScope = undefined;
 		socket.setNoDelay?.(true);
 
 		return new Promise<PhoneCapture>((resolve, reject) => {
@@ -287,13 +302,13 @@ export class PhoneInputClient {
 					this.#socket = null;
 					this.#cancelCapture = null;
 				}
-				if (!error && capture && !streamMode && this.#ticket) {
+				if (!error && capture && !streamMode && endpoint === "local" && this.#ticket) {
 					try { this.retireHandle?.({ endpoint, ticket: this.#ticket }); }
 					catch (retirementError) { error = retirementError instanceof Error ? retirementError : new Error(String(retirementError)); }
 				}
-				const stopped = this.#ticket && (error || streamMode) ? this.stop() : Promise.resolve();
+				const stopped = this.#ticket && (error || streamMode || endpoint !== "local") ? this.stop() : Promise.resolve();
 				void stopped.catch(() => {});
-				if ((!this.#ticket || (!error && !streamMode)) && this.#activeEndpoint === endpoint) {
+				if ((!this.#ticket || (!error && !streamMode && endpoint === "local")) && this.#activeEndpoint === endpoint) {
 					this.#activeEndpoint = null; this.#ticket = null;
 				}
 				socket.destroy();
@@ -321,7 +336,7 @@ export class PhoneInputClient {
 				detector?.write(chunk);
 			};
 
-			socket.on("connect", () => { if (!settled) socket.write(endpoint === "local" ? "ticket-wait\n" : "ticket\n"); });
+			socket.on("connect", () => { if (!settled) socket.write(endpoint === "local" ? "ticket-wait\n" : "ticket-admit\n"); });
 			socket.on("data", (raw: Buffer) => {
 				if (settled) return;
 				if (streamMode) {
@@ -338,15 +353,15 @@ export class PhoneInputClient {
 				const header = headerBuffer.subarray(0, newline).toString("utf8").trim();
 				const remainder = headerBuffer.subarray(newline + 1);
 				if (!ticketReceived) {
-					const [kind, ticket = "", bootId, capability, extra] = header.split(" ");
-					if (kind !== "ticket" || !/^[0-9a-f]{32}\.[1-9][0-9]{0,15}$/.test(ticket) || !Number.isSafeInteger(Number(ticket.split(".")[1])) || !validBootId(bootId) || capability !== (endpoint === "local" ? "wait-v1" : undefined) || extra !== undefined || remainder.length) {
+					const [kind, ticket = "", bootId, capability, deviceId, extra] = header.split(" ");
+					if (kind !== "ticket" || !/^[0-9a-f]{32}\.[1-9][0-9]{0,15}$/.test(ticket) || !Number.isSafeInteger(Number(ticket.split(".")[1])) || !validBootId(bootId) || !(capability === "wait-v1" || endpoint !== "local" && capability === "admit-v1") || (capability === "wait-v1" ? deviceId !== undefined : !deviceId || !/^[a-zA-Z0-9._-]{1,128}$/.test(deviceId)) || extra !== undefined || remainder.length) {
 						finish(new Error("Boot-bound microphone admission unavailable; update the recorder client and host together before recording (no START sent)"));
 						return;
 					}
 					ticketReceived = true;
 					this.#ticket = ticket;
-					if (endpoint === "local") this.#waitBoot = bootId;
-					try { this.retainHandle?.({ endpoint, ticket, bootId, ...(endpoint === "local" ? { desktopWait: true } : {}) }); }
+					if (capability === "wait-v1") this.#waitBoot = bootId;
+					try { this.retainHandle?.({ endpoint, ticket, bootId, ...(capability === "wait-v1" ? { desktopWait: true } : { networkAdmission: true, deviceId }) }); }
 					catch (error) { finish(error instanceof Error ? error : new Error(String(error))); return; }
 					headerBuffer = Buffer.alloc(0);
 					socket.write(`record ${ticket} ${bootId}\n`);

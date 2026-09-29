@@ -814,6 +814,46 @@ for (const proof of ["late-receipt", "reconnect", "no-ack", "input-pending", "re
  t.mock.timers.reset();
 });
 
+for (const grant of [false, true]) test(`network input restart is idle after ${grant ? "covered normal stop" : "pre-retain disconnect without grant"}`, async t => {
+ const { host, lease } = await setup(t);
+ const ticket = `${"a".repeat(32)}.1`;
+ const bootId = "11111111-2222-3333-4444-555555555555";
+ const commands: string[] = [];
+ const requested = Promise.withResolvers<void>();
+ const respond = Promise.withResolvers<void>();
+ const server = net.createServer(socket => {
+  socket.on("error", () => {});
+  socket.on("data", raw => {
+   const command = String(raw).trim();
+   commands.push(command);
+   if (command === "ticket-admit") {
+    requested.resolve();
+    void respond.promise.then(() => {
+     if (grant) socket.write(`ticket ${ticket} ${bootId} admit-v1 null\n`);
+     else socket.end("error bm8gZ3JhbnQ=\n");
+    });
+   } else if (command === `record ${ticket} ${bootId}`) socket.end("ok \n");
+   else if (command === `stop ${ticket}`) socket.end(`ok ${Buffer.from(`stopped ${ticket}`).toString("base64")}\n`);
+   else assert.fail(`Unexpected command: ${command}`);
+  });
+ });
+ await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+ t.after(() => new Promise<void>(resolve => server.close(() => resolve())));
+ const endpoint = `tcp://127.0.0.1:${(server.address() as net.AddressInfo).port}`;
+ await host.command(`input ${endpoint}`);
+ const capture = host.command("talk");
+ await requested.promise;
+ const owner = JSON.parse(await fs.readFile(lease, "utf8"));
+ respond.resolve();
+ await capture; await settle();
+ assert.deepEqual(commands, grant ? ["ticket-admit", `record ${ticket} ${bootId}`, `stop ${ticket}`] : ["ticket-admit"]);
+ const restarted = new StopRecovery(path.dirname(path.dirname(lease)), owner.instanceId);
+ assert.equal(restarted.episode("input")?.handles.length ?? 0, 0);
+ await restarted.retry("input", new DeviceRouter(), endpoint);
+ assert.deepEqual(commands, grant ? ["ticket-admit", `record ${ticket} ${bootId}`, `stop ${ticket}`] : ["ticket-admit"], "restart needs no new grant or stop IO");
+ assert.equal(restarted.isIdle("input"), true, "network admission must not leave an uncovered pre-ticket window");
+});
+
 test("normal microphone receipt retires config A before recovery retries config B", async t => {
  const { host, lease } = await setup(t);
  const ticket = `${"a".repeat(32)}.1`;
@@ -829,7 +869,7 @@ test("normal microphone receipt retires config A before recovery retries config 
   socket.on("error", () => {});
   socket.on("data", raw => {
    const command = String(raw).trim();
-   if (command === "ticket") socket.write(`ticket ${ticket} 11111111-2222-3333-4444-555555555555\n`);
+   if (command === "ticket-admit") socket.write(`ticket ${ticket} 11111111-2222-3333-4444-555555555555 admit-v1 null\n`);
    else if (command.startsWith("record ")) { active = socket; recorded.resolve(); }
    else socket.end(`ok ${Buffer.from(`stopped ${ticket}`).toString("base64")}\n`);
   });
@@ -858,7 +898,7 @@ test("normal microphone receipt retires config A before recovery retries config 
  await recorded.promise;
  const retry = t.mock.method(PhoneInputClient, "retryStop", async () => {});
  await journal().retry("input", new DeviceRouter(), b);
- assert.deepEqual(retry.mock.calls.map(call => call.arguments), [[{ endpoint: b, ticket }]], "obsolete A cannot block current B recovery");
+ assert.deepEqual(retry.mock.calls.map(call => call.arguments), [[{ endpoint: b, ticket, bootId: "11111111-2222-3333-4444-555555555555", deviceId: "local", allowReboot: false }]], "obsolete A cannot block current B recovery");
  await host.command("talk");
  await stopped.promise;
  active!.end("ok \n");

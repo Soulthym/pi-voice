@@ -38,7 +38,7 @@ case "$1" in
       interrupted) kill -TERM $$;;
     esac;;
 -q) ${outcome === "success-delayed-quit" ? 'touch "$TMPDIR/queued-quit"; rm -f "$TMPDIR/running"; sleep 5;' : ""}
-    ${["success-retained", "success-missing-active"].includes(outcome) ? '[[ -e "$TMPDIR/allow-stop" ]] &&' : ""} rm -f "$TMPDIR/running"; exit 0;;
+    ${["success-retained", "success-missing-active"].includes(outcome) ? '[[ -e "$TMPDIR/allow-stop" ]] &&' : ""} rm -f "$TMPDIR/running"; printf 'Recording finished: %s\\n' "$(cat "$TMPDIR/queued-start")"; exit 0;;
 -i) if [[ -e "$TMPDIR/running" ]]; then printf '{"isRecording":true}'; else printf '{"isRecording":false}'; fi;;
 esac
 `, { mode: 0o700 });
@@ -77,7 +77,13 @@ esac
 		}
 		const recording = await fs.readFile(path.join(root, "queued-start"), "utf8");
 		owner.child.stdin.end();
-		await owner.closed;
+		const captureReply = await owner.closed;
+		if (script.startsWith("termux/") && !outcome.startsWith("success")) {
+			assert.doesNotMatch(captureReply, /\nstream\n/);
+			const error = captureReply.split("\n").find(line => line.startsWith("error "));
+			assert.ok(error);
+			assert.match(Buffer.from(error.slice(6), "base64").toString(), /unknown\/pending/);
+		}
 		const state = path.join(root, "pi-voice/microphone/termux");
 		if (outcome === "success-missing-active") {
 			assert.ok(await fs.stat(path.join(root, "running")));
@@ -100,6 +106,9 @@ esac
 			return;
 		}
 		assert.match(reply, /^error /);
+		if (script.startsWith("termux/") && outcome.startsWith("success")) {
+			assert.equal(await fs.readFile(recording, "utf8"), "audio", "uncertainty must preserve the recording path");
+		}
 		assert.match(await fs.readFile(path.join(state, "active"), "utf8"), new RegExp(`^${ticket}:`));
 		if (outcome === "success-delayed-quit") {
 			assert.ok(await fs.stat(path.join(state, "quit-uncertain")));

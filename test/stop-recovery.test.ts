@@ -17,6 +17,7 @@ async function setup(t: import("node:test").TestContext) {
 	const commands: string[] = [];
 	let exact = true;
 	let proof: Record<string, unknown> = {};
+	let inputReceipt: string | undefined;
 	const socketPath = path.join(root, "device.sock");
 	const server = net.createServer(socket => {
 		let data = "";
@@ -25,7 +26,7 @@ async function setup(t: import("node:test").TestContext) {
 			if (!data.endsWith("\n")) return;
 			commands.push(data.trim());
 			if (data.startsWith("PI_VOICE_CONTROL")) socket.end(`${JSON.stringify({ type: "stopped", id: exact ? outputId : "other", ...proof })}\n`);
-			else socket.end(`ok ${Buffer.from(`stopped ${exact ? ticket : "other"}`).toString("base64")}\n`);
+			else socket.end(`ok ${Buffer.from(inputReceipt ?? `stopped ${exact ? ticket : "other"}`).toString("base64")}\n`);
 		});
 	});
 	await new Promise<void>(resolve => server.listen(socketPath, resolve));
@@ -33,7 +34,7 @@ async function setup(t: import("node:test").TestContext) {
 	const endpoint = `unix://${socketPath}`;
 	await fs.mkdir(path.join(root, "devices"));
 	await fs.writeFile(path.join(root, "devices", "A.json"), JSON.stringify({ version: 1, id: "A", name: "Original device", platform: "linux", audioEndpoint: endpoint, inputEndpoint: endpoint, connectedAt: 2, lastActive: 2 }));
-	return { root, endpoint, commands, router: new DeviceRouter(path.join(root, "devices"), "replacement", {}), setExact(value: boolean) { exact = value; }, setProof(value: Record<string, unknown>) { proof = value; } };
+	return { root, endpoint, commands, router: new DeviceRouter(path.join(root, "devices"), "replacement", {}), setExact(value: boolean) { exact = value; }, setProof(value: Record<string, unknown>) { proof = value; }, setInputReceipt(value: string) { inputReceipt = value; } };
 }
 
 test("durable input/output retries use original identity and old scope through changed registration; never remove fence", async t => {
@@ -156,6 +157,25 @@ test("reboot discharge requires original registered identity and persisted commi
 	}
 });
 
+test("covered network retry preserves identity across restart and retires only a verified reboot", async t => {
+	const { root, endpoint, router, commands, setInputReceipt } = await setup(t);
+	const journal = new StopRecovery(root, "network-owner");
+	journal.initialize();
+	const handle = { endpoint: "unix:///old-input", id: ticket, selection: "A", configured: "auto", bootId: outputId, networkAdmission: true, rebootSafe: true };
+	journal.retain("input", handle, "Original device");
+	const restored = new StopRecovery(root, "network-owner");
+	assert.deepEqual(restored.episode("input")!.handles, [handle]);
+	const reboot = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+	setInputReceipt(`stopped-reboot ${ticket} ${outputId} ${reboot} B`);
+	await assert.rejects(restored.retry("input", router, "auto"), /not confirmed/);
+	assert.deepEqual(new StopRecovery(root, "network-owner").episode("input")!.handles, [handle]);
+	setInputReceipt(`stopped-reboot ${ticket} ${outputId} ${reboot} A`);
+	await restored.retry("input", router, "auto");
+	assert.equal(new StopRecovery(root, "network-owner").isIdle("input"), true);
+	assert.deepEqual(commands, Array(2).fill(`stop-admit ${ticket} ${outputId} A`));
+	assert.notEqual(endpoint, handle.endpoint, "retry uses the registered original identity's new endpoint");
+});
+
 test("input persistence failure aborts before recording admission", async t => {
 	const { root } = await setup(t);
 	const commands: string[] = [];
@@ -163,7 +183,7 @@ test("input persistence failure aborts before recording admission", async t => {
 	const server = net.createServer(socket => socket.on("data", chunk => {
 		const command = String(chunk).trim();
 		commands.push(command);
-		if (command === "ticket") socket.write(`ticket ${ticket} ${outputId}\n`);
+		if (command === "ticket-admit") socket.write(`ticket ${ticket} ${outputId} admit-v1 null\n`);
 		else if (command === `stop ${ticket}`) socket.end(`ok ${Buffer.from(`stopped ${ticket}`).toString("base64")}\n`);
 	}));
 	await new Promise<void>(resolve => server.listen(endpoint, resolve));
@@ -171,7 +191,7 @@ test("input persistence failure aborts before recording admission", async t => {
 	const input = new PhoneInputClient(() => { throw new Error("disk full"); });
 	await assert.rejects(input.capture(`unix://${endpoint}`), /disk full/);
 	await input.cancel();
-	assert.ok(commands.includes("ticket"));
+	assert.ok(commands.includes("ticket-admit"));
 	assert.ok(commands.includes(`stop ${ticket}`));
 	assert.ok(!commands.some(command => command.startsWith("record ")));
 });

@@ -401,13 +401,13 @@ export default async function (pi: ExtensionAPI) {
 	const captureRecoveryRoute = (direction: "input" | "output", route: ReturnType<DeviceRouter["routeMetadata"]>): void => {
 		recoveryRoutes[direction].set(route.endpoint, { selection: route.kind === "device" ? route.device.id : "local", configured: config[direction], device: route.kind === "device" ? route.device.name : selectedDeviceLabel });
 	};
-	const retainRecoveryHandle = (direction: "input" | "output", endpoint: string, id: string, bootId?: string | null, rebootSafe?: boolean, deviceId?: string, desktopWait?: true): void => {
+	const retainRecoveryHandle = (direction: "input" | "output", endpoint: string, id: string, bootId?: string | null, rebootSafe?: boolean, deviceId?: string, desktopWait?: true, networkAdmission?: true): void => {
 		if (!stopRecovery || (!/^(tcp|unix):\/\//.test(endpoint) && !(direction === "input" && endpoint === "local"))) {
 			throw new Error("Recovery journal unavailable; dispatch denied");
 		}
 		const route = recoveryRoutes[direction].get(endpoint);
 		if (!route) throw new Error("Original recovery route not captured; ownership retained");
-		stopRecovery.retain(direction, { endpoint, id, selection: route.selection, configured: route.configured, ...(bootId !== undefined ? { bootId } : {}), ...(desktopWait ? { desktopWait } : {}), ...(rebootSafe === true && route.configured === "auto" && deviceId === route.selection && deviceId !== "local" && deviceId !== "legacy-loopback" ? { rebootSafe } : {}) }, route.device);
+		stopRecovery.retain(direction, { endpoint, id, selection: route.selection, configured: route.configured, ...(bootId !== undefined ? { bootId } : {}), ...(desktopWait ? { desktopWait } : {}), ...(networkAdmission ? { networkAdmission } : {}), ...(rebootSafe === true && route.configured === "auto" && deviceId === route.selection && deviceId !== "local" && deviceId !== "legacy-loopback" ? { rebootSafe } : {}) }, route.device);
 	};
 	const restoreStopRecovery = (initialize = false): void => {
 		const previousRecovery = orphanRecovery;
@@ -464,7 +464,7 @@ export default async function (pi: ExtensionAPI) {
 		if (!coordinator?.ownsSpeech() || stopRecovery !== coordinator.recovery) {
 			throw new Error("Physical voice IO requires the current durable owner");
 		}
-		stopRecovery.beforeIO(direction, direction === "output" && /^(tcp|unix):\/\//.test(routedVoiceConfig().output), direction === "input" && routedVoiceConfig().input === "local");
+		stopRecovery.beforeIO(direction, direction === "output" && /^(tcp|unix):\/\//.test(routedVoiceConfig().output), direction === "input");
 	};
 	const reportedStopErrors = new WeakSet<object>();
 	let stopDiagnostic = { cause: "", notified: false };
@@ -1957,7 +1957,7 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	const phoneInput = new PhoneInputClient(
-		handle => retainRecoveryHandle("input", handle.endpoint, handle.ticket, handle.bootId, undefined, undefined, handle.desktopWait),
+		handle => retainRecoveryHandle("input", handle.endpoint, handle.ticket, handle.bootId, handle.networkAdmission, handle.deviceId, handle.desktopWait, handle.networkAdmission),
 		handle => retireStopHandle("input", handle.ticket, handle.endpoint),
 		() => beforePhysicalIO("input"),
 	);
@@ -2364,6 +2364,7 @@ export default async function (pi: ExtensionAPI) {
 		handoffConnecting = true;
 		refreshProgressWidget();
 		let stopUnconfirmed = false;
+		let recoveredInput = false;
 		const adoption = (async () => {
 			try {
 				// Fence the whole adoption, including resolution, stop proof and both route metadata updates.
@@ -2391,6 +2392,16 @@ export default async function (pi: ExtensionAPI) {
 					stopUnconfirmed = true;
 					await trackStop("output", vocalizer.shutdown(scope => recovery.stopOutputScope(scope, deviceRouter, config.output)));
 					if (stopResources.output.episode || stopResources.output.cleanup) throw new Error("Retained output scopes remain unconfirmed");
+					stopUnconfirmed = false;
+				}
+				if (recover && stopRecovery?.episode("input")?.handles.length) {
+					const recovery = stopRecovery;
+					stopUnconfirmed = true;
+					// Invalidate dictation first: its rejection must not replace recovery's cleanup tracker.
+					await cancelActiveInput().catch(() => {});
+					await trackStop("input", phoneInput.recover(() => recovery.retry("input", deviceRouter, config.input)));
+					if (stopResources.input.episode || stopResources.input.cleanup) throw new Error("Retained input scopes remain unconfirmed");
+					recoveredInput = true;
 					stopUnconfirmed = false;
 				}
 				const connection = origin ?? await deviceRouter.resolveCurrentConnection();
@@ -2468,6 +2479,7 @@ export default async function (pi: ExtensionAPI) {
 			if (deviceRebind === barrier) {
 				deviceRebind = undefined;
 				finishSpeechPreemption();
+				if (recoveredInput && !inputInProgress && !speechReservedForInput && lastOwnerUtterance === undefined) releaseSpeechOwnership(false);
 			}
 		};
 		void adoption.finally(() => {
