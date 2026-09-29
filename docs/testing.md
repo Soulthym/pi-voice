@@ -1,5 +1,38 @@
 # Tests
 
+## Integrated host/helper recovery after `eac9b9e`
+
+Final typecheck passed; full default suite **1295 passed / 33 compatibility skips /
+zero failures (1328 total)**; full installed-native suite **1328 passed / zero
+skips/failures**. Isolated real SSH: **12/12 synthetic cases passed**, including
+normal/Stop/Cancel input and v3 cancelled output preparation; no player invocation.
+Logs: `/tmp/vf.JR6u/{check,full,native,ssh}.log`.
+
+Both host admission fixtures now send JSON-quoted `"A"`, matching the nullable
+identity protocol; no assertions were relaxed. The initial SSH run failed with no
+decodable audio: its minimal image lacked the desktop recorder's new Python 3
+runtime requirement. Adding `python3` to that image fixed the actual prerequisite;
+`ssh-missing-python.log` preserves the failure. Installation docs explicitly cover
+local Linux hosts and desktop capture clients; Termux's Android path is unchanged.
+
+All runs used `env -i`, private HOME/TMPDIR and XDG config/cache/data/state/runtime
+roots. Full suites ran sequentially; installed-native UI was inert. Rootless SSH
+containers used private networking, synthetic PulseAudio/PipeWire sources, no host
+mounts/audio devices, ephemeral keys and isolated container storage. Owned containers
+and run image were removed; the harness used its scoped SIGKILL cleanup fallback.
+LSP unavailable; typecheck, shell syntax, helper parity and diff checks passed.
+No live sessions/configuration, providers/inference, hardware, deployment or push.
+
+Host regressions cover original-route retired/journal-only scope replay, durable
+clear failure, healthy capture review/manual-edit preservation and clearing proved
+input cancellation barriers. Helper checks cover pidfd cancellation, durable retirement
+replay, saved canonical recording paths and absent versus literal `"null"` identity.
+Fresh fp5-style network input/output are covered for completed normal start/stop
+and eligible same-device changed-boot proof, not all failure schedules. Local OUTPUT
+accounting remains unsupported; unknown Android same-boot dispatch stays fenced.
+Unknown saved/current kernel boot is receipt-stop-only, and uncertain/legacy journals
+are never promoted. These are synthetic checks, not installed-phone/reboot evidence.
+
 ## Live-owner remote output reconnect
 
 Explicit reconnect now passes the shared durable StopRecovery route proof into

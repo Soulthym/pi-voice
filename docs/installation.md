@@ -21,6 +21,7 @@ For local Linux devices, install:
 
 - PipeWire's `pw-play`, `pw-record`, and `wpctl`; or PulseAudio's `parec` for recording.
 - `mpv` or `ffplay` as a playback fallback.
+- Python 3 with `os.pidfd_open` and `signal.pidfd_send_signal`, and Linux pidfd support, for desktop capture (normally Python ≥3.9 / Linux ≥5.3). No numeric-PID fallback is used.
 
 Pi Voice prefers `pw-play`, then `mpv`, then `ffplay` for local output. It prefers a usable PipeWire source, then PulseAudio for local input. Selecting a non-monitor PulseAudio source requires successful `pactl` detection; otherwise the backend uses its default.
 
@@ -51,7 +52,7 @@ After registration, `Connected as <name>` confirms the **client's** identity, **
 
 ## Linux SSH client
 
-Install `openssh`, `socat`, `mpv`, `ffmpeg`, `flock` (util-linux), and PipeWire or PulseAudio recording utilities. From a Pi Voice checkout:
+Install `openssh`, `socat`, `mpv`, `ffmpeg`, `flock` (util-linux), Python 3 with the pidfd facilities listed above, and PipeWire or PulseAudio recording utilities. From a Pi Voice checkout:
 
 ```bash
 mkdir -p "$HOME/.local/bin"
@@ -172,7 +173,7 @@ chmod 755 /absolute/custom/bin/pi-voice-*
 Only then reconnect with `pi-voice-ssh YOUR_HOST` and run `/reload` in Pi when safe.
 These are operator-run upgrade instructions, not deployment or stop-proof shortcuts.
 
-Desktop capture requires Python 3 with `os.pidfd_open` and `signal.pidfd_send_signal`, plus Linux pidfd support. The recorder acquires its own incarnation-safe signal handle before opening the device; unavailable support fails closed rather than signalling a potentially reused PID.
+Desktop capture now requires Python 3 with `os.pidfd_open` and `signal.pidfd_send_signal`, plus Linux pidfd support (normally Python ≥3.9 / Linux ≥5.3). Install/verify this on local Linux Pi hosts and every desktop capture client before upgrading; Termux's Android recorder path does not use Python. The recorder acquires its own incarnation-safe signal handle before opening the device; unavailable support fails closed rather than signalling a potentially reused PID.
 
 ### Audio protocol v3 (host and every client)
 

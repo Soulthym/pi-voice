@@ -120,7 +120,7 @@ for (const [stopFirst, replace] of [[false, false], [true, false], [true, true]]
 				commands.push(`${endpoint} ${command}`);
 				if (command === "ticket-admit") {
 					socket.on("end", () => { grantClosed = true; });
-					socket.write(`ticket ${ticket} ${boot} admit-v1 A\n`);
+					socket.write(`ticket ${ticket} ${boot} admit-v1 "A"\n`);
 				} else if (command === `record ${ticket} ${boot}`) admitted.resolve();
 				else if (endpoint === moved && command === `stop-admit ${ticket} ${boot} A`) {
 					assert.equal(grantClosed, true, "close the live grant before ledger recovery");
@@ -196,7 +196,7 @@ for (const manual of [false, true]) test(`healthy retained capture finishes to r
 	const admitted = Promise.withResolvers<void>();
 	const server = net.createServer(socket => socket.on("data", data => {
 		const command = String(data).trim();
-		if (command === "ticket-admit") socket.write(`ticket ${ticket} ${boot} admit-v1 A\n`);
+		if (command === "ticket-admit") socket.write(`ticket ${ticket} ${boot} admit-v1 "A"\n`);
 		else if (command === `record ${ticket} ${boot}`) { capture = socket; admitted.resolve(); }
 		else if (command === `stop ${ticket}`) {
 			capture?.end(`ok ${Buffer.from("Healthy dictation.").toString("base64")}\n`);
