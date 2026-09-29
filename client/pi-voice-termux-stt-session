@@ -61,7 +61,7 @@ load_tickets() {
   if [[ -e $ticket_state ]]; then
     IFS=' ' read -r epoch latest watermark saved_boot dispatch extra <"$ticket_state" || exit 1
     [[ $epoch =~ ^[0-9a-f]{32}$ ]] && valid_counter "$latest" && valid_counter "$watermark" && [[ -z $extra ]] && valid_boot "$saved_boot" && (( watermark <= latest )) || exit 1
-    [[ $dispatch == - || $dispatch =~ ^[0-9a-f]{32}\.[1-9][0-9]{0,15}:[1-9][0-9]*$ ]] || exit 1
+    [[ $dispatch == - || $dispatch =~ ^(retired:)?[0-9a-f]{32}\.[1-9][0-9]{0,15}:[1-9][0-9]*$ ]] || exit 1
     if [[ $saved_boot != "$boot_id" ]]; then
       # Kernel reboot closes old dispatches; same-boot idle snapshots do not.
       watermark=$latest
@@ -72,6 +72,16 @@ load_tickets() {
     fi
   elif [[ -e $active_file || -e $pending_file || -e $recording_lock ]]; then
     exit 1
+  fi
+  if [[ $dispatch == retired:* ]]; then
+    local retired_owner=${dispatch#retired:} retired_counter
+    retired_counter=${retired_owner#*.}; retired_counter=${retired_counter%%:*}
+    [[ $retired_owner == "$epoch.$retired_counter:"* ]] && valid_counter "$retired_counter" &&
+      (( retired_counter <= latest )) || exit 1
+    # Only this ticket-bound proof authorizes replay, never a missing active file.
+    [[ ! -e $active_file || $(cat "$active_file") == "$retired_owner" ]] || exit 1
+    finish_retirement
+    return
   fi
   if [[ -e $active_file ]]; then
     local saved_owner
@@ -122,10 +132,16 @@ valid_start_response() {
 
 retire_dispatch() {
   load_tickets
-  dispatch=-
+  [[ $dispatch == retired:* ]] && return 0
+  # Publish verified closure before removing ownership; keep the proof on replay.
+  dispatch="retired:$dispatch"
   save_tickets
-  rm -f "$active_file" "$stop_file" "$pending_file"
+  finish_retirement
+}
+finish_retirement() {
+  rm -f "$active_file" "$stop_file" "$pending_file" || exit 1
   rmdir "$recording_lock" 2>/dev/null || true
+  sync "$state_dir" || exit 1
 }
 confirmed_quit() {
   # A timed-out quit may execute against the next capture. Never retry past it.
