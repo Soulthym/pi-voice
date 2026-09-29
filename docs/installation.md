@@ -126,6 +126,14 @@ Validate with `sshd -t`, then reload `sshd` after changing its configuration. Th
 
 ## Upgrading
 
+### Audio protocol v3 (host and every client)
+
+Update the host and **all installed helpers and SSH wrappers together** on every desktop and Termux client, including custom launcher paths. Copy the complete `client/pi-voice-*` set using the [local install or SCP commands below](#upgrade-device-name-support), not just `pi-voice-audio-session`. If using a separate `termux/` installation, update its complete `termux/pi-voice-*` set at its actual installed location too. Use the matching host checkout if these changes are not published upstream.
+
+Both SSH wrapper variants require the exact v3 control-only `hello` acknowledgement; v1/v2, malformed and empty replies are rejected without sending audio or starting a player. Old wrappers that require v2 will reject a new v3 bridge. Readiness is not a playback test.
+
+Before replacing scripts or exiting wrappers, explicitly stop playback/capture and confirm actual device stop. If unconfirmed, preserve the connection, tickets, receipts, leases and runtime state and follow [stop recovery](troubleshooting.md#unconfirmed-stop); an upgrade is not stop proof. After confirmed stop, close every old wrapper on that client (they share a bridge), replace the complete helper set, reconnect and reload the host extension when ready. Retain device IDs, names/configuration and durable recovery evidence; remote tmux may remain. Earlier host-only notes below do not waive this v3 upgrade.
+
 ### Never-admitted orphan recovery
 
 This change is host-only; **no client scripts or endpoint protocol changed**. Load the updated extension when it is safe to do so; no SSH/client restart or hardware test is needed for this change. New owners get durable pre-dispatch admission evidence. Old journals are not upgraded, and an existing unresolved fence is not cleared by `/reload` or updating clients. Read the [legacy incident limitations](troubleshooting.md#disconnected-replay-incident-2026-09-27) before attempting recovery. Do not interrupt live sessions or delete coordination/runtime state to install this update.
@@ -178,7 +186,7 @@ Substitute the actual host checkout and installed paths. Update the underlying w
 
 Before replacing scripts or exiting wrappers, explicitly stop active playback/capture and confirm actual device stop. If stop is unconfirmed, preserve the original connection, runtime state, tickets, receipts and leases; restore that connection and retry `/voice stop` (or `/voice reconnect` for retained output stop). Do not kill host processes or delete leases as proof. See [recovery](troubleshooting.md#unconfirmed-stop).
 
-After confirmed stop, exit every old wrapper, update all copies together, reconnect and reload the host extension. The microphone now requires origin-scoped random-epoch tickets (`<epoch>.<counter>`, UUID-like identity, not numeric-only) and exact `stopped N` receipts. Audio requires the latest host and client scripts: v2 negotiation now uses secure opaque UUID stream IDs for scoped control and completion/stop proof. Older numeric/PID-based v2 clients are rejected before PCM; upgrade every audio-script copy together, not just the host. Retained numeric receipts are not valid modern proof. Existing epoch-qualified ticket state must be retained; only incompatible numeric-era `.tickets` state may be removed **after all old captures are confirmed stopped and old sessions exited**. Never unconditionally remove runtime state or the persistent `flock` fence. See [protocol migration](endpoint-protocol.md#microphone-protocol-migration).
+After confirmed stop, exit every old wrapper, update all copies together, reconnect and reload the host extension. The microphone now requires origin-scoped random-epoch tickets (`<epoch>.<counter>`, UUID-like identity, not numeric-only) and exact `stopped N` receipts. Audio requires v3 prepare/journal/commit with opaque UUID stream IDs and boot-bound completion/stop proof. All v1/v2 clients are rejected before PCM; upgrade every helper and SSH wrapper copy together, not just the host or audio helper. Retained numeric receipts are not valid modern proof. Existing epoch-qualified ticket state must be retained; only incompatible numeric-era `.tickets` state may be removed **after all old captures are confirmed stopped and old sessions exited**. Never unconditionally remove runtime state or the persistent `flock` fence. See [protocol migration](endpoint-protocol.md#microphone-protocol-migration).
 
 For later published updates, update the host checkout:
 

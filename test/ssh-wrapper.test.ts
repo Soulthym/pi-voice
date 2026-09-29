@@ -166,7 +166,7 @@ async function scenario(
 	const bridge = path.join(root, "fake-pi-voice-client");
 	fs.writeFileSync(
 		bridge,
-		"#!/usr/bin/env bash\nexec node -e 'const n=require(\"net\");const s=n.createServer(c=>c.on(\"data\",b=>{if(String(b)!==\"PI_VOICE_CONTROLhello\\n\")process.exit(2);c.end(JSON.stringify({type:\"protocol\",version:2})+\"\\n\")}));s.listen(Number(process.env.PI_VOICE_AUDIO_PORT)||8765,\"127.0.0.1\")'",
+		"#!/usr/bin/env bash\nexec node -e 'const n=require(\"net\");const s=n.createServer(c=>c.on(\"data\",b=>{if(String(b)!==\"PI_VOICE_CONTROLhello\\n\")process.exit(2);c.end(JSON.stringify({type:\"protocol\",version:3})+\"\\n\")}));s.listen(Number(process.env.PI_VOICE_AUDIO_PORT)||8765,\"127.0.0.1\")'",
 	);
 	fs.chmodSync(bridge, 0o755);
 	prefillName(path.join(root, "config"));
@@ -282,7 +282,7 @@ test("registration preserves names, confirms identity, and keeps the ID across r
 	}
 });
 
-test("wrapper fallback requires a v2 ACK, never an empty audio probe or TCP accept", async () => {
+test("wrapper fallback requires a v3 ACK, rejects v1/v2, and sends only control hello", async () => {
 	for (const wrapper of [CLIENT_WRAPPER, TERMUX_WRAPPER]) {
 		for (const socat of [true, false]) {
 			const root = fs.mkdtempSync(path.join(os.tmpdir(), "voice-probe-"));
@@ -305,10 +305,10 @@ test("wrapper fallback requires a v2 ACK, never an empty audio probe or TCP acce
 					// Deliberately not PI_VOICE_AUDIO_PORT: the fallback must use the shell port.
 					AUDIO_PORT: String((server.address() as net.AddressInfo).port),
 				};
-				for (const response of ["", "not JSON\n", '{"type":"protocol","version":1}\n', '{"type":"protocol","version":2}\n']) {
+				for (const response of ["", "not JSON\n", '{"type":"protocol","version":1}\n', '{"type":"protocol","version":2}\n', '{"type":"protocol","version":3}\n']) {
 					reply = response;
 					const result = await runScript(probe, [], env);
-					assert.equal(result.code, response.includes('"version":2') ? 0 : 1, `${wrapper} socat=${socat}: ${result.stderr}`);
+					assert.equal(result.code, response.includes('"version":3') ? 0 : 1, `${wrapper} socat=${socat}: ${result.stderr}`);
 					assert.equal(requests.at(-1), "PI_VOICE_CONTROLhello\n");
 				}
 				const authoritative = path.join(root, "pi-voice-client");
@@ -444,7 +444,7 @@ test("stale bridge pid files are replaced; live bridges are reused", async () =>
 	fs.writeFileSync(
 		bridgePath,
 		"#!/usr/bin/env bash\necho started >> " + JSON.stringify(path.join(root, "bridge-starts.log")) +
-			"\nexec node -e 'const n=require(\"net\");const s=n.createServer(c=>c.on(\"data\",b=>{if(String(b)!==\"PI_VOICE_CONTROLhello\\n\")process.exit(2);c.end(JSON.stringify({type:\"protocol\",version:2})+\"\\n\")}));s.listen(Number(process.env.PI_VOICE_AUDIO_PORT)||8765,\"127.0.0.1\")'",
+			"\nexec node -e 'const n=require(\"net\");const s=n.createServer(c=>c.on(\"data\",b=>{if(String(b)!==\"PI_VOICE_CONTROLhello\\n\")process.exit(2);c.end(JSON.stringify({type:\"protocol\",version:3})+\"\\n\")}));s.listen(Number(process.env.PI_VOICE_AUDIO_PORT)||8765,\"127.0.0.1\")'",
 	);
 	fs.chmodSync(bridgePath, 0o755);
 
@@ -506,7 +506,7 @@ test("termux wrapper runs the lifecycle and clears stale players", async () => {
 	fs.writeFileSync(
 		path.join(root, "counting-bridge"),
 		"#!/usr/bin/env bash\necho started >> " + JSON.stringify(path.join(root, "bridge-starts.log")) +
-			"\nexec node -e 'const n=require(\"net\");const s=n.createServer(c=>c.on(\"data\",b=>{if(String(b)!==\"PI_VOICE_CONTROLhello\\n\")process.exit(2);c.end(JSON.stringify({type:\"protocol\",version:2})+\"\\n\")}));s.listen(Number(process.env.PI_VOICE_AUDIO_PORT)||8765,\"127.0.0.1\")'\n",
+			"\nexec node -e 'const n=require(\"net\");const s=n.createServer(c=>c.on(\"data\",b=>{if(String(b)!==\"PI_VOICE_CONTROLhello\\n\")process.exit(2);c.end(JSON.stringify({type:\"protocol\",version:3})+\"\\n\")}));s.listen(Number(process.env.PI_VOICE_AUDIO_PORT)||8765,\"127.0.0.1\")'\n",
 	);
 	fs.chmodSync(path.join(root, "counting-bridge"), 0o755);
 
