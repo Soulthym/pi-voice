@@ -22,10 +22,13 @@ test("output grant requires durable exact reservation; cancellation closes late 
  const worker = new VoiceWorkerClient(event => events.push(event));
  const output = "unix:///test-only-output";
  worker.sendSegment(1, 1, "No inference", { ...DEFAULT_VOICE_CONFIG, output });
- const handle = { type: "remote-handle", output, id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", bootId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", utterance: 1 };
+ const handle = { type: "remote-handle", output, id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", bootId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", rebootSafe: true, deviceId: "test-device-A", utterance: 1 };
  worker.sendSegment(2, 2, "Queued without inference", { ...DEFAULT_VOICE_CONFIG, output });
  child.stdout.write(JSON.stringify(handle) + "\n");
  assert.equal(messages.some(m => m.type === "output-grant"), false, "event delivery is not journal ACK");
+ const { grant, ...forwarded } = events[0];
+ assert.equal(typeof grant, "function");
+ assert.deepEqual(forwarded, handle, "worker-client preserves the endpoint's reboot capability and device identity");
  const retain = () => journal.retain("output", { endpoint: output, id: handle.id, bootId: handle.bootId, selection: "device", configured: "auto" }, "Test output");
  const failing = mock.method(fs, "fsyncSync", () => { throw new Error("injected fsync failure"); });
  syncBuiltinESMExports();

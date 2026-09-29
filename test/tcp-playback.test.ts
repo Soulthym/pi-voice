@@ -6,10 +6,15 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 const helper = fileURLToPath(new URL("../src/tcp-playback.mjs", import.meta.url));
 const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-const boot_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const deviceId = "test-device-A";
 
-for (const mode of ["complete", "broken-pipe", "broken-forward", "old-client", "v2", "premature", "lost-ack", "stop", "startup-stop", "ack-reset", "pause-failure", "numeric", "malformed", "forged-stop", "forged-complete", "no-grant", "wrong-boot"] as const) {
+for (const mode of ["complete", "broken-pipe", "broken-forward", "old-client", "v2", "premature", "lost-ack", "stop", "startup-stop", "ack-reset", "pause-failure", "numeric", "malformed", "forged-stop", "forged-complete", "no-grant", "wrong-boot", "null-boot", "fenced", "false-fenced", "invalid-fenced", "missing-device", "invalid-device", "dash-device"] as const) {
  test(`TCP prepare/commit proof: ${mode}`, { timeout: 8000 }, async t => {
+  const boot_id = mode === "null-boot" ? null : "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const device_id = mode === "missing-device" ? null : mode === "invalid-device" ? "bad id" : mode === "dash-device" ? "-" : deviceId;
+  const preparedDevice = device_id === null || device_id === "bad id" ? ":" : device_id;
+  const boot_fenced = ["fenced", "null-boot", "missing-device", "invalid-device", "dash-device"].includes(mode) ? true : mode === "false-fenced" ? false : mode === "invalid-fenced" ? "true" : undefined;
+  const completes = ["complete", "null-boot", "fenced", "false-fenced", "invalid-fenced", "missing-device", "invalid-device", "dash-device"].includes(mode);
   const sockets = new Set<net.Socket>();
   let bytes = "", committed = false;
   const server = net.createServer({ allowHalfOpen: true }, socket => {
@@ -30,7 +35,7 @@ for (const mode of ["complete", "broken-pipe", "broken-forward", "old-client", "
      if (mode === "old-client") socket.end();
      else send({ type: "protocol", version: mode === "v2" ? 2 : 3 });
     } else if (text === "PI_VOICE_PREPARE\n") {
-     send({ type: "prepared", version: 3, id: mode === "numeric" ? 123 : mode === "malformed" ? "../../receipt" : id, boot_id });
+     send({ type: "prepared", version: 3, id: mode === "numeric" ? 123 : mode === "malformed" ? "../../receipt" : id, boot_id, boot_fenced, device_id });
     } else if (text.startsWith("PI_VOICE_COMMIT")) {
      assert.equal(text, `PI_VOICE_COMMIT ${id} ${boot_id}\n`);
      committed = true;
@@ -39,7 +44,7 @@ for (const mode of ["complete", "broken-pipe", "broken-forward", "old-client", "
    });
    socket.on("end", () => {
     if (["stop", "startup-stop", "ack-reset", "lost-ack", "forged-stop"].includes(mode)) return;
-    if (mode === "complete" || mode === "forged-complete") send({ type: "complete", id, boot_id: mode === "forged-complete" ? id : boot_id });
+    if (completes || mode === "forged-complete") send({ type: "complete", id, boot_id: mode === "forged-complete" ? id : boot_id });
     socket.end();
    });
   });
@@ -54,6 +59,7 @@ for (const mode of ["complete", "broken-pipe", "broken-forward", "old-client", "
    feedback += chunk;
    for (const line of String(chunk).trim().split("\n")) {
     if (line.startsWith("prepared ") && !["no-grant", "startup-stop"].includes(mode)) {
+     assert.equal(line, `prepared ${id} ${boot_id}${boot_fenced === true ? ` fenced ${preparedDevice}` : ""}`);
      assert.equal(committed, false, "prepare cannot dispatch without the host ACK");
      control.write(`grant ${id} ${mode === "wrong-boot" ? id : boot_id}\n`);
     }
@@ -65,7 +71,7 @@ for (const mode of ["complete", "broken-pipe", "broken-forward", "old-client", "
   if (!["stop", "ack-reset", "lost-ack", "forged-stop"].includes(mode)) child.stdin.end(Buffer.alloc(64));
   const [code] = await exit;
   const nonadmitted = ["broken-forward", "old-client", "v2", "numeric", "malformed", "no-grant", "wrong-boot"].includes(mode);
-  assert.equal(code, ["complete", "stop", "startup-stop", "ack-reset"].includes(mode) ? 0 : nonadmitted ? 2 : 1, events);
+  assert.equal(code, completes || ["stop", "startup-stop", "ack-reset"].includes(mode) ? 0 : nonadmitted ? 2 : 1, events);
   if (nonadmitted || mode === "startup-stop") {
    assert.equal(committed, false);
    assert.equal(bytes.includes("\0"), false);
@@ -75,7 +81,11 @@ for (const mode of ["complete", "broken-pipe", "broken-forward", "old-client", "
    assert.match(events, /REMOTE_PLAYBACK_UNCONFIRMED/, "a committed player still needs exit proof even without PCM");
   }
   if (["old-client", "v2"].includes(mode)) assert.equal(bytes, "PI_VOICE_CONTROLhello\n");
-  if (mode === "complete") assert.match(events, /remote-released/);
+  if (completes) {
+   assert.equal(committed, true);
+   assert.ok(bytes.includes("\0"), "granted scope delivers PCM");
+   assert.match(events, /remote-released/);
+  }
   if (mode === "no-grant") assert.match(feedback, /no-audio/);
  });
 }

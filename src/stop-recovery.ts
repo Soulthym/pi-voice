@@ -5,7 +5,7 @@ import { DeviceRouter, type DeviceDirection } from "./device-router.js";
 import { PhoneInputClient } from "./phone-input.js";
 import { stopRemotePlayback, validStreamId, validBootId } from "./remote-playback.mjs";
 
-export type RecoveryHandle = { endpoint: string; id: string; selection: string; configured: string; bootId?: string };
+export type RecoveryHandle = { endpoint: string; id: string; selection: string; configured: string; bootId?: string | null; rebootSafe?: boolean };
 export type RecoveryEpisode = { device: string; cause: string; handles: RecoveryHandle[] };
 type Journal = { input?: RecoveryEpisode; output?: RecoveryEpisode } & (
 	{ version: 1 } | { version: 2 | 3; owner: string; admission: Record<DeviceDirection, "idle" | "uncertain" | "covered"> }
@@ -37,7 +37,7 @@ export class StopRecovery {
 					throw new Error("Invalid recovery journal");
 				}
 			}
-			if (value.version === 3 && value.admission.output === "covered" && value.output?.handles.some(handle => !validBootId(handle.bootId))) throw new Error("Invalid covered output scope");
+			if (value.version === 3 && value.admission.output === "covered" && value.output?.handles.some(handle => !(handle.bootId === null || validBootId(handle.bootId)))) throw new Error("Invalid covered output scope");
 			this.#journal = value;
 			this.#exists = true;
 		} catch (error) {
@@ -71,10 +71,10 @@ export class StopRecovery {
 
 	retain(direction: DeviceDirection, handle: RecoveryHandle, device: string): void {
 		if (!validHandle(direction, handle)) throw new Error("Invalid recovery handle");
-		if (this.#journal.version !== 1) this.#journal.admission[direction] = direction === "output" && this.#journal.version === 3 && validBootId(handle.bootId) && this.#journal.admission.output !== "uncertain" ? "covered" : "uncertain";
+		if (this.#journal.version !== 1) this.#journal.admission[direction] = direction === "output" && this.#journal.version === 3 && (handle.bootId === null || validBootId(handle.bootId)) && this.#journal.admission.output !== "uncertain" ? "covered" : "uncertain";
 		const episode = this.#journal[direction] ??= { device, cause: "Original transport stop not yet confirmed", handles: [] };
 		const existing = episode.handles.find(existing => existing.id === handle.id);
-		if (existing && (existing.endpoint !== handle.endpoint || existing.bootId !== handle.bootId || existing.selection !== handle.selection || existing.configured !== handle.configured)) throw new Error("Recovery scope identity changed");
+		if (existing && (existing.endpoint !== handle.endpoint || existing.bootId !== handle.bootId || existing.rebootSafe !== handle.rebootSafe || existing.selection !== handle.selection || existing.configured !== handle.configured)) throw new Error("Recovery scope identity changed");
 		if (!existing) {
 			if (direction === "output" && episode.handles.length >= 256) throw new Error("Output recovery scope limit reached; dispatch denied");
 			episode.handles.push({ ...handle });
@@ -123,7 +123,12 @@ export class StopRecovery {
 			if (route.kind === "disabled" || route.kind === "intentional_local" ||
 				(route.kind === "custom" && route.endpoint !== handle.endpoint)) throw new Error("Original recovery route unavailable");
 			if (direction === "input") await PhoneInputClient.retryStop({ endpoint: route.endpoint, ticket: handle.id });
-			else await stopRemotePlayback({ output: route.endpoint, id: handle.id, bootId: handle.bootId });
+			else await stopRemotePlayback({ output: route.endpoint, id: handle.id, bootId: handle.bootId, deviceId: handle.selection,
+				// Only an original registered identity can attest a moved endpoint. Legacy
+				// loopback/custom addresses are not device identities, even when unchanged.
+				allowReboot: this.#journal.version === 3 && handle.rebootSafe === true &&
+					route.kind === "device" && route.device.id === handle.selection && handle.selection !== "legacy-loopback",
+			});
 			this.retire(direction, handle.id, handle.endpoint);
 			episode.cause = "Saved scope stopped; interrupted transport coverage remains unproven; ownership retained";
 			this.#save();
@@ -156,6 +161,7 @@ export class StopRecovery {
 function validHandle(direction: DeviceDirection, value: RecoveryHandle): boolean {
 	return !!value && typeof value.endpoint === "string" && value.endpoint.length <= 4096 && (/^(tcp|unix):/.test(value.endpoint) || direction === "input" && value.endpoint === "local") &&
 		typeof value.selection === "string" && /^[a-zA-Z0-9._-]{1,128}$/.test(value.selection) && value.selection !== "auto" &&
-		typeof value.configured === "string" && value.configured.length <= 4096 && (direction === "output" ? validStreamId(value.id) && (value.bootId === undefined || validBootId(value.bootId)) :
+		typeof value.configured === "string" && value.configured.length <= 4096 && (direction === "output" ? validStreamId(value.id) && (value.bootId === undefined || value.bootId === null || validBootId(value.bootId)) &&
+			(value.rebootSafe === undefined || typeof value.rebootSafe === "boolean") :
 			typeof value.id === "string" && /^[0-9a-f]{32}\.[1-9][0-9]{0,15}$/.test(value.id) && Number.isSafeInteger(Number(value.id.split(".")[1])) && (value.bootId === undefined || validBootId(value.bootId)));
 }

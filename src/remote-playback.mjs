@@ -12,10 +12,12 @@ export class RemotePlaybackUnconfirmedError extends Error {
 	}
 }
 
-/** Only an exact opaque stream receipt is proof; endpoint/PID disappearance is not. */
-export function stopRemotePlayback({ output, id, bootId }) {
+/** allowReboot requires persisted preparation identity and an independently matching responder. */
+export function stopRemotePlayback({ output, id, bootId, deviceId, allowReboot = false }) {
+	const rebootAllowed = allowReboot === true && typeof deviceId === "string" &&
+		/^[a-zA-Z0-9._-]{1,128}$/.test(deviceId) && deviceId.trim() === deviceId && deviceId !== "legacy-loopback";
 	return new Promise((resolve, reject) => {
-		if (!validStreamId(id) || bootId !== undefined && !validBootId(bootId)) return reject(new RemotePlaybackUnconfirmedError("invalid stream ID"));
+		if (!validStreamId(id) || bootId !== undefined && bootId !== null && !validBootId(bootId)) return reject(new RemotePlaybackUnconfirmedError("invalid stream ID"));
 		let endpoint;
 		try {
 			endpoint = new URL(output);
@@ -29,7 +31,7 @@ export function stopRemotePlayback({ output, id, bootId }) {
 		let ack = false;
 		let failure;
 		peer.setTimeout(1500, () => peer.destroy(new Error("control timed out")));
-		peer.on("connect", () => peer.end(`PI_VOICE_CONTROLstop ${id}\n`));
+		peer.on("connect", () => peer.end(`PI_VOICE_CONTROLstop ${id}${rebootAllowed && validBootId(bootId) ? ` ${bootId}` : ""}\n`));
 		peer.on("data", chunk => {
 			reply += chunk;
 			if (reply.length > 8192) return peer.destroy(new Error("invalid control response"));
@@ -38,7 +40,12 @@ export function stopRemotePlayback({ output, id, bootId }) {
 				if (end < 0) break;
 				try {
 					const event = JSON.parse(reply.slice(0, end));
-					if (event.type === "stopped" && event.id === id && (bootId === undefined || event.boot_id === bootId)) ack = true;
+					if (event.type === "stopped" && event.id === id) {
+						if (event.proof === "reboot") {
+							if (rebootAllowed && event.device_id === deviceId && validBootId(bootId) && event.expected_boot_id === bootId &&
+								validBootId(event.boot_id) && event.boot_id !== bootId) ack = true;
+						} else if (event.proof === undefined && (bootId === undefined || event.boot_id === bootId)) ack = true;
+					}
 				} catch {}
 				reply = reply.slice(end + 1);
 			}

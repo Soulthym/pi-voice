@@ -83,6 +83,9 @@ test("network padding cancellation waits for confirmed helper exit", { timeout: 
 		["refusal after exit", 2, null],
 		["refusal after audio admission", 2, null],
 		["confirmed stop", 0, null],
+		["null boot grant", 0, null],
+		["fenced grant", 0, null],
+		["legacy grant", 0, null],
 		["nonzero exit", 1, null],
 		["signal exit", null, "SIGTERM"],
 	] as const) {
@@ -152,6 +155,20 @@ test("network padding cancellation waits for confirmed helper exit", { timeout: 
 					send({ type: "output-grant", id, bootId });
 					assert.ok(child.commands.includes(`grant ${id} ${bootId}\n`));
 				}
+			}
+			if (["null boot grant", "fenced grant", "legacy grant"].includes(name)) {
+				const expectedBoot = name === "null boot grant" ? null : bootId;
+				const fenced = name !== "legacy grant";
+				const deviceId = "test-device-A";
+				child.stdio[3].write(`prepared ${id} ${expectedBoot}${fenced ? ` fenced ${deviceId}` : ""}\n`);
+				assert.deepEqual(events.filter(e => e.type === "remote-handle"), [{
+					type: "remote-handle", output, id, bootId: expectedBoot, rebootSafe: fenced, ...(fenced ? { deviceId } : {}), utterance: 1,
+				}]);
+				for (const wrongBoot of [undefined, "null", id]) send({ type: "output-grant", id, bootId: wrongBoot });
+				assert.ok(!child.commands.some((command: string) => command.startsWith("grant ")));
+				send({ type: "output-grant", id, bootId: expectedBoot });
+				send({ type: "output-grant", id, bootId: expectedBoot });
+				assert.deepEqual(child.commands.filter((command: string) => command.startsWith("grant ")), [`grant ${id} ${expectedBoot}\n`]);
 			}
 			send({ type: "cancel", cancelId: 42 });
 			if (name === "refusal after audio admission") {

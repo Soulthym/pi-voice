@@ -104,6 +104,7 @@ exec /usr/bin/sync "$@"
 			session.child.stdin.write("PI_VOICE_PREPARE\n");
 			await until(() => session.output().includes('"type":"prepared"'));
 			const prepared = session.output().trim().split("\n").map(l => JSON.parse(l)).find(e => e.type === "prepared");
+			assert.equal(prepared.boot_fenced, true);
 			assert.equal(fs.existsSync(path.join(root, `fake-${prepared.id}.pid`)), false, "prepare must not open physical output");
 			session.child.stdin.write(`PI_VOICE_COMMIT ${prepared.id} ${prepared.boot_id}\n`);
 			await until(() => session.output().includes('"type":"session"'));
@@ -144,7 +145,7 @@ exec /usr/bin/sync "$@"
 				let preparation = "";
 				(helper.stdio[3] as net.Socket).on("data", chunk => {
 					preparation += chunk;
-					const match = /^prepared ([0-9a-f-]+) ([0-9a-f-]+)$/m.exec(preparation);
+					const match = /^prepared ([0-9a-f-]+) (null|[0-9a-f-]+)(?: fenced [a-zA-Z0-9._:-]+)?$/m.exec(preparation);
 					if (match) {
 						(helper.stdio[3] as net.Socket).write(`grant ${match[1]} ${match[2]}\n`);
 						preparation = "";
@@ -289,13 +290,6 @@ exec /usr/bin/sync "$@"
 				if (value !== undefined) fs.writeFileSync(bootFile, value);
 				const injected = path.join(root, "pi-voice-audio-session-boot");
 				fs.writeFileSync(injected, source.replace("/proc/sys/kernel/random/boot_id", bootFile));
-				if (value === undefined || value === "not-a-boot-id") {
-					const denied = start(injected);
-					denied.child.stdin.end("PI_VOICE_CONTROLhello\nPI_VOICE_PREPARE\n");
-					await until(() => denied.child.exitCode !== null);
-					assert.equal(denied.output().includes('"prepared"'), false, "missing kernel boot must deny preparation");
-					continue;
-				}
 				const session = await audio(injected);
 				session.child.stdin.end(Buffer.alloc(32));
 				await until(() => fs.existsSync(session.base + ".eof"));
@@ -305,6 +299,46 @@ exec /usr/bin/sync "$@"
 				assert.equal(JSON.parse(fs.readFileSync(receipt(session.id), "utf8")).boot_id, expected);
 				const event = session.output().split("\n").filter(Boolean).map(l => JSON.parse(l)).find(e => e.type === "session");
 				assert.equal(event.boot_id, expected);
+				{
+					const stopped = start(injected);
+					stopped.child.stdin.end(`PI_VOICE_CONTROLstop ${session.id} ${expected}\n`);
+					await until(() => stopped.child.exitCode !== null);
+					assert.deepEqual(JSON.parse(stopped.output()), { type: "stopped", id: session.id, boot_id: expected });
+					if (expected === null) {
+						const pending = start(injected);
+						pending.child.stdin.write("PI_VOICE_CONTROLhello\nPI_VOICE_PREPARE\n");
+						await until(() => pending.output().includes('"prepared"'));
+						const scope = pending.output().split("\n").filter(Boolean).map(l => JSON.parse(l)).find(e => e.type === "prepared");
+						assert.equal(scope.boot_id, null);
+						const cancel = start(injected);
+						cancel.child.stdin.end(`PI_VOICE_CONTROLstop ${scope.id} null\n`);
+						await until(() => cancel.child.exitCode !== null);
+						assert.deepEqual(JSON.parse(cancel.output()), { type: "stopped", id: scope.id, boot_id: null });
+						pending.child.stdin.end(`PI_VOICE_COMMIT ${scope.id} null\n`);
+						await until(() => pending.child.exitCode !== null);
+						assert.equal(fs.existsSync(path.join(root, `fake-${scope.id}.pid`)), false);
+						assert.equal(fs.existsSync(receipt(scope.id)), false, "null-boot cancellation is non-admission, not child-wait proof");
+					}
+				}
+			}
+
+			{
+				for (const changed of [null, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"]) {
+					const bootFile = path.join(root, "kernel-boot");
+					fs.writeFileSync(bootFile, kernelBoot);
+					const injected = path.join(root, "pi-voice-audio-session-changed-boot");
+					fs.writeFileSync(injected, source.replace("/proc/sys/kernel/random/boot_id", bootFile));
+					const reserved = start(injected);
+					reserved.child.stdin.write("PI_VOICE_CONTROLhello\nPI_VOICE_PREPARE\n");
+					await until(() => reserved.output().includes('"prepared"'));
+					const scope = reserved.output().split("\n").filter(Boolean).map(l => JSON.parse(l)).find(e => e.type === "prepared");
+					fs.writeFileSync(bootFile, changed ?? "unknown");
+					reserved.child.stdin.end(`PI_VOICE_COMMIT ${scope.id} ${scope.boot_id}\n`);
+					await until(() => reserved.child.exitCode !== null);
+					assert.equal(reserved.child.exitCode, 1);
+					assert.equal(fs.existsSync(path.join(root, `fake-${scope.id}.pid`)), false, "changed or unreadable known boot must prevent spawn");
+					assert.equal(fs.existsSync(receipt(scope.id)), false);
+				}
 			}
 
 			const failedSyncScript = path.join(root, "pi-voice-audio-session-fsync");

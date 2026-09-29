@@ -16,6 +16,7 @@ async function setup(t: import("node:test").TestContext) {
 	t.after(() => fs.rm(root, { recursive: true, force: true }));
 	const commands: string[] = [];
 	let exact = true;
+	let proof: Record<string, unknown> = {};
 	const socketPath = path.join(root, "device.sock");
 	const server = net.createServer(socket => {
 		let data = "";
@@ -23,7 +24,7 @@ async function setup(t: import("node:test").TestContext) {
 			data += chunk;
 			if (!data.endsWith("\n")) return;
 			commands.push(data.trim());
-			if (data.startsWith("PI_VOICE_CONTROL")) socket.end(`${JSON.stringify({ type: "stopped", id: exact ? outputId : "other" })}\n`);
+			if (data.startsWith("PI_VOICE_CONTROL")) socket.end(`${JSON.stringify({ type: "stopped", id: exact ? outputId : "other", ...proof })}\n`);
 			else socket.end(`ok ${Buffer.from(`stopped ${exact ? ticket : "other"}`).toString("base64")}\n`);
 		});
 	});
@@ -32,7 +33,7 @@ async function setup(t: import("node:test").TestContext) {
 	const endpoint = `unix://${socketPath}`;
 	await fs.mkdir(path.join(root, "devices"));
 	await fs.writeFile(path.join(root, "devices", "A.json"), JSON.stringify({ version: 1, id: "A", name: "Original device", platform: "linux", audioEndpoint: endpoint, inputEndpoint: endpoint, connectedAt: 2, lastActive: 2 }));
-	return { root, endpoint, commands, router: new DeviceRouter(path.join(root, "devices"), "replacement", {}), setExact(value: boolean) { exact = value; } };
+	return { root, endpoint, commands, router: new DeviceRouter(path.join(root, "devices"), "replacement", {}), setExact(value: boolean) { exact = value; }, setProof(value: Record<string, unknown>) { proof = value; } };
 }
 
 test("durable input/output retries use original identity and old scope through changed registration; never remove fence", async t => {
@@ -106,6 +107,52 @@ test("boot-bound input scopes persist locally and remotely but never claim compl
 		journal.retire("input", ticket, input);
 		journal.clear("input");
 		assert.equal(new StopRecovery(root, owner).isIdle("input"), false);
+	}
+});
+
+test("covered null-boot output retires only with a null-boot receipt", async t => {
+	const { root, endpoint, router, setProof } = await setup(t);
+	const journal = new StopRecovery(root, "null-owner");
+	journal.initialize();
+	journal.beforeIO("output", true);
+	journal.retain("output", { endpoint, id: outputId, selection: "A", configured: "auto", bootId: null }, "A");
+	const restored = new StopRecovery(root, "null-owner");
+	await assert.rejects(restored.retry("output", router, "auto"), /missing scoped/);
+	setProof({ boot_id: null });
+	await restored.retry("output", router, "auto");
+	assert.equal(new StopRecovery(root, "null-owner").isIdle("output"), true);
+});
+
+test("reboot discharge requires original registered identity and persisted commit fencing", async t => {
+	const { root, endpoint, router, commands, setProof } = await setup(t);
+	const bootId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+	const reboot = { proof: "reboot", expected_boot_id: bootId, boot_id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", device_id: "A" };
+	setProof(reboot);
+	for (const scenario of ["registered", "foreign", "missing-identity", "historical", "custom", "legacy", "unknown", "uncertain"] as const) {
+		setProof(scenario === "foreign" ? { ...reboot, device_id: "B" } : scenario === "missing-identity" ? { ...reboot, device_id: null } : reboot);
+		const journal = new StopRecovery(root, scenario);
+		if (scenario !== "unknown") journal.initialize();
+		if (scenario === "uncertain") journal.beforeIO("output");
+		const configured = scenario === "custom" ? endpoint : "auto";
+		journal.retain("output", { endpoint: scenario === "custom" ? endpoint : "unix:///old-endpoint",
+			id: outputId, selection: scenario === "legacy" ? "legacy-loopback" : "A", configured,
+			bootId, ...(scenario !== "historical" ? { rebootSafe: true } : {}) }, "Original device");
+		const restored = new StopRecovery(root, scenario);
+		// A legacy-loopback route is deliberately not a stable device identity.
+		const originalRoute = router.routeMetadata.bind(router);
+		if (scenario === "legacy") router.routeMetadata = () => ({ kind: "device", endpoint,
+			device: { ...router.resolve("A")!, id: "legacy-loopback" } });
+		try {
+			if (scenario === "registered" || scenario === "uncertain") {
+				await restored.retry("output", router, configured);
+				assert.equal(new StopRecovery(root, scenario).isIdle("output"), scenario === "registered");
+				assert.equal(commands.at(-1), `PI_VOICE_CONTROLstop ${outputId} ${bootId}`);
+			} else {
+				await assert.rejects(restored.retry("output", router, configured), /missing scoped/);
+				assert.equal(restored.episode("output")?.handles.length, 1);
+				assert.equal(commands.at(-1), `PI_VOICE_CONTROLstop ${outputId}${scenario === "foreign" || scenario === "missing-identity" ? ` ${bootId}` : ""}`);
+			}
+		} finally { router.routeMetadata = originalRoute; }
 	}
 });
 

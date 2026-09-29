@@ -18,7 +18,7 @@ export type WorkerPlaybackPhase = "playing" | "synthesizing" | "loading" | "conn
 
 export type WorkerEvent =
 	| { type: "playback-phase"; utterance: number; segmentId: number; phase: WorkerPlaybackPhase }
-	| { type: "remote-handle"; output: string; id: string; utterance: number; bootId?: string; grant?: () => void }
+	| { type: "remote-handle"; output: string; id: string; utterance: number; bootId?: string | null; rebootSafe?: boolean; deviceId?: string; grant?: () => void }
 	| { type: "remote-released"; id: string }
 	| { type: "remote-not-admitted"; id: string }
 	| { type: "loading" }
@@ -73,7 +73,7 @@ export class VoiceWorkerClient {
 	#retiring = new Set<ChildProcessWithoutNullStreams>();
 	#signalled = new Set<ChildProcessWithoutNullStreams>();
 	#remoteUnconfirmed = false;
-	#remoteHandles = new Map<string, { output: string; id: string; utterance: number; bootId?: string }>();
+	#remoteHandles = new Map<string, { output: string; id: string; utterance: number; bootId?: string | null }>();
 	#dispatchClosed = false;
 	#remoteUtterance: number | undefined;
 	#closed = new WeakSet<ChildProcessWithoutNullStreams>();
@@ -443,7 +443,7 @@ export class VoiceWorkerClient {
 				const source = this.#child;
 				let granted = false;
 				delete event.grant; // Wire data never supplies executable admission authority.
-				this.#onEvent({ ...event, ...(validBootId(event.bootId) ? { grant: () => {
+				this.#onEvent({ ...event, ...(event.bootId === null || validBootId(event.bootId) ? { grant: () => {
 					if (granted || retired || !source || this.#child !== source || this.#closed.has(source) || this.#dispatchClosed || generation !== this.#nextCancelId || !this.#grantUtterances.has(event.utterance)) return;
 					granted = true;
 					this.#send({ type: "output-grant", id: event.id, bootId: event.bootId });

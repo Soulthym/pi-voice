@@ -120,10 +120,12 @@ socket.on("data", chunk => {
 			negotiated = true;
 			socket.write("PI_VOICE_PREPARE\n");
 		} else if (negotiated && event.type === "prepared") {
-			if (session || event.version !== 3 || !validStreamId(event.id) || !validBootId(event.boot_id)) return fail(new Error("Invalid prepared output scope or kernel boot ID"));
+			if (session || event.version !== 3 || !validStreamId(event.id) || !(event.boot_id === null || validBootId(event.boot_id))) return fail(new Error("Invalid prepared output scope or kernel boot ID"));
 			session = event.id;
 			bootId = event.boot_id;
-			control.write(`prepared ${session} ${bootId}\n`);
+			// Missing identity must not collide with any valid registered ID (including "-").
+			const deviceId = typeof event.device_id === "string" && /^[a-zA-Z0-9._-]{1,128}$/.test(event.device_id) ? event.device_id : ":";
+			control.write(`prepared ${session} ${bootId}${event.boot_fenced === true ? ` fenced ${deviceId}` : ""}\n`);
 			if (stopping) void command("stop");
 		} else if (negotiated && event.type === "session") {
 			if (!committed || event.version !== 3 || event.id !== session || event.boot_id !== bootId) return fail(new Error("Output commit identity mismatch"));

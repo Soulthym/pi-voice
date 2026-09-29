@@ -627,6 +627,26 @@ test("session restart cannot retire ownership using proof older than a remote ep
 });
 
 
+for (const deviceId of ["A", "B", undefined]) test(`host grants receipt scope but persists reboot capability only for matching device identity (${deviceId})`, async t => {
+ const { host, worker, lease } = await setup(t);
+ await host.command("test Identity-bound transport.");
+ const owner = JSON.parse(await fs.readFile(lease, "utf8"));
+ const journal = () => new StopRecovery(path.dirname(path.dirname(lease)), owner.instanceId);
+ const handle = { type: "remote-handle" as const, output: "unix:///old-output", id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", bootId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", rebootSafe: true, deviceId, utterance: 1 };
+ let grants = 0;
+ worker.emit({ ...handle, grant: () => {
+  assert.deepEqual(journal().episode("output")!.handles, [{
+   endpoint: handle.output, id: handle.id, bootId: handle.bootId, selection: "A", configured: "auto",
+   ...(deviceId === "A" ? { rebootSafe: true } : {}),
+  }], "exact receipt scope and identity-bound capability are durable before granting");
+  grants++;
+ } });
+ assert.equal(grants, 1, "missing or mismatched identity still permits receipt-based admission");
+ assert.equal(journal().episode("output")!.handles[0].rebootSafe, deviceId === "A" ? true : undefined);
+ worker.emit({ type: "remote-released", id: handle.id });
+ assert.deepEqual(journal().episode("output")!.handles, [], "exact receipt retires every identity variant");
+});
+
 test("host journals original route after registration loss, retires receipts and fences late cleanup", async t => {
  const { host, worker, lease, registration, register } = await setup(t);
  await host.command("test Original transport.");

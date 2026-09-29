@@ -708,16 +708,16 @@ function createNetworkSink(output, sampleRate, utterance) {
 	const controlLines = readline.createInterface({ input: control });
 	controlLines.on("line", line => {
 		if (line.startsWith("prepared ")) {
-			const [, id, boot] = line.split(" ");
-			if (session || !validStreamId(id) || !validBootId(boot)) return;
+			const [, id, boot, capability, deviceId] = line.split(" ");
+			if (session || !validStreamId(id) || !(boot === "null" || validBootId(boot))) return;
 			session = id;
-			bootId = boot;
+			bootId = boot === "null" ? null : boot;
 			outputGrants.set(id, expectedBoot => {
 				if (expectedBoot !== bootId || intentionallyStopped || dispatchEpoch !== epoch || shuttingDown) return;
 				outputGrants.delete(id);
 				control.write(`grant ${id} ${bootId}\n`);
 			});
-			send({ type: "remote-handle", output, id, bootId, utterance });
+			send({ type: "remote-handle", output, id, bootId, rebootSafe: capability === "fenced", deviceId, utterance });
 			return;
 		}
 		if (line === "no-audio") { noAudio = true; return; }
@@ -1044,7 +1044,7 @@ lines.on("line", line => {
 	}
 	switch (message.type) {
 		case "output-grant":
-			if (validStreamId(message.id) && validBootId(message.bootId)) outputGrants.get(message.id)?.(message.bootId);
+			if (validStreamId(message.id) && (message.bootId === null || validBootId(message.bootId))) outputGrants.get(message.id)?.(message.bootId);
 			break;
 		case "retry-timing":
 			void retryTiming(message);
