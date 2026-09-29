@@ -131,7 +131,7 @@ Validate with `sshd -t`, then reload `sshd` after changing its configuration. Th
 Update the host and every desktop/Termux recorder helper together; bootless ticket
 or capability-less ticket replies now fail before recording with an explicit upgrade error.
 Network capture requires `ticket-admit`: Termux reports `admit-v1` plus its existing
-stable device ID, while desktop reports `wait-v1` with scoped child-wait receipts.
+stable device ID as a quoted JSON string (or JSON `null` if absent), while desktop reports `wait-v1` with scoped child-wait receipts.
 Local desktop retains `ticket-wait`/`wait-v1`. Preserve `device-id`; do not regenerate it. This is not a
 host-only update. Follow the confirmed-stop/full-helper procedure below at a time
 you choose; no deployment or restart is automatic.
@@ -172,11 +172,13 @@ chmod 755 /absolute/custom/bin/pi-voice-*
 Only then reconnect with `pi-voice-ssh YOUR_HOST` and run `/reload` in Pi when safe.
 These are operator-run upgrade instructions, not deployment or stop-proof shortcuts.
 
+Desktop capture requires Python 3 with `os.pidfd_open` and `signal.pidfd_send_signal`, plus Linux pidfd support. The recorder acquires its own incarnation-safe signal handle before opening the device; unavailable support fails closed rather than signalling a potentially reused PID.
+
 ### Audio protocol v3 (host and every client)
 
 Update the host and **all installed helpers and SSH wrappers together** on every desktop and Termux client, including custom launcher paths. Copy the complete `client/pi-voice-*` set using the [local install or SCP commands below](#upgrade-device-name-support), not just `pi-voice-audio-session`. If using a separate `termux/` installation, update its complete `termux/pi-voice-*` set at its actual installed location too. Use the matching host checkout if these changes are not published upstream.
 
-Both SSH wrapper variants require the exact v3 control-only `hello` acknowledgement; v1/v2, malformed and empty replies are rejected without sending audio or starting a player. Old wrappers that require v2 will reject a new v3 bridge. Readiness is not a playback test.
+When probing a newly started bridge, both SSH wrapper variants require the exact v3 control-only `hello` acknowledgement; v1/v2, malformed and empty replies are rejected without sending audio or starting a player. The existing-live-bridge command-line check can bypass that wrapper probe; wrapper reuse is not an upgrade check. Actual host admission still requires v3 prepare/journal/commit before PCM (and the current boot-bound microphone capability before START). Old wrappers that require v2 will reject a new v3 bridge. Readiness is not a playback test.
 
 Before replacing scripts or exiting wrappers, explicitly stop playback/capture and confirm actual device stop. If unconfirmed, preserve the connection, tickets, receipts, leases and runtime state and follow [stop recovery](troubleshooting.md#unconfirmed-stop); an upgrade is not stop proof. After confirmed stop, close every old wrapper on that client (they share a bridge), replace the complete helper set, reconnect and reload the host extension when ready. Retain device IDs, names/configuration and durable recovery evidence; remote tmux may remain. Earlier host-only notes below do not waive this v3 upgrade.
 
@@ -232,7 +234,7 @@ Substitute the actual host checkout and installed paths. Update the underlying w
 
 Before replacing scripts or exiting wrappers, explicitly stop active playback/capture and confirm actual device stop. If stop is unconfirmed, preserve the original connection, runtime state, tickets, receipts and leases; restore that connection and retry `/voice stop` (or `/voice reconnect` for retained input/output stop). Do not kill host processes or delete leases as proof. See [recovery](troubleshooting.md#unconfirmed-stop).
 
-After confirmed stop, exit every old wrapper, update all copies together, reconnect and reload the host extension. The microphone now requires origin-scoped random-epoch tickets (`<epoch>.<counter>`, UUID-like identity, not numeric-only), an actual kernel boot ID echoed in START, and explicit capability-scoped stop receipts (`stopped N` for Termux, `stopped-wait N B` for desktop). Audio requires v3 prepare/journal/commit with opaque UUID stream IDs and boot-bound completion/stop proof. All v1/v2 clients are rejected before PCM; upgrade every helper and SSH wrapper copy together, not just the host or audio helper. Retained numeric receipts are not valid modern proof. Existing epoch-qualified ticket state must be retained; only incompatible numeric-era `.tickets` state may be removed **after all old captures are confirmed stopped and old sessions exited**. Never unconditionally remove runtime state or the persistent `flock` fence. See [protocol migration](endpoint-protocol.md#microphone-protocol-migration).
+After confirmed stop, exit every old wrapper, update all copies together, reconnect and reload the host extension. The microphone now requires origin-scoped random-epoch tickets (`<epoch>.<counter>`, UUID-like identity, not numeric-only), an actual kernel boot ID echoed in START, and explicit capability-scoped stop receipts (`stopped N` for Termux, `stopped-wait N B` for desktop). Audio requires v3 prepare/journal/commit with opaque UUID stream IDs and boot-bound completion/stop proof. All v1/v2 clients are rejected before PCM; upgrade every helper and SSH wrapper copy together, not just the host or audio helper. Retained numeric receipts are not valid modern proof. Retain current durable epoch-qualified ticket state. Legacy runtime recorder paths—including idle epoch `.tickets` and `.fence` files—are refused by the new helper. Only after independently confirming all old captures and outstanding API dispatches stopped and closing all old sessions, archive those recorder-only paths under supervision as described in the protocol migration. Preserve durable audio/microphone receipts, device IDs and host leases. Never unconditionally remove runtime state, blanket-delete configuration/TMPDIR or remove a fence while any session may use it. See [protocol migration](endpoint-protocol.md#microphone-protocol-migration).
 
 For later published updates, update the host checkout:
 

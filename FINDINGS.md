@@ -2,6 +2,15 @@
 
 Updated incrementally. Companion: `PLAN.md`. Reorganize freely while preserving evidence and disposition.
 
+## Device/PhoneInput review follow-up (baseline `0f649bd`)
+
+- Termux admission identity is nullable JSON: absent `null` is not the valid string `"null"`. PhoneInput passes absent identity as undefined, so the existing host identity-equality admission guard cannot grant same-device reboot proof. No additional index callback guard is required for this parser fix. Existing bare-ID fixtures must be upgraded to quoted JSON IDs alongside helpers.
+- Both Termux helpers durably retain ticket-bound `retired:` dispatch proof before removing active markers; replacement helpers finish marker cleanup idempotently. Injected death covers publication/removal and pending never-dispatched cancellation; marker absence alone remains insufficient.
+- Termux canonicalizes the recorder directory before START and validates bounded private start receipts. Recovery uses the saved actual path across TMPDIR changes; retirement keeps its path/response tombstone, not audio bytes, through receipt replay.
+- Desktop recorder cancellation uses a self-acquired pidfd inherited by a monitor, not a recycled numeric PID. Normal owned-child waits still gate retirement; missing proof or unsupported Python/Linux pidfd facilities fails closed. This requires Python 3 with `os.pidfd_open` / `signal.pidfd_send_signal` and Linux pidfd support; no new package dependency was added. Daemonizing recorder replacements remain unsupported.
+- Validation: 178 focused phone/helper/device/admission tests passed, Termux reboot-proof shell checks passed, typecheck and diff checks passed. LSP unavailable. Initial test attempt omitted the Node module-mock flag and the new metadata fixture needed private directory/stop handling; corrected rerun is green. Full suite is deferred to the parent after the concurrent index/worker changes. Parent must update `test/index-stop-recovery.test.ts` bare `admit-v1 A` fixtures to `admit-v1 "A"`.
+- No hardware, live sessions, deployment, provider calls or settings/cache changes. Real Android ordering/power-loss guarantees and total durable-store loss remain outside these synthetic checks. Migration docs now require supervised archival only of independently stopped legacy recorder paths; existing bridge reuse is explicitly not a wrapper v3 probe. `ISSUES.md` and user-deleted demos preserved.
+
 ## Stage C microphone resilience — conservative production increment
 
 Production and regressions: `d9ab147`.
