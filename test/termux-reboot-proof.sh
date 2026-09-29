@@ -33,7 +33,8 @@ for script in termux/pi-voice-stt-session client/pi-voice-termux-stt-session; do
   rm -rf "$XDG_STATE_HOME"
   printf 'phone_1.example-2\n' >"$identity"
   read -r kind ticket boot capability device extra <<<"$(run ticket-admit)"
-  [[ $kind == ticket && $boot == "$MOCK_BOOT" && $capability == admit-v1 && $device == phone_1.example-2 && -z $extra ]] || fail 'Prepare contract'
+  [[ $kind == ticket && $boot == "$MOCK_BOOT" && $capability == admit-v1 && $device == '"phone_1.example-2"' && -z $extra ]] || fail 'Prepare contract'
+  device=${device//\"/}
   [[ $(message "stop-admit $ticket $boot $device") == "stopped $ticket" ]] || fail 'Same-boot exact receipt'
   [[ $(message "stop $ticket") == "stopped $ticket" ]] || fail 'Custom-host plain stop'
   [[ $(message "stop-admit $ticket $old_boot $device") == "stopped-reboot $ticket $old_boot $boot $device" ]] || fail 'Reboot receipt'
@@ -67,7 +68,10 @@ for script in termux/pi-voice-stt-session client/pi-voice-termux-stt-session; do
     reject "stop-admit $ticket $old_boot null"
   done
   printf 'phone-no-newline' >"$identity"
-  [[ $(run ticket-admit) == *' admit-v1 phone-no-newline' ]] || fail 'Optional final newline'
+  [[ $(run ticket-admit) == *' admit-v1 "phone-no-newline"' ]] || fail 'Optional final newline'
+  printf 'null\n' >"$identity"
+  [[ $(run ticket-admit) == *' admit-v1 "null"' ]] || fail 'Literal null identity lost'
+  [[ $(message "stop-admit $ticket $old_boot null") == "stopped-reboot $ticket $old_boot $boot null" ]] || fail 'Literal null reboot receipt'
   read -r kind ticket boot extra <<<"$(run ticket)"
   [[ $kind == ticket && $boot == "$MOCK_BOOT" && -z $extra ]] || fail 'Legacy prepare contract'
 done

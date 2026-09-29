@@ -353,8 +353,10 @@ export class PhoneInputClient {
 				const header = headerBuffer.subarray(0, newline).toString("utf8").trim();
 				const remainder = headerBuffer.subarray(newline + 1);
 				if (!ticketReceived) {
-					const [kind, ticket = "", bootId, capability, deviceId, extra] = header.split(" ");
-					if (kind !== "ticket" || !/^[0-9a-f]{32}\.[1-9][0-9]{0,15}$/.test(ticket) || !Number.isSafeInteger(Number(ticket.split(".")[1])) || !validBootId(bootId) || !(capability === "wait-v1" || endpoint !== "local" && capability === "admit-v1") || (capability === "wait-v1" ? deviceId !== undefined : !deviceId || !/^[a-zA-Z0-9._-]{1,128}$/.test(deviceId)) || extra !== undefined || remainder.length) {
+					const [kind, ticket = "", bootId, capability, identity, extra] = header.split(" ");
+					// Nullable JSON distinguishes absent identity from the valid literal ID "null".
+					const deviceId = identity && /^"[a-zA-Z0-9._-]{1,128}"$/.test(identity) ? identity.slice(1, -1) : undefined;
+					if (kind !== "ticket" || !/^[0-9a-f]{32}\.[1-9][0-9]{0,15}$/.test(ticket) || !Number.isSafeInteger(Number(ticket.split(".")[1])) || !validBootId(bootId) || !(capability === "wait-v1" || endpoint !== "local" && capability === "admit-v1") || (capability === "wait-v1" ? identity !== undefined : identity !== "null" && deviceId === undefined) || extra !== undefined || remainder.length) {
 						finish(new Error("Boot-bound microphone admission unavailable; update the recorder client and host together before recording (no START sent)"));
 						return;
 					}

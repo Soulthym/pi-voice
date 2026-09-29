@@ -199,7 +199,7 @@ load_tickets
 issued_ticket=
 if [[ $command == ticket || $command == ticket-admit ]]; then
   capability=
-  [[ $command == ticket-admit ]] && capability=" admit-v1 ${device_id//\"/}"
+  [[ $command == ticket-admit ]] && capability=" admit-v1 $device_id"
   if [[ -z $epoch ]]; then
     epoch=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
     [[ $epoch =~ ^[0-9a-f]{32}$ ]] || exit 1
