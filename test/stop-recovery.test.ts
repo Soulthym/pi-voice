@@ -133,6 +133,32 @@ test("covered null-boot output retires only with a null-boot receipt", async t =
 	assert.equal(new StopRecovery(root, "null-owner").isIdle("output"), true);
 });
 
+test("native exit proof is capability-bound across restart and live cleanup; legacy handles never upgrade", async t => {
+	const { root, endpoint, router, setProof } = await setup(t);
+	const bootId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+	for (const nativeWatchdog of [undefined, true] as const) {
+		for (const live of [false, true]) {
+			const owner = `native-${nativeWatchdog}-${live}`;
+			const journal = new StopRecovery(root, owner);
+			journal.initialize();
+			const handle = { endpoint, id: outputId, bootId, selection: "A", configured: "auto", nativeWatchdog };
+			journal.retain("output", handle, "A");
+			assert.throws(() => journal.retain("output", { ...handle, nativeWatchdog: nativeWatchdog ? undefined : true }, "A"), /identity changed/);
+			const restored = new StopRecovery(root, owner);
+			assert.equal(restored.episode("output")?.handles[0].nativeWatchdog, nativeWatchdog);
+			const stop = () => live ? restored.stopOutputScope({ output: endpoint, id: outputId, bootId }, router, "auto") : restored.retry("output", router, "auto");
+			setProof({ boot_id: bootId, ...(nativeWatchdog ? {} : { proof: "native-process-exit" }) });
+			await assert.rejects(stop(), /missing scoped/);
+			assert.equal(new StopRecovery(root, owner).episode("output")?.handles.length, 1);
+			setProof({ boot_id: bootId, ...(nativeWatchdog ? { proof: "native-process-exit" } : {}) });
+			await stop();
+			assert.equal(new StopRecovery(root, owner).episode("output")?.handles.length ?? 0, 0);
+		}
+	}
+	const invalid = new StopRecovery(root, "invalid-native");
+	assert.throws(() => invalid.retain("output", { endpoint, id: outputId, bootId: null, selection: "A", configured: "auto", nativeWatchdog: true }, "A"), /Invalid recovery handle/);
+});
+
 test("reboot discharge requires original registered identity and persisted commit fencing", async t => {
 	const { root, endpoint, router, commands, setProof } = await setup(t);
 	const bootId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";

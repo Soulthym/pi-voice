@@ -697,6 +697,7 @@ function createNetworkSink(output, sampleRate, utterance) {
 	let audioAdmitted = false;
 	let session;
 	let bootId;
+	let nativeWatchdog = false;
 	const dispatchEpoch = epoch;
 	const exited = new Promise((resolve, reject) => {
 		child.once("error", reject);
@@ -708,16 +709,17 @@ function createNetworkSink(output, sampleRate, utterance) {
 	const controlLines = readline.createInterface({ input: control });
 	controlLines.on("line", line => {
 		if (line.startsWith("prepared ")) {
-			const [, id, boot, capability, deviceId] = line.split(" ");
-			if (session || !validStreamId(id) || !(boot === "null" || validBootId(boot))) return;
+			const [, id, boot, capability, deviceId, watchdog] = line.split(" ");
+			if (session || !validStreamId(id) || !validBootId(boot) || watchdog !== "native-watchdog") return;
+			nativeWatchdog = true;
 			session = id;
-			bootId = boot === "null" ? null : boot;
+			bootId = boot;
 			outputGrants.set(id, expectedBoot => {
 				if (expectedBoot !== bootId || intentionallyStopped || dispatchEpoch !== epoch || shuttingDown) return;
 				outputGrants.delete(id);
 				control.write(`grant ${id} ${bootId}\n`);
 			});
-			send({ type: "remote-handle", output, id, bootId, rebootSafe: capability === "fenced", deviceId, utterance });
+			send({ type: "remote-handle", output, id, bootId, rebootSafe: capability === "fenced", deviceId, nativeWatchdog, utterance });
 			return;
 		}
 		if (line === "no-audio") { noAudio = true; return; }
@@ -779,7 +781,7 @@ function createNetworkSink(output, sampleRate, utterance) {
 			killTimer.unref?.();
 			return exited.catch(async error => {
 				if (!session) throw error;
-				await stopRemotePlayback({ output, id: session, bootId });
+				await stopRemotePlayback({ output, id: session, bootId, nativeWatchdog });
 				send({ type: "remote-released", id: session });
 			}).finally(() => clearTimeout(killTimer));
 		},

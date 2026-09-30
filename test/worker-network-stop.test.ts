@@ -13,7 +13,7 @@ test("network padding cancellation waits for confirmed helper exit", { timeout: 
 	const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 	const bootId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 	let receipt = false;
-	const server = net.createServer(socket => socket.on("data", () => socket.end(receipt ? JSON.stringify({ type: "stopped", id, boot_id: bootId }) + "\n" : "")));
+	const server = net.createServer(socket => socket.on("data", () => socket.end(receipt ? JSON.stringify({ type: "stopped", id, boot_id: bootId, proof: "native-process-exit" }) + "\n" : "")));
 	await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
 	t.after(() => server.close());
 	const output = `tcp://127.0.0.1:${(server.address() as net.AddressInfo).port}`;
@@ -148,7 +148,7 @@ test("network padding cancellation waits for confirmed helper exit", { timeout: 
 			assert.ok(!events.some(e => e.type === "idle"));
 
 			if (name === "nonzero exit" || name === "refusal after audio admission") {
-				child.stdio[3].write(`prepared ${id} ${bootId}\n`);
+				child.stdio[3].write(`prepared ${id} ${bootId} unfenced : native-watchdog\n`);
 				send({ type: "output-grant", id, bootId: id });
 				assert.ok(!child.commands.some((command: string) => command.startsWith("grant ")), "worker must reject mismatched expected boot");
 				if (name === "nonzero exit") {
@@ -160,15 +160,19 @@ test("network padding cancellation waits for confirmed helper exit", { timeout: 
 				const expectedBoot = name === "null boot grant" ? null : bootId;
 				const fenced = name !== "legacy grant";
 				const deviceId = "test-device-A";
-				child.stdio[3].write(`prepared ${id} ${expectedBoot}${fenced ? ` fenced ${deviceId}` : ""}\n`);
+				child.stdio[3].write(`prepared ${id} ${expectedBoot} ${fenced ? "fenced" : "unfenced"} ${deviceId} native-watchdog\n`);
+				if (expectedBoot === null) {
+					assert.deepEqual(events.filter(e => e.type === "remote-handle"), [], "v4 rejects unknown boot");
+				} else {
 				assert.deepEqual(events.filter(e => e.type === "remote-handle"), [{
-					type: "remote-handle", output, id, bootId: expectedBoot, rebootSafe: fenced, ...(fenced ? { deviceId } : {}), utterance: 1,
+					type: "remote-handle", output, id, bootId: expectedBoot, rebootSafe: fenced, deviceId, nativeWatchdog: true, utterance: 1,
 				}]);
 				for (const wrongBoot of [undefined, "null", id]) send({ type: "output-grant", id, bootId: wrongBoot });
 				assert.ok(!child.commands.some((command: string) => command.startsWith("grant ")));
 				send({ type: "output-grant", id, bootId: expectedBoot });
 				send({ type: "output-grant", id, bootId: expectedBoot });
 				assert.deepEqual(child.commands.filter((command: string) => command.startsWith("grant ")), [`grant ${id} ${expectedBoot}\n`]);
+				}
 			}
 			send({ type: "cancel", cancelId: 42 });
 			if (name === "refusal after audio admission") {

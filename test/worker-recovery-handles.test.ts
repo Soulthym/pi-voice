@@ -25,5 +25,13 @@ test("worker forwards validated original scopes to the durable recovery observer
 	child.stdout.write(`${JSON.stringify(handle)}\n`);
 	child.stdout.write(`${JSON.stringify({ type: "remote-not-admitted", id: handle.id })}\n`);
 	assert.deepEqual(events.slice(-2), [handle, { type: "remote-not-admitted", id: handle.id }]);
+	const bootId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+	child.stdout.write(`${JSON.stringify({ ...handle, bootId, nativeWatchdog: true })}\n`);
+	mock.method(process, "kill", () => { throw Object.assign(new Error("Synthetic group is gone"), { code: "ESRCH" }); }); // Never signal a real process group.
+	const scopes: unknown[] = [];
+	const stopped = worker.terminate(async scope => { scopes.push(scope); });
+	child.emit("close", 0, null);
+	await stopped;
+	assert.deepEqual(scopes, [{ output: handle.output, id: handle.id, utterance: 1, bootId, nativeWatchdog: true }]);
 	child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy();
 });

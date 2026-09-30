@@ -11,13 +11,14 @@ export const REMOTE_STOP_DEADLINE_MS = 20_000;
 export class RemotePlaybackUnconfirmedError extends Error {
 	code = "REMOTE_PLAYBACK_UNCONFIRMED";
 	constructor(message, options) {
-		super(`Remote playback unconfirmed: ${message}. Ownership retained; /voice reconnect retries available receipts but cannot reconstruct a missing same-boot guardian wait receipt`, options);
+		super(`Remote playback unconfirmed: ${message}. Ownership retained; /voice reconnect requires a verified scoped player-exit or reboot receipt`, options);
 		this.name = "RemotePlaybackUnconfirmedError";
 	}
 }
 
-/** allowReboot requires persisted preparation identity and an independently matching responder. */
-export function stopRemotePlayback({ output, id, bootId, deviceId, allowReboot = false }) {
+/** nativeWatchdog is persisted v4 preparation capability, never inferred from a new responder.
+ * allowReboot requires persisted preparation identity and an independently matching responder. */
+export function stopRemotePlayback({ output, id, bootId, deviceId, allowReboot = false, nativeWatchdog = false }) {
 	const rebootAllowed = allowReboot === true && typeof deviceId === "string" &&
 		/^[a-zA-Z0-9._-]{1,128}$/.test(deviceId) && deviceId.trim() === deviceId && deviceId !== "legacy-loopback";
 	return new Promise((resolve, reject) => {
@@ -48,6 +49,8 @@ export function stopRemotePlayback({ output, id, bootId, deviceId, allowReboot =
 						if (event.proof === "reboot") {
 							if (rebootAllowed && event.device_id === deviceId && validBootId(bootId) && event.expected_boot_id === bootId &&
 								validBootId(event.boot_id) && event.boot_id !== bootId) ack = true;
+						} else if (nativeWatchdog === true) {
+							if (event.proof === "native-process-exit" && validBootId(bootId) && event.boot_id === bootId) ack = true;
 						} else if (event.proof === undefined && (bootId === undefined || event.boot_id === bootId)) ack = true;
 					}
 				} catch {}

@@ -15,7 +15,7 @@ const originalDevice = "original-device_1.0";
 
 test("stop receipts require exact scope; reboot requires explicit same-device opt-in and both known boots", async () => {
 	const reboot = { type: "stopped", id, boot_id: nextBoot, device_id: originalDevice, proof: "reboot", expected_boot_id: boot };
-	const cases: { bootId?: string | null; deviceId?: string; allowReboot?: boolean; event: object; accepted: boolean; sendBoot?: boolean }[] = [
+	const cases: { bootId?: string | null; deviceId?: string; allowReboot?: boolean; nativeWatchdog?: boolean; event: object; accepted: boolean; sendBoot?: boolean }[] = [
 		{ bootId: boot, event: { type: "stopped", id, boot_id: boot }, accepted: true },
 		{ bootId: null, event: { type: "stopped", id, boot_id: null }, accepted: true },
 		{ event: { type: "stopped", id }, accepted: true },
@@ -32,7 +32,16 @@ test("stop receipts require exact scope; reboot requires explicit same-device op
 		{ bootId: null, allowReboot: true, event: { ...reboot, expected_boot_id: null }, accepted: false },
 		{ allowReboot: true, event: { ...reboot, expected_boot_id: undefined }, accepted: false },
 	];
+	const native = { type: "stopped", id, boot_id: boot, proof: "native-process-exit" };
 	cases.push(
+		{ bootId: boot, event: native, accepted: false },
+		{ bootId: boot, nativeWatchdog: true, event: native, accepted: true },
+		{ bootId: null, nativeWatchdog: true, event: { ...native, boot_id: null }, accepted: false },
+		{ nativeWatchdog: true, event: native, accepted: false },
+		{ bootId: boot, nativeWatchdog: true, event: { ...native, proof: undefined }, accepted: false },
+		{ bootId: boot, nativeWatchdog: true, event: { ...native, boot_id: nextBoot }, accepted: false },
+		{ bootId: boot, nativeWatchdog: true, event: { ...native, id: nextBoot }, accepted: false },
+		{ bootId: boot, nativeWatchdog: true, allowReboot: true, event: reboot, accepted: true },
 		{ bootId: boot, allowReboot: true, event: { ...reboot, device_id: "foreign-device" }, accepted: false },
 		{ bootId: boot, allowReboot: true, event: { ...reboot, device_id: undefined }, accepted: false },
 		{ bootId: boot, allowReboot: true, event: { ...reboot, device_id: null }, accepted: false },
@@ -40,7 +49,7 @@ test("stop receipts require exact scope; reboot requires explicit same-device op
 	for (const deviceId of ["", "legacy-loopback", "bad/id", "x".repeat(129), "device\n", "device\r", "device\u2028"]) {
 		cases.push({ bootId: boot, deviceId, allowReboot: true, event: { ...reboot, device_id: deviceId }, accepted: false, sendBoot: false });
 	}
-	for (const { bootId, deviceId = originalDevice, allowReboot, event, accepted, sendBoot = true } of cases) {
+	for (const { bootId, deviceId = originalDevice, allowReboot, nativeWatchdog, event, accepted, sendBoot = true } of cases) {
 		let command = "";
 		const server = net.createServer({ allowHalfOpen: true }, peer => {
 			peer.on("data", chunk => command += chunk);
@@ -50,7 +59,7 @@ test("stop receipts require exact scope; reboot requires explicit same-device op
 		await once(server, "listening");
 		try {
 			const output = `tcp://127.0.0.1:${(server.address() as net.AddressInfo).port}`;
-			const stopped = stopRemotePlayback({ output, id, bootId, deviceId: deviceId || undefined, allowReboot });
+			const stopped = stopRemotePlayback({ output, id, bootId, deviceId: deviceId || undefined, allowReboot, nativeWatchdog });
 			if (accepted) await stopped;
 			else await assert.rejects(stopped, { code: "REMOTE_PLAYBACK_UNCONFIRMED" });
 			assert.equal(command, `PI_VOICE_CONTROLstop ${id}${sendBoot && allowReboot === true && typeof bootId === "string" ? ` ${bootId}` : ""}\n`);
@@ -102,6 +111,7 @@ test(`${helper}: reboot proof independently reads device identity without fabric
 		const bootFile = path.join(root, "boot");
 		const script = path.join(root, "session");
 		fs.writeFileSync(script, fs.readFileSync(helper, "utf8").replace("/proc/sys/kernel/random/boot_id", bootFile));
+		fs.copyFileSync(path.join(path.dirname(helper), "pi-voice-mpv-watchdog.lua"), path.join(root, "pi-voice-mpv-watchdog.lua"));
 		const env = { PATH: process.env.PATH, HOME: root, TMPDIR: root, XDG_RUNTIME_DIR: root, XDG_STATE_HOME: path.join(root, "state"), XDG_CONFIG_HOME: "", PI_VOICE_DEVICE_ID: "must-not-be-used" };
 		const deviceFile = path.join(root, ".config/pi-voice/device-id");
 		fs.mkdirSync(path.dirname(deviceFile), { recursive: true });
@@ -128,7 +138,7 @@ test(`${helper}: reboot proof independently reads device identity without fabric
 		for (const value of [null, "invalid/id", "foreign-device\n"]) {
 			if (value === null) fs.unlinkSync(configuredDevice);
 			else fs.writeFileSync(configuredDevice, value);
-			const prepared = spawnSync("bash", [script], { env, input: "PI_VOICE_CONTROLhello\nPI_VOICE_PREPARE\n", encoding: "utf8", timeout: 3000 });
+			const prepared = spawnSync("bash", [script], { env, input: "PI_VOICE_CONTROLhello\nPI_VOICE_PREPARE 4\n", encoding: "utf8", timeout: 3000 });
 			assert.ifError(prepared.error);
 			assert.equal(prepared.status, 1, "EOF before commit must prevent playback");
 			const event = prepared.stdout.trim().split("\n").map(line => JSON.parse(line)).find(event => event.type === "prepared");

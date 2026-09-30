@@ -13,11 +13,11 @@ test("real helper ungranted reservation releases only verified non-admitted owne
 	const server = net.createServer(socket => {
 		socket.on("error", () => {});
 		socket.on("data", bytes => {
-			if (String(bytes) === "PI_VOICE_CONTROLhello\n") socket.write('{"type":"protocol","version":3}\n');
-			else if (String(bytes) === "PI_VOICE_PREPARE\n") {
+			if (String(bytes) === "PI_VOICE_CONTROLhello\n") socket.write('{"type":"protocol","version":4,"native_watchdog":true,"lease_seconds":30}\n');
+			else if (String(bytes) === "PI_VOICE_PREPARE 4\n") {
 				// Lose the endpoint after reservation but before any durable host grant.
 				server.close();
-				socket.end(JSON.stringify({ type: "prepared", version: 3, id, boot_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" }) + "\n");
+				socket.end(JSON.stringify({ type: "prepared", version: 4, native_watchdog: true, lease_seconds: 30, id, boot_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" }) + "\n");
 			} else pcm += bytes.length;
 		});
 	});

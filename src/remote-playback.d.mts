@@ -5,5 +5,5 @@ export class RemotePlaybackUnconfirmedError extends Error {
 	readonly code: "REMOTE_PLAYBACK_UNCONFIRMED";
 	constructor(message: string, options?: ErrorOptions);
 }
-/** Set allowReboot only with persisted preparation identity matching the original registered deviceId. */
-export function stopRemotePlayback(handle: { output: string; id: string; bootId?: string | null; deviceId?: string; allowReboot?: boolean }): Promise<void>;
+/** nativeWatchdog requires persisted v4 capability; allowReboot requires original registered device identity. */
+export function stopRemotePlayback(handle: { output: string; id: string; bootId?: string | null; deviceId?: string; allowReboot?: boolean; nativeWatchdog?: boolean }): Promise<void>;

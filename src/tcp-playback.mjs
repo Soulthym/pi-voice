@@ -23,14 +23,64 @@ let failing = false;
 let controlQueue = Promise.resolve();
 let feedback = "";
 let commands = "";
+let renewalTimer;
+let renewalPeer;
+let leaseDeadline;
+let leaseExpiresAt = 0;
+function stopRenewal() {
+	clearInterval(renewalTimer);
+	clearTimeout(leaseDeadline);
+	renewalPeer?.destroy();
+	renewalPeer = undefined;
+}
+function armLease(elapsed = 0) {
+	clearTimeout(leaseDeadline);
+	leaseExpiresAt = performance.now() + 30_000 - elapsed;
+	leaseDeadline = setTimeout(() => fail(new Error("Native playback lease expired")), Math.max(0, 30_000 - elapsed));
+}
+function renew() {
+	if (stopping || failing || finished || complete || renewalPeer) return;
+	if (performance.now() >= leaseExpiresAt) return fail(new Error("Native playback lease expired"));
+	const sentAt = performance.now();
+	const peer = renewalPeer = connect();
+	let reply = "";
+	let acknowledged = false;
+	// Bound the whole exchange, not socket inactivity (a trickle is not a renewal).
+	const timeout = setTimeout(() => peer.destroy(new Error("Native playback renewal timed out")), 5000);
+	peer.on("connect", () => peer.end(`PI_VOICE_CONTROLrenew ${session} ${bootId}\n`));
+	peer.on("data", chunk => {
+		reply += chunk;
+		if (reply.length > 8192) return peer.destroy(new Error("Invalid renewal response"));
+		for (;;) {
+			const end = reply.indexOf("\n");
+			if (end < 0) break;
+			try {
+				const event = JSON.parse(reply.slice(0, end));
+				if (event.type === "renewed" && event.id === session && event.boot_id === bootId) acknowledged = true;
+			} catch {}
+			reply = reply.slice(end + 1);
+		}
+	});
+	peer.on("error", error => { if (!stopping && !complete && !finished && !failing) fail(error); });
+	peer.on("close", () => {
+		clearTimeout(timeout);
+		if (renewalPeer !== peer) return; // A stopped/expired scope cannot be revived by a late ACK.
+		renewalPeer = undefined;
+		if (stopping || failing || finished || complete) return;
+		if (performance.now() >= leaseExpiresAt) return fail(new Error("Native playback lease expired"));
+		if (!acknowledged) fail(new Error("Missing scoped native renewal acknowledgment"));
+		else armLease(performance.now() - sentAt);
+	});
+}
 const connect = () => endpoint.protocol === "unix:"
 	? net.createConnection({ path: decodeURIComponent(endpoint.pathname) })
 	: net.createConnection({ host: endpoint.hostname.replace(/^\[|\]$/g, ""), port: Number(endpoint.port) });
 const socket = connect();
-const deadline = setTimeout(() => fail(new Error("Audio client v3 prepare/commit timed out; upgrade the client")), 5000);
+const deadline = setTimeout(() => fail(new Error("Audio client v4 native-watchdog prepare/commit timed out; upgrade the client")), 5000);
 function finish(code) {
 	if (finished) return;
 	finished = true;
+	stopRenewal();
 	clearTimeout(deadline);
 	socket.destroy();
 	process.exit(code);
@@ -38,6 +88,7 @@ function finish(code) {
 function fail(error) {
 	if (finished || failing) return;
 	failing = true;
+	stopRenewal();
 	const detail = error instanceof Error ? error.message : String(error);
 	if (audioAdmitted) error = new RemotePlaybackUnconfirmedError(detail);
 	const message = error instanceof Error ? error.message : String(error);
@@ -47,6 +98,7 @@ function fail(error) {
 	process.stdout.write(`${JSON.stringify({ type: "error", message, ...(audioAdmitted ? { code: error.code } : {}), utterance })}\n`, () => finish(audioAdmitted ? 1 : 2));
 }
 function command(command) {
+	if (command === "stop") stopRenewal();
 	if (!session) {
 		if (command === "stop") stopping = true;
 		return Promise.resolve();
@@ -56,7 +108,7 @@ function command(command) {
 		clearTimeout(deadline);
 		return controlQueue = controlQueue.then(async () => {
 			try {
-				await stopRemotePlayback({ output, id: session, bootId });
+				await stopRemotePlayback({ output, id: session, bootId, nativeWatchdog: true });
 				process.stdout.write(`${JSON.stringify({ type: "remote-released", id: session })}\n`, () => finish(0));
 			} catch (error) { fail(error); }
 		});
@@ -99,6 +151,7 @@ control.on("end", () => { stopping = true; void command("stop"); });
 socket.on("connect", () => socket.write("PI_VOICE_CONTROLhello\n"));
 socket.on("error", error => { if (!complete) fail(error); });
 socket.on("data", chunk => {
+	if (finished || failing) return;
 	feedback += chunk;
 	if (feedback.length > 8192) return fail(new Error("Invalid audio client feedback"));
 	for (;;) {
@@ -109,22 +162,24 @@ socket.on("data", chunk => {
 		let event;
 		try { event = JSON.parse(line); } catch { continue; }
 		if (!negotiated && event.type === "protocol") {
-			if (event.version !== 3) return fail(new Error("Audio client requires v3 prepare/commit; upgrade the client"));
+			if (event.version !== 4 || event.native_watchdog !== true || event.lease_seconds !== 30) return fail(new Error("Audio client requires v4 native watchdog with a 30-second lease; upgrade the client"));
 			negotiated = true;
-			socket.write("PI_VOICE_PREPARE\n");
+			socket.write("PI_VOICE_PREPARE 4\n");
 		} else if (negotiated && event.type === "prepared") {
-			if (session || event.version !== 3 || !validStreamId(event.id) || !(event.boot_id === null || validBootId(event.boot_id))) return fail(new Error("Invalid prepared output scope or kernel boot ID"));
+			if (session || event.version !== 4 || event.native_watchdog !== true || event.lease_seconds !== 30 || !validStreamId(event.id) || !validBootId(event.boot_id)) return fail(new Error("Invalid prepared output scope or kernel boot ID"));
 			session = event.id;
 			bootId = event.boot_id;
 			// Missing identity must not collide with any valid registered ID (including "-").
 			const deviceId = typeof event.device_id === "string" && /^[a-zA-Z0-9._-]{1,128}$/.test(event.device_id) ? event.device_id : ":";
-			control.write(`prepared ${session} ${bootId}${event.boot_fenced === true ? ` fenced ${deviceId}` : ""}\n`);
+			control.write(`prepared ${session} ${bootId} ${event.boot_fenced === true ? "fenced" : "unfenced"} ${deviceId} native-watchdog\n`);
 			if (stopping) void command("stop");
 		} else if (negotiated && event.type === "session") {
-			if (!committed || event.version !== 3 || event.id !== session || event.boot_id !== bootId) return fail(new Error("Output commit identity mismatch"));
+			if (!committed || renewalTimer || event.version !== 4 || event.id !== session || event.boot_id !== bootId) return fail(new Error("Output commit identity mismatch"));
 			clearTimeout(deadline);
 			if (stopping) command("stop");
 			else {
+				armLease();
+				renewalTimer = setInterval(renew, 5000);
 				const start = () => {
 					if (stopping || finished || failing) return;
 					// Physical dispatch was already journaled before commit.
@@ -136,14 +191,16 @@ socket.on("data", chunk => {
 			}
 		} else if (session && event.type === "complete" && event.id === session && event.boot_id === bootId) {
 			complete = true;
+			stopRenewal();
 		} else if (session && event.type === "playback" && Number.isFinite(event.position) && event.position >= 0) {
 			process.stdout.write(`${JSON.stringify({ type: "playback", position: event.position, utterance })}\n`);
 		}
 	}
 });
 socket.on("close", () => {
+	stopRenewal();
 	if (stopping) return; // Only the separate stop receipt proves remote termination.
 	if (complete) process.stdout.write(`${JSON.stringify({ type: "remote-released", id: session })}\n`, () => finish(0));
-	else fail(new Error("Audio client closed without v3 readiness/completion proof; upgrade client or repair forwarding (no replay)"));
+	else fail(new Error("Audio client closed without v4 readiness/completion proof; upgrade client or repair forwarding (no replay)"));
 });
 process.stdin.on("error", fail);

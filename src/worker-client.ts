@@ -7,7 +7,7 @@ import { normalizeWorkerCount, type VoiceConfig } from "./config.js";
 
 import type { AlignmentWord, TimingQuality } from "./narration-progress.js";
 
-export type RemoteOutputStop = (scope: { output: string; id: string; bootId?: string | null }) => Promise<void>;
+export type RemoteOutputStop = (scope: { output: string; id: string; bootId?: string | null; nativeWatchdog?: true }) => Promise<void>;
 
 export type MeasurementPhase = "cache-decode" | "synthesis";
 
@@ -20,7 +20,7 @@ export type WorkerPlaybackPhase = "playing" | "synthesizing" | "loading" | "conn
 
 export type WorkerEvent =
 	| { type: "playback-phase"; utterance: number; segmentId: number; phase: WorkerPlaybackPhase }
-	| { type: "remote-handle"; output: string; id: string; utterance: number; bootId?: string | null; rebootSafe?: boolean; deviceId?: string; grant?: () => void }
+	| { type: "remote-handle"; output: string; id: string; utterance: number; bootId?: string | null; rebootSafe?: boolean; nativeWatchdog?: true; deviceId?: string; grant?: () => void }
 	| { type: "remote-released"; id: string }
 	| { type: "remote-not-admitted"; id: string }
 	| { type: "loading" }
@@ -75,7 +75,7 @@ export class VoiceWorkerClient {
 	#retiring = new Set<ChildProcessWithoutNullStreams>();
 	#signalled = new Set<ChildProcessWithoutNullStreams>();
 	#remoteUnconfirmed = false;
-	#remoteHandles = new Map<string, { output: string; id: string; utterance: number; bootId?: string | null }>();
+	#remoteHandles = new Map<string, { output: string; id: string; utterance: number; bootId?: string | null; nativeWatchdog?: true }>();
 	#dispatchClosed = false;
 	#remoteUtterance: number | undefined;
 	#closed = new WeakSet<ChildProcessWithoutNullStreams>();
@@ -443,7 +443,7 @@ export class VoiceWorkerClient {
 		}
 		if (event.type === "remote-handle") {
 			if (validStreamId(event.id) && /^(tcp|unix):\/\//.test(event.output)) {
-				this.#remoteHandles.set(event.id, { output: event.output, id: event.id, utterance: event.utterance, bootId: event.bootId });
+				this.#remoteHandles.set(event.id, { output: event.output, id: event.id, utterance: event.utterance, bootId: event.bootId, ...(event.nativeWatchdog === true && validBootId(event.bootId) ? { nativeWatchdog: true } : {}) });
 				this.#remoteUnconfirmed = true;
 				// Queued submissions share admission; only cancellation invalidates a saved grant.
 				const generation = this.#nextCancelId;
