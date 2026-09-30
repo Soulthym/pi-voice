@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -u
+# Job-spec signals below require Bash's per-child (not process-group) path.
+set +m
 
 runtime_dir=${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}
 # Secure per-stream identity, never a reusable process identifier.
@@ -101,15 +103,28 @@ publish_exit() (
   exec 8>"$state_dir/lock" && flock -x -w 5 8 && publish_native_exit "$state_dir"
 )
 
+# Named, single-process jobs: Bash kill_pid blocks SIGCHLD and skips reaped
+# children (PALIVE). Numeric $! signals bypass that check. Do not enable job
+# control, use pipelines here, or replace these builtin job-spec signals.
+pi_voice_feeder() { exec cat; }
+stop_feeder() { builtin kill -KILL %pi_voice_feeder 2>/dev/null || true; }
+
 cleanup() {
   trap - EXIT
   trap '' INT TERM
   flock -u 9 2>/dev/null || true
-  [[ -n "$feeder_pid" ]] && kill "$feeder_pid" 2>/dev/null || true
+  stop_feeder
   if [[ $player_exited == false && -S $ipc_socket ]]; then
     printf '{"command":["quit"]}\n' | socat -T 0.1 - "UNIX-CONNECT:$ipc_socket" >/dev/null 2>&1 || true
   fi
-  [[ $player_exited == false && -n "$mpv_pid" ]] && kill "$mpv_pid" 2>/dev/null || true
+  if [[ $player_exited == false && -n "$mpv_pid" ]]; then
+    # An unsupported idle player or a launcher has no verified native timer.
+    # Never wait indefinitely for it to honor TERM; a detached native player
+    # remains governed by its scoped IPC/watchdog, not the launcher's job.
+    local signal=KILL
+    [[ $native_child == true ]] && signal=TERM
+    builtin kill -"$signal" %pi_voice_player 2>/dev/null || true
+  fi
   [[ -n "$feeder_pid" ]] && wait "$feeder_pid" 2>/dev/null || true
   if [[ $player_exited == false && -n "$mpv_pid" ]]; then
     wait "$mpv_pid" 2>/dev/null || true
@@ -301,15 +316,17 @@ mkfifo "$audio_fifo"
 
 # A known preparation boot must still be observable immediately before spawn.
 [[ $boot_id == null || $(kernel_boot) == "$boot_id" ]] || exit 1
+pi_voice_player() {
 PI_VOICE_SCOPE="$session_id" PI_VOICE_BOOT="${boot_id//\"/}" PI_VOICE_BINDING="$state_dir/binding" PI_VOICE_FIFO="$audio_fifo" \
-mpv --no-config --load-scripts=no --script="$script_dir/pi-voice-mpv-watchdog.lua" --idle=yes \
+exec mpv --no-config --load-scripts=no --script="$script_dir/pi-voice-mpv-watchdog.lua" --idle=yes \
   --really-quiet --no-video --cache=no \
   --input-ipc-server="$ipc_socket" \
   --demuxer=rawaudio \
   --demuxer-rawaudio-format=floatle \
   --demuxer-rawaudio-rate=24000 \
-  --demuxer-rawaudio-channels=mono \
-  9>&- > /dev/null 2>/dev/null &
+  --demuxer-rawaudio-channels=mono
+}
+pi_voice_player 9>&- > /dev/null 2>/dev/null &
 mpv_pid=$!
 # The idle native player must identify itself before PCM can be opened.
 for _ in {1..100}; do
@@ -334,7 +351,7 @@ lock_held=false
 # playback-position feedback over the reverse direction of the same socket.
 [[ ! -f $state_dir/stopped ]] || exit 1
 (umask 077; touch "$state_dir/admission-intent") && sync "$state_dir/admission-intent" "$state_dir" || exit 1
-cat <&3 9>&- >"$audio_fifo" &
+pi_voice_feeder <&3 9>&- >"$audio_fifo" &
 feeder_pid=$!
 printf '{"command":["script-message","pi-voice-start","%s","%s"]}\n' "$session_id" "${boot_id//\"/}" |
   socat -T 0.1 - "UNIX-CONNECT:$ipc_socket" >/dev/null 2>&1 || exit 1
@@ -343,7 +360,6 @@ exec 9>&-
 
 for _ in {1..50}; do
   [[ -S "$ipc_socket" ]] && break
-  kill -0 "$mpv_pid" 2>/dev/null || exit 1
   sleep 0.02
 done
 [[ -S "$ipc_socket" ]] || exit 1
@@ -351,7 +367,11 @@ done
 printf '{"type":"session","version":4,"id":"%s","boot_id":%s}\n' "$session_id" "$boot_id" || true
 
 request_id=0
-while kill -0 "$native_pid" 2>/dev/null; do
+# Identity reads only guide polling; they never authorize signals or receipts.
+while native_stat=$(cat "/proc/$native_pid/stat" 2>/dev/null); do
+  native_tail=${native_stat##*) }
+  read -r -a native_fields <<<"$native_tail"
+  [[ ${native_fields[19]:-} == "$bound_ticks" ]] || break
   ((request_id += 1))
   response=$(
     printf '{"command":["get_property","time-pos"],"request_id":%d}\n' "$request_id" |
@@ -365,15 +385,15 @@ while kill -0 "$native_pid" 2>/dev/null; do
   sleep 0.08
 done
 
-if kill -0 "$feeder_pid" 2>/dev/null; then
-  kill "$feeder_pid" 2>/dev/null || true
-fi
+stop_feeder
 feeder_status=0
 wait "$feeder_pid" 2>/dev/null || feeder_status=$?
 feeder_pid=
 player_status=0
 # The polling loop has ended; do not interrupt reaping/proof publication.
 trap '' INT TERM
+# A surviving launcher is not the native player we just observed exiting.
+[[ $native_child == true ]] || builtin kill -KILL %pi_voice_player 2>/dev/null || true
 wait "$mpv_pid" 2>/dev/null || player_status=$?
 player_exited=true
 trap 'exit 1' INT TERM
