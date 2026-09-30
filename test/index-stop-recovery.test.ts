@@ -439,7 +439,55 @@ for (const diesAfterStartup of [false, true]) for (const journalAvailable of [tr
 	assert.match(rows(), /Output stop unconfirmed/);
 });
 
-test("covered empty output orphan reconnect retires durably without inventing an input episode", async t => {
+for (const covered of [true, false]) test(`orphan retry preserves guardian failure without reclassifying admission (covered: ${covered})`, async t => {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-pending-receipt-"));
+	const env = { PI_VOICE_CONFIG: path.join(root, "config"), PI_VOICE_DEVICE_DIR: path.join(root, "devices"), PI_VOICE_COORDINATOR_DIR: path.join(root, "coordinator") };
+	const old = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
+	Object.assign(process.env, env);
+	const host = new FakeVoiceHost(root, "replacement");
+	t.after(async () => {
+		await host.shutdown().catch(() => {});
+		for (const [key, value] of Object.entries(old)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+		await fs.rm(root, { recursive: true, force: true });
+	});
+	await fs.writeFile(env.PI_VOICE_CONFIG, JSON.stringify({ enabled: true, input: "local", audioCache: false, timingPreprocessConcurrency: 0, codeDescriptionPreprocessConcurrency: 0 }));
+	const ledger = new StopRecovery(env.PI_VOICE_COORDINATOR_DIR, "dead-owner");
+	ledger.initialize();
+	ledger.beforeIO("input", false, covered);
+	const handle = { endpoint: "local", id: `${"a".repeat(32)}.1`, selection: "local", configured: "local", bootId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", desktopWait: true };
+	ledger.retain("input", handle, "Original desktop");
+	const file = path.join(env.PI_VOICE_COORDINATOR_DIR, "speech.lock", "lease.json");
+	await fs.mkdir(path.dirname(file));
+	const fence = JSON.stringify({ kind: "speech", instanceId: "dead-owner", pid: 2147483647, speechGeneration: "original-generation", interactive: true, updatedAt: 1, cwd: root, sessionId: "previous" });
+	await fs.writeFile(file, fence);
+	const failure = "Same-boot guardian exited without durable wait proof";
+	const retry = t.mock.method(PhoneInputClient, "retryStop", async () => { throw new Error(failure); });
+	const lookup = t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", async () => ({ kind: "intentional_local" as const }));
+	await host.start();
+	const lookups = lookup.mock.callCount();
+	for (let attempt = 1; attempt <= 2; attempt++) {
+		const notices = host.notices.length;
+		await host.command("reconnect");
+		assert.equal(retry.mock.callCount(), attempt);
+		assert.equal(lookup.mock.callCount(), lookups, "failed proof cannot adopt a connection");
+		const messages = host.notices.slice(notices).map(notice => notice.message).join("\n");
+		if (attempt === 1) {
+			assert.match(messages, covered ? /Admission coverage complete; scoped stop receipts still pending/ : /Interrupted transport coverage remains unproven/);
+			assert.match(messages, /cannot reconstruct missing same-boot guardian wait proof/);
+		}
+		if (covered) assert.doesNotMatch(messages, /coverage remains unproven|missing admission evidence/);
+		assert.match(host.widgetLines()!.join("\n"), /Same-boot guardian exited without durable wait proof/);
+		const restored = new StopRecovery(env.PI_VOICE_COORDINATOR_DIR, "dead-owner");
+		assert.equal(restored.isCovered("input"), covered);
+		assert.equal(restored.isIdle("input"), false);
+		assert.deepEqual(restored.episode("input")!.handles, [handle]);
+		assert.equal(restored.episode("input")!.cause, failure);
+		assert.equal(JSON.parse(await fs.readFile(ledger.file, "utf8")).version, 4);
+		assert.equal(await fs.readFile(file, "utf8"), fence);
+	}
+});
+
+for (const retained of [false, true]) test(`covered output orphan reconnect preserves accounting until exact receipt (retained: ${retained})`, async t => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-covered-index-"));
 	const env = { PI_VOICE_CONFIG: path.join(root, "config"), PI_VOICE_DEVICE_DIR: path.join(root, "devices"), PI_VOICE_COORDINATOR_DIR: path.join(root, "coordinator") };
 	const old = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
@@ -454,6 +502,21 @@ test("covered empty output orphan reconnect retires durably without inventing an
 	const ledger = new StopRecovery(env.PI_VOICE_COORDINATOR_DIR, "dead-owner");
 	ledger.initialize();
 	ledger.beforeIO("output", true);
+	let acknowledge = false;
+	const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+	const bootId = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+	if (retained) {
+		const current = `unix://${path.join(root, "new.sock")}`;
+		const server = net.createServer(socket => socket.on("data", data => {
+			assert.equal(String(data), `PI_VOICE_CONTROLstop ${id} ${bootId}\n`);
+			socket.end(acknowledge ? JSON.stringify({ type: "stopped", id, boot_id: bootId }) + "\n" : "");
+		}));
+		await new Promise<void>(resolve => server.listen(current.slice(7), resolve));
+		t.after(() => new Promise<void>(resolve => server.close(() => resolve())));
+		await fs.mkdir(env.PI_VOICE_DEVICE_DIR);
+		await fs.writeFile(path.join(env.PI_VOICE_DEVICE_DIR, "A.json"), JSON.stringify({ version: 1, id: "A", name: "Original", platform: "termux", audioEndpoint: current, inputEndpoint: current, connectedAt: 2, lastActive: 2 }));
+		ledger.retain("output", { endpoint: `unix://${path.join(root, "old.sock")}`, id, bootId, selection: "A", configured: "auto", rebootSafe: true }, "Original");
+	}
 	const file = path.join(env.PI_VOICE_COORDINATOR_DIR, "speech.lock", "lease.json");
 	await fs.mkdir(path.dirname(file));
 	await fs.writeFile(file, JSON.stringify({ kind: "speech", instanceId: "dead-owner", pid: 2147483647, speechGeneration: "original-generation", interactive: true, updatedAt: 1, cwd: root, sessionId: "previous" }));
@@ -462,6 +525,21 @@ test("covered empty output orphan reconnect retires durably without inventing an
 	assert.match(host.widgetLines()!.join("\n"), /Output stop unconfirmed/);
 	assert.doesNotMatch(host.widgetLines()!.join("\n"), /Input stop unconfirmed/);
 	const beforeReconnect = resolveConnection.mock.callCount();
+	if (retained) {
+		const fence = await fs.readFile(file, "utf8");
+		await host.command("reconnect");
+		assert.equal(resolveConnection.mock.callCount(), beforeReconnect);
+		const messages = host.notices.map(notice => notice.message).join("\n");
+		assert.match(messages, /Admission coverage complete; scoped stop receipts still pending/);
+		assert.doesNotMatch(messages, /coverage remains unproven|missing admission evidence/);
+		assert.match(host.widgetLines()!.join("\n"), /missing scoped player-exit receipt/);
+		const pending = new StopRecovery(env.PI_VOICE_COORDINATOR_DIR, "dead-owner");
+		assert.equal(pending.isIdle("input"), true);
+		assert.equal(pending.isCovered("output"), true);
+		assert.equal(pending.episode("output")!.handles.length, 1);
+		assert.equal(await fs.readFile(file, "utf8"), fence);
+		acknowledge = true;
+	}
 	const previousNotices = host.notices.length;
 	await host.command("reconnect");
 	assert.ok(resolveConnection.mock.callCount() > beforeReconnect, "successful recovery continues connection adoption");

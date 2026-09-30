@@ -447,7 +447,12 @@ export default async function (pi: ExtensionAPI) {
 		if (orphanRecovery) {
 			await Promise.allSettled((["input", "output"] as const).map(async direction => {
 				try { await orphanRecovery!.retry(direction, deviceRouter, config[direction]); }
-				catch (error) { notifyStopFailure(error, inheritedStops[direction]); }
+				catch (error) {
+					const diagnostic = inheritedStops[direction];
+					if (diagnostic) diagnostic.cause = error instanceof Error ? error.message : String(error);
+					notifyStopFailure(error, diagnostic);
+					return;
+				}
 				const saved = orphanRecovery!.episode(direction);
 				if (saved && inheritedStops[direction]) inheritedStops[direction]!.cause = saved.cause;
 			}));
@@ -458,7 +463,13 @@ export default async function (pi: ExtensionAPI) {
 			return;
 		}
 		refreshProgressWidget();
-		const error = new Error("Interrupted transport coverage remains unproven. Ownership retained; reconnect cannot reconstruct missing admission evidence. Preserve the original device receipts and see docs/troubleshooting.md#unconfirmed-stop; restarting or deleting the fence is not stop proof.");
+		const unknownCoverage = !orphanRecovery || (["input", "output"] as const).some(direction => !orphanRecovery!.isIdle(direction) && !orphanRecovery!.isCovered(direction));
+		const pendingReceipts = orphanRecovery && (["input", "output"] as const).some(direction => orphanRecovery!.isCovered(direction));
+		const error = new Error(`${unknownCoverage
+			? "Interrupted transport coverage remains unproven. Ownership retained; reconnect cannot reconstruct missing admission evidence."
+			: pendingReceipts
+				? "Admission coverage complete; scoped stop receipts still pending. Ownership retained."
+				: "Stop receipts complete; ownership release remains unconfirmed."} Preserve the original device receipts and see docs/troubleshooting.md#unconfirmed-stop; restarting or deleting the fence is not stop proof.`);
 		notifyStopFailure(error);
 		throw error;
 	};
@@ -468,6 +479,7 @@ export default async function (pi: ExtensionAPI) {
 		}
 		stopRecovery.beforeIO(direction, direction === "output" && /^(tcp|unix):\/\//.test(routedVoiceConfig().output), direction === "input");
 	};
+	const stopRecoveryAdvice = "preserve original device receipts; /voice reconnect can retry available stop proof, but cannot reconstruct missing same-boot guardian wait proof; see docs/troubleshooting.md#unconfirmed-stop";
 	const reportedStopErrors = new WeakSet<object>();
 	let stopDiagnostic = { cause: "", notified: false };
 	const notifyStopFailure = (error: unknown, diagnostic?: { notified: boolean }): void => {
@@ -480,7 +492,7 @@ export default async function (pi: ExtensionAPI) {
 		}
 		const cause = error instanceof Error ? error.message : String(error);
 		if (stopDiagnostic.cause !== cause) stopDiagnostic = { cause, notified: false };
-		notifyVoice(activeContext, `Stop unconfirmed; ownership retained: ${cause} · restore the original device connection; /voice reconnect to retry cleanup`, "error", diagnostic ?? stopDiagnostic);
+		notifyVoice(activeContext, `Stop unconfirmed; ownership retained: ${cause} · ${stopRecoveryAdvice}`, "error", diagnostic ?? stopDiagnostic);
 		stopDiagnostic.notified = true;
 	};
 	const stopsUnresolved = (): boolean => Object.values(stopResources).some(resource => resource.episode || resource.cleanup);
@@ -2295,7 +2307,7 @@ export default async function (pi: ExtensionAPI) {
 		void Promise.all([inputCancellation, waitForTransportCancellation(cancelId)]).then(async () => {
 			if (deviceRebind) await deviceRebind;
 			if (pendingSpeechPreemption === pending) finishSpeechPreemption();
-		}).catch(error => notifyVoice(activeContext, `Handoff stop failed; ownership retained: ${error instanceof Error ? error.message : String(error)} · restore the device connection; /voice reconnect to retry cleanup`, "error"));
+		}).catch(error => notifyVoice(activeContext, `Handoff stop failed; ownership retained: ${error instanceof Error ? error.message : String(error)} · ${stopRecoveryAdvice}`, "error"));
 	};
 
 	const pollWaitingAttention = (): void => {
@@ -2513,7 +2525,7 @@ export default async function (pi: ExtensionAPI) {
 				if (epoch === playbackRequestEpoch && ctx === activeContext) {
 					deviceRetryRequired = true;
 					if (!stopUnconfirmed || (!stopResources.input.episode && !stopResources.output.episode)) {
-						notifyVoice(ctx, `Device: ${error instanceof Error ? error.message : String(error)}${stopUnconfirmed ? " Stop unconfirmed; ownership retained. Restore the old device connection and retry /voice reconnect." : " Retry /voice reconnect."}`, "error", reconnectDiagnostic);
+						notifyVoice(ctx, `Device: ${error instanceof Error ? error.message : String(error)}${stopUnconfirmed ? ` Stop unconfirmed; ownership retained. ${stopRecoveryAdvice}.` : " Retry /voice reconnect."}`, "error", reconnectDiagnostic);
 					}
 				}
 				throw error;
@@ -2791,7 +2803,7 @@ export default async function (pi: ExtensionAPI) {
 			playbackPaused = true;
 			narration.setPaused(true);
 			refreshStatus();
-			notifyVoice(activeContext, `Replay blocked; microphone ownership retained: ${error instanceof Error ? error.message : String(error)} · restore the device connection; /voice reconnect to retry cleanup`, "error");
+			notifyVoice(activeContext, `Replay blocked; microphone ownership retained: ${error instanceof Error ? error.message : String(error)} · ${stopRecoveryAdvice}`, "error");
 			return;
 		}
 		try {
@@ -2862,7 +2874,7 @@ export default async function (pi: ExtensionAPI) {
 					request.paused = playbackPaused = true;
 					narration.setPaused(true);
 					refreshStatus();
-					notifyVoice(activeContext, `Replay stop failed; ownership retained: ${String(error)} · restore the device connection; /voice reconnect to retry cleanup`, "error");
+					notifyVoice(activeContext, `Replay stop failed; ownership retained: ${String(error)} · ${stopRecoveryAdvice}`, "error");
 				}
 				return;
 			}
@@ -3761,7 +3773,7 @@ export default async function (pi: ExtensionAPI) {
 			transportStopPending = false;
 			transportStops.clear();
 		} catch (error) {
-			notifyVoice(ctx, `Reload stop failed; ownership retained: ${String(error)} · restore the device connection; /voice reconnect to retry cleanup`, "error");
+			notifyVoice(ctx, `Reload stop failed; ownership retained: ${String(error)} · ${stopRecoveryAdvice}`, "error");
 			throw error;
 		}
 		ownsSpeech = false;
@@ -4008,7 +4020,7 @@ export default async function (pi: ExtensionAPI) {
 			await Promise.all([inputCancelled, cleanup()]);
 			deviceRebind = undefined;
 		} catch (error) {
-			notifyVoice(ctx, `Shutdown stop failed; ownership retained: ${String(error)} · restore the device connection; /voice reconnect to retry cleanup`, "error");
+			notifyVoice(ctx, `Shutdown stop failed; ownership retained: ${String(error)} · ${stopRecoveryAdvice}`, "error");
 			throw error;
 		}
 		for (const resolve of transportCancelWaiters.values()) resolve();

@@ -52,6 +52,10 @@ test("durable input/output retries use original identity and old scope through c
 	await assert.rejects(restored.retry("output", router, "auto"), /missing scoped/);
 	assert.equal(new StopRecovery(root, "old-owner").episode("input")?.handles[0].id, ticket);
 	assert.equal(restored.episode("output")?.handles.length, 1);
+	assert.equal(restored.isCovered("input"), false);
+	assert.equal(restored.isCovered("output"), false);
+	assert.match(new StopRecovery(root, "old-owner").episode("input")!.cause, /not confirmed/);
+	assert.match(new StopRecovery(root, "old-owner").episode("output")!.cause, /missing scoped/);
 	setExact(true);
 	await restored.retry("input", router, "auto");
 	await restored.retry("output", router, "auto");
@@ -119,6 +123,11 @@ test("covered null-boot output retires only with a null-boot receipt", async t =
 	journal.retain("output", { endpoint, id: outputId, selection: "A", configured: "auto", bootId: null }, "A");
 	const restored = new StopRecovery(root, "null-owner");
 	await assert.rejects(restored.retry("output", router, "auto"), /missing scoped/);
+	const pending = new StopRecovery(root, "null-owner");
+	assert.equal(pending.isCovered("output"), true);
+	assert.equal(pending.isIdle("output"), false);
+	assert.match(pending.episode("output")!.cause, /missing scoped/);
+	assert.equal(JSON.parse(await fs.readFile(pending.file, "utf8")).version, 4);
 	setProof({ boot_id: null });
 	await restored.retry("output", router, "auto");
 	assert.equal(new StopRecovery(root, "null-owner").isIdle("output"), true);
@@ -168,12 +177,39 @@ test("covered network retry preserves identity across restart and retires only a
 	const reboot = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
 	setInputReceipt(`stopped-reboot ${ticket} ${outputId} ${reboot} B`);
 	await assert.rejects(restored.retry("input", router, "auto"), /not confirmed/);
-	assert.deepEqual(new StopRecovery(root, "network-owner").episode("input")!.handles, [handle]);
+	const pending = new StopRecovery(root, "network-owner");
+	assert.deepEqual(pending.episode("input")!.handles, [handle]);
+	assert.equal(pending.isCovered("input"), true);
+	assert.equal(pending.isIdle("input"), false);
+	assert.match(pending.episode("input")!.cause, /not confirmed/);
 	setInputReceipt(`stopped-reboot ${ticket} ${outputId} ${reboot} A`);
 	await restored.retry("input", router, "auto");
 	assert.equal(new StopRecovery(root, "network-owner").isIdle("input"), true);
 	assert.deepEqual(commands, Array(2).fill(`stop-admit ${ticket} ${outputId} A`));
 	assert.notEqual(endpoint, handle.endpoint, "retry uses the registered original identity's new endpoint");
+});
+
+test("partial covered retry retains only the pending scope and its actual failure", async t => {
+	const { root, endpoint, router } = await setup(t);
+	const journal = new StopRecovery(root, "partial-owner");
+	journal.initialize();
+	const handle = { endpoint, id: ticket, selection: "A", configured: "auto", bootId: outputId, networkAdmission: true };
+	const remaining = { ...handle, id: `${"b".repeat(32)}.20` };
+	journal.retain("input", handle, "A");
+	journal.retain("input", remaining, "A");
+	const failure = new Error("guardian wait receipt missing");
+	t.mock.method(PhoneInputClient, "retryStop", async (scope: Parameters<typeof PhoneInputClient.retryStop>[0]) => {
+		if (scope.ticket === remaining.id) {
+			assert.match(new StopRecovery(root, "partial-owner").episode("input")!.cause, /Admission coverage complete/);
+			throw failure;
+		}
+	});
+	await assert.rejects(journal.retry("input", router, "auto"), error => error === failure);
+	const restored = new StopRecovery(root, "partial-owner");
+	assert.deepEqual(restored.episode("input")!.handles, [remaining]);
+	assert.equal(restored.episode("input")!.cause, failure.message);
+	assert.equal(restored.isCovered("input"), true);
+	assert.equal(restored.isIdle("input"), false);
 });
 
 test("input persistence failure aborts before recording admission", async t => {

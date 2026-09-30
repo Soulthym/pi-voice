@@ -57,6 +57,11 @@ export class StopRecovery {
 		return this.#exists && this.#journal.version !== 1 && this.#journal.admission[direction] === "idle" && !this.#journal[direction];
 	}
 
+	/** Complete admission accounting is not a stop receipt. */
+	isCovered(direction: DeviceDirection): boolean {
+		return this.#exists && this.#journal.version !== 1 && this.#journal.admission[direction] === "covered";
+	}
+
 	/** Must finish durably BEFORE sending work that could open a player or recorder. */
 	beforeIO(direction: DeviceDirection, preparedOutput = false, preparedInput = false): void {
 		if (!this.#exists || this.#journal.version === 1) throw new Error("Admission ledger unavailable");
@@ -144,9 +149,17 @@ export class StopRecovery {
 		if (!episode) return;
 		if (!episode.handles.length) throw new Error(`${episode.device}: no retained ${direction} scope; ownership retained`);
 		for (const handle of [...episode.handles]) {
-			await this.#stopScope(direction, handle, router, configured);
-			this.retire(direction, handle.id, handle.endpoint);
-			episode.cause = "Saved scope stopped; interrupted transport coverage remains unproven; ownership retained";
+			try {
+				await this.#stopScope(direction, handle, router, configured);
+				this.retire(direction, handle.id, handle.endpoint);
+			} catch (error) {
+				episode.cause = error instanceof Error ? error.message : String(error);
+				this.#save();
+				throw error;
+			}
+			episode.cause = this.isCovered(direction)
+				? "Admission coverage complete; remaining scoped stop receipts pending; ownership retained"
+				: "Saved scope stopped; interrupted transport coverage remains unproven; ownership retained";
 			this.#save();
 		}
 		if (this.#journal.version !== 1 && this.#journal.admission[direction] === "covered") this.clear(direction);
