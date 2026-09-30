@@ -16,7 +16,7 @@ Audio protocol v4 requires a handshake on the actual output connection (never an
 4. Client durably reserves a random UUID v4 **without opening a player**, then replies `{"type":"prepared","version":4,"id":"<uuid>","boot_id":"<kernel-boot-uuid>","device_id":"<stable-device-id>","boot_fenced":true,"native_watchdog":true,"lease_seconds":30}\n`. Boot identity comes only from `/proc/sys/kernel/random/boot_id`; missing/invalid identity denies new v4 admission. Historical null-boot scopes retain only their original receipt cleanup, never new native-watchdog or reboot capability.
 5. The host fsyncs the original endpoint, selection/configuration, ID and boot ID to its recovery journal. Only successful journal publication permits `output-grant` to the worker. The worker checks the expected boot and cancellation epoch before forwarding the grant.
 6. Host sends `PI_VOICE_COMMIT <uuid> <kernel-boot-uuid>\n` on that same connection. The client verifies both identities, takes the scope lock, checks the durable stop tombstone, and persists possible dispatch before spawning mpv. `boot_fenced:true` promises that a known expected boot is also re-read and checked immediately before spawn; the host persists this per-scope capability before granting only when `device_id` independently reported by the helper matches the original registered route ID. The helper reads its existing `${XDG_CONFIG_HOME:-$HOME/.config}/pi-voice/device-id`; missing/invalid identity is `null` and cannot enable reboot discharge.
-7. After the idle native mpv has bound its own PID/start ticks, UID, boot and PID/mount namespaces, the guardian fsyncs that binding and an `admission-intent` marker under the same scope lock before launching the feeder or sending scoped `pi-voice-start` to open PCM. Then, client replies `{"type":"session","version":4,"id":"<uuid>","boot_id":"<kernel-boot-uuid>"}\n`. Only then does the host send mono little-endian Float32 PCM at 24 kHz.
+7. After the idle native mpv has bound its own PID/start ticks, UID, boot and PID/mount/reader-time namespaces, the guardian fsyncs that binding and an `admission-intent` marker under the same scope lock before launching the feeder or sending scoped `pi-voice-start` to open PCM. Then, client replies `{"type":"session","version":4,"id":"<uuid>","boot_id":"<kernel-boot-uuid>"}\n`. Only then does the host send mono little-endian Float32 PCM at 24 kHz.
 
 The client keeps the reverse direction open for newline-delimited JSON `{"type":"playback","position":1.234}`. Position is the actual player position in seconds. The client-generated session ID scopes control to this player. Generate a secure random lowercase UUID v4 once per stream, independent of its PID; preserve it as an opaque string. All scoped commands and completion/stop receipts must match that exact ID. Numeric IDs (including numeric strings), malformed IDs and path components are rejected.
 
@@ -58,7 +58,7 @@ Stop, disconnect, failed renewal and an expired absolute host deadline cancel re
 permanently; late replies cannot resurrect it. The native player remains authoritative.
 
 A recovery handler can publish `native-process-exit` only for a durably bound scope
-on the same known boot, UID and PID/mount namespaces, with readable unrestricted
+on the same known boot, UID and PID/mount/reader-time namespaces, with readable unrestricted
 procfs and verified absence of the original PID or a different start time at that PID.
 Read/list failures, restricted procfs, a still-present original process (including a
 zombie), missing binding and namespace changes remain fenced. Host acceptance also
@@ -69,6 +69,17 @@ a new helper never promotes an old handle. Separately, a scope with durable
 receipt under the same lock that gates intent, feeder and start. This covers a
 prebinding crash after commit without signalling a reconstructed PID. Missing
 metadata or existing intent cannot use that proof.
+
+The private native binding format is now
+`<scope> <boot> <pid> <startticks> <uid> <pidns> <mntns> binding-v2 <reader-timens>`.
+Lua records its own reader time namespace (`time:[inode]`, not `time_for_children`);
+the helper validates its reader domain before any start-tick comparison. Different
+or unverifiable time domains cannot prove PID reuse. Only a readable pre-5.6 kernel
+release plus a successful namespace listing showing PID/mount but no time namespace
+permits the explicit `unsupported-pre5.6` marker. Read/permission errors or missing
+links on newer kernels fail closed. Install matching shell/Lua helpers together;
+old unversioned bindings are not upgraded or reinterpreted, and cannot mint a new
+native-exit receipt. Previously durable receipts retain their existing meaning.
 
 The watchdog is not an OS/hardware guarantee: suspended/frozen native mpv, a frozen
 OS, uninterruptible kernel work and physical output buffers can exceed the timer.

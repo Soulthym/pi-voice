@@ -52,17 +52,37 @@ stable_device_id() {
 }
 device_id=$(stable_device_id)
 
+# A missing link on modern kernels is not evidence of unsupported time namespaces.
+reader_timens() {
+  local release major minor names value
+  release=$(cat /proc/sys/kernel/osrelease) || return 1
+  [[ $release =~ ^([0-9]+)\.([0-9]+)\. ]] || return 1
+  major=${BASH_REMATCH[1]} minor=${BASH_REMATCH[2]}
+  if (( major < 5 || (major == 5 && minor < 6) )); then
+    names=$(LC_ALL=C QUOTING_STYLE=literal ls -1 -- /proc/self/ns) || return 1
+    [[ $'\n'$names$'\n' == *$'\npid\n'* && $'\n'$names$'\n' == *$'\nmnt\n'* ]] || return 1
+    if [[ $'\n'$names$'\n' != *$'\ntime\n'* ]]; then
+      printf 'unsupported-pre5.6'
+      return
+    fi
+  fi
+  value=$(readlink /proc/self/ns/time) || return 1
+  [[ $value =~ ^time:\[[0-9]+\]$ ]] || return 1
+  printf '%s' "$value"
+}
+
 # Only a successfully read, unrestricted procfs in the original namespaces can
 # establish absence. A failed stat/read/permission check is never absence.
 native_gone() {
-  local directory=$1 identity bid bboot pid ticks uid pidns mntns extra mounts listing stat tail current_ticks
+  local directory=$1 identity bid bboot pid ticks uid pidns mntns version timens extra mounts listing stat tail current_ticks
   [[ -f $directory/bound && -f $directory/committed ]] || return 1
   identity=$(cat "$directory/bound") || return 1
-  read -r bid bboot pid ticks uid pidns mntns extra <<<"$identity"
+  read -r bid bboot pid ticks uid pidns mntns version timens extra <<<"$identity"
   [[ -z $extra && $bid == "${directory##*/}" && $bboot == "${boot_id//\"/}" && $boot_id != null ]] || return 1
   [[ $pid =~ ^[1-9][0-9]*$ && $ticks =~ ^[0-9]+$ && $uid =~ ^[0-9]+$ && $pidns =~ ^pid:\[[0-9]+\]$ && $mntns =~ ^mnt:\[[0-9]+\]$ ]] || return 1
   [[ $(kernel_boot) == "$boot_id" && $(id -u) == "$uid" ]] || return 1
   [[ $(readlink /proc/self/ns/pid) == "$pidns" && $(readlink /proc/self/ns/mnt) == "$mntns" ]] || return 1
+  [[ $version == binding-v2 && -n $timens && $(reader_timens) == "$timens" ]] || return 1
   mounts=$(cat /proc/mounts) || return 1
   local source mount type options rest visible=false
   while read -r source mount type options rest; do
@@ -88,7 +108,7 @@ native_gone() {
 publish_native_exit() (
   local directory=$1
   if [[ $directory == "$state_dir" && $native_child == true && $player_exited == true ]]; then
-    [[ $boot_id != null && $(kernel_boot) == "$boot_id" ]] || exit 1
+    [[ $boot_id != null && $(kernel_boot) == "$boot_id" && $(reader_timens) == "$bound_timens" ]] || exit 1
   else
     native_gone "$directory" || exit 1
   fi
@@ -339,9 +359,10 @@ for _ in {1..100}; do
   sleep 0.02
 done
 [[ -f $state_dir/binding && -S $ipc_socket ]] || { printf '{"type":"error","message":"mpv native watchdog failed to bind before audio; install matching client helpers and an mpv build with Lua support"}\n'; exit 1; }
-read -r bound_id bound_boot native_pid bound_ticks bound_uid bound_pidns bound_mntns extra <"$state_dir/binding" || exit 1
+read -r bound_id bound_boot native_pid bound_ticks bound_uid bound_pidns bound_mntns bound_version bound_timens extra <"$state_dir/binding" || exit 1
 [[ -z $extra && $bound_id == "$session_id" && $bound_boot == "${boot_id//\"/}" && $native_pid =~ ^[1-9][0-9]*$ && $bound_ticks =~ ^[0-9]+$ ]] || exit 1
 [[ $bound_uid == "$(id -u)" && $bound_pidns == "$(readlink /proc/self/ns/pid)" && $bound_mntns == "$(readlink /proc/self/ns/mnt)" ]] || exit 1
+[[ $bound_version == binding-v2 && -n $bound_timens && $(reader_timens) == "$bound_timens" ]] || exit 1
 native_stat=$(cat "/proc/$native_pid/stat") || exit 1
 native_tail=${native_stat##*) }
 read -r -a native_fields <<<"$native_tail"
@@ -373,7 +394,10 @@ printf '{"type":"session","version":4,"id":"%s","boot_id":%s}\n' "$session_id" "
 
 request_id=0
 # Identity reads only guide polling; they never authorize signals or receipts.
-while native_stat=$(cat "/proc/$native_pid/stat" 2>/dev/null); do
+while :; do
+  # An unverifiable reader domain cannot end polling or authorize cleanup.
+  if [[ $(reader_timens) != "$bound_timens" ]]; then sleep 0.08; continue; fi
+  native_stat=$(cat "/proc/$native_pid/stat" 2>/dev/null) || break
   native_tail=${native_stat##*) }
   read -r -a native_fields <<<"$native_tail"
   [[ ${native_fields[19]:-} == "$bound_ticks" ]] || break

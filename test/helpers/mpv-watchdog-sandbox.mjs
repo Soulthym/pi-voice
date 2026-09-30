@@ -38,6 +38,7 @@ async function run(mode) {
   assert.equal(identity[4], String(process.getuid()));
   assert.equal(identity[5], fs.readlinkSync('/proc/self/ns/pid'));
   assert.equal(identity[6], fs.readlinkSync('/proc/self/ns/mnt'));
+  assert.deepEqual(identity.slice(7), ['binding-v2', fs.readlinkSync('/proc/self/ns/time')]);
   socket=net.createConnection(ipc); await once(socket,'connect');
   socket.on('error',()=>{});
   let response=''; socket.on('data',b=>response+=b);

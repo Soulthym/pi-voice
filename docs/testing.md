@@ -12,7 +12,16 @@ Validation: typecheck, Bash/Lua/JS syntax, helper parity and whitespace checks
 passed. Network/PID-isolated focused tests: **28 passed, 1 skipped** (real mpv
 requires an explicitly selected cached container image; it was not run here).
 No devices, inference, live sessions or runtime settings were used. Existing
-Bash-job PID fixes remain intact; time-namespace fencing is deferred.
+Bash-job PID fixes remain intact. The subsequent time-domain fix uses versioned
+bindings; deterministic Lua/helper fixtures cover unsupported pre-5.6 kernels,
+unreadable metadata, legacy versions and changed reader namespaces. A stopped-live-PID
+regression also exercises actual user/time namespace offsets when unshare is allowed.
+Time-domain validation: `npm run check`, syntax/parity/whitespace checks and both
+network/PID-isolated full suites passed: default **1375 passed / 34 skipped**;
+installed-Pi **1408 passed / 1 skipped**, zero failures. Actual time-namespace offset
+fixtures ran successfully for both helper variants. LSP is unavailable. No devices,
+providers, inference or live sessions were used. Real old/new mpv compatibility
+validation for this format change remains separate (the real-mpv test was skipped).
 
 ## Native watchdog v4 validation
 

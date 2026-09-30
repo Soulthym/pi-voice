@@ -66,6 +66,7 @@ assert(ack()==nonce, 'an expired lease must never be resurrected')
   const binding = fs.readFileSync(`${root}/binding`, "utf8").trim().split(" ");
   assert.equal(binding[0], id); assert.equal(binding[1], boot);
   assert.match(binding[2], /^[1-9][0-9]*$/); assert.match(binding[3], /^[0-9]+$/);
+  assert.deepEqual(binding.slice(7), ['binding-v2', 'time:[123]']);
  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -82,6 +83,18 @@ for (const directory of ["client", "termux"]) test(`${directory}: native capabil
  }
 });
 
+for (const directory of ["client", "termux"]) test(`${directory}: versioned native time domain distinguishes unsupported from unreadable`, () => {
+ for (const mode of ['modern', 'old-present', 'old-absent', 'old-read-error', 'old-list-error', 'old-hidden', 'modern-absent', 'read-error', 'malformed', 'release-error']) {
+  const { root, env } = fixture();
+  try {
+   const lua = spawnSync('lua', ['test/helpers/native-watchdog-timens.lua', path.resolve(directory, 'pi-voice-mpv-watchdog.lua'), mode], {
+    env: { ...env, PI_VOICE_SCOPE: id, PI_VOICE_BOOT: boot, PI_VOICE_BINDING: `${root}/binding`, PI_VOICE_FIFO: `${root}/pcm` }, encoding: 'utf8',
+   });
+   assert.equal(lua.status, 0, `${mode}: ${lua.stderr}`);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+ }
+});
+
 for (const directory of ["client", "termux"]) test(`${directory}: bind before PCM, orphan native proof, and legacy fail-closed`, async () => {
  const { root, bin, env } = fixture();
  const children: ChildProcess[] = [];
@@ -92,8 +105,16 @@ const fs=require('fs'), net=require('net');
 const ipc=process.argv.find(v=>v.startsWith('--input-ipc-server=')).split('=')[1];
 const binding=process.env.PI_VOICE_BINDING, id=process.env.PI_VOICE_SCOPE;
 const ticks=fs.readFileSync('/proc/self/stat','utf8').replace(/^.*\\) /,'').split(' ')[19];
-fs.writeFileSync(binding, [id,process.env.PI_VOICE_BOOT,process.pid,ticks,process.getuid(),fs.readlinkSync('/proc/self/ns/pid'),fs.readlinkSync('/proc/self/ns/mnt')].join(' ')+'\\n');
+fs.writeFileSync(binding, [id,process.env.PI_VOICE_BOOT,process.pid,ticks,process.getuid(),fs.readlinkSync('/proc/self/ns/pid'),fs.readlinkSync('/proc/self/ns/mnt'),'binding-v2',fs.readlinkSync('/proc/self/ns/time')].join(' ')+'\\n');
 
+if(fs.existsSync(process.env.HOME+'/binding-mode')) {
+ const mode=fs.readFileSync(process.env.HOME+'/binding-mode','utf8');
+ let value=fs.readFileSync(binding,'utf8');
+ if(mode==='old') value=value.replace(/ binding-v2 time:\\[\\d+\\]/,'');
+ if(mode==='domain') value=value.replace(/time:\\[\\d+\\]/,'time:[1]');
+ if(mode==='missing') value=value.replace(/ time:\\[\\d+\\]/,'');
+ fs.writeFileSync(binding,value);
+}
 net.createServer(s=>{let text='';s.on('data',b=>{text+=b;let p;while((p=text.indexOf('\\n'))>=0){
  const c=JSON.parse(text.slice(0,p)).command;text=text.slice(p+1);
  if(c[0]==='quit' && !fs.existsSync(process.env.HOME+'/hold')) process.exit(0);
@@ -134,6 +155,18 @@ setTimeout(()=>{s.destroy();process.exit(0)},100);
    await until(() => old.child.exitCode !== null);
    assert.match(old.output(), /upgrade host/); assert.equal(fs.existsSync(`${root}/started`), false);
   }
+  for (const mode of ['old', 'domain', 'missing']) {
+   fs.writeFileSync(`${root}/binding-mode`, mode);
+   const rejected = start(); rejected.child.stdin.write('PI_VOICE_CONTROLhello\nPI_VOICE_PREPARE 4\n');
+   await until(() => rejected.output().includes('"prepared"'));
+   const prepared = rejected.output().trim().split('\n').map(v => JSON.parse(v)).find(v => v.type === 'prepared');
+   rejected.child.stdin.write(`PI_VOICE_COMMIT ${prepared.id} ${prepared.boot_id}\n`);
+   await until(() => rejected.child.exitCode !== null);
+   assert.equal(rejected.child.exitCode, 1, rejected.error());
+   assert.equal(fs.existsSync(`${root}/started`), false);
+   assert.equal(fs.existsSync(`${root}/state/pi-voice/playback/${prepared.id}/exited`), false);
+  }
+  fs.unlinkSync(`${root}/binding-mode`);
   const session = start(); session.child.stdin.write("PI_VOICE_CONTROLhello\nPI_VOICE_PREPARE 4\n");
   await until(() => session.output().includes('"prepared"'));
   const prepared = session.output().trim().split("\n").map(v => JSON.parse(v)).find(v => v.type === "prepared");

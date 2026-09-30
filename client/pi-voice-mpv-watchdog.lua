@@ -43,7 +43,7 @@ guarded(function()
     local function namespace(pid, name)
         local result = utils.subprocess({args={'readlink', '/proc/' .. pid .. '/ns/' .. name}, cancellable=false})
         assert(result.status == 0)
-        return assert(result.stdout:match('^' .. name .. ':%[%d+%]'))
+        return assert(result.stdout:match('^(' .. name .. ':%[%d+%])\n?$'))
     end
     assert(type(mp.commandv) == 'function')
     deadline = mp.get_time() + 30
@@ -75,12 +75,24 @@ guarded(function()
     local stat = read('/proc/self/stat')
     local pid, tail = stat:match('^(%d+) %(.+%) (.+)$')
     assert(pid and tail)
+    -- Read the native reader's namespace, not the subprocess's or time_for_children.
+    local major, minor = read('/proc/sys/kernel/osrelease'):match('^(%d+)%.(%d+)%.')
+    assert(major and minor)
+    local timens
+    if tonumber(major) < 5 or (tonumber(major) == 5 and tonumber(minor) < 6) then
+        local result = utils.subprocess({args={'ls', '-1', '--', '/proc/' .. pid .. '/ns'}, cancellable=false})
+        assert(result.status == 0)
+        local names = '\n' .. result.stdout .. '\n'
+        assert(names:match('\npid\n') and names:match('\nmnt\n'))
+        if not names:match('\ntime\n') then timens = 'unsupported-pre5.6' end
+    end
+    timens = timens or namespace(pid, 'time')
     local fields = {}
     for value in tail:gmatch('%S+') do fields[#fields+1] = value end
     local ticks = assert(fields[20])
     assert(ticks:match('^%d+$'))
     local uid = assert(read('/proc/self/status'):match('\nUid:%s+(%d+)%s'))
     assert(read('/proc/sys/kernel/random/boot_id'):match('^(%S+)') == boot)
-    local identity = table.concat({scope, boot, pid, ticks, uid, namespace(pid, 'pid'), namespace(pid, 'mnt')}, ' ')
+    local identity = table.concat({scope, boot, pid, ticks, uid, namespace(pid, 'pid'), namespace(pid, 'mnt'), 'binding-v2', timens}, ' ')
     publish(binding, identity .. '\n')
 end)()
