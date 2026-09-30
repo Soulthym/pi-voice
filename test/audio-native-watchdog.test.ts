@@ -90,7 +90,7 @@ net.createServer(s=>{let text='';s.on('data',b=>{text+=b;let p;while((p=text.ind
   fs.writeFileSync(process.env.HOME+'/started',String(process.pid));
  }
  if(c[1]==='pi-voice-renew') nonce=c[4];
- s.write(JSON.stringify({data:c[1]==='shared-script-properties/pi-voice-renewed'?nonce:0})+'\\n');
+ s.write(JSON.stringify({data:c[1]==='shared-script-properties'?{'pi-voice-renewed':nonce}:0})+'\\n');
 }});s.on('end',()=>s.end());}).listen(ipc);
 `);
  fake("socat", `

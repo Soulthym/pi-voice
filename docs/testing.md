@@ -31,30 +31,72 @@ fakes do not validate real mpv/Lua runtime compatibility.
 The SSH desktop fixture's control-only hello and cancelled preparation use v4;
 its player tripwire still forbids playback.
 
-### Real mpv audio-null sandbox (opt-in, currently blocked)
+### Real mpv audio-null and SSH validation after `4d8f0d5`
 
-`test/audio-mpv-sandbox.test.ts` creates a networkless container from an explicitly
-selected **already cached** image containing Node, mpv with Lua, `/bin/sh` and
-`readlink`. It copies only the fixture and Lua helper; no host mounts, published
-ports, host audio or model/provider calls. `--pull=never` prevents downloads.
-The native helper uses `--no-config --load-scripts=no --ao=null`, synthetic PCM,
-and isolated HOME/XDG/PI paths. It checks native PID/start-time binding, natural
-EOF, paused expiry with a wrong-scope renewal, and matching renewal beyond the
-original deadline followed by expiry after controller disconnect. The real fixed
-30-second production timer is not shortened. Container cleanup is owned/scoped.
+Final isolated runs: **real SSH 12/12 cases passed**; **real mpv 5/5 scenarios
+passed** inside one Node test (zero skips); **20/20 focused helper tests passed**;
+`npm run check`, shell syntax, helper parity and whitespace checks passed. No full
+suite rerun is claimed here; counts above belong to the preceding checkpoint.
+LSP is unavailable. The real SSH run was repeated successfully after the production
+renewal fix. Its cancelled-prepare fixture now requires `sealed-nonadmission`.
 
-```bash
-PI_VOICE_TEST_MPV_IMAGE='your-local-cached-mpv-node-image' \
-  node --import tsx --test test/audio-mpv-sandbox.test.ts
+Real execution found a production renewal ACK bug: mpv 0.37 exposes
+`shared-script-properties` as a map, but rejects the `/pi-voice-renewed` subpath.
+Lua renewed correctly while the shell reported failure. Both helper copies now
+query the whole map; fake fixtures model that response. The original direct Lua
+fixture's substring ACK assertion could match a broadcast containing the nonce;
+it now requires the parsed property map. The real production-API regression failed
+before the fix and passed afterward. Production changes require review; these runs
+are not deployment approval.
+
+`test/audio-mpv-sandbox.test.ts` creates a rootless networkless container from an
+explicitly selected cached image. It copies the fixture, production shell helper
+and Lua script, uses a private writable `/work` tmpfs and isolated HOME/XDG/PI paths,
+and drops capabilities with no-new-privileges. Container init reaps actual orphan
+children. There are no host home/audio/device mounts or published ports.
+`--pull=never` prevents downloads during the test itself.
+
+Five scenarios use real mpv with Lua, `--no-config --load-scripts=no --ao=null` and
+synthetic PCM: natural EOF; paused expiry despite wrong-scope renewal; matching
+renewal beyond the initial deadline then IPC disconnect; production API startup
+and expiry receipt; production API renewal followed by guardian SIGKILL. The last
+case verifies native mpv remains alive (not a zombie), no premature exit receipt,
+actual eventual process disappearance and a recovery-issued `native-process-exit`
+receipt. Lua writes its own binding before PCM; PID/start-time/UID/namespaces are
+checked against actual procfs. No proof files or kernel oracles are overridden.
+The sole player wrapper execs real mpv with null audio, pause and a diagnostic log.
+The fixed production 30-second lease is not shortened.
+
+Public Ubuntu 24.04 packages were downloaded into private rootless container
+storage with explicit authorization, not installed on the host. Runtime versions:
+Node 18.19.1 and mpv 0.37.0. A minimal temporary image recipe is:
+
+```Dockerfile
+FROM docker.io/library/ubuntu:24.04
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nodejs mpv coreutils socat util-linux python3 && rm -rf /var/lib/apt/lists/*
 ```
 
-No host mpv was installed, and offline cached-image inspection found no mpv or
-sshd/socat installation. Thus **real mpv execution and isolated real SSH's 12 cases
-were not run**; the mpv test explicitly skips without its opt-in image. No image
-pull, package installation or external network probe was attempted. A suitable
-locally supplied image is required before claiming native runtime validation.
-Even a passing null-audio fixture would not establish Android device support,
-physical speaker drain, OS/player-freeze behavior or universal recovery.
+Build it with `podman build -t pi-voice-real-mpv <temporary-build-directory>`, then:
+
+```bash
+PI_VOICE_TEST_MPV_IMAGE=localhost/pi-voice-real-mpv \
+  node --import tsx --test test/audio-mpv-sandbox.test.ts
+bash scripts/test-ssh-desktop.sh
+```
+
+Validation used `env -i` with private HOME/TMPDIR/XDG/PI and Podman storage paths.
+The first build failed with `sd-bus call: Access denied` because no user systemd
+session was available; a **temporary test-only** containers.conf selecting
+`cgroup_manager="cgroupfs"` resolved it. No host service/sysctl/SSH configuration or
+privileged workaround was used. An initial image lacked a writable `/work`; the
+fixture now supplies its own tmpfs. Focused tests/typecheck ran in network/PID-
+isolated Bubblewrap with private HOME/XDG/PI, synthetic user/localhost records and
+read-only source/toolchain. Owned containers and image tags were removed.
+
+No live endpoints/sessions, provider/model calls, weights, real inference, host
+cache inspection, runtime settings, deployment or push were used. These Linux
+null-audio checks do not establish Android support, physical speaker drain,
+OS/player-freeze behavior or universal recovery.
 
 
 ## Bounded output stop and covered-ledger diagnostics

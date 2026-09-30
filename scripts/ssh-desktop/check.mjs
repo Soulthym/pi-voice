@@ -30,7 +30,7 @@ assert.equal(prepared.type, 'prepared');
 assert.match(prepared.id, /^[0-9a-f-]{36}$/);
 assert.match(prepared.boot_id, /^[0-9a-f-]{36}$/);
 assert.deepEqual(JSON.parse(await request(device.audioEndpoint, `PI_VOICE_CONTROLstop ${prepared.id}`)),
- {type:'stopped', id:prepared.id, boot_id:prepared.boot_id});
+ {type:'stopped', id:prepared.id, boot_id:prepared.boot_id, proof:'sealed-nonadmission'});
 const outputClosed = new Promise(resolve => output.once('close', resolve));
 output.end(`PI_VOICE_COMMIT ${prepared.id} ${prepared.boot_id}\n`);
 await outputClosed; // The durable stop tombstone must defeat this late grant.
