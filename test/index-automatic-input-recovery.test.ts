@@ -6,12 +6,14 @@ import * as net from "node:net";
 import test, { mock } from "node:test";
 import { DeviceRouter } from "../src/device-router.js";
 import { StopRecovery } from "../src/stop-recovery.js";
+import { PhoneInputClient } from "../src/phone-input.js";
 import { FakeVoiceHost, MockedVoiceWorkerClient } from "./helpers/fake-voice-host.js";
 
 mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: MockedVoiceWorkerClient } });
 const settle = async () => { for (let i = 0; i < 60; i++) await new Promise(resolve => setImmediate(resolve)); };
 
-for (const failedOutput of [false, true]) test(`automatic input recovery preserves draft, pin, and fence until both resources resolve (failed output: ${failedOutput})`, async t => {
+for (const outcome of ["input-only", "input-rejection", "input-timeout"] as const) test(`automatic input recovery preserves draft, pin, and fence until both resources resolve (${outcome})`, async t => {
+	const failedOutput = outcome !== "input-only";
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-auto-input-"));
 	const env = { PI_VOICE_CONFIG: path.join(root, "config"), PI_VOICE_DEVICE_DIR: path.join(root, "devices"), PI_VOICE_COORDINATOR_DIR: path.join(root, "coordinator"), PI_VOICE_DEVICE_ID: "A" };
 	const old = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]])); Object.assign(process.env, env);
@@ -80,12 +82,22 @@ for (const failedOutput of [false, true]) test(`automatic input recovery preserv
 	await register(moved);
 	const lookups = lookup.mock.callCount();
 	lookup.mock.mockImplementation(async () => { throw new Error("ambiguous new attachment"); });
+	const lateInput = Promise.withResolvers<void>();
+	const retry = outcome === "input-timeout" ? t.mock.method(PhoneInputClient, "retryStop", () => lateInput.promise) : undefined;
 	t.mock.timers.tick(3_000); await settle();
 	assert.equal(journal().isIdle("input"), false);
 	assert.equal(JSON.parse(await fs.readFile(fence, "utf8")).instanceId, owner.instanceId);
-	assert.equal(commands.filter(command => command.includes("stop-admit")).length, 1);
+	assert.equal(commands.filter(command => command.includes("stop-admit")).length, retry ? 0 : 1);
 	assert.doesNotMatch(host.widgetLines()!.join("\n"), /Output stop unconfirmed/);
 	const outputStops = terminate.mock.callCount();
+	if (retry) {
+		assert.equal(journal().isIdle("output"), true, "output proves stop before sibling timeout");
+		t.mock.timers.tick(20_000); await settle();
+		lateInput.resolve(); await settle();
+		assert.equal(journal().isIdle("input"), false, "late input success cannot consume aborted proof");
+		assert.equal(JSON.parse(await fs.readFile(fence, "utf8")).speechGeneration, owner.speechGeneration);
+		retry.mock.restore();
+	}
 	identity = "A";
 	t.mock.timers.tick(6_000); await settle();
 	assert.equal(journal().isIdle("input"), true);
@@ -95,6 +107,19 @@ for (const failedOutput of [false, true]) test(`automatic input recovery preserv
 	assert.equal(commands.filter(command => command.endsWith("ticket-admit")).length, 1, "recovery never records again");
 	assert.equal(lookup.mock.callCount(), lookups, "original registered identity only; no pin adoption");
 	await assert.rejects(fs.stat(fence), { code: "ENOENT" });
+	if (retry) {
+		await host.shortcut("f4"); await settle();
+		const nextOwner = await fs.readFile(fence, "utf8");
+		assert.notEqual(JSON.parse(nextOwner).speechGeneration, owner.speechGeneration);
+		const stopCommands = commands.filter(command => command.includes(" stop")).length;
+		t.mock.timers.tick(60_000); await settle();
+		assert.equal(await fs.readFile(fence, "utf8"), nextOwner, "old recovery cannot release the new input epoch");
+		assert.equal(commands.filter(command => command.includes(" stop")).length, stopCommands, "old recovery cannot stop healthy input");
+		assert.equal(terminate.mock.callCount(), outputStops, "old recovery cannot clear new transport state");
+		await host.command("stop"); await settle();
+		t.mock.timers.tick(3_000); await settle();
+		await assert.rejects(fs.stat(fence), { code: "ENOENT" });
+	}
 	await host.command("input disabled");
 	assert.equal(JSON.parse(await fs.readFile(env.PI_VOICE_CONFIG, "utf8")).input, "disabled", "successful proof replaces the rejected input barrier");
 });

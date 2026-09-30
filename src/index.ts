@@ -2503,20 +2503,20 @@ export default async function (pi: ExtensionAPI) {
 							: phoneInput.recover(() => recovery.retry("input", deviceRouter, config.input, guard)), true);
 						if (direction === "input") { inputStopBarrier = stopping; inputStopPending = true; }
 						await stopping;
+						// Consume output proof before a sibling can time out: trackStop has
+						// cleared this episode, so the next attempt cannot recognize it.
+						if (direction === "output" && valid() && !resource.episode && !resource.cleanup) {
+							for (const resolve of transportCancelWaiters.values()) resolve();
+							transportCancelWaiters.clear();
+							transportStopBarrier = Promise.resolve();
+							transportStopPending = false;
+							transportStops.clear();
+						}
 						signal.throwIfAborted();
 						if (direction === "input" && valid() && inputStopBarrier === stopping && !resource.episode) inputStopPending = false;
 					}));
 					signal.throwIfAborted();
 					if (!attempted || !valid()) return;
-					// Consume output proof even if input still needs another retry: trackStop
-					// has cleared this episode, so the next attempt cannot recognize it.
-					if (failedOutput && !stopResources.output.episode && !stopResources.output.cleanup) {
-						for (const resolve of transportCancelWaiters.values()) resolve();
-						transportCancelWaiters.clear();
-						transportStopBarrier = Promise.resolve();
-						transportStopPending = false;
-						transportStops.clear();
-					}
 					if (stopsUnresolved()) return;
 					if (rebind === deviceRebind && rebind && unconfirmedDeviceStops.has(rebind)) deviceRebind = undefined;
 					// Do not release a healthy sibling transport or announce/play anything.
