@@ -1,5 +1,62 @@
 # Tests
 
+## Native watchdog v4 validation
+
+Final rerun including the recovery and cleanup regressions:
+`npm run check` passed; full default **1369 passed, 34 skipped (1403 total)**;
+installed-native **1402 passed, 1 skipped (1403 total)**; zero failures in both.
+Both used `npm test -- --test-timeout=120000` in
+Bubblewrap with private network/PID namespaces, synthetic `/etc/hosts` and user
+records, isolated HOME/TMPDIR/XDG/PI directories, read-only source/toolchain, and
+no host audio, devices, home/config/cache, providers or inference. Native here means
+installed Pi TUI with inert terminals, **not mpv**. LSP is unavailable; tsc is the
+type check. An earlier sandbox lacked localhost/user records, causing a hang and
+two extra SSH failures; all three passed after correcting that sandbox, without
+production changes.
+
+Both `client/pi-voice-ssh` and `termux/pi-voice-ssh` now require the exact v4
+native-watchdog capability reply; the earlier eight wrapper failures are resolved
+in both full runs. Old/malformed and incomplete-v4 replies remain rejected.
+This is synthetic validation, not deployment approval.
+
+Device fixtures now negotiate `PI_VOICE_PREPARE 4`, publish synthetic foreground
+native binding before PCM, and assert explicit `native-process-exit` receipts.
+Legacy receipt cleanup, numeric/unknown-scope rejection, uncertain-admission fences,
+unknown-boot refusal, lost ACK, delayed exit, fsync failure and cancellation races
+remain covered. Latest regressions exercise locked `sealed-nonadmission` for marked
+pre-intent scopes (including committed prebinding crashes), journal-before-commit
+reservation recovery, owned-job cleanup without reusable-PID signals, and independent
+output-barrier retirement while input proof remains pending or times out. These
+fakes do not validate real mpv/Lua runtime compatibility.
+The SSH desktop fixture's control-only hello and cancelled preparation use v4;
+its player tripwire still forbids playback.
+
+### Real mpv audio-null sandbox (opt-in, currently blocked)
+
+`test/audio-mpv-sandbox.test.ts` creates a networkless container from an explicitly
+selected **already cached** image containing Node, mpv with Lua, `/bin/sh` and
+`readlink`. It copies only the fixture and Lua helper; no host mounts, published
+ports, host audio or model/provider calls. `--pull=never` prevents downloads.
+The native helper uses `--no-config --load-scripts=no --ao=null`, synthetic PCM,
+and isolated HOME/XDG/PI paths. It checks native PID/start-time binding, natural
+EOF, paused expiry with a wrong-scope renewal, and matching renewal beyond the
+original deadline followed by expiry after controller disconnect. The real fixed
+30-second production timer is not shortened. Container cleanup is owned/scoped.
+
+```bash
+PI_VOICE_TEST_MPV_IMAGE='your-local-cached-mpv-node-image' \
+  node --import tsx --test test/audio-mpv-sandbox.test.ts
+```
+
+No host mpv was installed, and offline cached-image inspection found no mpv or
+sshd/socat installation. Thus **real mpv execution and isolated real SSH's 12 cases
+were not run**; the mpv test explicitly skips without its opt-in image. No image
+pull, package installation or external network probe was attempted. A suitable
+locally supplied image is required before claiming native runtime validation.
+Even a passing null-audio fixture would not establish Android device support,
+physical speaker drain, OS/player-freeze behavior or universal recovery.
+
+
 ## Bounded output stop and covered-ledger diagnostics
 
 Typecheck passed. Focused transport/helper/recovery tests: **83 passed**;
@@ -428,7 +485,7 @@ drift, rejected monitor source, unavailable PulseAudio, real PipeWire synthetic
 source, unavailable audio-server environment, finite synthetic PCM/natural EOF,
 empty source, and startup failure. The last three substitute only `pw-record`;
 SSH, protocol, encoder and decoder remain real. Every case checks dynamic reverse
-forwarding, v3 playback prepare/cancel/late-commit rejection and admission-ticket cancellation/ACK. No server-local
+forwarding, v4 playback prepare/cancel/late-commit rejection and admission-ticket cancellation/ACK. No server-local
 recorder invocation is allowed. Natural EOF must decode all 240,000 synthetic
 samples; successful live virtual sources require finite, nonzero-energy PCM.
 

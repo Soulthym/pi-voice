@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
 import test from "node:test";
+import { nativeBinding } from "./helpers/native-binding.js";
 
 const CLIENT_DIR = path.resolve("client");
 const MIC_EPOCH = "0123456789abcdef0123456789abcdef";
@@ -455,8 +456,13 @@ for arg in "$@"; do
     --input-ipc-server=*) ipc=\${arg#--input-ipc-server=} ;;
   esac
 done
-node -e 'const n=require("net");const s=n.createServer();s.listen(process.argv[1]);setTimeout(()=>process.exit(0),Number(process.argv[2]))' "$ipc" "$MPV_LIFETIME" >/dev/null 2>&1 &
-wait $!`,
+exec node - "$ipc" "$MPV_LIFETIME" <<'JS'
+const fs = require('fs');
+${nativeBinding}
+const s = require('net').createServer();
+s.listen(process.argv[2]);
+setTimeout(() => process.exit(0), Number(process.argv[3]));
+JS`,
 			socat: `cat >> "${root}/socat.log"; printf '{"data":1.25,"request_id":1}\\n'`,
 		});
 
@@ -474,7 +480,7 @@ wait $!`,
 			stdio: ["pipe", "pipe", "pipe"],
 			detached: true,
 		});
-		child.stdin.write("PI_VOICE_CONTROLhello\nPI_VOICE_PREPARE\n");
+		child.stdin.write("PI_VOICE_CONTROLhello\nPI_VOICE_PREPARE 4\n");
 		let stdout = "";
 		let committed = false;
 		child.stdin.on("error", () => {});
@@ -505,7 +511,7 @@ wait $!`,
 			poll();
 		});
 
-		assert.match(stdout, /"type":"session","version":3,"id":"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"/);
+		assert.match(stdout, /"type":"session","version":4,"id":"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"/);
 		assert.match(stdout, /"type":"playback","position":1\.25/);
 		const socatLog = fs.readFileSync(path.join(root, "socat.log"), "utf8");
 		assert.match(socatLog, /get_property.*time-pos/);
@@ -568,7 +574,7 @@ test("control connections forward pause, resume, and stop to the targeted player
 	}
 });
 
-test("playback session exits with an error when mpv is unavailable", async () => {
+test("raw PCM is rejected before attempting player startup", async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-voice-audio-nompv-"));
 	try {
 		const runtime = path.join(root, "runtime");
@@ -582,8 +588,8 @@ test("playback session exits with an error when mpv is unavailable", async () =>
 			8_000,
 			root,
 		);
-		assert.notEqual(result.code, 0, "a missing player must fail loudly");
-		assert.equal(result.stdout, "");
+		assert.notEqual(result.code, 0, "unnegotiated PCM must fail closed");
+		assert.match(result.stdout, /"type":"error"/);
 	} finally {
 		fs.rmSync(root, { recursive: true, force: true });
 	}

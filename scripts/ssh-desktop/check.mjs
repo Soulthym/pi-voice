@@ -17,14 +17,14 @@ async function request(endpoint, command) {
   s.on('data',b=>{data+=b; if(data.includes('\n')) resolve(data.trim());});
  }); } finally { s.destroy(); }
 }
-assert.equal(await request(device.audioEndpoint,'PI_VOICE_CONTROLhello'), '{"type":"protocol","version":3}');
+assert.equal(await request(device.audioEndpoint,'PI_VOICE_CONTROLhello'), '{"type":"protocol","version":4,"native_watchdog":true,"lease_seconds":30}');
 // Reserve/cancel over the real SSH tunnel without granting physical output.
 const output = connect(device.audioEndpoint);
 const hello = readLine(output);
 output.once('connect', () => output.write('PI_VOICE_CONTROLhello\n'));
-assert.equal(JSON.parse(await hello).version, 3);
+assert.equal(JSON.parse(await hello).version, 4);
 const preparedLine = readLine(output);
-output.write('PI_VOICE_PREPARE\n');
+output.write('PI_VOICE_PREPARE 4\n');
 const prepared = JSON.parse(await preparedLine);
 assert.equal(prepared.type, 'prepared');
 assert.match(prepared.id, /^[0-9a-f-]{36}$/);

@@ -8,21 +8,21 @@ Endpoints may use `tcp://host:port` or `unix:///absolute/path`. Explicit TCP is 
 
 ## Output connection
 
-Audio protocol v3 requires a handshake on the actual output connection (never an empty connection probe):
+Audio protocol v4 requires a handshake on the actual output connection (never an empty connection probe):
 
 1. Host sends `PI_VOICE_CONTROLhello\n` (the existing 16-byte control prefix).
-2. Client replies `{"type":"protocol","version":3}\n`.
-3. Host sends `PI_VOICE_PREPARE\n`.
-4. Client durably reserves a random UUID v4 **without opening a player**, then replies `{"type":"prepared","version":3,"id":"<uuid>","boot_id":"<kernel-boot-uuid>","device_id":"<stable-device-id>","boot_fenced":true}\n`. Boot identity comes only from `/proc/sys/kernel/random/boot_id`; missing/invalid identity is JSON `null`, never a generated boot UUID. Null-boot scopes retain receipt-based operation and cleanup, but cannot use reboot proof.
+2. Client replies `{"type":"protocol","version":4,"native_watchdog":true,"lease_seconds":30}\n`.
+3. Host sends `PI_VOICE_PREPARE 4\n`.
+4. Client durably reserves a random UUID v4 **without opening a player**, then replies `{"type":"prepared","version":4,"id":"<uuid>","boot_id":"<kernel-boot-uuid>","device_id":"<stable-device-id>","boot_fenced":true,"native_watchdog":true,"lease_seconds":30}\n`. Boot identity comes only from `/proc/sys/kernel/random/boot_id`; missing/invalid identity denies new v4 admission. Historical null-boot scopes retain only their original receipt cleanup, never new native-watchdog or reboot capability.
 5. The host fsyncs the original endpoint, selection/configuration, ID and boot ID to its recovery journal. Only successful journal publication permits `output-grant` to the worker. The worker checks the expected boot and cancellation epoch before forwarding the grant.
-6. Host sends `PI_VOICE_COMMIT <uuid> <kernel-boot-uuid>\n` on that same connection. Use literal `null` instead of the boot UUID for a null-boot scope. The client verifies both identities, takes the scope lock, checks the durable stop tombstone, and persists possible dispatch before spawning mpv. `boot_fenced:true` promises that a known expected boot is also re-read and checked immediately before spawn; the host persists this per-scope capability before granting only when `device_id` independently reported by the helper matches the original registered route ID. The helper reads its existing `${XDG_CONFIG_HOME:-$HOME/.config}/pi-voice/device-id`; missing/invalid identity is `null` and cannot enable reboot discharge.
-7. After player startup, client replies `{"type":"session","version":3,"id":"<uuid>","boot_id":"<kernel-boot-uuid>"}\n`. Only then does the host send mono little-endian Float32 PCM at 24 kHz.
+6. Host sends `PI_VOICE_COMMIT <uuid> <kernel-boot-uuid>\n` on that same connection. The client verifies both identities, takes the scope lock, checks the durable stop tombstone, and persists possible dispatch before spawning mpv. `boot_fenced:true` promises that a known expected boot is also re-read and checked immediately before spawn; the host persists this per-scope capability before granting only when `device_id` independently reported by the helper matches the original registered route ID. The helper reads its existing `${XDG_CONFIG_HOME:-$HOME/.config}/pi-voice/device-id`; missing/invalid identity is `null` and cannot enable reboot discharge.
+7. After the idle native mpv has bound its own PID/start ticks, UID, boot and PID/mount namespaces, the guardian fsyncs that binding and an `admission-intent` marker under the same scope lock before launching the feeder or sending scoped `pi-voice-start` to open PCM. Then, client replies `{"type":"session","version":4,"id":"<uuid>","boot_id":"<kernel-boot-uuid>"}\n`. Only then does the host send mono little-endian Float32 PCM at 24 kHz.
 
 The client keeps the reverse direction open for newline-delimited JSON `{"type":"playback","position":1.234}`. Position is the actual player position in seconds. The client-generated session ID scopes control to this player. Generate a secure random lowercase UUID v4 once per stream, independent of its PID; preserve it as an opaque string. All scoped commands and completion/stop receipts must match that exact ID. Numeric IDs (including numeric strings), malformed IDs and path components are rejected.
 
-The host appends approximately one second of silence before clean EOF. After feeder EOF and successful player exit, the client sends `{"type":"complete","id":"<uuid>","boot_id":"<kernel-boot-uuid>"}` and closes. TCP acceptance, EOF, helper exit by signal, and elapsed duration are not completion proof. Premature close fails without automatic replay.
+The host appends approximately one second of silence before clean EOF. After feeder EOF, a native Lua EOF marker and successful player exit, the client sends `{"type":"complete","id":"<uuid>","boot_id":"<kernel-boot-uuid>"}` and closes. TCP acceptance, EOF, helper exit by signal, and elapsed duration are not completion proof. Premature close fails without automatic replay.
 
-**Migration:** upgrade the host and every installed desktop/Termux helper and SSH wrapper together, including custom paths—not just audio-script copies. Both wrapper variants require the exact v3 `hello` reply for readiness; their probe sends only control `hello`, never prepare/commit or PCM. Follow the [confirmed-stop and complete-helper upgrade steps](installation.md#audio-protocol-v3-host-and-every-client). V1/v2 negotiation, old `PI_VOICE_AUDIO`, and raw PCM cannot start a player; there is no fallback. A failure **before commit** can prove non-admission. After commit, even zero PCM requires an exact player-exit receipt. Old numeric receipts cannot confirm modern streams. V1 safely ignores `hello`; v2 is rejected without sending its audio header. Existing durable receipts are retained for scoped legacy cleanup, never for new admission.
+**Migration:** upgrade the host and every installed desktop/Termux helper and SSH wrapper together, including custom paths—not just audio-script copies. Both wrapper variants require the exact v4 capability `hello` reply for readiness; their probe sends only control `hello`, never prepare/commit or PCM. Follow the [confirmed-stop and complete-helper upgrade steps](installation.md#audio-protocol-v4-native-watchdog-host-and-every-client). V1/v2/v3 negotiation, unversioned prepare, old `PI_VOICE_AUDIO`, and raw PCM cannot start a player; there is no fallback. New reservations persist `admission-protocol` as `v4-start-intent-1`. Before durable `admission-intent`, stop can seal non-admission under the scope lock—even after commit or idle-player spawn. Once intent exists, even zero PCM requires exact exit proof (or separately eligible reboot proof). Old numeric receipts cannot confirm modern streams. V1 safely ignores `hello`; v2 is rejected without sending its audio header. Existing durable receipts are retained for scoped legacy cleanup, never for new admission.
 
 ## Pause/resume control connection
 
@@ -34,9 +34,41 @@ PI_VOICE_CONTROLresume aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\n
 PI_VOICE_CONTROLstop aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\n
 ```
 
-The bundled client maps pause/resume to mpv's `pause` property and stop to mpv's `quit` command. Stop replies `{"type":"stopped","id":"<uuid>","boot_id":"<kernel-boot-uuid>"}` after actual player exit, or after durably closing an uncommitted reservation under the same lock as commit/spawn. Missing socket/PID alone is not proof. Exit receipts remain under `${XDG_STATE_HOME:-$HOME/.local/state}/pi-voice/playback` so a scoped retry can recover a lost ACK across runtime-directory loss. Non-admission has its own durable `not-admitted` receipt; only the actual owner's child wait may publish `exited`. A persisted possible dispatch without the owner's child-wait receipt stays fenced. Control connections carry no PCM. Starting a new stream also replaces the previous endpoint player.
+The bundled client maps pause/resume to mpv's `pause` property and stop to mpv's `quit` command. For bound v4 scopes, stop replies `{"type":"stopped","id":"<uuid>","boot_id":"<kernel-boot-uuid>","proof":"native-process-exit"}` only after verified native process exit. Sealing a marked reservation before `admission-intent` under the commit/start lock returns `{"type":"stopped","id":"<uuid>","boot_id":"<kernel-boot-uuid>","proof":"sealed-nonadmission"}`. The durable stop tombstone prevents later admission; the receipt proves no audio dispatch, not idle-player exit. Host acceptance requires saved `nativeWatchdog:true` and the exact stream ID and valid saved boot. Missing socket/PID alone is not proof. Exit receipts remain under `${XDG_STATE_HOME:-$HOME/.local/state}/pi-voice/playback` so a scoped retry can recover a lost ACK across runtime-directory loss. Non-admission has its own durable `not-admitted` receipt; a direct bound-native-child wait or validated native identity absence/reuse may publish `exited`. A committed scope without durable native binding can still be sealed only with the new admission-protocol marker, absent intent and verified matching boot; legacy/missing metadata or possible admission stays fenced. Control connections carry no PCM. Starting a new stream also replaces the previous endpoint player.
 
 For eligible reboot recovery only, the host sends `PI_VOICE_CONTROLstop <uuid> <expected-boot-uuid>\n`. A changed known boot returns `{"type":"stopped","id":"<uuid>","boot_id":"<current-boot>","device_id":"<stable-device-id>","proof":"reboot","expected_boot_id":"<saved-boot>"}` without stopping anything on the new boot. The host accepts this only with persisted commit fencing, original registered-device routing, and an independently reported matching `device_id` on the recovery connection; a stale registration pointing at another client's reused socket is rejected. Matching addresses or display names alone are insufficient. Device IDs rely on the existing trusted registration/authenticated tunnel boundary, not cryptographic attestation by this protocol. Ordinary/legacy receipt retries retain the two-token stop command. Unknown boot, missing capability, and unknown admission coverage never become idle through reboot inference.
+
+### Native watchdog and proof limits
+
+The host saves `nativeWatchdog:true` only from the exact v4 preparation capability,
+not from a journal version or the currently installed helper. The native Lua timer
+uses mpv monotonic time: 30 seconds from initialization or the last accepted renewal,
+including while paused. Every 5 seconds the host opens a separate short connection:
+`PI_VOICE_CONTROLrenew <uuid> <boot>\n`. A matching
+`{"type":"renewed","id":"<uuid>","boot_id":"<boot>"}` reply requires native
+Lua acknowledgement of the request nonce through mpv's shared script property
+`pi-voice-renewed`, not just successful IPC delivery. PCM, position feedback and
+pause commands do not renew.
+Stop, disconnect, failed renewal and an expired absolute host deadline cancel renewal
+permanently; late replies cannot resurrect it. The native player remains authoritative.
+
+A recovery handler can publish `native-process-exit` only for a durably bound scope
+on the same known boot, UID and PID/mount namespaces, with readable unrestricted
+procfs and verified absence of the original PID or a different start time at that PID.
+Read/list failures, restricted procfs, a still-present original process (including a
+zombie), missing binding and namespace changes remain fenced. Host acceptance also
+requires the saved per-scope capability. Legacy receipts keep their legacy meaning;
+a new helper never promotes an old handle. Separately, a scope with durable
+`v4-start-intent-1` metadata and no `admission-intent` can obtain
+`sealed-nonadmission` on its verified original boot: stop fsyncs its tombstone and
+receipt under the same lock that gates intent, feeder and start. This covers a
+prebinding crash after commit without signalling a reconstructed PID. Missing
+metadata or existing intent cannot use that proof.
+
+The watchdog is not an OS/hardware guarantee: suspended/frozen native mpv, a frozen
+OS, uninterruptible kernel work and physical output buffers can exceed the timer.
+Elapsed time alone never releases host ownership; an exact accepted receipt is still
+required. This changes remote mpv output only, not local output or microphone proof.
 
 ### Playback stop deadline
 
@@ -54,7 +86,7 @@ holding it, endpoint-player lock contention can consume approximately 6 seconds
 (100 × (50 + 10) ms), prior-player cleanup another 0.5 second, plus sync/spawn work.
 These concurrent main-body phases are **not** an extra stop-side wait allowance:
 a stop queued behind them may exhaust its own 5-second flock and close without a
-receipt. A later explicit retry may obtain an existing receipt; it cannot invent
+receipt. A later automatic or explicit retry may obtain a valid receipt; it cannot invent
 one. Neither lock expiry nor a missing player is proof of non-admission.
 
 The TCP helper delegates stop to the same implementation and cancels its obsolete
@@ -69,7 +101,7 @@ remote scope by itself.
 Both bundled audio helpers already close FD9 in the mpv child and close the
 guardian's FD9 before launching the feeder and polling socat. Stop-side socat runs
 after explicit unlock. No concrete inherited scope-lock leak was found in these
-paths; helpers and their child-wait proof rules are unchanged.
+paths; native watchdog recovery adds the strictly bound exit evidence described above.
 
 ### Host cancellation API and limitations
 
@@ -85,15 +117,15 @@ Forced local termination cannot confirm remote buffered audio stopped. This impl
 
 Stage B remote output uses **prepare/journal/commit and a complete v3 admission ledger**, including orphan reclamation when every direction is proven idle. Output reservations are limited to 256 unresolved host-journal scopes; exceeding the limit denies grants. Cancellation closes worker grants synchronously; delayed grants cannot reopen that epoch. Original-route recovery remains mandatory, and v3 receipts must match the saved boot as well as the opaque ID.
 
-Fresh owners initialize the v4 ledger before acquiring a lease (v3 remote-output accounting is retained). Remote dispatch durably marks output `covered` before preparation; no physical player can exist without its exact scope being journaled before the grant. Queued work and ungranted preparations therefore cannot hide a player. Matching receipts durably retire scopes; confirmed cancellation with no remaining scopes returns covered output to `idle`. After owner death, explicit reconnect retries original scopes and durably clears covered empty output. Reclamation then rechecks death, owner, PID, acquisition generation and **every** direction's durable idle proof under the speech mutation lock. Unused input stays idle, not a synthetic input episode. Unknown/legacy uncertainty is never upgraded. Output reboot discharge is allowed only for a saved v3 scope advertising `boot_fenced:true`, with a known saved boot and a different known current boot on the original registered device. Recovery resolves that original device ID to its current endpoint, never the new selection. Custom endpoints and synthetic `legacy-loopback` IDs cannot establish same-device reboot proof. Historical scopes without the saved capability require their original exact receipts.
+Fresh owners initialize the v4 ledger before acquiring a lease (v3 remote-output accounting is retained). Remote dispatch durably marks output `covered` before preparation; no physical player can exist without its exact scope being journaled before the grant. Queued work and ungranted preparations therefore cannot hide a player. Matching receipts durably retire scopes; confirmed cancellation with no remaining scopes returns covered output to `idle`. After owner death, guarded automatic stop-only recovery or explicit reconnect retries original scopes and durably clears covered empty output. Reclamation then rechecks death, owner, PID, acquisition generation and **every** direction's durable idle proof under the speech mutation lock. Unused input stays idle, not a synthetic input episode. Unknown/legacy uncertainty is never upgraded. Output reboot discharge is allowed only for a saved v3 scope advertising `boot_fenced:true`, with a known saved boot and a different known current boot on the original registered device. Recovery resolves that original device ID to its current endpoint, never the new selection. Custom endpoints and synthetic `legacy-loopback` IDs cannot establish same-device reboot proof. Historical scopes without the saved capability require their original exact receipts.
 
 Explicit reconnect first finishes a healthy retained capture into review (no submission; manual edits preserved). Failed captures instead use scoped recovery; successful proof clears the previous cancellation barrier. Output shutdown seals dispatch before replaying journal-only scopes. Retired session cleanup retains its original owner journal, router and configured routes rather than adopting a new selection; durable-clear failures retain warnings. Successful reconnect never resumes playback or starts capture. Unknown saved/current kernel boot remains receipt-stop-only, not reboot proof.
 
-Endpoint-owner `SIGKILL` after durable commit remains conservatively fenced, including the committed-before-spawn crash window. A replacement handler cannot perform the original owner's child wait: missing PID/socket state, elapsed time, or a synthetic wait result cannot become an exit receipt. A verified same-device reboot can close this window for boot-fenced scopes; otherwise reconnect does not invent evidence.
+Endpoint-owner `SIGKILL` after durable native binding can recover using the strict native identity proof above. Before admission intent, marked new reservations can instead recover through locked durable `sealed-nonadmission`, including committed-before-binding crashes. Missing socket state or elapsed time is never a receipt; eligible same-device reboot proof remains a separate path.
 
 Local output still uses owned-process cleanup, not a prepared durable per-resource output ledger. Any local output admission keeps that owner's output direction uncertain for orphan recovery, even after known scopes retire. Legacy input remains uncertain. Fresh v4 owners using bundled local/network desktop `wait-v1` or network Termux `admit-v1` can establish complete input accounting; this does not clear an uncertain output direction. Version 4 alone is not proof: input must have persisted `covered` admission and each saved scope must carry `desktopWait:true` or `networkAdmission:true` with a valid boot ID. Receipts are retained indefinitely; do not delete them while recovery is outstanding.
 
-**Bounded local-output guardian integration (not implemented):** `worker.mjs#createLocalSink` directly spawns the selected `PI_VOICE_PLAYER`, `pw-play`, `mpv`, or `ffplay` with its sample rate. The inspected durable guardian, `client/pi-voice-audio-session`, belongs to the remote v3 path: it launches fixed-rate mpv, controls it through its IPC socket, and replaces endpoint players through shared runtime state. It is not a guardian around local worker children. Local worker players (including an `aplay` override) lack durable pre-grant admission and per-scope child-wait receipts. Routing local output through it unchanged would silently change backend/rate/pause/replacement semantics. Completing this requires a local command/rate/control adapter, pre-grant host scope retention for every queued/replacement/draining sink, local receipt retry routing, and worker-termination integration that cannot mistake killing the guardian's process group for its player's wait. No PID/group-disappearance shortcut or coverage promotion was added. This is a remaining implementation task, not a claim that local guardians are impossible.
+**Bounded local-output guardian integration (not implemented):** `worker.mjs#createLocalSink` directly spawns the selected `PI_VOICE_PLAYER`, `pw-play`, `mpv`, or `ffplay` with its sample rate. The inspected durable guardian, `client/pi-voice-audio-session`, belongs to the remote v4 path: it launches fixed-rate mpv, controls it through its IPC socket, and replaces endpoint players through shared runtime state. It is not a guardian around local worker children. Local worker players (including an `aplay` override) lack durable pre-grant admission and per-scope child-wait receipts. Routing local output through it unchanged would silently change backend/rate/pause/replacement semantics. Completing this requires a local command/rate/control adapter, pre-grant host scope retention for every queued/replacement/draining sink, local receipt retry routing, and worker-termination integration that cannot mistake killing the guardian's process group for its player's wait. No PID/group-disappearance shortcut or coverage promotion was added. This is a remaining implementation task, not a claim that local guardians are impossible.
 
 ## Input commands
 

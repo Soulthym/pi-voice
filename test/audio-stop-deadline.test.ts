@@ -7,6 +7,8 @@ import * as path from "node:path";
 import { performance } from "node:perf_hooks";
 import test, { type TestContext } from "node:test";
 
+import { nativeBinding } from "./helpers/native-binding.js";
+
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 async function until(check: () => boolean) {
 	const deadline = performance.now() + 8000;
@@ -39,9 +41,10 @@ function fixture(t: TestContext, script: string) {
 	const fake = (name: string, source: string) => fs.writeFileSync(path.join(bin, name), `#!${process.execPath}\n${source}`, { mode: 0o700 });
 	fake("mpv", `
 const fs = require('fs'), net = require('net');
+${nativeBinding}
 const ipc = process.argv.find(a => a.startsWith('--input-ipc-server=')).split('=')[1];
 const base = process.env.TMPDIR + '/player';
-const fifo = fs.openSync(process.argv.at(-1), fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+
 let quitting = false;
 net.createServer(socket => socket.on('data', data => {
  const command = JSON.parse(String(data)).command;
@@ -97,7 +100,7 @@ for (const script of ["client/pi-voice-audio-session", "termux/pi-voice-audio-se
 	test(`${script}: queued stop waits for lock and actual delayed player exit`, { timeout: 15000 }, async t => {
 		const f = fixture(t, script);
 		const guardian = f.start();
-		guardian.child.stdin.write("PI_VOICE_CONTROLhello\nPI_VOICE_PREPARE\n");
+		guardian.child.stdin.write("PI_VOICE_CONTROLhello\nPI_VOICE_PREPARE 4\n");
 		await until(() => guardian.output().includes('"type":"prepared"'));
 		const prepared = guardian.output().trim().split("\n").map(line => JSON.parse(line)).find(event => event.type === "prepared");
 		guardian.child.stdin.write(`PI_VOICE_COMMIT ${prepared.id} ${prepared.boot_id}\n`);
@@ -119,8 +122,8 @@ for (const script of ["client/pi-voice-audio-session", "termux/pi-voice-audio-se
 		assert.equal((await stopped.done)[0], 0, stopped.errors());
 		const elapsed = performance.now() - began;
 		assert.ok(elapsed >= 3900 && elapsed < 12000, `lock plus exit wait took ${elapsed}ms`);
-		assert.deepEqual(JSON.parse(stopped.output()), { type: "stopped", id: prepared.id, boot_id: prepared.boot_id });
-		assert.deepEqual(JSON.parse(fs.readFileSync(path.join(state, "exited"), "utf8")), { id: prepared.id, boot_id: prepared.boot_id });
+		assert.deepEqual(JSON.parse(stopped.output()), { type: "stopped", id: prepared.id, boot_id: prepared.boot_id, proof: "native-process-exit" });
+		assert.deepEqual(JSON.parse(fs.readFileSync(path.join(state, "exited"), "utf8")), { id: prepared.id, boot_id: prepared.boot_id, proof: "native-process-exit" });
 		assert.equal(fs.existsSync(path.join(state, "not-admitted")), false);
 		assert.equal((await guardian.done)[0], 0, guardian.errors());
 	});
