@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -u
 
-runtime_dir=${TMPDIR:-/data/data/com.termux/files/usr/tmp}
+runtime_dir=${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}
 # Secure per-stream identity, never a reusable process identifier.
 random=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
 [[ $random =~ ^[0-9a-f]{32}$ ]] || exit 1
@@ -17,6 +17,9 @@ player_exited=false
 feeder_pid=
 lock_held=false
 protocol=1
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+native_pid=
+native_child=false
 state_home=${XDG_STATE_HOME:-${HOME:?}/.local/state}
 playback_dir="$state_home/pi-voice/playback"
 state_dir="$playback_dir/$session_id"
@@ -46,27 +49,75 @@ stable_device_id() {
 }
 device_id=$(stable_device_id)
 
-publish_exit() (
+# Only a successfully read, unrestricted procfs in the original namespaces can
+# establish absence. A failed stat/read/permission check is never absence.
+native_gone() {
+  local directory=$1 identity bid bboot pid ticks uid pidns mntns extra mounts listing stat tail current_ticks
+  [[ -f $directory/bound && -f $directory/committed ]] || return 1
+  identity=$(cat "$directory/bound") || return 1
+  read -r bid bboot pid ticks uid pidns mntns extra <<<"$identity"
+  [[ -z $extra && $bid == "${directory##*/}" && $bboot == "${boot_id//\"/}" && $boot_id != null ]] || return 1
+  [[ $pid =~ ^[1-9][0-9]*$ && $ticks =~ ^[0-9]+$ && $uid =~ ^[0-9]+$ && $pidns =~ ^pid:\[[0-9]+\]$ && $mntns =~ ^mnt:\[[0-9]+\]$ ]] || return 1
+  [[ $(kernel_boot) == "$boot_id" && $(id -u) == "$uid" ]] || return 1
+  [[ $(readlink /proc/self/ns/pid) == "$pidns" && $(readlink /proc/self/ns/mnt) == "$mntns" ]] || return 1
+  mounts=$(cat /proc/mounts) || return 1
+  local source mount type options rest visible=false
+  while read -r source mount type options rest; do
+    if [[ $mount == /proc ]]; then
+      [[ $type == proc ]] || return 1
+      [[ ,$options, != *,hidepid=* || ,$options, == *,hidepid=0,* ]] || return 1
+      visible=true
+    fi
+  done <<<"$mounts"
+  [[ $visible == true && -r /proc/self/stat && -x /proc ]] || return 1
+  listing=$(LC_ALL=C QUOTING_STYLE=literal ls -1 -- /proc) || return 1
+  if [[ $'\n'$listing$'\n' != *$'\n'"$pid"$'\n'* ]]; then
+    return 0
+  fi
+  stat=$(cat "/proc/$pid/stat") || return 1
+  [[ $stat == "$pid ("* && $stat == *") "* ]] || return 1
+  tail=${stat##*) }
+  read -r -a fields <<<"$tail"
+  current_ticks=${fields[19]:-}
+  [[ $current_ticks =~ ^[0-9]+$ && $current_ticks != "$ticks" ]]
+}
+
+publish_native_exit() (
+  local directory=$1
+  if [[ $directory == "$state_dir" && $native_child == true && $player_exited == true ]]; then
+    [[ $boot_id != null && $(kernel_boot) == "$boot_id" ]] || exit 1
+  else
+    native_gone "$directory" || exit 1
+  fi
   umask 077
-  printf '{"id":"%s","boot_id":%s}\n' "$session_id" "$boot_id" >"$state_dir/exited.tmp" &&
-    sync "$state_dir/exited.tmp" &&
-    mv -f "$state_dir/exited.tmp" "$state_dir/exited" &&
-    sync "$state_dir"
+  printf '{"id":"%s","boot_id":%s,"proof":"native-process-exit"}\n' "${directory##*/}" "$boot_id" >"$directory/exited.tmp" &&
+    sync "$directory/exited.tmp" && mv -f "$directory/exited.tmp" "$directory/exited" && sync "$directory"
+)
+
+publish_exit() (
+  # Waiting for a launcher is not waiting for its native player; never promote
+  # an unbound scope. Historical receipts remain readable by the stop path.
+  [[ -f $state_dir/bound ]] || exit 1
+  exec 8>"$state_dir/lock" && flock -x -w 5 8 && publish_native_exit "$state_dir"
 )
 
 cleanup() {
   trap - EXIT
   trap '' INT TERM
+  flock -u 9 2>/dev/null || true
   [[ -n "$feeder_pid" ]] && kill "$feeder_pid" 2>/dev/null || true
+  if [[ $player_exited == false && -S $ipc_socket ]]; then
+    printf '{"command":["quit"]}\n' | socat -T 0.1 - "UNIX-CONNECT:$ipc_socket" >/dev/null 2>&1 || true
+  fi
   [[ $player_exited == false && -n "$mpv_pid" ]] && kill "$mpv_pid" 2>/dev/null || true
   [[ -n "$feeder_pid" ]] && wait "$feeder_pid" 2>/dev/null || true
   if [[ $player_exited == false && -n "$mpv_pid" ]]; then
     wait "$mpv_pid" 2>/dev/null || true
     player_exited=true
   fi
-  # Retain own-child wait proof even after the normal path clears its PID.
+  # Retain bound native-child wait proof after the normal path clears its PID.
   [[ $player_exited == true ]] && publish_exit
-  if [[ -n "$mpv_pid" ]] && [[ $(cat "$active_player_file" 2>/dev/null || true) == "$session_id $mpv_pid" ]]; then
+  if [[ -n "$mpv_pid" ]] && [[ $(cat "$active_player_file" 2>/dev/null || true) == "$session_id ${native_pid:-$mpv_pid}" ]]; then
     rm -f "$active_player_file"
   fi
   [[ $lock_held == true ]] && rm -rf "$player_lock" 2>/dev/null || true
@@ -88,19 +139,39 @@ if cmp -s "$header_file" <(printf 'PI_VOICE_CONTROL'); then
   target_id= expected_boot= extra=
   IFS=' ' read -r -n 128 command target_id expected_boot extra <&3 || true
   [[ -z $extra ]] || exit 0
-  [[ -z $expected_boot || $command == stop ]] || exit 0
+  [[ -z $expected_boot || $command == stop || $command == renew ]] || exit 0
   if [[ $command == hello && -z $target_id ]]; then
-    protocol=3
-    printf '{"type":"protocol","version":3}\n' || exit 1
+    protocol=4
+    [[ -r $script_dir/pi-voice-mpv-watchdog.lua ]] || { printf '{"type":"error","message":"Install all matching Pi Voice client helpers, including pi-voice-mpv-watchdog.lua"}\n'; exit 1; }
+    printf '{"type":"protocol","version":4,"native_watchdog":true,"lease_seconds":30}\n' || exit 1
     audio_header=
     IFS= read -r -n 128 audio_header <&3 || exit 1
-    [[ $audio_header == PI_VOICE_PREPARE ]] || exit 1
+    [[ $audio_header == 'PI_VOICE_PREPARE 4' ]] || { printf '{"type":"error","message":"Pi Voice requires v4 native watchdog support; upgrade host and all client helpers together"}\n'; exit 1; }
   else
     [[ $target_id =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || exit 0
     target_socket="$runtime_dir/pi-voice-mpv-$target_id.sock"
     target_state="$playback_dir/$target_id"
     legacy_state="$runtime_dir/pi-voice-session-$target_id"
-    if [[ $command == pause || $command == resume ]] && [[ -S $target_socket ]]; then
+    if [[ $command == renew ]]; then
+      [[ $boot_id != null && $expected_boot == "${boot_id//\"/}" && -f $target_state/bound && -f $target_state/committed ]] || exit 1
+      exec 9>"$target_state/lock" || exit 1
+      flock -x -w 1 9 || exit 1
+      [[ ! -f $target_state/stopped && ! -f $target_state/exited && -S $target_socket ]] || exit 1
+      read -r bound_id bound_boot _ <"$target_state/bound" || exit 1
+      [[ $bound_id == "$target_id" && $bound_boot == "$expected_boot" ]] || exit 1
+      response=$({
+        printf '{"command":["script-message","pi-voice-renew","%s","%s","%s"]}\n' "$target_id" "$expected_boot" "$random"
+        printf '{"command":["get_property","shared-script-properties/pi-voice-renewed"]}\n'
+      } | socat -T 1 - "UNIX-CONNECT:$target_socket" 2>/dev/null) || exit 1
+      # Script messages are asynchronous: poll the native acknowledgement.
+      for _ in {1..10}; do
+        [[ $response == *\"$random\"* ]] && break
+        sleep 0.02
+        response=$(printf '{"command":["get_property","shared-script-properties/pi-voice-renewed"]}\n' | socat -T 0.1 - "UNIX-CONNECT:$target_socket" 2>/dev/null) || exit 1
+      done
+      [[ $response == *\"$random\"* ]] || exit 1
+      printf '{"type":"renewed","id":"%s","boot_id":%s}\n' "$target_id" "$boot_id"
+    elif [[ $command == pause || $command == resume ]] && [[ -S $target_socket ]]; then
       paused=false
       [[ $command == pause ]] && paused=true
       printf '{"command":["set_property","pause",%s]}\n' "$paused" |
@@ -139,6 +210,9 @@ if cmp -s "$header_file" <(printf 'PI_VOICE_CONTROL'); then
       # A missing socket/PID is not proof of exit. Retain the owner's receipt
       # for retries when a stop ACK (or natural completion) was lost.
       for _ in {1..100}; do
+        if [[ ! -f $target_state/exited && -f $target_state/bound ]]; then
+          (exec 9>"$target_state/lock" && flock -x -w 1 9 && publish_native_exit "$target_state") || true
+        fi
         proof_file="$target_state/exited"
         [[ -f $target_state/not-admitted ]] && proof_file="$target_state/not-admitted"
         if { [[ -f $proof_file ]] && sync "$proof_file" "$target_state"; } || [[ -f $legacy_state/exited ]]; then
@@ -159,7 +233,7 @@ if cmp -s "$header_file" <(printf 'PI_VOICE_CONTROL'); then
 fi
 
 # Raw PCM and v2 clients may not start physical output.
-[[ $protocol == 3 ]] || exit 1
+[[ $protocol == 4 && $boot_id != null ]] || { printf '{"type":"error","message":"Native playback watchdog requires readable Linux kernel boot identity"}\n'; exit 1; }
 
 # Reserve a durable opaque scope before any player I/O.
 (
@@ -181,7 +255,7 @@ fi
     directory=$(dirname "$directory")
   done
 ) || exit 1
-printf '{"type":"prepared","version":3,"id":"%s","boot_id":%s,"device_id":%s,"boot_fenced":true}\n' "$session_id" "$boot_id" "$device_id" || exit 1
+printf '{"type":"prepared","version":4,"id":"%s","boot_id":%s,"device_id":%s,"boot_fenced":true,"native_watchdog":true,"lease_seconds":30}\n' "$session_id" "$boot_id" "$device_id" || exit 1
 commit=
 IFS= read -r -n 128 commit <&3 || exit 1
 [[ $commit == "PI_VOICE_COMMIT $session_id ${boot_id//\"/}" ]] || exit 1
@@ -228,17 +302,34 @@ mkfifo "$audio_fifo"
 
 # A known preparation boot must still be observable immediately before spawn.
 [[ $boot_id == null || $(kernel_boot) == "$boot_id" ]] || exit 1
-mpv --really-quiet --no-video --cache=no \
+PI_VOICE_SCOPE="$session_id" PI_VOICE_BOOT="${boot_id//\"/}" PI_VOICE_BINDING="$state_dir/binding" PI_VOICE_FIFO="$audio_fifo" \
+mpv --no-config --load-scripts=no --script="$script_dir/pi-voice-mpv-watchdog.lua" --idle=yes \
+  --really-quiet --no-video --cache=no \
   --input-ipc-server="$ipc_socket" \
   --demuxer=rawaudio \
   --demuxer-rawaudio-format=floatle \
   --demuxer-rawaudio-rate=24000 \
   --demuxer-rawaudio-channels=mono \
-  "$audio_fifo" 9>&- > /dev/null 2>/dev/null &
+  9>&- > /dev/null 2>/dev/null &
 mpv_pid=$!
+# The idle native player must identify itself before PCM can be opened.
+for _ in {1..100}; do
+  [[ -f $state_dir/binding && -S $ipc_socket ]] && break
+  sleep 0.02
+done
+[[ -f $state_dir/binding && -S $ipc_socket ]] || { printf '{"type":"error","message":"mpv native watchdog failed to bind before audio; install matching client helpers and an mpv build with Lua support"}\n'; exit 1; }
+read -r bound_id bound_boot native_pid bound_ticks bound_uid bound_pidns bound_mntns extra <"$state_dir/binding" || exit 1
+[[ -z $extra && $bound_id == "$session_id" && $bound_boot == "${boot_id//\"/}" && $native_pid =~ ^[1-9][0-9]*$ && $bound_ticks =~ ^[0-9]+$ ]] || exit 1
+[[ $bound_uid == "$(id -u)" && $bound_pidns == "$(readlink /proc/self/ns/pid)" && $bound_mntns == "$(readlink /proc/self/ns/mnt)" ]] || exit 1
+native_stat=$(cat "/proc/$native_pid/stat") || exit 1
+native_tail=${native_stat##*) }
+read -r -a native_fields <<<"$native_tail"
+[[ ${native_fields[19]:-} == "$bound_ticks" && $(kernel_boot) == "$boot_id" ]] || exit 1
+chmod 600 "$state_dir/binding" && sync "$state_dir/binding" && mv "$state_dir/binding" "$state_dir/bound" && sync "$state_dir" || exit 1
+[[ $native_pid != "$mpv_pid" ]] || native_child=true
 flock -u 9
 exec 9>&-
-printf '%s %s\n' "$session_id" "$mpv_pid" >"$active_player_file"
+printf '%s %s\n' "$session_id" "$native_pid" >"$active_player_file"
 rm -rf "$player_lock" 2>/dev/null || true
 lock_held=false
 
@@ -246,6 +337,8 @@ lock_held=false
 # playback-position feedback over the reverse direction of the same socket.
 cat <&3 >"$audio_fifo" &
 feeder_pid=$!
+printf '{"command":["script-message","pi-voice-start","%s","%s"]}\n' "$session_id" "${boot_id//\"/}" |
+  socat -T 0.1 - "UNIX-CONNECT:$ipc_socket" >/dev/null 2>&1 || exit 1
 
 for _ in {1..50}; do
   [[ -S "$ipc_socket" ]] && break
@@ -254,10 +347,10 @@ for _ in {1..50}; do
 done
 [[ -S "$ipc_socket" ]] || exit 1
 [[ ! -f $state_dir/stopped ]] || exit 0
-printf '{"type":"session","version":3,"id":"%s","boot_id":%s}\n' "$session_id" "$boot_id" || true
+printf '{"type":"session","version":4,"id":"%s","boot_id":%s}\n' "$session_id" "$boot_id" || true
 
 request_id=0
-while kill -0 "$mpv_pid" 2>/dev/null; do
+while kill -0 "$native_pid" 2>/dev/null; do
   ((request_id += 1))
   response=$(
     printf '{"command":["get_property","time-pos"],"request_id":%d}\n' "$request_id" |
@@ -283,11 +376,11 @@ trap '' INT TERM
 wait "$mpv_pid" 2>/dev/null || player_status=$?
 player_exited=true
 trap 'exit 1' INT TERM
-if [[ $(cat "$active_player_file" 2>/dev/null || true) == "$session_id $mpv_pid" ]]; then
+if [[ $(cat "$active_player_file" 2>/dev/null || true) == "$session_id ${native_pid:-$mpv_pid}" ]]; then
   rm -f "$active_player_file"
 fi
 mpv_pid=
 publish_exit || exit 1
-if [[ $protocol == 3 && $player_status == 0 && $feeder_status == 0 && ! -f $state_dir/stopped ]]; then
+if [[ $protocol == 4 && $player_status == 0 && $feeder_status == 0 && ! -f $state_dir/stopped && $(cat "$state_dir/binding.complete" 2>/dev/null) == "$session_id" ]]; then
   printf '{"type":"complete","id":"%s","boot_id":%s}\n' "$session_id" "$boot_id" || true
 fi
