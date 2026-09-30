@@ -302,6 +302,28 @@ export class SessionCoordinator {
 		release();
 	}
 
+	/** Heartbeat expiry alone is never authority to stop somebody else's IO. */
+	canRecoverSpeech(expected: SessionPresence): boolean {
+		const owner = this.speechOwner();
+		if (!expected.speechGeneration || owner?.instanceId !== expected.instanceId ||
+			owner.speechGeneration !== expected.speechGeneration || owner.pid !== expected.pid ||
+			!Number.isInteger(owner.pid) || owner.pid <= 0) return false;
+		try { process.kill(owner.pid, 0); return false; }
+		catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
+	}
+
+	/** Serialize orphan stop requests across sessions, without holding the speech mutation lock during IO. */
+	async withSpeechRecovery(expected: SessionPresence, operation: () => Promise<void>): Promise<void> {
+		const fd = fs.openSync(path.join(this.root, ".speech-recovery.lock"), "a", 0o600);
+		try {
+			if (process.platform !== "linux" && process.platform !== "android") return;
+			const lock = spawnSync("flock", ["-n", "3"], { stdio: ["ignore", "ignore", "pipe", fd] });
+			if (lock.status === 1) return;
+			if (lock.error || lock.status !== 0) throw new Error("Speech recovery requires working Linux flock", { cause: lock.error });
+			if (this.canRecoverSpeech(expected)) await operation();
+		} finally { fs.closeSync(fd); }
+	}
+
 	/** No transport calls: dead authority + durable all-direction idle proof, including retired v3 output scopes. */
 	recoverIdleSpeech(expected: SessionPresence): boolean {
 		if (!expected.speechGeneration) return false;

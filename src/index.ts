@@ -59,7 +59,7 @@ import {
 	type PlaybackTimingSnapshot,
 } from "./playback-history.js";
 import { PhoneInputClient } from "./phone-input.js";
-import { StopRecovery } from "./stop-recovery.js";
+import { StopRecovery, boundedStopRecovery } from "./stop-recovery.js";
 import { prioritizeFromCurrent, processConcurrently, resolveTimingConcurrency } from "./preprocessing.js";
 import { SpeakableStream, type FencedCodeBlock, type SpeakableSourceRange } from "./speakable.js";
 import { devicePickerLabels, notifyVoice, playbackTimingStatus, voiceProgressLines, type ReadyProgress } from "./status-text.js";
@@ -84,9 +84,10 @@ const CODE_DESCRIPTION_CACHE_ENTRY = "pi-voice.code-description";
 const DEVICE_SELECTION_ENTRY = "pi-voice.device-selection";
 // Pi reloads even when session_shutdown throws. Retain cleanup, never retired UI/session callbacks.
 const retiredStopsKey = Symbol.for("pi-voice.retired-stops");
+type RetiredStop = ((guard?: Parameters<StopRecovery["retry"]>[3]) => Promise<void>) & { owner?: ReturnType<SessionCoordinator["speechOwner"]>; root?: string };
 const retiredStops = ((globalThis as typeof globalThis & {
-	[retiredStopsKey]?: Set<() => Promise<void>>;
-})[retiredStopsKey] ??= new Set<() => Promise<void>>());
+	[retiredStopsKey]?: Set<RetiredStop>;
+})[retiredStopsKey] ??= new Set<RetiredStop>());
 
 function assistantText(message: unknown): string {
 	if (!message || typeof message !== "object" || !("role" in message) || message.role !== "assistant") return "";
@@ -398,22 +399,36 @@ export default async function (pi: ExtensionAPI) {
 	let orphanRecoveryOwner: string | undefined;
 	let orphanRecoveryLease: ReturnType<SessionCoordinator["speechOwner"]>;
 	let orphanRecoveryBlocked = false;
+	let automaticRecoveryTimer: NodeJS.Timeout | undefined;
+	let automaticRecoveryFlight: Promise<void> | undefined;
+	let automaticRecoveryWork: Promise<void> | undefined;
+	let automaticRecoveryEpoch = 0;
+	let automaticRecoveryDelay = 3_000;
+	let automaticRecoveryEnabled = false;
+	let scheduleAutomaticRecovery = (): void => {};
+	const cancelAutomaticRecovery = (): void => {
+		automaticRecoveryEnabled = false;
+		automaticRecoveryEpoch++;
+		clearTimeout(automaticRecoveryTimer);
+		automaticRecoveryTimer = undefined;
+	};
 	const inheritedStops: Partial<Record<"input" | "output", StopEpisode>> = {};
 	const recoveryRoutes = { input: new Map<string, { selection: string; configured: string; device: string }>(), output: new Map<string, { selection: string; configured: string; device: string }>() };
 	const captureRecoveryRoute = (direction: "input" | "output", route: ReturnType<DeviceRouter["routeMetadata"]>): void => {
 		recoveryRoutes[direction].set(route.endpoint, { selection: route.kind === "device" ? route.device.id : "local", configured: config[direction], device: route.kind === "device" ? route.device.name : selectedDeviceLabel });
 	};
-	const retainRecoveryHandle = (direction: "input" | "output", endpoint: string, id: string, bootId?: string | null, rebootSafe?: boolean, deviceId?: string, desktopWait?: true, networkAdmission?: true): void => {
+	const retainRecoveryHandle = (direction: "input" | "output", endpoint: string, id: string, bootId?: string | null, rebootSafe?: boolean, deviceId?: string, desktopWait?: true, networkAdmission?: true, nativeWatchdog?: true): void => {
 		if (!stopRecovery || (!/^(tcp|unix):\/\//.test(endpoint) && !(direction === "input" && endpoint === "local"))) {
 			throw new Error("Recovery journal unavailable; dispatch denied");
 		}
 		const route = recoveryRoutes[direction].get(endpoint);
 		if (!route) throw new Error("Original recovery route not captured; ownership retained");
-		stopRecovery.retain(direction, { endpoint, id, selection: route.selection, configured: route.configured, ...(bootId !== undefined ? { bootId } : {}), ...(desktopWait ? { desktopWait } : {}), ...(networkAdmission ? { networkAdmission } : {}), ...(rebootSafe === true && route.configured === "auto" && deviceId === route.selection && deviceId !== "local" && deviceId !== "legacy-loopback" ? { rebootSafe } : {}) }, route.device);
+		stopRecovery.retain(direction, { endpoint, id, selection: route.selection, configured: route.configured, ...(bootId !== undefined ? { bootId } : {}), ...(desktopWait ? { desktopWait } : {}), ...(networkAdmission ? { networkAdmission } : {}), ...(nativeWatchdog ? { nativeWatchdog } : {}), ...(rebootSafe === true && route.configured === "auto" && deviceId === route.selection && deviceId !== "local" && deviceId !== "legacy-loopback" ? { rebootSafe } : {}) }, route.device);
 	};
 	const restoreStopRecovery = (initialize = false): void => {
 		const previousRecovery = orphanRecovery;
 		const previousOwner = orphanRecoveryOwner;
+		const previousLease = orphanRecoveryLease;
 		const previousStops = { ...inheritedStops };
 		orphanRecovery = undefined;
 		orphanRecoveryOwner = undefined;
@@ -431,7 +446,8 @@ export default async function (pi: ExtensionAPI) {
 		orphanRecoveryBlocked = true;
 		orphanRecoveryOwner = owner.instanceId;
 		orphanRecoveryLease = owner;
-		try { orphanRecovery = new StopRecovery(coordinator.root, owner.instanceId); }
+		try { orphanRecovery = previousRecovery && previousOwner === owner.instanceId && previousLease?.speechGeneration === owner.speechGeneration
+			? previousRecovery : new StopRecovery(coordinator.root, owner.instanceId); }
 		catch (error) { notifyStopFailure(error); }
 		for (const direction of ["input", "output"] as const) {
 			if (orphanRecovery?.isIdle(direction)) continue;
@@ -442,8 +458,16 @@ export default async function (pi: ExtensionAPI) {
 		}
 		deviceRetryRequired = true;
 	};
-	const retryStopRecovery = async (): Promise<void> => {
+	const retryStopRecovery = async (locked = false): Promise<void> => {
 		if (!orphanRecoveryBlocked) return;
+		const owner = coordinator;
+		const lease = orphanRecoveryLease;
+		if (!locked && owner && lease && owner.canRecoverSpeech(lease)) {
+			return owner.withSpeechRecovery(lease, async () => {
+				orphanRecovery = new StopRecovery(owner.root, lease.instanceId);
+				await retryStopRecovery(true);
+			});
+		}
 		if (orphanRecovery) {
 			await Promise.allSettled((["input", "output"] as const).map(async direction => {
 				try { await orphanRecovery!.retry(direction, deviceRouter, config[direction]); }
@@ -509,7 +533,7 @@ export default async function (pi: ExtensionAPI) {
 	};
 	// Observe each resource, not Promise.all's first rejection. Only its latest
 	// cleanup can prove its own episode resolved; a first late notice joins it.
-	const trackStop = (resource: "input" | "output", promise: Promise<void>): Promise<void> => {
+	const trackStop = (resource: "input" | "output", promise: Promise<void>, automatic = false): Promise<void> => {
 		const state = stopResources[resource];
 		if (state.cleanup?.promise === promise) return promise;
 		const device = selectedDeviceLabel;
@@ -533,20 +557,28 @@ export default async function (pi: ExtensionAPI) {
 			}
 			if (journal === stopRecovery && state.episode && (state.episode === cleanup.episode || !cleanup.episode)) state.episode.cancelled = true;
 			state.cleanup = undefined;
-			finishSpeechPreemption();
-			flushDeferredRelease();
+			if (!automatic) {
+				finishSpeechPreemption();
+				flushDeferredRelease();
+			}
 			refreshProgressWidget();
 		}, error => {
 			const cause = error instanceof Error ? error.message : String(error);
 			const existing = cleanup.episode ?? state.episode;
 			const episode = existing ?? { device, cause, notified: false };
-			try { if (!stopRecovery?.isIdle(resource)) stopRecovery?.fail(resource, episode.device, cause); } catch (error) { notifyStopFailure(error); }
+			try { if (journal === stopRecovery && !journal?.isIdle(resource)) journal?.fail(resource, episode.device, automatic ? episode.cause : cause); } catch (error) { notifyStopFailure(error); }
 			if (state.cleanup === cleanup) {
 				if (state.episode === cleanup.episode) state.episode = episode;
 				state.cleanup = undefined;
 			}
 			notifyStopFailure(error, episode);
 			refreshProgressWidget();
+			if (!existing) {
+				automaticRecoveryDelay = 3_000;
+				clearTimeout(automaticRecoveryTimer);
+				automaticRecoveryTimer = undefined;
+			}
+			scheduleAutomaticRecovery();
 		});
 		return promise;
 	};
@@ -1718,7 +1750,7 @@ export default async function (pi: ExtensionAPI) {
 	const handleWorkerEvent = (event: WorkerEvent): void => {
 		if (event.type === "remote-handle") {
 			try {
-				retainRecoveryHandle("output", event.output, event.id, event.bootId, event.rebootSafe, event.deviceId);
+				retainRecoveryHandle("output", event.output, event.id, event.bootId, event.rebootSafe, event.deviceId, undefined, undefined, event.nativeWatchdog);
 				event.grant?.();
 			}
 			catch (error) { notifyStopFailure(error); }
@@ -2113,7 +2145,7 @@ export default async function (pi: ExtensionAPI) {
 			return;
 		}
 		restoreFollowAfterSpeech();
-		if (announceNext && config.enabled && !attentionSuppressed && !playbackPaused) {
+		if (announceNext && !automaticRecoveryFlight && config.enabled && !attentionSuppressed && !playbackPaused) {
 			const waiting = coordinator.nextUnannouncedWaiting();
 			if (waiting) {
 				speakAttentionNotification(waiting);
@@ -2393,14 +2425,117 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	// Seal dispatch and close descendants before replaying scopes only the journal still knows.
-	const shutdownOutput = async (recovery = stopRecovery, router = deviceRouter, configured = config.output): Promise<void> => {
+	const shutdownOutput = async (recovery = stopRecovery, router = deviceRouter, configured = config.output, guard: Parameters<StopRecovery["retry"]>[3] = {}): Promise<void> => {
 		await vocalizer.shutdown(recovery?.episode("output")?.handles.length
-			? scope => recovery.stopOutputScope(scope, router, configured) : undefined);
-		if (recovery?.episode("output")?.handles.length) await recovery.retry("output", router, configured);
+			? scope => recovery.stopOutputScope(scope, router, configured, guard) : undefined);
+		guard.signal?.throwIfAborted();
+		if (guard.current && !guard.current()) throw new Error("Recovery owner changed; ownership retained");
+		if (recovery?.episode("output")?.handles.length) await recovery.retry("output", router, configured, guard);
 	};
 	let deviceRebind: Promise<void> | undefined;
 	let reconnectDiagnostic = { notified: false };
 	const unconfirmedDeviceStops = new WeakSet<Promise<void>>();
+	// Recovery is stop-only: never adopt a connection or replay a user intent here.
+	scheduleAutomaticRecovery = (): void => {
+		if (!automaticRecoveryEnabled || automaticRecoveryTimer || automaticRecoveryFlight) return;
+		automaticRecoveryTimer = setTimeout(() => {
+			automaticRecoveryTimer = undefined;
+			if (!automaticRecoveryEnabled) return;
+			if (automaticRecoveryWork || deviceRebind && !unconfirmedDeviceStops.has(deviceRebind)) {
+				scheduleAutomaticRecovery();
+				return;
+			}
+			const owner = coordinator;
+			const epoch = automaticRecoveryEpoch;
+			const context = contextEpoch;
+			const request = playbackRequestEpoch;
+			const current = () => automaticRecoveryEnabled && automaticRecoveryEpoch === epoch && coordinator === owner && contextEpoch === context && playbackRequestEpoch === request;
+			let attempted = false;
+			const attempt = boundedStopRecovery(signal => {
+				const work = (async () => {
+					if (!owner || !current()) return;
+					restoreStopRecovery(); // Also discover owners that died after session startup.
+					const lease = owner.speechOwner();
+					const retired = [...retiredStops].find(cleanup => cleanup.root === owner.root && cleanup.owner?.instanceId === lease?.instanceId &&
+						!!lease?.speechGeneration && cleanup.owner?.speechGeneration === lease.speechGeneration && cleanup.owner.pid === lease.pid);
+					if (retired) {
+						attempted = true;
+						// Only the original closure can seal a same-process retired worker.
+						await retired({ signal, current: () => current() && owner.speechOwner()?.speechGeneration === lease?.speechGeneration });
+						return;
+					}
+					if (orphanRecoveryBlocked) {
+						const recovery = orphanRecovery;
+						if (!lease || !recovery || !owner.canRecoverSpeech(lease)) return;
+						const valid = () => current() && owner.canRecoverSpeech(lease);
+						await owner.withSpeechRecovery(lease, async () => {
+							// Another session may have retired scopes before we acquired the lock.
+							const journal = new StopRecovery(owner.root, lease.instanceId);
+							orphanRecovery = journal;
+							await Promise.allSettled((["input", "output"] as const).map(async direction => {
+								if (!journal.episode(direction)?.handles.length && !journal.isCovered(direction)) return;
+								attempted = true;
+								try { await journal.retry(direction, deviceRouter, config[direction], { signal, current: valid }); }
+								catch (error) { if (current()) notifyStopFailure(error, inheritedStops[direction]); }
+							}));
+							signal.throwIfAborted();
+							if (valid() && owner.recoverIdleSpeech(lease)) restoreStopRecovery();
+						});
+						if (current()) refreshProgressWidget();
+						return;
+					}
+					const recovery = stopRecovery;
+					if (!recovery || lease?.instanceId !== owner.instanceId) return;
+					const input = inputEpoch;
+					const generations = { ...recovery.generations };
+					const valid = () => current() && stopRecovery === recovery && inputEpoch === input &&
+						owner.speechOwner()?.speechGeneration === lease.speechGeneration &&
+						recovery.generations.input === generations.input && recovery.generations.output === generations.output;
+					const rebind = deviceRebind;
+					const failedOutput = !!stopResources.output.episode;
+					await Promise.allSettled((["input", "output"] as const).map(async direction => {
+						const resource = stopResources[direction];
+						// Retained handles alone describe healthy IO. Unknown microphones stay fenced.
+						if (!resource.episode || resource.cleanup || direction === "input" && !recovery.episode(direction)?.handles.length && !recovery.isCovered(direction)) return;
+						attempted = true;
+						const guard = { signal, current: valid };
+						const stopping = trackStop(direction, direction === "output" ? shutdownOutput(recovery, deviceRouter, config.output, guard)
+							: phoneInput.recover(() => recovery.retry("input", deviceRouter, config.input, guard)), true);
+						if (direction === "input") { inputStopBarrier = stopping; inputStopPending = true; }
+						await stopping;
+						signal.throwIfAborted();
+						if (direction === "input" && valid() && inputStopBarrier === stopping && !resource.episode) inputStopPending = false;
+					}));
+					signal.throwIfAborted();
+					if (!attempted || !valid() || stopsUnresolved()) return;
+					if (rebind === deviceRebind && rebind && unconfirmedDeviceStops.has(rebind)) deviceRebind = undefined;
+					if (failedOutput) {
+						for (const resolve of transportCancelWaiters.values()) resolve();
+						transportCancelWaiters.clear();
+						transportStopBarrier = Promise.resolve();
+						transportStopPending = false;
+						transportStops.clear();
+					}
+					// Do not release a healthy sibling transport or announce/play anything.
+					if (!inputInProgress && !recovery.episode("input")?.handles.length && !recovery.episode("output")?.handles.length && (failedOutput || lastOwnerUtterance === undefined)) {
+						if (deferredRelease) deferredRelease.announceNext = false;
+						releaseSpeechOwnership(false);
+					}
+					refreshProgressWidget();
+				})();
+				automaticRecoveryWork = work;
+				void work.finally(() => { if (automaticRecoveryWork === work) automaticRecoveryWork = undefined; }).catch(() => {});
+				return work;
+			});
+			const flight = attempt.catch(() => { /* The episode already owns its coalesced diagnostic. */ }).finally(() => {
+				if (automaticRecoveryFlight === flight) automaticRecoveryFlight = undefined;
+				automaticRecoveryDelay = attempted ? Math.min(60_000, automaticRecoveryDelay * 2) : 3_000;
+				scheduleAutomaticRecovery();
+			});
+			automaticRecoveryFlight = flight;
+		}, automaticRecoveryDelay);
+		automaticRecoveryTimer.unref();
+	};
 	// Persist only session metadata. Reattachment alone never changes an existing pin.
 	const adoptCurrentConnection = (epoch: number, force = false, origin?: ConnectionDevice, current = () => true, manual?: VoiceDeviceSelection, recover = false): Promise<boolean> => {
 		if (!force && (deviceSelection !== "auto" || (!origin && config.output !== "auto"))) {
@@ -2423,6 +2558,8 @@ export default async function (pi: ExtensionAPI) {
 			try {
 				// Fence the whole adoption, including resolution, stop proof and both route metadata updates.
 				// Explicit reconnect retries stop proof; ordinary playback still waits on the failure.
+				if (automaticRecoveryFlight) await automaticRecoveryFlight;
+				if (automaticRecoveryWork) throw new Error("Original stop recovery still pending; ownership retained");
 				if (previous) await previous.catch(() => { stopUnconfirmed = unconfirmedDeviceStops.has(previous); });
 				if (epoch !== playbackRequestEpoch || ctx !== activeContext || !interactiveVoiceSession) return false;
 				// A retained capture ticket is normal admission, not a failed stop.
@@ -3759,6 +3896,8 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	pi.on("session_start", async (_event, ctx) => {
+		cancelAutomaticRecovery();
+		if (automaticRecoveryFlight) await automaticRecoveryFlight;
 		cancelTimingRetry();
 		const inputCancelled = cancelActiveInput();
 		clearPlaybackTransport();
@@ -3796,6 +3935,9 @@ export default async function (pi: ExtensionAPI) {
 		coordinator.start();
 		coordinator.setAttentionEnabled(config.enabled);
 		restoreStopRecovery(true);
+		automaticRecoveryEnabled = true;
+		automaticRecoveryDelay = 3_000;
+		scheduleAutomaticRecovery();
 		const savedDevice = sessionDeviceSelection(ctx);
 		deviceSelection = savedDevice.selection;
 		activeDeviceId = savedDevice.pin ?? (deviceSelection === "auto" || deviceSelection === "local" ? undefined : deviceSelection);
@@ -3939,6 +4081,8 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
+		cancelAutomaticRecovery();
+		if (automaticRecoveryFlight) await automaticRecoveryFlight;
 		cancelTimingRetry();
 		devicePicker?.abort();
 		devicePicker = undefined;
@@ -4006,16 +4150,20 @@ export default async function (pi: ExtensionAPI) {
 		const ownerInput = config.input;
 		const ownerOutput = config.output;
 		let stopping: Promise<void> | undefined;
-		const cleanup = (): Promise<void> => stopping ??= Promise.all([
+		const cleanup = (guard: Parameters<StopRecovery["retry"]>[3] = {}): Promise<void> => stopping ??= Promise.allSettled([
 			trackStop("input", ownerRecovery?.episode("input")?.handles.length
-				? phoneInput.recover(() => ownerRecovery.retry("input", ownerRouter, ownerInput)) : phoneInput.cancel()), retiringRebind?.catch(() => {}),
-			...workers.map(worker => worker.terminate()), trackStop("output", shutdownOutput(ownerRecovery, ownerRouter, ownerOutput)),
-		]).then(() => {
+				? phoneInput.recover(() => ownerRecovery.retry("input", ownerRouter, ownerInput, guard)) : phoneInput.cancel()), retiringRebind?.catch(() => {}),
+			...workers.map(worker => worker.terminate()), trackStop("output", shutdownOutput(ownerRecovery, ownerRouter, ownerOutput, guard)),
+		]).then(results => {
+			const failure = results.find(result => result.status === "rejected");
+			if (failure?.status === "rejected") throw failure.reason;
+			guard.signal?.throwIfAborted();
+			if (guard.current && !guard.current()) throw new Error("Recovery owner changed; ownership retained");
 			if (Object.values(stopResources).some(resource => resource.episode || resource.cleanup)) throw new Error("Newer stop remains unconfirmed");
 			retiringCoordinator?.shutdown();
 			retiredStops.delete(cleanup);
 		}).finally(() => { stopping = undefined; });
-		retiredStops.add(cleanup);
+		retiredStops.add(Object.assign(cleanup, { owner: retiringCoordinator?.speechOwner(), root: retiringCoordinator?.root }));
 		try {
 			await Promise.all([inputCancelled, cleanup()]);
 			deviceRebind = undefined;

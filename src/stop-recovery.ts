@@ -6,7 +6,29 @@ import { PhoneInputClient } from "./phone-input.js";
 import { stopRemotePlayback, validStreamId, validBootId } from "./remote-playback.mjs";
 
 export type RecoveryHandle = { endpoint: string; id: string; selection: string; configured: string; bootId?: string | null; rebootSafe?: boolean; nativeWatchdog?: true; desktopWait?: boolean; networkAdmission?: boolean };
-export type RecoveryEpisode = { device: string; cause: string; handles: RecoveryHandle[] };
+export type RecoveryEpisode = { device: string; cause: string; originalCause?: string; handles: RecoveryHandle[] };
+
+/** One whole recovery budget, not a fresh timeout for every retained scope. */
+export async function boundedStopRecovery<T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
+	const controller = new AbortController();
+	let timer: NodeJS.Timeout | undefined;
+	const timeout = new Promise<never>((_, reject) => {
+		timer = setTimeout(() => {
+			const error = new Error("Stop recovery timed out after 20000ms; ownership retained");
+			controller.abort(error);
+			reject(error);
+		}, 20_000);
+		timer.unref();
+	});
+	try { return await Promise.race([operation(controller.signal), timeout]); }
+	finally { clearTimeout(timer); controller.abort(); }
+}
+
+type RecoveryGuard = { signal?: AbortSignal; current?: () => boolean };
+function checkRecovery(guard: RecoveryGuard): void {
+	guard.signal?.throwIfAborted();
+	if (guard.current && !guard.current()) throw new Error("Recovery owner changed; ownership retained");
+}
 type Journal = { input?: RecoveryEpisode; output?: RecoveryEpisode } & (
 	{ version: 1 } | { version: 2 | 3 | 4; owner: string; admission: Record<DeviceDirection, "idle" | "uncertain" | "covered"> }
 );
@@ -17,6 +39,7 @@ export class StopRecovery {
 	#journal: Journal = { version: 1 };
 	readonly generations = { input: 0, output: 0 };
 	#exists = false;
+	#pending: Partial<Record<DeviceDirection, Promise<void>>> = {};
 	#syncThrough: string | undefined;
 	constructor(root: string, private readonly instanceId: string) {
 		if (!/^[a-zA-Z0-9._-]{1,128}$/.test(instanceId)) throw new Error("Invalid recovery owner");
@@ -33,6 +56,7 @@ export class StopRecovery {
 				const episode = value[direction];
 				if (episode === undefined) continue;
 				if (!episode || typeof episode.device !== "string" || typeof episode.cause !== "string" ||
+					(episode.originalCause !== undefined && typeof episode.originalCause !== "string") ||
 					!Array.isArray(episode.handles) || episode.handles.some(handle => !validHandle(direction, handle))) {
 					throw new Error("Invalid recovery journal");
 				}
@@ -96,6 +120,7 @@ export class StopRecovery {
 		// A failed stop does not lose coverage: every possible dispatch is still listed.
 		if (this.#journal.version !== 1 && this.#journal.admission[direction] !== "covered") this.#journal.admission[direction] = "uncertain";
 		const episode = this.#journal[direction] ??= { device, cause, handles: [] };
+		episode.originalCause ??= cause;
 		episode.cause = cause;
 		this.#save();
 	}
@@ -120,11 +145,13 @@ export class StopRecovery {
 
 	/** Live cleanup may use this only after worker dispatch and descendants are closed.
 	 * Persist only this receipt before the worker forgets the matching scope. */
-	async stopOutputScope(scope: { output: string; id: string; bootId?: string | null }, router: DeviceRouter, configured: string): Promise<void> {
+	async stopOutputScope(scope: { output: string; id: string; bootId?: string | null }, router: DeviceRouter, configured: string, guard: RecoveryGuard = {}): Promise<void> {
+		checkRecovery(guard);
 		const handle = this.#journal.output?.handles.find(handle => handle.id === scope.id && handle.endpoint === scope.output && handle.bootId === scope.bootId);
 		if (!handle) throw new Error("No matching durable output scope; ownership retained");
 		if (handle.rebootSafe !== true) await stopRemotePlayback({ ...scope, nativeWatchdog: handle.nativeWatchdog }); // Preserve legacy exact-endpoint cleanup.
 		else await this.#stopScope("output", handle, router, configured);
+		checkRecovery(guard);
 		this.retire("output", handle.id, handle.endpoint);
 	}
 
@@ -143,17 +170,35 @@ export class StopRecovery {
 	}
 
 	/** Only retry a dead owner's scopes, using original selection, never the new pin. */
-	async retry(direction: DeviceDirection, router: DeviceRouter, configured: string): Promise<void> {
+	retry(direction: DeviceDirection, router: DeviceRouter, configured: string, guard: RecoveryGuard = {}): Promise<void> {
+		if (this.#pending[direction]) return this.#pending[direction]!;
+		const pending = this.#retry(direction, router, configured, guard);
+		this.#pending[direction] = pending;
+		void pending.finally(() => { if (this.#pending[direction] === pending) delete this.#pending[direction]; }).catch(() => {});
+		return pending;
+	}
+
+	async #retry(direction: DeviceDirection, router: DeviceRouter, configured: string, guard: RecoveryGuard): Promise<void> {
+		const generation = this.generations[direction];
+		const check = () => {
+			checkRecovery(guard);
+			if (generation !== this.generations[direction]) throw new Error("New recovery scope admitted; ownership retained");
+		};
+		check();
 		const episode = this.#journal[direction];
 		if (this.#journal.version !== 1 && this.#journal.admission[direction] === "covered" && !episode?.handles.length) { this.clear(direction); return; }
 		if (!episode) return;
 		if (!episode.handles.length) throw new Error(`${episode.device}: no retained ${direction} scope; ownership retained`);
 		for (const handle of [...episode.handles]) {
 			try {
+				check();
 				await this.#stopScope(direction, handle, router, configured);
+				check();
 				this.retire(direction, handle.id, handle.endpoint);
 			} catch (error) {
+				check();
 				episode.cause = error instanceof Error ? error.message : String(error);
+				episode.originalCause ??= episode.cause;
 				this.#save();
 				throw error;
 			}
