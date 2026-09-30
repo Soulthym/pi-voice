@@ -54,6 +54,23 @@ fakes do not validate real mpv/Lua runtime compatibility.
 The SSH desktop fixture's control-only hello and cancelled preparation use v4;
 its player tripwire still forbids playback.
 
+### ACK compatibility and reader-time binding validation
+
+After both fixes, typecheck passed; the default suite passed **1,375 tests** and
+installed-Pi mode passed **1,408 tests**. Actual unshared time-namespace regressions
+passed. Native fixtures cover callback/I/O failures and distinguish proven
+pre-5.6 namespace absence from unreadable namespace metadata; an actual old kernel
+and fault-injected real mpv were not tested.
+
+Real rootless audio-null runs passed **5/5 scenarios each**, without skips, on
+Debian bookworm mpv **0.35.1-4** and Debian trixie mpv **0.40.0-3+deb13u1**.
+These exercise the production atomic nonce ACK and versioned native binding,
+not the removed shared-script-property API. The isolated SSH desktop harness was
+rerun after both helper changes: **12/12 cases passed**. Public package builds
+changed no host packages; temporary containers and images were removed. No host
+home/device mounts, physical audio, providers, inference, live-session changes or
+deployment were involved. Independent source review found no actionable issues.
+
 ### Real mpv audio-null and SSH validation after `4d8f0d5`
 
 Final isolated runs: **real SSH 12/12 cases passed**; **real mpv 5/5 scenarios
