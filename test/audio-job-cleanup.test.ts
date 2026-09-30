@@ -81,7 +81,7 @@ mpv_pid=$!
 pi_voice_feeder </dev/null >/dev/null &
 feeder_pid=$!
 sleep .02
-player_exited=false; native_child=false; native_pid=$native; lock_held=false
+player_exited=false; native_child=false; native_pid=$native; lock_held=false; renew_ack=
 active_player_file=$PWD/active; player_lock=$PWD/lock; header_file=$PWD/header
 # This fixture has no native binding: waiting for the launcher proves nothing.
 publish_exit() { [[ $native_child == false ]]; }

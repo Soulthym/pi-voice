@@ -46,8 +46,13 @@ uses mpv monotonic time: 30 seconds from initialization or the last accepted ren
 including while paused. Every 5 seconds the host opens a separate short connection:
 `PI_VOICE_CONTROLrenew <uuid> <boot>\n`. A matching
 `{"type":"renewed","id":"<uuid>","boot_id":"<boot>"}` reply requires native
-Lua acknowledgement of the request nonce through mpv's shared script property
-`pi-voice-renewed`, not just successful IPC delivery. PCM, position feedback and
+Lua acknowledgement of the exact 32-character random hex nonce via atomic rename
+of a private `binding.ack` file in the scope directory, not just successful IPC
+delivery. The scope lock serializes requests; the helper removes stale ACKs before
+sending and removes the ephemeral ACK afterward. Lua tests ACK write/read/rename
+and installs guarded callbacks and the timer before publishing its binding; it
+uses no shared-script-property APIs. Native initialization, timer or callback
+errors seal admission and attempt stop plus quit. PCM, position feedback and
 pause commands do not renew.
 Stop, disconnect, failed renewal and an expired absolute host deadline cancel renewal
 permanently; late replies cannot resurrect it. The native player remains authoritative.

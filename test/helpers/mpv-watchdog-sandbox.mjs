@@ -14,7 +14,7 @@ async function until(check) {
  assert.ok(check(), 'native mpv startup/ACK timed out');
 }
 async function run(mode) {
- const dir = `/work/${mode}`; fs.mkdirSync(dir);
+ const dir = `/work/${mode}`; fs.mkdirSync(dir, {mode:0o700});
  const binding = `${dir}/binding`, ipc = `${dir}/ipc`, pcm = `${dir}/pcm`;
  // Synthetic silence only, read from a regular file (no device/audio mounts).
  fs.writeFileSync(pcm, Buffer.alloc(24000 * 4 * (mode === 'eof' ? 0.1 : 90)));
@@ -49,16 +49,15 @@ async function run(mode) {
   send('script-message','pi-voice-start',scope,boot);
   if (mode === 'renewed') {
    await delay(12000);
-   send('script-message','pi-voice-renew',scope,boot,'abc123');
-   await until(()=>{
-    send('get_property','shared-script-properties');
-    return response.split('\n').slice(0,-1).some(line=>JSON.parse(line).data?.['pi-voice-renewed']==='abc123');
-   });
+   const nonce='a'.repeat(32);
+   send('script-message','pi-voice-renew',scope,boot,nonce);
+   await until(()=>fs.existsSync(binding+'.ack') && fs.readFileSync(binding+'.ack','utf8')===nonce);
+   fs.unlinkSync(binding+'.ack');
    await delay(19000);
    assert.equal(child.exitCode,null,'matching renewal survives original 30s deadline while paused');
   } else if (mode === 'paused') {
    await delay(12000);
-   send('script-message','pi-voice-renew','wrong',boot,'def456');
+   send('script-message','pi-voice-renew','wrong',boot,'b'.repeat(32));
   }
   // Losing the controller/IPC connection must not disable the native timer.
   socket.destroy();

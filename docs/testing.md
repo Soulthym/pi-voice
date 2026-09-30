@@ -1,5 +1,19 @@
 # Tests
 
+## Native renewal ACK compatibility (P1)
+
+Renewal now uses a private, ephemeral exact-nonce file atomically renamed by Lua,
+with ACK I/O and callback/timer setup validated before binding. Native failures
+are guarded, seal further admission and attempt stop plus quit; deterministic Lua
+fixtures cover startup, timer, renewal, start, end-file and shutdown failures.
+Both helper variants reject missing, stale, substring and newline-suffixed ACKs.
+
+Validation: typecheck, Bash/Lua/JS syntax, helper parity and whitespace checks
+passed. Network/PID-isolated focused tests: **28 passed, 1 skipped** (real mpv
+requires an explicitly selected cached container image; it was not run here).
+No devices, inference, live sessions or runtime settings were used. Existing
+Bash-job PID fixes remain intact; time-namespace fencing is deferred.
+
 ## Native watchdog v4 validation
 
 Final rerun including the recovery and cleanup regressions:
@@ -42,10 +56,12 @@ renewal fix. Its cancelled-prepare fixture now requires `sealed-nonadmission`.
 
 Real execution found a production renewal ACK bug: mpv 0.37 exposes
 `shared-script-properties` as a map, but rejects the `/pi-voice-renewed` subpath.
-Lua renewed correctly while the shell reported failure. Both helper copies now
-query the whole map; fake fixtures model that response. The original direct Lua
-fixture's substring ACK assertion could match a broadcast containing the nonce;
-it now requires the parsed property map. The real production-API regression failed
+Lua renewed correctly while the shell reported failure. The interim helper fix
+queried the whole map; that approach is now superseded by the private atomic
+nonce ACK file because newer mpv versions removed the shared-property API.
+At that checkpoint, the original direct Lua fixture's substring ACK assertion
+could match a broadcast containing the nonce; it was changed to require the
+parsed property map. The real production-API regression failed
 before the fix and passed afterward. Production changes require review; these runs
 are not deployment approval.
 

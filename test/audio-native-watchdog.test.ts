@@ -27,19 +27,13 @@ for (const directory of ["client", "termux"]) test(`${directory}: native watchdo
 local now, commands, callbacks = 100, {}, {}
 local mp = {
  get_time=function() return now end,
- add_periodic_timer=function(_, cb) callbacks.timer=cb end,
- commandv=function(...) commands[#commands+1]={...} end,
+ add_periodic_timer=function(_, cb) callbacks.timer=cb; return {} end,
+ commandv=function(...) commands[#commands+1]={...}; return true end,
  register_script_message=function(name, cb) callbacks[name]=cb end,
  register_event=function(name, cb) callbacks[name]=cb end,
- -- mpv does not implement SET on shared-script-properties subpaths.
- set_property=function() return nil, 'property unavailable' end,
 }
 package.preload['mp']=function() return mp end
 package.preload['mp.utils']=function() return {
- shared_script_property_set=function(name, value)
-  assert(name=='pi-voice-renewed' and type(value)=='string')
-  callbacks.ack=value
- end,
  subprocess=function(args)
  local name=args.args[2]:match('/ns/(%w+)$')
  return {status=0,stdout=name..':[123]\\n'}
@@ -51,23 +45,41 @@ assert(#commands==0)
 callbacks['pi-voice-start']('${id}', '${boot}')
 assert(commands[1][1]=='loadfile')
 now=129
-callbacks['pi-voice-renew']('wrong','${boot}','aa')
-callbacks['pi-voice-renew']('${id}','wrong','aa')
-callbacks['pi-voice-renew']('${id}','${boot}','not-a-nonce')
-assert(callbacks.ack==nil)
+callbacks['pi-voice-renew']('wrong','${boot}',string.rep('a',32))
+callbacks['pi-voice-renew']('${id}','wrong',string.rep('a',32))
 callbacks['pi-voice-renew']('${id}','${boot}','aa')
-assert(callbacks.ack=='aa')
+callbacks['pi-voice-renew']('${id}','${boot}','not-a-nonce')
+assert(io.open('${root}/binding.ack')==nil)
+local nonce=string.rep('a',32)
+callbacks['pi-voice-renew']('${id}','${boot}',nonce)
+local function ack()
+ local f=assert(io.open('${root}/binding.ack')); local value=f:read('*a'); f:close(); return value
+end
+assert(ack()==nonce)
 now=158.9; callbacks.timer(); assert(#commands==1)
 -- Pause and missing guardian/transport cannot suppress a native timer.
 now=159; callbacks.timer(); assert(commands[2][1]=='quit' and commands[2][2]=='1')
-callbacks['pi-voice-renew']('${id}','${boot}','bb')
-assert(callbacks.ack=='aa', 'an expired lease must never be resurrected')
+callbacks['pi-voice-renew']('${id}','${boot}',string.rep('b',32))
+assert(ack()==nonce, 'an expired lease must never be resurrected')
 `], { env: { ...env, PI_VOICE_SCOPE: id, PI_VOICE_BOOT: boot, PI_VOICE_BINDING: `${root}/binding`, PI_VOICE_FIFO: `${root}/pcm` }, encoding: "utf8" });
   assert.equal(lua.status, 0, lua.stderr);
   const binding = fs.readFileSync(`${root}/binding`, "utf8").trim().split(" ");
   assert.equal(binding[0], id); assert.equal(binding[1], boot);
   assert.match(binding[2], /^[1-9][0-9]*$/); assert.match(binding[3], /^[0-9]+$/);
  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+for (const directory of ["client", "termux"]) test(`${directory}: native capability and callback failures attempt stop and quit`, () => {
+ for (const mode of ['setup-clock', 'setup-timer', 'setup-utils', 'setup-message', 'setup-event', 'setup-open', 'setup-write', 'setup-close', 'setup-rename', 'clock', 'open', 'write', 'close', 'rename', 'loadfile', 'load-return', 'end-file', 'complete', 'quit']) {
+  const { root, env } = fixture();
+  try {
+   const lua = spawnSync('lua', ['test/helpers/native-watchdog-failure.lua', path.resolve(directory, 'pi-voice-mpv-watchdog.lua'), mode], {
+    env: { ...env, PI_VOICE_SCOPE: id, PI_VOICE_BOOT: boot, PI_VOICE_BINDING: `${root}/binding`, PI_VOICE_FIFO: `${root}/pcm` }, encoding: 'utf8',
+   });
+   assert.equal(lua.status, 0, `${mode}: ${lua.stderr}`);
+   assert.match(lua.stderr, /Pi Voice watchdog:/, 'native failures are reported');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+ }
 });
 
 for (const directory of ["client", "termux"]) test(`${directory}: bind before PCM, orphan native proof, and legacy fail-closed`, async () => {
@@ -81,7 +93,7 @@ const ipc=process.argv.find(v=>v.startsWith('--input-ipc-server=')).split('=')[1
 const binding=process.env.PI_VOICE_BINDING, id=process.env.PI_VOICE_SCOPE;
 const ticks=fs.readFileSync('/proc/self/stat','utf8').replace(/^.*\\) /,'').split(' ')[19];
 fs.writeFileSync(binding, [id,process.env.PI_VOICE_BOOT,process.pid,ticks,process.getuid(),fs.readlinkSync('/proc/self/ns/pid'),fs.readlinkSync('/proc/self/ns/mnt')].join(' ')+'\\n');
-let nonce='';
+
 net.createServer(s=>{let text='';s.on('data',b=>{text+=b;let p;while((p=text.indexOf('\\n'))>=0){
  const c=JSON.parse(text.slice(0,p)).command;text=text.slice(p+1);
  if(c[0]==='quit' && !fs.existsSync(process.env.HOME+'/hold')) process.exit(0);
@@ -89,8 +101,15 @@ net.createServer(s=>{let text='';s.on('data',b=>{text+=b;let p;while((p=text.ind
   if(!fs.existsSync(binding.replace(/binding$/,'bound')) || !fs.existsSync(binding.replace(/binding$/,'admission-intent'))) process.exit(99);
   fs.writeFileSync(process.env.HOME+'/started',String(process.pid));
  }
- if(c[1]==='pi-voice-renew') nonce=c[4];
- s.write(JSON.stringify({data:c[1]==='shared-script-properties'?{'pi-voice-renewed':nonce}:0})+'\\n');
+ if(c[1]==='pi-voice-renew') {
+  const mode=fs.existsSync(process.env.HOME+'/ack-mode') ? fs.readFileSync(process.env.HOME+'/ack-mode','utf8') : 'exact';
+  if(mode!=='missing') {
+   fs.writeFileSync(binding+'.ack.tmp', mode==='exact'?c[4]:mode==='newline'?c[4]+'\\n':mode==='substring'?'prefix'+c[4]+'suffix':'stale', {mode:0o600});
+   fs.renameSync(binding+'.ack.tmp',binding+'.ack');
+  }
+ }
+ if(c[1]==='shared-script-properties') process.exit(98);
+ s.write(JSON.stringify({data:0})+'\\n');
 }});s.on('end',()=>s.end());}).listen(ipc);
 `);
  fake("socat", `
@@ -127,6 +146,14 @@ setTimeout(()=>{s.destroy();process.exit(0)},100);
   const bound = fs.readFileSync(`${state}/bound`, "utf8").trim().split(" ");
   assert.equal(bound[2], fs.readFileSync(`${root}/started`, "utf8"));
   assert.match(await control(`renew ${prepared.id} ${boot}`), /"renewed"/);
+  assert.equal(fs.existsSync(`${state}/binding.ack`), false, 'ACK is ephemeral');
+  for (const mode of ['missing', 'newline', 'substring', 'stale']) {
+   fs.writeFileSync(`${root}/ack-mode`, mode);
+   fs.writeFileSync(`${state}/binding.ack`, 'stale');
+   assert.equal(await control(`renew ${prepared.id} ${boot}`), '', mode);
+   assert.equal(fs.existsSync(`${state}/binding.ack`), false, 'failed ACK is removed');
+  }
+  fs.unlinkSync(`${root}/ack-mode`);
   assert.equal(await control(`renew ${prepared.id} ${id}`), "");
   fs.writeFileSync(`${root}/hold`, "");
   session.child.kill("SIGKILL"); await until(() => session.child.signalCode !== null);

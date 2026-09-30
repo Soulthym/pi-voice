@@ -36,7 +36,7 @@ process.on('SIGTERM', () => {
  if (fs.existsSync(base + '.hold')) fs.writeFileSync(base + '.term', '');
  else process.exit(0);
 });
-let eof = false, paused = false, quitting = false, fd; let nonce = '';
+let eof = false, paused = false, quitting = false, fd;
 const server = net.createServer(s => { let text = ''; s.on('data', b => {
  text += b; let end;
  while ((end = text.indexOf('\\n')) >= 0) {
@@ -45,10 +45,13 @@ const server = net.createServer(s => { let text = ''; s.on('data', b => {
   if (!fs.existsSync(binding.replace(/binding$/, 'bound'))) process.exit(99);
   fd = fs.openSync(process.env.PI_VOICE_FIFO, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
  }
- if (c[1] === 'pi-voice-renew') nonce = c[4];
+ if (c[1] === 'pi-voice-renew') {
+  fs.writeFileSync(binding + '.ack.tmp', c[4], {mode:0o600});
+  fs.renameSync(binding + '.ack.tmp', binding + '.ack');
+ }
  if (c[0] === 'quit' && !quitting && !fs.existsSync(base + '.hold')) { quitting = true; setTimeout(() => { fs.writeFileSync(base + '.exit', 'stop'); process.exit(0); }, 250); }
  if (c[0] === 'set_property') { paused = c[2]; fs.appendFileSync(base + '.pause', String(paused) + '\\n'); }
- s.write(JSON.stringify({data: c[1] === 'shared-script-properties' ? {'pi-voice-renewed':nonce} : 1.25, request_id:1}) + '\\n');
+ s.write(JSON.stringify({data: 1.25, request_id:1}) + '\\n');
  }
 }); });
 server.listen(ipc);
