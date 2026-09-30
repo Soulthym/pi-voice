@@ -188,9 +188,10 @@ if cmp -s "$header_file" <(printf 'PI_VOICE_CONTROL'); then
         exec 9>"$target_state/lock" || exit 1
         flock -x -w 5 9 || exit 1
         (umask 077; touch "$target_state/stopped") && sync "$target_state/stopped" "$target_state" || exit 1
-        if [[ ! -f $target_state/committed ]]; then
-          # The durable tombstone and absent commit, checked under the spawn lock,
-          # seal this reservation against all future grants; this is not exit proof.
+        if [[ $(cat "$target_state/admission-protocol" 2>/dev/null) == v4-start-intent-1 && ! -e $target_state/admission-intent ]]; then
+          # Only this protocol guarantees no start before durable intent. Commit
+          # proves possible spawn, not admission. The same lock seals future starts.
+          # Legacy scopes without this metadata must remain conservatively fenced.
           [[ $boot_id != null && $(cat "$target_state/prepared") == "$boot_id" && $(kernel_boot) == "$boot_id" ]] || exit 1
           (umask 077
             printf '{"id":"%s","boot_id":%s,"proof":"sealed-nonadmission"}\n' "$target_id" "$boot_id" >"$target_state/not-admitted.tmp" &&
@@ -249,7 +250,8 @@ fi
   done
   mkdir -m 700 "$state_dir" || exit 1
   printf '%s\n' "$boot_id" >"$state_dir/prepared" || exit 1
-  sync "$state_dir/prepared" || exit 1
+  printf 'v4-start-intent-1\n' >"$state_dir/admission-protocol" || exit 1
+  sync "$state_dir/prepared" "$state_dir/admission-protocol" || exit 1
   directory=$state_dir
   while :; do
     sync "$directory" || exit 1
@@ -264,11 +266,11 @@ IFS= read -r -n 128 commit <&3 || exit 1
 exec 9>"$state_dir/lock" || exit 1
 flock -x -w 5 9 || exit 1
 [[ ! -f $state_dir/stopped ]] || exit 1
-# Persist possible dispatch BEFORE spawn; a crash here remains conservatively fenced.
+# Persist possible spawn; only admission-intent below permits audio dispatch.
 (umask 077; touch "$state_dir/committed") && sync "$state_dir/committed" "$state_dir" || exit 1
 
-# Starting a new stream atomically replaces any prior Pi Voice player. This is
-# an endpoint-level safety net for rapid seeks and cross-session preemption.
+# Starting a new stream atomically requests the prior scope to quit. This is
+# best-effort only: host ownership gates admission; the native lease bounds orphans.
 for _ in {1..100}; do
   if mkdir "$player_lock" 2>/dev/null; then
     lock_held=true
@@ -286,16 +288,11 @@ for _ in {1..100}; do
   sleep 0.01
 done
 [[ $lock_held == true ]] || exit 1
-old_id= old_player=
-read -r old_id old_player <"$active_player_file" 2>/dev/null || true
-old_player_command=$(tr '\0' ' ' <"/proc/$old_player/cmdline" 2>/dev/null || true)
-if [[ $old_player =~ ^[0-9]+$ ]] && [[ $old_id =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] && [[ $old_player_command == *"--input-ipc-server=$runtime_dir/pi-voice-mpv-$old_id.sock "* ]] && kill -0 "$old_player" 2>/dev/null; then
-  kill "$old_player" 2>/dev/null || true
-  for _ in {1..50}; do
-    kill -0 "$old_player" 2>/dev/null || break
-    sleep 0.01
-  done
-  kill -0 "$old_player" 2>/dev/null && kill -KILL "$old_player" 2>/dev/null || true
+old_id=
+read -r old_id _ <"$active_player_file" 2>/dev/null || true
+if [[ $old_id =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] && [[ -S $runtime_dir/pi-voice-mpv-$old_id.sock ]]; then
+  printf '{"command":["quit"]}\n' |
+    socat -T 0.1 - "UNIX-CONNECT:$runtime_dir/pi-voice-mpv-$old_id.sock" >/dev/null 2>&1 || true
 fi
 
 # ponytail: retain receipts indefinitely; add expiry only with a safe retry horizon.
@@ -329,18 +326,20 @@ read -r -a native_fields <<<"$native_tail"
 [[ ${native_fields[19]:-} == "$bound_ticks" && $(kernel_boot) == "$boot_id" ]] || exit 1
 chmod 600 "$state_dir/binding" && sync "$state_dir/binding" && mv "$state_dir/binding" "$state_dir/bound" && sync "$state_dir" || exit 1
 [[ $native_pid != "$mpv_pid" ]] || native_child=true
-flock -u 9
-exec 9>&-
 printf '%s %s\n' "$session_id" "$native_pid" >"$active_player_file"
 rm -rf "$player_lock" 2>/dev/null || true
 lock_held=false
 
 # stdin is the TCP audio direction. stdout is deliberately kept free for JSON
 # playback-position feedback over the reverse direction of the same socket.
-cat <&3 >"$audio_fifo" &
+[[ ! -f $state_dir/stopped ]] || exit 1
+(umask 077; touch "$state_dir/admission-intent") && sync "$state_dir/admission-intent" "$state_dir" || exit 1
+cat <&3 9>&- >"$audio_fifo" &
 feeder_pid=$!
 printf '{"command":["script-message","pi-voice-start","%s","%s"]}\n' "$session_id" "${boot_id//\"/}" |
   socat -T 0.1 - "UNIX-CONNECT:$ipc_socket" >/dev/null 2>&1 || exit 1
+flock -u 9
+exec 9>&-
 
 for _ in {1..50}; do
   [[ -S "$ipc_socket" ]] && break

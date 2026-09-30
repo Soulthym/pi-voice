@@ -86,7 +86,7 @@ net.createServer(s=>{let text='';s.on('data',b=>{text+=b;let p;while((p=text.ind
  const c=JSON.parse(text.slice(0,p)).command;text=text.slice(p+1);
  if(c[0]==='quit' && !fs.existsSync(process.env.HOME+'/hold')) process.exit(0);
  if(c[1]==='pi-voice-start') {
-  if(!fs.existsSync(binding.replace(/binding$/,'bound'))) process.exit(99);
+  if(!fs.existsSync(binding.replace(/binding$/,'bound')) || !fs.existsSync(binding.replace(/binding$/,'admission-intent'))) process.exit(99);
   fs.writeFileSync(process.env.HOME+'/started',String(process.pid));
  }
  if(c[1]==='pi-voice-renew') nonce=c[4];

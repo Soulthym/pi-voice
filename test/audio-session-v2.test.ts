@@ -194,7 +194,7 @@ exec /usr/bin/sync "$@"
 					if (boundary === "stop-before-commit") assert.match(await control(`stop ${scope.id}`), /stopped/);
 					reserved.child.stdin.end(`PI_VOICE_COMMIT ${scope.id} ${boundary === "wrong-boot" ? scope.id : scope.boot_id}\n`);
 					await until(() => reserved.child.exitCode !== null || reserved.child.signalCode !== null).catch(error => { throw new Error(`${boundary}: ${reserved.output()}`, { cause: error }); });
-					if (boundary === "commit-crash") assert.equal(await control(`stop ${scope.id}`), "", "persisted possible spawn without own-child wait remains fenced");
+					if (boundary === "commit-crash") assert.match(await control(`stop ${scope.id}`), /sealed-nonadmission/, "spawn intent without admission intent can be sealed");
 				}
 				assert.equal(fs.existsSync(path.join(root, `fake-${scope.id}.pid`)), false, boundary);
 				assert.equal(fs.existsSync(receipt(scope.id)), false, "non-admission must never fabricate child-wait proof");
