@@ -1,5 +1,34 @@
 # Tests
 
+## Bounded output stop and covered-ledger diagnostics
+
+Typecheck passed. Focused transport/helper/recovery tests: **83 passed**;
+final mounted recovery rerun (including the retained-output case): **37 passed**.
+Full default suite: **1324 passed, 33 compatibility skips, zero failures**;
+full installed-native suite: **1357 passed, zero skips/failures**. LSP is unavailable.
+Runs used `env -i`, private HOME/TMPDIR/XDG roots, network-isolated bubblewrap,
+synthetic transports/players and inert native UI. Final full runs also isolated
+process IDs and masked host SSH configuration. An initial full run had two wrapper
+fixture failures from SSH system-config ownership inside the sandbox; both passed
+with that unrelated configuration masked. No live device/SSH/session calls,
+provider calls, real inference, hardware, settings changes or deployment occurred.
+
+Regression coverage exercises real delayed matching receipts beyond 1.5 seconds,
+startup stop beyond the former prepare timer, wrong/dropped/silent/trickling peers,
+and retained fences on the absolute deadline. Both production shell helpers run
+against synthetic owned mpv/socat children: queued kernel flock plus actual delayed
+child exit succeeds, committed scope without wait receipt sends no ACK, and a
+main-body scope lock held beyond 5 seconds rejects without inventing proof. The
+real worker cancellation path also survives the former 2-second helper kill timer.
+Mounted extension and journal tests distinguish complete covered admission awaiting
+receipts from legacy/unknown coverage and preserve the actual failed-retry reason.
+The v4 idle-input/covered-output orphan regression retains its original boot-fenced
+scope across a failed receipt at the same registered device's moved endpoint,
+then retires it only after an exact matching receipt.
+These tests do not diagnose the phone's still-missing receipt; local durable scope
+and boot evidence remains pending. No journal reinitialization, coverage promotion
+or same-boot PID-absence heuristic was introduced.
+
 ## User-deployed phone migration check — 2026-09-29
 
 The user restarted Pi/wrappers and supplied local Termux checks. All five installed

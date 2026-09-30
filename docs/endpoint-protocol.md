@@ -38,6 +38,39 @@ The bundled client maps pause/resume to mpv's `pause` property and stop to mpv's
 
 For eligible reboot recovery only, the host sends `PI_VOICE_CONTROLstop <uuid> <expected-boot-uuid>\n`. A changed known boot returns `{"type":"stopped","id":"<uuid>","boot_id":"<current-boot>","device_id":"<stable-device-id>","proof":"reboot","expected_boot_id":"<saved-boot>"}` without stopping anything on the new boot. The host accepts this only with persisted commit fencing, original registered-device routing, and an independently reported matching `device_id` on the recovery connection; a stale registration pointing at another client's reused socket is rejected. Matching addresses or display names alone are insufficient. Device IDs rely on the existing trusted registration/authenticated tunnel boundary, not cryptographic attestation by this protocol. Ordinary/legacy receipt retries retain the two-token stop command. Unknown boot, missing capability, and unknown admission coverage never become idle through reboot inference.
 
+### Playback stop deadline
+
+All scoped output-stop requests use `stopRemotePlayback` with a **20-second
+whole-request deadline**, including connection establishment. This is not a resettable
+socket inactivity timer: unsolicited/trickling data cannot extend it. The budget is
+5 seconds for the client's scope `flock`, 1 second for quit IPC, 5 seconds for
+100 × 50 ms receipt polling, plus 9 seconds for filesystem sync, scheduling and
+transport. Filesystem stalls and arbitrary child cleanup have no guaranteed upper
+bound; exceeding the budget rejects with ownership retained, never inferred success.
+Keep this explicit budget aligned with future helper phase changes.
+
+The commit handler also waits up to 5 seconds to acquire the scope lock. While
+holding it, endpoint-player lock contention can consume approximately 6 seconds
+(100 × (50 + 10) ms), prior-player cleanup another 0.5 second, plus sync/spawn work.
+These concurrent main-body phases are **not** an extra stop-side wait allowance:
+a stop queued behind them may exhaust its own 5-second flock and close without a
+receipt. A later explicit retry may obtain an existing receipt; it cannot invent
+one. Neither lock expiry nor a missing player is proof of non-admission.
+
+The TCP helper delegates stop to the same implementation and cancels its obsolete
+prepare/commit timer once a scoped stop takes over. Pause/resume retain their short
+control timeout. The worker's network-sink kill watchdog allows 25 seconds (the
+stop budget plus queue/cleanup margin), then retains the existing exact-scope
+fallback. Extension cancellation can still escalate after one second to owned-worker
+termination; that local cleanup has its own bounded timers and then uses the same
+20-second remote receipt request for retained scopes. Local death never releases a
+remote scope by itself.
+
+Both bundled audio helpers already close FD9 in the mpv child and close the
+guardian's FD9 before launching the feeder and polling socat. Stop-side socat runs
+after explicit unlock. No concrete inherited scope-lock leak was found in these
+paths; helpers and their child-wait proof rules are unchanged.
+
 ### Host cancellation API and limitations
 
 `VoiceWorkerClient.cancel()` returns a cancel ID; only matching `idle.cancelId` confirms stop. Integration may wait one second, then await `VoiceWorkerClient.terminate()`. Termination cleans up its owned detached local worker group, including descendants after unexpected worker exit. **A rejected termination retains the speech lease in the extension integration.**

@@ -36,6 +36,38 @@ After process loss, saved original remote input/output scopes and device/cause d
 
 This is **not complete transport recovery**. Once either direction becomes uncertain, it stays uncertain for that owner's lifetime, even after successful saved receipts. Legacy v1, missing and malformed journals remain fenced. The mandatory remote-output prepare/grant handshake supplies covered output; desktop `wait-v1` and network Termux `admit-v1` supply covered input for fresh v4 owners. Bounded local-output guardian integration remains unimplemented: worker players, including `aplay` overrides, lack durable admission and per-scope child-wait receipts; reconnect, EOF, process death and empty handles cannot substitute for unknown coverage. A local capture guardian killed after possible dispatch but before publishing its wait receipt remains fenced on the same boot. See the [scope and remaining integration boundary](endpoint-protocol.md#stage-b-scope-and-remaining-gaps).
 
+### Covered output awaiting a receipt
+
+`Admission coverage complete; scoped stop receipts still pending` is different
+from missing/legacy admission evidence. A v4 journal with idle input, covered
+output and a retained scope already accounts for possible playback. A failed
+receipt request does not downgrade that coverage. Retry preserves the actual
+transport/receipt failure; it must not relabel this case as unknown admission.
+
+Playback stop now has a **20-second whole-request deadline**, shared by direct
+host cleanup and the playback helper. The previous 1.5-second inactivity timeout
+could expire during valid client cleanup. Wrong receipts, disconnects and a
+silent or trickling peer still fail closed; elapsed time never proves stop.
+See the [stop budget](endpoint-protocol.md#playback-stop-deadline).
+
+If the original playback guardian died on the **same kernel boot** after durable
+commit but before writing its own-child `exited` receipt, reconnect cannot recreate
+that wait proof. Missing player/socket/PID is not a substitute. This case remains
+intentionally fenced; no PID-absence recovery or journal reset is introduced.
+A verified changed boot on the original registered device remains eligible only
+under the existing saved-scope reboot rules.
+
+For the reported post-upgrade Termux recurrence, the supplied host evidence is
+complete v4 coverage, not a missing-admission incident. The deadline and diagnostic
+bugs do **not** establish why that phone's receipt is missing. Pending the user's
+local read-only evidence, preserve the original scope's `prepared`, `committed`,
+`exited`, `not-admitted` and `stopped` metadata/content (including which files are
+absent), and the current kernel boot identity. Here `SCOPE_DIR` means the original
+retained stream's directory under the client's effective state root; `BOOT_ID`
+means the current kernel boot identity, not a process ID. Compare with the retained
+host scope/boot without changing either record. Do not probe/control playback,
+reinitialize the journal, delete a fence, or infer proof from silence.
+
 ### Disconnected-replay incident (2026-09-27)
 
 Read-only ownership metadata ties the reported session to the first incident's owner `<owner-id>` (anonymized), last refreshed at `15:18:35.962Z`; that PID and its presence record were absent when inspected. The v1 journal, last modified at `15:19:35.509Z`, contains output device `phone`, cause `Saved scope stopped; interrupted transport coverage remains unproven; ownership retained`, and zero handles. It has no input entry. The permitted session device metadata retains an auto pin. The other live Pi sessions were not the fenced owner and were not changed.
