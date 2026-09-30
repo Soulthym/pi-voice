@@ -189,9 +189,11 @@ if cmp -s "$header_file" <(printf 'PI_VOICE_CONTROL'); then
         flock -x -w 5 9 || exit 1
         (umask 077; touch "$target_state/stopped") && sync "$target_state/stopped" "$target_state" || exit 1
         if [[ ! -f $target_state/committed ]]; then
-          # Non-admission is not child-wait proof: never forge an exited receipt.
+          # The durable tombstone and absent commit, checked under the spawn lock,
+          # seal this reservation against all future grants; this is not exit proof.
+          [[ $boot_id != null && $(cat "$target_state/prepared") == "$boot_id" && $(kernel_boot) == "$boot_id" ]] || exit 1
           (umask 077
-            printf '{"id":"%s","boot_id":%s}\n' "$target_id" "$(cat "$target_state/prepared")" >"$target_state/not-admitted.tmp" &&
+            printf '{"id":"%s","boot_id":%s,"proof":"sealed-nonadmission"}\n' "$target_id" "$boot_id" >"$target_state/not-admitted.tmp" &&
               sync "$target_state/not-admitted.tmp" &&
               mv -f "$target_state/not-admitted.tmp" "$target_state/not-admitted" &&
               sync "$target_state"

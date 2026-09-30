@@ -49,6 +49,9 @@ export function stopRemotePlayback({ output, id, bootId, deviceId, allowReboot =
 						if (event.proof === "reboot") {
 							if (rebootAllowed && event.device_id === deviceId && validBootId(bootId) && event.expected_boot_id === bootId &&
 								validBootId(event.boot_id) && event.boot_id !== bootId) ack = true;
+						} else if (event.proof === "sealed-nonadmission") {
+							// The device durably sealed an uncommitted reservation under its spawn lock.
+							if (nativeWatchdog === true && validBootId(bootId) && event.boot_id === bootId) ack = true;
 						} else if (nativeWatchdog === true) {
 							if (event.proof === "native-process-exit" && validBootId(bootId) && event.boot_id === bootId) ack = true;
 						} else if (event.proof === undefined && (bootId === undefined || event.boot_id === bootId)) ack = true;

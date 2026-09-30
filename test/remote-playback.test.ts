@@ -46,6 +46,16 @@ test("stop receipts require exact scope; reboot requires explicit same-device op
 		{ bootId: boot, allowReboot: true, event: { ...reboot, device_id: undefined }, accepted: false },
 		{ bootId: boot, allowReboot: true, event: { ...reboot, device_id: null }, accepted: false },
 	);
+	const sealed = { type: "stopped", id, boot_id: boot, proof: "sealed-nonadmission" };
+	cases.push(
+		{ bootId: boot, nativeWatchdog: true, event: sealed, accepted: true },
+		{ bootId: boot, event: sealed, accepted: false },
+		{ bootId: null, nativeWatchdog: true, event: { ...sealed, boot_id: null }, accepted: false },
+		{ nativeWatchdog: true, event: sealed, accepted: false },
+		{ bootId: boot, nativeWatchdog: true, event: { ...sealed, boot_id: nextBoot }, accepted: false },
+		{ bootId: boot, nativeWatchdog: true, event: { ...sealed, id: nextBoot }, accepted: false },
+		{ bootId: boot, nativeWatchdog: true, event: { ...sealed, proof: "not-admitted" }, accepted: false },
+	);
 	for (const deviceId of ["", "legacy-loopback", "bad/id", "x".repeat(129), "device\n", "device\r", "device\u2028"]) {
 		cases.push({ bootId: boot, deviceId, allowReboot: true, event: { ...reboot, device_id: deviceId }, accepted: false, sendBoot: false });
 	}

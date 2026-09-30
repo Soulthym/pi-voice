@@ -47,7 +47,7 @@ if not ok then quit(); return end
 mp.register_script_message('pi-voice-renew', function(id, expected_boot, nonce)
     if id ~= scope or expected_boot ~= boot or not nonce or not nonce:match('^[0-9a-f]+$') or not alive() then return end
     deadline = mp.get_time() + 30
-    mp.set_property('shared-script-properties/pi-voice-renewed', nonce)
+    utils.shared_script_property_set('pi-voice-renewed', nonce)
 end)
 mp.register_script_message('pi-voice-start', function(id, expected_boot)
     if started or id ~= scope or expected_boot ~= boot or not alive() then return end

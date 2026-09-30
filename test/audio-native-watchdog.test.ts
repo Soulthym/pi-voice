@@ -31,10 +31,16 @@ local mp = {
  commandv=function(...) commands[#commands+1]={...} end,
  register_script_message=function(name, cb) callbacks[name]=cb end,
  register_event=function(name, cb) callbacks[name]=cb end,
- set_property=function(name,value) callbacks.ack=value end,
+ -- mpv does not implement SET on shared-script-properties subpaths.
+ set_property=function() return nil, 'property unavailable' end,
 }
 package.preload['mp']=function() return mp end
-package.preload['mp.utils']=function() return {subprocess=function(args)
+package.preload['mp.utils']=function() return {
+ shared_script_property_set=function(name, value)
+  assert(name=='pi-voice-renewed' and type(value)=='string')
+  callbacks.ack=value
+ end,
+ subprocess=function(args)
  local name=args.args[2]:match('/ns/(%w+)$')
  return {status=0,stdout=name..':[123]\\n'}
 end} end
@@ -46,6 +52,8 @@ callbacks['pi-voice-start']('${id}', '${boot}')
 assert(commands[1][1]=='loadfile')
 now=129
 callbacks['pi-voice-renew']('wrong','${boot}','aa')
+callbacks['pi-voice-renew']('${id}','wrong','aa')
+callbacks['pi-voice-renew']('${id}','${boot}','not-a-nonce')
 assert(callbacks.ack==nil)
 callbacks['pi-voice-renew']('${id}','${boot}','aa')
 assert(callbacks.ack=='aa')
