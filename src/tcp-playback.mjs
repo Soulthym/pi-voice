@@ -1,5 +1,5 @@
 import * as net from "node:net";
-import { validStreamId, validBootId, RemotePlaybackUnconfirmedError } from "./remote-playback.mjs";
+import { stopRemotePlayback, validStreamId, validBootId, RemotePlaybackUnconfirmedError } from "./remote-playback.mjs";
 
 const [output, rate, utteranceValue] = process.argv.slice(2);
 const utterance = Number(utteranceValue);
@@ -51,34 +51,27 @@ function command(command) {
 		if (command === "stop") stopping = true;
 		return Promise.resolve();
 	}
+	if (command === "stop") {
+		// Stop owns its deadline even if cancelled during prepare/commit.
+		clearTimeout(deadline);
+		return controlQueue = controlQueue.then(async () => {
+			try {
+				await stopRemotePlayback({ output, id: session, bootId });
+				process.stdout.write(`${JSON.stringify({ type: "remote-released", id: session })}\n`, () => finish(0));
+			} catch (error) { fail(error); }
+		});
+	}
 	return controlQueue = controlQueue.then(() => new Promise(resolve => {
 		const peer = connect();
 		let reply = "";
-		let ack = false;
 		peer.setTimeout(1500, () => peer.destroy(new Error("Remote playback control timed out")));
 		peer.on("connect", () => peer.end(`PI_VOICE_CONTROL${command} ${session}\n`));
 		peer.on("data", chunk => {
 			reply += chunk;
 			if (reply.length > 8192) return peer.destroy(new Error("Invalid playback control response"));
-			for (;;) {
-				const end = reply.indexOf("\n");
-				if (end < 0) break;
-				try {
-					const event = JSON.parse(reply.slice(0, end));
-					if (event.type === "stopped" && event.id === session && event.boot_id === bootId) ack = true;
-				} catch {}
-				reply = reply.slice(end + 1);
-			}
 		});
-		peer.on("error", error => { if (!ack || command !== "stop") fail(error); });
-		peer.on("close", () => {
-			resolve();
-			if (command !== "stop") return;
-			if (ack) {
-				process.stdout.write(`${JSON.stringify({ type: "remote-released", id: session })}\n`, () => finish(0));
-			}
-			else fail(new Error("Remote stop unconfirmed: missing player-exit ACK"));
-		});
+		peer.on("error", fail);
+		peer.on("close", resolve);
 	}));
 }
 input.on("data", chunk => {

@@ -1,3 +1,4 @@
+export const REMOTE_STOP_DEADLINE_MS: number;
 export function validStreamId(id: unknown): id is string;
 export function validBootId(id: unknown): id is string;
 export class RemotePlaybackUnconfirmedError extends Error {

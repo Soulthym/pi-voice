@@ -9,7 +9,7 @@ import { mock, test } from "node:test";
 
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-test("network padding cancellation waits for confirmed helper exit", { timeout: 5000 }, async t => {
+test("network padding cancellation waits for confirmed helper exit", { timeout: 8000 }, async t => {
 	const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 	const bootId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 	let receipt = false;
@@ -184,6 +184,10 @@ test("network padding cancellation waits for confirmed helper exit", { timeout: 
 			assert.ok(!events.some(e => e.type === "idle"), "neither utterance nor cancel idle precedes helper exit");
 			assert.ok(!events.some(e => e.type === "error"));
 
+			if (name === "confirmed stop") {
+				await wait(2100);
+				assert.ok(!events.some(e => e.type === "idle"), "helper must survive the old two-second kill timer while awaiting proof");
+			}
 			child.exitCode = code;
 			child.signalCode = signal;
 			child.emit("exit", code, signal);

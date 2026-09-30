@@ -8,8 +8,11 @@ const helper = fileURLToPath(new URL("../src/tcp-playback.mjs", import.meta.url)
 const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const deviceId = "test-device-A";
 
-for (const mode of ["complete", "broken-pipe", "broken-forward", "old-client", "v2", "premature", "lost-ack", "stop", "startup-stop", "ack-reset", "pause-failure", "numeric", "malformed", "forged-stop", "forged-complete", "no-grant", "wrong-boot", "null-boot", "fenced", "false-fenced", "invalid-fenced", "missing-device", "invalid-device", "dash-device"] as const) {
- test(`TCP prepare/commit proof: ${mode}`, { timeout: 8000 }, async t => {
+for (const scenario of ["delayed-stop", "delayed-startup-stop", "silent-stop", "trickle-stop", "complete", "broken-pipe", "broken-forward", "old-client", "v2", "premature", "lost-ack", "stop", "startup-stop", "ack-reset", "pause-failure", "numeric", "malformed", "forged-stop", "forged-complete", "no-grant", "wrong-boot", "null-boot", "fenced", "false-fenced", "invalid-fenced", "missing-device", "invalid-device", "dash-device"] as const) {
+ test(`TCP prepare/commit proof: ${scenario}`, { timeout: 25_000 }, async t => {
+  const mode = scenario === "delayed-startup-stop" ? "startup-stop" : ["delayed-stop", "silent-stop", "trickle-stop"].includes(scenario) ? "stop" : scenario;
+  const timers: NodeJS.Timeout[] = [];
+  t.after(() => { for (const timer of timers) clearInterval(timer); });
   const boot_id = mode === "null-boot" ? null : "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
   const device_id = mode === "missing-device" ? null : mode === "invalid-device" ? "bad id" : mode === "dash-device" ? "-" : deviceId;
   const preparedDevice = device_id === null || device_id === "bad id" ? ":" : device_id;
@@ -26,6 +29,12 @@ for (const mode of ["complete", "broken-pipe", "broken-forward", "old-client", "
     if (text.startsWith("PI_VOICE_CONTROLpause")) { socket.resetAndDestroy(); return; }
     if (text.startsWith("PI_VOICE_CONTROLstop")) {
      if (mode === "lost-ack") { socket.end(); return; }
+     if (scenario === "silent-stop") return;
+     if (scenario === "trickle-stop") { timers.push(setInterval(() => send({ type: "stopped", id: "wrong", boot_id }), 100)); return; }
+     if (["delayed-stop", "delayed-startup-stop"].includes(scenario)) {
+      timers.push(setTimeout(() => { send({ type: "stopped", id, boot_id }); socket.end(); }, scenario === "delayed-stop" ? 1800 : 6000));
+      return;
+     }
      send({ type: "stopped", id: mode === "forged-stop" ? "wrong" : id, boot_id });
      if (mode === "ack-reset") setTimeout(() => socket.resetAndDestroy(), 10);
      else socket.end();
@@ -71,6 +80,12 @@ for (const mode of ["complete", "broken-pipe", "broken-forward", "old-client", "
   if (!["stop", "ack-reset", "lost-ack", "forged-stop"].includes(mode)) child.stdin.end(Buffer.alloc(64));
   const [code] = await exit;
   const nonadmitted = ["broken-forward", "old-client", "v2", "numeric", "malformed", "no-grant", "wrong-boot"].includes(mode);
+  if (["silent-stop", "trickle-stop"].includes(scenario)) {
+   assert.equal(code, 1, events);
+   assert.match(events, /control timed out after 20000ms/);
+   assert.doesNotMatch(events, /remote-released/);
+   return;
+  }
   assert.equal(code, completes || ["stop", "startup-stop", "ack-reset"].includes(mode) ? 0 : nonadmitted ? 2 : 1, events);
   if (nonadmitted || mode === "startup-stop") {
    assert.equal(committed, false);

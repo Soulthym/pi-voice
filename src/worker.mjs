@@ -7,7 +7,7 @@ import * as readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import { env as transformersEnv, pipeline } from "@huggingface/transformers";
 import { KokoroTTS } from "kokoro-js";
-import { stopRemotePlayback, validStreamId, validBootId, RemotePlaybackUnconfirmedError } from "./remote-playback.mjs";
+import { REMOTE_STOP_DEADLINE_MS, stopRemotePlayback, validStreamId, validBootId, RemotePlaybackUnconfirmedError } from "./remote-playback.mjs";
 import { createPlaybackController } from "./playback-controller.mjs";
 import { generateSentenceAudio } from "./sentence-audio.mjs";
 import { SentencePool } from "./sentence-pool.mjs";
@@ -774,7 +774,8 @@ function createNetworkSink(output, sampleRate, utterance) {
 				// The helper may have failed before its control fd became writable.
 			}
 			child.stdin.destroy();
-			const killTimer = setTimeout(() => child.kill("SIGKILL"), 2_000);
+			// Allow queued pause/resume cleanup and the full scoped stop deadline.
+			const killTimer = setTimeout(() => child.kill("SIGKILL"), REMOTE_STOP_DEADLINE_MS + 5_000);
 			killTimer.unref?.();
 			return exited.catch(async error => {
 				if (!session) throw error;

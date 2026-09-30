@@ -4,10 +4,14 @@ export const validStreamId = id => typeof id === "string" && /^[0-9a-f]{8}-[0-9a
 
 export const validBootId = id => typeof id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id);
 
+// Whole-request budget: scope flock (5s), quit IPC (1s), receipt polling (5s),
+// plus 9s for durable sync, scheduling and transport. Slow/stuck storage still fences.
+export const REMOTE_STOP_DEADLINE_MS = 20_000;
+
 export class RemotePlaybackUnconfirmedError extends Error {
 	code = "REMOTE_PLAYBACK_UNCONFIRMED";
 	constructor(message, options) {
-		super(`Remote playback unconfirmed: ${message}. Restore the original device connection and retry /voice reconnect; ownership retained`, options);
+		super(`Remote playback unconfirmed: ${message}. Ownership retained; /voice reconnect retries available receipts but cannot reconstruct a missing same-boot guardian wait receipt`, options);
 		this.name = "RemotePlaybackUnconfirmedError";
 	}
 }
@@ -30,7 +34,7 @@ export function stopRemotePlayback({ output, id, bootId, deviceId, allowReboot =
 		let reply = "";
 		let ack = false;
 		let failure;
-		peer.setTimeout(1500, () => peer.destroy(new Error("control timed out")));
+		const deadline = setTimeout(() => peer.destroy(new Error(`control timed out after ${REMOTE_STOP_DEADLINE_MS}ms waiting for scoped stop receipt`)), REMOTE_STOP_DEADLINE_MS);
 		peer.on("connect", () => peer.end(`PI_VOICE_CONTROLstop ${id}${rebootAllowed && validBootId(bootId) ? ` ${bootId}` : ""}\n`));
 		peer.on("data", chunk => {
 			reply += chunk;
@@ -51,6 +55,10 @@ export function stopRemotePlayback({ output, id, bootId, deviceId, allowReboot =
 			}
 		});
 		peer.on("error", error => { failure = error; });
-		peer.on("close", () => ack ? resolve() : reject(new RemotePlaybackUnconfirmedError(failure?.message ?? "missing scoped player-exit receipt", { cause: failure })));
+		peer.on("close", () => {
+			clearTimeout(deadline);
+			if (ack) resolve();
+			else reject(new RemotePlaybackUnconfirmedError(failure?.message ?? "missing scoped player-exit receipt", { cause: failure }));
+		});
 	});
 }

@@ -6,7 +6,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
-import { stopRemotePlayback } from "../src/remote-playback.mjs";
+import { REMOTE_STOP_DEADLINE_MS, stopRemotePlayback } from "../src/remote-playback.mjs";
 
 const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const boot = "11111111-1111-1111-1111-111111111111";
@@ -56,6 +56,43 @@ test("stop receipts require exact scope; reboot requires explicit same-device op
 			assert.equal(command, `PI_VOICE_CONTROLstop ${id}${sendBoot && allowReboot === true && typeof bootId === "string" ? ` ${bootId}` : ""}\n`);
 		} finally { await new Promise<void>(resolve => server.close(() => resolve())); }
 	}
+});
+
+test("stop deadline accepts delayed proof, rejects drop/wrong/silent/trickling peers without extending the budget", { timeout: 25_000 }, async () => {
+	assert.equal(REMOTE_STOP_DEADLINE_MS, 20_000);
+	await Promise.all(["delayed", "drop", "wrong", "silent", "trickle"].map(async mode => {
+		const sockets = new Set<net.Socket>();
+		const timers: NodeJS.Timeout[] = [];
+		const server = net.createServer({ allowHalfOpen: true }, peer => {
+			sockets.add(peer);
+			peer.on("error", () => {});
+			peer.resume();
+			peer.on("end", () => {
+				const receipt = JSON.stringify({ type: "stopped", id: mode === "wrong" ? "wrong" : id, boot_id: boot }) + "\n";
+				if (mode === "delayed") timers.push(setTimeout(() => peer.end(receipt), 1800));
+				if (mode === "wrong") peer.end(receipt);
+				if (mode === "drop") peer.destroy();
+				if (mode === "trickle") timers.push(setInterval(() => peer.write("{}\n"), 100));
+			});
+		});
+		server.listen(0, "127.0.0.1");
+		await once(server, "listening");
+		const start = performance.now();
+		try {
+			const stopped = stopRemotePlayback({ output: `tcp://127.0.0.1:${(server.address() as net.AddressInfo).port}`, id, bootId: boot });
+			if (mode === "delayed") { await stopped; assert.ok(performance.now() - start >= 1800); }
+			else await assert.rejects(stopped, error => {
+				assert.equal((error as { code: string }).code, "REMOTE_PLAYBACK_UNCONFIRMED");
+				if (["silent", "trickle"].includes(mode)) assert.match(String(error), /control timed out after 20000ms/);
+				return true;
+			});
+			assert.ok(performance.now() - start < REMOTE_STOP_DEADLINE_MS + 3000);
+		} finally {
+			for (const timer of timers) clearInterval(timer);
+			for (const peer of sockets) peer.destroy();
+			await new Promise<void>(resolve => server.close(() => resolve()));
+		}
+	}));
 });
 
 for (const helper of ["client/pi-voice-audio-session", "termux/pi-voice-audio-session"]) {
