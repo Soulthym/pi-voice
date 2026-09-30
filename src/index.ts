@@ -2507,15 +2507,18 @@ export default async function (pi: ExtensionAPI) {
 						if (direction === "input" && valid() && inputStopBarrier === stopping && !resource.episode) inputStopPending = false;
 					}));
 					signal.throwIfAborted();
-					if (!attempted || !valid() || stopsUnresolved()) return;
-					if (rebind === deviceRebind && rebind && unconfirmedDeviceStops.has(rebind)) deviceRebind = undefined;
-					if (failedOutput) {
+					if (!attempted || !valid()) return;
+					// Consume output proof even if input still needs another retry: trackStop
+					// has cleared this episode, so the next attempt cannot recognize it.
+					if (failedOutput && !stopResources.output.episode && !stopResources.output.cleanup) {
 						for (const resolve of transportCancelWaiters.values()) resolve();
 						transportCancelWaiters.clear();
 						transportStopBarrier = Promise.resolve();
 						transportStopPending = false;
 						transportStops.clear();
 					}
+					if (stopsUnresolved()) return;
+					if (rebind === deviceRebind && rebind && unconfirmedDeviceStops.has(rebind)) deviceRebind = undefined;
 					// Do not release a healthy sibling transport or announce/play anything.
 					if (!inputInProgress && !recovery.episode("input")?.handles.length && !recovery.episode("output")?.handles.length && (failedOutput || lastOwnerUtterance === undefined)) {
 						if (deferredRelease) deferredRelease.announceNext = false;

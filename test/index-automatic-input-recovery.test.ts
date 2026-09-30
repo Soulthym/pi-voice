@@ -11,7 +11,7 @@ import { FakeVoiceHost, MockedVoiceWorkerClient } from "./helpers/fake-voice-hos
 mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: MockedVoiceWorkerClient } });
 const settle = async () => { for (let i = 0; i < 60; i++) await new Promise(resolve => setImmediate(resolve)); };
 
-test("automatic input recovery keeps the original grant closed and preserves draft, pin, and cancellation fence", async t => {
+for (const failedOutput of [false, true]) test(`automatic input recovery preserves draft, pin, and fence until both resources resolve (failed output: ${failedOutput})`, async t => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-auto-input-"));
 	const env = { PI_VOICE_CONFIG: path.join(root, "config"), PI_VOICE_DEVICE_DIR: path.join(root, "devices"), PI_VOICE_COORDINATOR_DIR: path.join(root, "coordinator"), PI_VOICE_DEVICE_ID: "A" };
 	const old = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]])); Object.assign(process.env, env);
@@ -63,6 +63,10 @@ test("automatic input recovery keeps the original grant closed and preserves dra
 	host.api.sendUserMessage = () => { submitted++; };
 	t.mock.timers.enable({ apis: ["setTimeout"] });
 	await host.start(); await host.shortcut("f4"); await admitted.promise;
+	let outputProven = !failedOutput;
+	const terminate = t.mock.method(MockedVoiceWorkerClient.prototype, "terminate", async () => {
+		if (!outputProven) throw new Error("output stop unconfirmed");
+	});
 	const fence = path.join(env.PI_VOICE_COORDINATOR_DIR, "speech.lock", "lease.json");
 	const owner = JSON.parse(await fs.readFile(fence, "utf8"));
 	const journal = () => new StopRecovery(env.PI_VOICE_COORDINATOR_DIR, owner.instanceId);
@@ -71,6 +75,8 @@ test("automatic input recovery keeps the original grant closed and preserves dra
 	await host.command("stop"); await settle();
 	editor = "New manual draft";
 	assert.match(host.widgetLines()!.join("\n"), /Input stop unconfirmed/);
+	if (failedOutput) assert.match(host.widgetLines()!.join("\n"), /Output stop unconfirmed/);
+	outputProven = true;
 	await register(moved);
 	const lookups = lookup.mock.callCount();
 	lookup.mock.mockImplementation(async () => { throw new Error("ambiguous new attachment"); });
@@ -78,9 +84,12 @@ test("automatic input recovery keeps the original grant closed and preserves dra
 	assert.equal(journal().isIdle("input"), false);
 	assert.equal(JSON.parse(await fs.readFile(fence, "utf8")).instanceId, owner.instanceId);
 	assert.equal(commands.filter(command => command.includes("stop-admit")).length, 1);
+	assert.doesNotMatch(host.widgetLines()!.join("\n"), /Output stop unconfirmed/);
+	const outputStops = terminate.mock.callCount();
 	identity = "A";
 	t.mock.timers.tick(6_000); await settle();
 	assert.equal(journal().isIdle("input"), true);
+	assert.equal(terminate.mock.callCount(), outputStops, "later input proof does not retry already-proven output");
 	assert.doesNotMatch(host.widgetLines()!.join("\n"), /Input stop unconfirmed/);
 	assert.equal(editor, "New manual draft"); assert.equal(submitted, 0);
 	assert.equal(commands.filter(command => command.endsWith("ticket-admit")).length, 1, "recovery never records again");

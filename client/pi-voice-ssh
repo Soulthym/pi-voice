@@ -347,7 +347,7 @@ probe_audio_port() {
   else
     return 1
   fi
-  [[ $response == '{"type":"protocol","version":3}' ]]
+  [[ $response == '{"type":"protocol","version":4,"native_watchdog":true,"lease_seconds":30}' ]]
 }
 
 bridge_alive() {
@@ -387,7 +387,7 @@ ensure_bridge() {
     "$bridge" >"$runtime_root/client-bridge.log" 2>&1 &
     pid=$!
     printf '%s\n' "$pid" >"$bridge_pid_file"
-    # Wait for a v3 capability ACK, not merely an open listener.
+    # Wait for a v4 native-watchdog capability ACK, not merely an open listener.
     local tick=0
     while (( tick < 20 )); do
       if probe_audio_port; then break; fi
@@ -397,7 +397,7 @@ ensure_bridge() {
     done
     if ! kill -0 "$pid" 2>/dev/null || ! probe_audio_port; then
       release_path_lock "$bridge_lock"
-      printf 'Audio bridge did not acknowledge protocol v3; legacy, malformed, or unavailable endpoint (update all client helpers and wrappers).\n' >&2
+      printf 'Audio bridge did not acknowledge protocol v4 native watchdog; legacy, malformed, or unavailable endpoint (update all client helpers and wrappers).\n' >&2
       cat "$runtime_root/client-bridge.log" >&2
       exit 1
     fi
