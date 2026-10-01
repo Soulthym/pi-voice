@@ -7,19 +7,23 @@ local fifo = os.getenv('PI_VOICE_FIFO')
 local deadline
 local started = false
 local expired = false
+local quit_code = 1
 local phase = 'setup'
 local cause = 'syscall-failed'
 local function quit(code)
     expired = true
-    assert(mp.commandv('quit', tostring(code or 1)))
+    quit_code = code or 1
+    assert(mp.commandv('quit', tostring(quit_code)))
 end
 local function guarded(callback)
     return function(...)
-        if expired then pcall(mp.commandv, 'quit', '1'); return end
+        -- quit is asynchronous: queued callbacks must preserve successful EOF.
+        if expired then pcall(mp.commandv, 'quit', tostring(quit_code)); return end
         cause = 'syscall-failed'
         local ok = pcall(callback, ...)
         if not ok then
             expired = true
+            quit_code = 1
             -- Neither a failed callback nor a failed quit may silently kill the watchdog.
             -- Fixed phase codes only: never persist paths, subprocess output or PCM.
             -- The helper launches us with umask 077 in its private scope directory.

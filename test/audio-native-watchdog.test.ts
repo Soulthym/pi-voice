@@ -23,7 +23,7 @@ function fixture() {
  return { root, bin, env };
 }
 
-for (const directory of ["client", "termux"]) test(`${directory}: native watchdog monotonic deadline and scoped renewal`, () => {
+for (const directory of ["client", "termux"]) for (const ending of ['deadline', 'eof']) test(`${directory}: native watchdog scoped renewal and ${ending}`, () => {
  const { root, env } = fixture();
  try {
   const lua = spawnSync("lua", ["-e", `
@@ -62,10 +62,22 @@ local function ack()
 end
 assert(ack()==nonce)
 now=158.9; callbacks.timer(); assert(#commands==1)
--- Pause and missing guardian/transport cannot suppress a native timer.
-now=159; callbacks.timer(); assert(commands[2][1]=='quit' and commands[2][2]=='1')
+local code = '${ending}' == 'eof' and '0' or '1'
+if '${ending}' == 'eof' then
+ callbacks['end-file']({reason='eof'})
+ local f=assert(io.open('${root}/binding.complete')); assert(f:read('*a')=='${id}'); f:close()
+else
+ -- Pause and missing guardian/transport cannot suppress a native timer.
+ now=159; callbacks.timer()
+end
+assert(commands[2][1]=='quit' and commands[2][2]==code)
+-- mpv can dispatch queued callbacks before the asynchronous quit takes effect.
+now=200; callbacks.timer()
 callbacks['pi-voice-renew']('${id}','${boot}',string.rep('b',32))
-assert(ack()==nonce, 'an expired lease must never be resurrected')
+callbacks['pi-voice-start']('${id}','${boot}')
+callbacks['end-file']({reason='stop'})
+for i=2,#commands do assert(commands[i][1]=='quit' and commands[i][2]==code, 'queued callback changed terminal exit status') end
+assert(ack()==nonce, 'a terminal lease must never be resurrected')
 `], { env: { ...env, PI_VOICE_SCOPE: id, PI_VOICE_BOOT: boot, PI_VOICE_BINDING: `${root}/binding`, PI_VOICE_FIFO: `${root}/pcm` }, encoding: "utf8" });
   assert.equal(lua.status, 0, lua.stderr);
   const binding = fs.readFileSync(`${root}/binding`, "utf8").trim().split(" ");

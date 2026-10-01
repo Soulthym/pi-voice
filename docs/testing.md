@@ -1,5 +1,46 @@
 # Tests
 
+## Native EOF exit-status race after namespace portability
+
+The previously intermittent mpv 0.35.1 full-host EOF failure was a production Lua
+race, not missing stdout drainage or temporary configuration. One uninstrumented
+baseline host run failed; five diagnostic host runs yielded three failures and
+two passes. The captured native trace showed natural EOF, `quit(0)`, then a queued
+callback issuing `quit(1)` before shutdown completed. Shell tracing confirmed
+feeder status zero and player status one. The helper therefore correctly withheld
+`complete`; TCP closure caused the host's unconfirmed-playback error even though
+scoped stop recovery subsequently obtained native exit proof.
+
+Both watchdog copies now retain the terminal quit code across queued callbacks.
+Successful EOF remains zero; expiry and callback failures remain nonzero, renewal
+cannot revive a terminal lease, and failed quit still attempts stop plus quit.
+No timeout, admission rule, native proof, host assertion or TCP protocol was relaxed.
+The deterministic EOF-then-timer/renew/start/end regression failed on **both copies
+before the fix**; both existing deadline cases passed. The full-host harness remains
+unchanged: it drains helper stdout into parsed replies and TCP, with private
+container HOME/XDG/runtime directories and fresh worker scopes.
+
+Post-fix validation: **45/45 focused tests**; full default **1,383 passed / 35
+skipped**; installed-native Pi **1,416 passed / 2 skipped**; zero failures.
+Typecheck, Lua syntax, helper parity and whitespace checks passed; LSP is
+unavailable. The full-suite skips still include both opt-in real-mpv tests.
+Isolated real SSH passed **12/12 cases**, with both no-player tripwires intact.
+Actual mpv **0.35.1 and 0.40.0 each passed 10/10 repetitions** of both sandbox
+suites: eight native plus four full-host scenarios per repetition, **120/120
+scenarios per version (240 total)**, zero skips or failures. Every repetition
+exercised hello/preparation/durable host grant/commit, paused readiness before PCM,
+cancel, resumed PCM/EOF, delayed startup, and native namespace failure/recovery.
+Natural host EOF required `complete`, scoped release, native disappearance and
+exit receipt with no unconfirmed error. Native cases retained lease expiry,
+renewal, guardian-crash recovery and synthetic Android EOF checks.
+
+These are isolated Linux software checks, **not real Android validation**.
+Namespace proof was not changed. Live namespace-directory evidence remains
+pending from the user; no absent live PID namespace is inferred. No actual phone,
+provider calls, inference, hardware audio, live-session restart, runtime-setting
+change or deployment was used. Existing cached mpv images were reused; the SSH
+harness used its disposable public-package image and private loopback network.
+
 ## Android 5.4 namespace capability portability
 
 Both helper copies and Lua now use validated `uname -r` and binding-v3 capability
@@ -26,9 +67,10 @@ After adding an explicit unpaused Android-fixture API EOF/completion regression,
 actual mpv **0.40.0 passed all 12 scenarios**; **0.35.1 passed all eight native
 scenarios**, including Android EOF and guardian crash, but the full-host delayed
 startup EOF check failed on its final run. Earlier 0.35.1 runs passed all previous
-11 scenarios; intermittent host completion failures remain unresolved, so the
-final 0.35.1 suite is **not green**. A first new EOF assertion also failed before
-the fixture waited for stream closure rather than just process exit. Final logs:
+11 scenarios; that checkpoint was **not green**. The production EOF race is
+resolved and revalidated in the follow-up section above. A first new EOF assertion
+also failed before the fixture waited for stream closure rather than just process
+exit. Final logs:
 `/tmp/ae.eGaV`. Typecheck/syntax checks were repeated; full default/native suites
 were not rerun after this opt-in sandbox-only addition.
 
