@@ -6,6 +6,7 @@ export const namespaceCases = [
  'release-malformed', 'release-nul', 'release-newline', 'release-long',
  'list-empty', 'list-duplicate', 'list-malformed', 'list-nul', 'list-no-newline',
  'list-blank', 'list-long', 'link-malformed', 'link-nul', 'link-long',
+ 'mount-question', 'mount-question-nul', 'mount-question-malformed', 'mount-empty',
  'mount-error', 'mount-malformed', 'mount-no-newline', 'mount-nul', 'mount-duplicate', 'mount-long', 'mount-nul-prefix',
  'mount-binfmt', 'mount-sys', 'mount-ancestry', 'mount-ancestry-reversed', 'mount-other-device', 'mount-wrong-root',
  'mount-sys-tmpfs', 'mount-sys-duplicate', 'mount-sys-hidepid', 'mount-ancestry-overlay',
@@ -32,6 +33,10 @@ export function namespaceFixture(mode: string) {
  if (mode === 'release-newline') release += '\n';
  if (mode === 'release-long') release = '5.4.0-' + 'a'.repeat(65) + '\n';
  let mounts = trustedMounts;
+ if (mode.startsWith('mount-question')) mounts += '2 1 0:2 / /media/backup? rw - tmpfs tmpfs rw\n';
+ if (mode === 'mount-question-nul') mounts = mounts.replace('backup?', 'backup\0');
+ if (mode === 'mount-question-malformed') mounts += 'broken\n';
+ if (mode === 'mount-empty') mounts = '';
  if (mode === 'mount-malformed') mounts += 'broken\n';
  if (mode === 'mount-no-newline') mounts = mounts.trimEnd();
  if (mode === 'mount-nul') mounts += '\0';
@@ -64,5 +69,5 @@ export function namespaceFixture(mode: string) {
  }
  return { release, listing, mounts, pid: mode === 'android' ? 'unsupported-no-pid' : 'pid:[123]',
   time: mode === 'android' || mode === 'old-absent' ? 'unsupported-pre5.6' : 'time:[123]',
-  accepted: ['modern', 'old-present', 'old-absent', 'android', 'mount-binfmt', 'mount-sys', 'mount-ancestry', 'mount-ancestry-reversed'].includes(mode) };
+  accepted: ['modern', 'old-present', 'old-absent', 'android', 'mount-question', 'mount-binfmt', 'mount-sys', 'mount-ancestry', 'mount-ancestry-reversed'].includes(mode) };
 }

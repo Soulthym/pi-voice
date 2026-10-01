@@ -1,5 +1,25 @@
 # Tests
 
+## Mountinfo literal question-mark regression
+
+Both shell helpers now detect actual NUL delimiters with Bash `read -d ''`
+without reserving a valid filename character. Bounded pipeline status, empty and
+truncated input rejection, full mountinfo parsing, hidepid checks and current
+namespace proof remain enforced for startup and recovery. Shared shell/Lua
+fixtures accept an unrelated mount path containing `?`, reject an actual NUL in
+that path, and reject empty input and malformed records after the valid mounts.
+Existing read-error-after-valid-prefix and other malformed/protection cases remain.
+
+In a disposable network-disabled container, the new valid-path case failed on
+both original shell copies; Lua accepted it. After the fix, **6/6 focused tests
+passed**, zero skips or failures: both shell recovery matrices, both Lua capability
+matrices, and both stopped-live-PID namespace guards. Typecheck, Bash syntax,
+helper parity and whitespace checks passed; LSP was unavailable. The full suite,
+real mpv and SSH were not rerun. No live sessions, providers, inference, runtime
+settings or deployment were used. Actual Android namespace-listing evidence,
+including actual PID-namespace absence proof, remains pending parent review;
+synthetic fixtures do not establish it.
+
 ## Native EOF exit-status race after namespace portability
 
 The previously intermittent mpv 0.35.1 full-host EOF failure was a production Lua

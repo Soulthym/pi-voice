@@ -58,9 +58,14 @@ trusted_proc() {
   local mounts line mount type options root option device= seen=$'\n' visible=false LC_ALL=C
   local -a fields
   # Require successful bounded I/O; preserve final newlines and reject NULs.
-  mounts=$(set -o pipefail; cat /proc/self/mountinfo | head -c 1048577 | tr '\000' '?' && printf '.') || return 1
+  mounts=$(set -o pipefail; cat /proc/self/mountinfo | head -c 1048577 | {
+    # NUL terminates read successfully; only EOF (1) may yield mount text.
+    IFS= read -r -d '' mounts
+    [[ $? == 1 ]] || exit 1
+    printf '%s.' "$mounts"
+  }) || return 1
   mounts=${mounts%.}
-  [[ -n $mounts && ${#mounts} -le 1048576 && $mounts == *$'\n' && $mounts != *'?'* ]] || return 1
+  [[ -n $mounts && ${#mounts} -le 1048576 && $mounts == *$'\n' ]] || return 1
   mounts=${mounts%$'\n'}
   while IFS= read -r line; do
     read -r -a fields <<<"$line"
