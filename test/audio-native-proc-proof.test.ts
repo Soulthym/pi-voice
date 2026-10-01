@@ -6,6 +6,12 @@ import * as path from 'node:path';
 import test from 'node:test';
 import { namespaceCases, namespaceFixture } from './helpers/namespace-fixture.js';
 
+test('binding-v4 Python native proof: Android hidepid=2, pidfd failures, and real Linux pidfd', () => {
+ const result = spawnSync('python3', ['-B', '-m', 'unittest', 'discover', '-s', 'test', '-p', 'test_native_proof.py'], { encoding: 'utf8', timeout: 15000 });
+ assert.equal(result.error, undefined);
+ assert.equal(result.status, 0, result.stdout + result.stderr);
+});
+
 for (const directory of ['client', 'termux']) test(`${directory}: binding-v3 synthetic capability recovery requires trusted proc visibility`, () => {
  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-proc-proof-'));
  const id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';

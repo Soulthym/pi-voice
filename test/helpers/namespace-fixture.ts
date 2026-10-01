@@ -15,7 +15,7 @@ export const namespaceCases = [
  'overlay-self', 'overlay-pid', 'overlay-sys', 'overlay-thread-self', 'overlay-mounts', 'overlay-escaped',
 ] as const;
 
-export function namespaceFixture(mode: string) {
+export function namespaceFixture(mode: string, pidfd = false) {
  const old = mode === 'android' || mode.startsWith('old-');
  let release = old ? '5.4.0-vendor\n' : '6.8.0\n';
  let listing = mode === 'android' ? 'mnt\nnet\nuser\nuts\n' : 'pid\nmnt\ntime\n';
@@ -69,5 +69,5 @@ export function namespaceFixture(mode: string) {
  }
  return { release, listing, mounts, pid: mode === 'android' ? 'unsupported-no-pid' : 'pid:[123]',
   time: mode === 'android' || mode === 'old-absent' ? 'unsupported-pre5.6' : 'time:[123]',
-  accepted: ['modern', 'old-present', 'old-absent', 'android', 'mount-question', 'mount-binfmt', 'mount-sys', 'mount-ancestry', 'mount-ancestry-reversed'].includes(mode) };
+  accepted: (pidfd && ['hidepid', 'hidepid-super', 'mount-sys-hidepid'].includes(mode)) || ['modern', 'old-present', 'old-absent', 'android', 'mount-question', 'mount-binfmt', 'mount-sys', 'mount-ancestry', 'mount-ancestry-reversed'].includes(mode) };
 }

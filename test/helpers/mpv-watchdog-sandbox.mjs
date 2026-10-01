@@ -25,7 +25,7 @@ async function run(mode) {
   '--idle=yes', '--demuxer=rawaudio', '--demuxer-rawaudio-format=floatle',
   '--demuxer-rawaudio-rate=24000', '--demuxer-rawaudio-channels=mono',
   `--input-ipc-server=${ipc}`, '--script=/work/pi-voice-mpv-watchdog.lua'], {
-  env: {...process.env, PI_VOICE_TEST_ANDROID:mode === 'android' ? '1' : '0', PI_VOICE_SCOPE:scope, PI_VOICE_BOOT:boot, PI_VOICE_BINDING:binding, PI_VOICE_FIFO:pcm},
+  env: {...process.env, PI_VOICE_TEST_PROC_MISMATCH:mode === 'procview-mismatch' ? '1' : '0', PI_VOICE_TEST_ANDROID:mode === 'android' ? '1' : '0', PI_VOICE_SCOPE:scope, PI_VOICE_BOOT:boot, PI_VOICE_BINDING:binding, PI_VOICE_FIFO:pcm},
   stdio:['ignore','pipe','pipe'],
  });
  let log=''; child.stdout.on('data', b=>log+=b); child.stderr.on('data', b=>log+=b);
@@ -33,6 +33,14 @@ async function run(mode) {
  let socket;
  const timeout = setTimeout(()=>child.kill('SIGKILL'), 55000);
  try {
+  if (mode === 'procview-mismatch') {
+   const [code, signal] = await exited;
+   assert.equal(signal, null, log); assert.equal(code, 1, log);
+   assert.equal(fs.existsSync(binding), false, 'foreign proc PID must not bind or admit PCM');
+   assert.equal(fs.readFileSync(binding+'.error', 'utf8'), 'pid-alignment unsupported\n');
+   console.log(`PASS real mpv --ao=null: ${mode}`);
+   return;
+  }
   await until(()=>fs.existsSync(binding) && fs.existsSync(ipc));
   const identity=fs.readFileSync(binding,'utf8').trim().split(' ');
   assert.equal(identity[0], scope); assert.equal(identity[1], boot);
@@ -41,7 +49,7 @@ async function run(mode) {
   assert.equal(identity[4], String(process.getuid()));
   assert.equal(identity[5], mode === 'android' ? 'unsupported-no-pid' : fs.readlinkSync('/proc/self/ns/pid'));
   assert.equal(identity[6], fs.readlinkSync('/proc/self/ns/mnt'));
-  assert.deepEqual(identity.slice(7), ['binding-v3', mode === 'android' ? 'unsupported-pre5.6' : fs.readlinkSync('/proc/self/ns/time')]);
+  assert.deepEqual(identity.slice(7), ['binding-v4', mode === 'android' ? 'unsupported-pre5.6' : fs.readlinkSync('/proc/self/ns/time')]);
   socket=net.createConnection(ipc); await once(socket,'connect');
   socket.on('error',()=>{});
   let response=''; socket.on('data',b=>response+=b);
@@ -113,14 +121,23 @@ async function api(mode) {
   assert.equal(fs.existsSync(`${state}/exited`),false);
   // PCM is supplied only after the real API confirms native binding/start.
   if(eof) {
-   assert.deepEqual(identity.slice(5), ['unsupported-no-pid', fs.readlinkSync('/proc/self/ns/mnt'), 'binding-v3', 'unsupported-pre5.6']);
+   assert.deepEqual(identity.slice(5), ['unsupported-no-pid', fs.readlinkSync('/proc/self/ns/mnt'), 'binding-v4', 'unsupported-pre5.6']);
    guardian.child.stdin.end(Buffer.alloc(24000*4*0.1));
   } else guardian.child.stdin.write(Buffer.alloc(24000*4*90));
   const began=performance.now();
-  if(mode==='api-android') {
-   assert.deepEqual(identity.slice(5), ['unsupported-no-pid', fs.readlinkSync('/proc/self/ns/mnt'), 'binding-v3', 'unsupported-pre5.6']);
-   guardian.child.kill('SIGKILL'); await guardian.done;
-   assert.equal(fs.existsSync(`${state}/exited`),false,'synthetic Android guardian death is not native exit');
+  if(!eof) {
+   await until(()=>guardian.output().split('\n').slice(0,-1).some(line=> {
+    const event=JSON.parse(line);
+    return event.type==='playback' && Number.isFinite(event.position) && event.position>=0;
+   }));
+  }
+  if(mode==='api-android' || mode==='api-native-kill') {
+   if(mode==='api-android') assert.deepEqual(identity.slice(5), ['unsupported-no-pid', fs.readlinkSync('/proc/self/ns/mnt'), 'binding-v4', 'unsupported-pre5.6']);
+   guardian.child.kill('SIGKILL');
+   assert.deepEqual(await guardian.done,[null,'SIGKILL']);
+   assert.equal(fs.existsSync(`${state}/exited`),false,'guardian death is not native exit');
+   assert.ok(fs.readFileSync(`/proc/${pid}/cmdline`,'utf8').includes('/usr/bin/mpv'),'native mpv survives guardian SIGKILL');
+   if(mode==='api-native-kill') process.kill(pid,'SIGKILL');
   }
   if(mode==='api-renew-crash') {
    await delay(12000);
@@ -145,15 +162,15 @@ async function api(mode) {
    assert.deepEqual(guardian.output().trim().split('\n').map(line=>JSON.parse(line)).filter(event=>event.type==='complete'),
     [{type:'complete',id:prepared.id,boot_id:boot}]);
    assert.deepEqual(JSON.parse(fs.readFileSync(`${state}/exited`,'utf8')),{id:prepared.id,boot_id:boot,proof:'native-process-exit'});
-  } else assert.ok(elapsed>=(mode==='api-renew-crash'?41000:29000),`early native exit: ${elapsed}ms`);
+  } else if(mode!=='api-native-kill') assert.ok(elapsed>=(mode==='api-renew-crash'?41000:29000),`early native exit: ${elapsed}ms`);
   if(mode==='api-expiry') assert.equal((await guardian.done)[0],0,guardian.errors());
   const stop=helper(`stop ${prepared.id} ${boot}`);
   assert.equal((await stop.done)[0],0,stop.errors());
   assert.deepEqual(JSON.parse(stop.output()),{type:'stopped',id:prepared.id,boot_id:boot,proof:'native-process-exit'});
   assert.deepEqual(JSON.parse(fs.readFileSync(`${state}/exited`,'utf8')),{id:prepared.id,boot_id:boot,proof:'native-process-exit'});
-  console.log(`PASS real mpv --ao=null: ${mode}`);
+  console.log(mode==='api-native-kill' ? 'PASS native SIGKILL recovery: real mpv --ao=null' : `PASS real mpv --ao=null: ${mode}`);
  } finally {
   for(const child of children) if(child.exitCode===null && child.signalCode===null) child.kill('SIGKILL');
  }
 }
-await Promise.all([...['eof','paused','renewed','android'].map(run), ...['api-expiry','api-renew-crash','api-android','api-android-eof'].map(api)]);
+await Promise.all([...['eof','paused','renewed','android','procview-mismatch'].map(run), ...['api-expiry','api-renew-crash','api-android','api-android-eof','api-native-kill'].map(api)]);

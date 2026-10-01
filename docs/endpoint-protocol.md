@@ -92,12 +92,13 @@ Stop, disconnect, failed renewal and an expired absolute host deadline cancel re
 permanently; late replies cannot resurrect it. The native player remains authoritative.
 
 A recovery handler can publish `native-process-exit` only for a durably bound scope
-on the same known boot, UID and PID/mount/reader-time namespaces, with readable unrestricted
-procfs and verified absence of the original PID or a different start time at that PID.
-Read/list failures, restricted procfs, a still-present original process (including a
-zombie), missing binding and namespace changes remain fenced. Host acceptance also
-requires the saved per-scope capability. Legacy receipts keep their legacy meaning;
-a new helper never promotes an old handle. Separately, a scope with durable
+on the same known boot, UID and PID/mount/reader-time namespaces, with the proof
+required by that binding version. New `binding-v4` uses kernel pidfds; legacy
+`binding-v3` still requires unrestricted procfs and verified PID absence or a
+different start time. Required read/list failures, a still-running original
+process, missing binding and namespace changes remain fenced. Host acceptance
+also requires the saved per-scope capability. Legacy receipts keep their legacy
+meaning; a new helper never promotes an old handle. Separately, a scope with durable
 `v4-start-intent-1` metadata and no `admission-intent` can obtain
 `sealed-nonadmission` on its verified original boot: stop fsyncs its tombstone and
 receipt under the same lock that gates intent, feeder and start. This covers a
@@ -105,9 +106,11 @@ prebinding crash after commit without signalling a reconstructed PID. Missing
 metadata or existing intent cannot use that proof.
 
 The private native binding format is now
-`<scope> <boot> <pid> <startticks> <uid> <pidns> <mntns> binding-v3 <reader-timens>`.
-Both readers obtain a strictly validated, bounded kernel release from `uname -r`,
-including vendor suffixes; neither reads the Android-restricted osrelease proc leaf.
+`<scope> <boot> <pid> <startticks> <uid> <pidns> <mntns> binding-v4 <reader-timens>`.
+Binding versions are private proof formats, distinct from wire audio protocol v4.
+The shell, Lua and Python readers obtain a strictly validated, bounded kernel
+release from `uname -r` (Python uses `os.uname().release`), including vendor suffixes;
+none reads the Android-restricted osrelease proc leaf.
 Successful complete namespace-directory enumeration on trusted procfs may establish
 an absent PID entry (`unsupported-no-pid`, for kernels without CONFIG_PID_NS).
 Mount namespace identity is mandatory. A missing time entry permits
@@ -115,25 +118,52 @@ Mount namespace identity is mandatory. A missing time entry permits
 must be readable and match exactly, regardless of version. Present-but-unreadable
 links, failed/malformed listings and unknown kernel releases always fail closed.
 
-Lua records its own PID from proc stat and reader time namespace (`time:[inode]`,
-not `time_for_children`). Recovery revalidates the same capability state, boot,
-UID and namespace identities before any start-tick comparison. Mount checks reject
-hidepid and identity-concealing overlays; identical-device procfs subtree mounts
-along boot identity ancestry are allowed. Different or unverifiable domains cannot
-prove PID reuse. Install matching shell/Lua helpers together: older bindings,
-including binding-v2, are not upgraded and cannot mint new native-exit receipts.
-Previously durable receipts retain their existing meaning.
+Lua records its own PID from proc stat and requires it to equal `mp.utils.getpid()`;
+the Python proof reader likewise aligns `/proc/self/stat` with `os.getpid()`.
+The time identity is the reader's `time:[inode]`, not `time_for_children`.
+Recovery revalidates capability state, boot, UID and namespace identities before
+using pidfd or start-tick evidence. Identity-concealing overlays remain rejected;
+identical-device procfs subtree mounts along boot identity ancestry are allowed.
+Different or unverifiable domains cannot prove PID reuse.
+
+`pi-voice-native-proof.py` requires Python 3 with stdlib `ctypes` on desktop and
+Termux. Its `probe` command checks the reader domain and opens/polls a pidfd for
+itself before player spawn. `validate <binding-path>` verifies the private,
+bounded binding, matching domain and live native PID/start ticks before the shell
+persists `bound` and permits admission intent/PCM. `gone <bound-path>` repeats the
+domain and positive self-pidfd probe before testing the recorded native PID.
+The shell additionally requires a committed, matching scope. A scope UUID must
+match its private directory; the binding must be a private, owned, single-link
+regular file, not a symlink.
+
+With that full **probe + PID alignment + scope contract**, `binding-v4` permits
+`hidepid=1` and `hidepid=2` as well as unrestricted procfs. It does not interpret a
+hidden directory or denied stat as exit. Only target `pidfd_open` **ESRCH** after
+the successful self-probe, a pidfd exit poll, or readable different start ticks
+can prove the original process gone. EPERM, ENOSYS, missing APIs, malformed
+metadata and other errors remain unproven. A readable pidfd can prove exit even
+before a zombie is reaped; legacy v3 procfs presence cannot.
+
+The helper uses `os.pidfd_open` when available; only if that Python API is absent
+does it call libc `pidfd_open` through `ctypes`. It never sends signals and has no
+numeric-PID signal fallback. A kernel version alone is not a capability probe.
+Install matching shell/Lua/Python helpers together. Existing `binding-v3` retains
+its original unrestricted-procfs absence/reuse checks (nonzero hidepid rejected),
+not v4 pidfd semantics. Binding-v2 and malformed/unknown bindings cannot mint new
+native-exit receipts. No old binding is upgraded; previously durable receipts
+retain their existing meaning.
 
 Supported native binding requires a Lua-enabled mpv with the timer, IPC/script-message
-and subprocess APIs used here, readable boot/process metadata, and matching verified
+and subprocess APIs plus `mp.utils.getpid` used here, Python 3 with `ctypes`,
+working kernel pidfds, readable boot/process metadata, and matching verified
 namespace domains. Linux null-output tests on mpv 0.35.1 and 0.40.0 do not validate
 a particular Android/Termux kernel or physical audio device. Android may permit
 self-process reads but restrict a subprocess reading the native player's namespace
 links; `namespace-read-failed` reports that boundary without bypassing it. An actual
 pre-5.6 kernel has not been validated; Android 5.4 capability layouts are synthetic
-fixtures, including actual mpv with null output. Nonzero hidepid remains unsupported,
-including Android configurations using it: this patch does not establish that an
-actual phone meets the complete proof requirements. A present-but-denied PID link
+fixtures, including actual mpv with null output. Restricted procfs support is
+conditional on the complete binding-v4 contract above, not a claim that an actual
+phone meets it. **No real Android validation is claimed.** A present-but-denied PID link
 also remains unsupported and needs a separately reviewed trustworthy identity,
 not an absence marker. There is no receipt-only, PID-only, no-watchdog or
 older-protocol fallback.

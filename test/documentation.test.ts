@@ -36,6 +36,34 @@ test("README, example JSON, and configuration table match current defaults", () 
 	assert.match(read("docs/commands.md"), /\/voice code-retry historical/);
 });
 
+test("native playback docs match installed helpers and distinguish proof versions", () => {
+	for (const directory of ["client", "termux"]) {
+		const helpers = fs.readdirSync(directory).filter(name => name.startsWith("pi-voice-"));
+		assert.equal(helpers.length, 7, `${directory} install glob count changed; update docs`);
+		assert.ok(helpers.includes("pi-voice-native-proof.py"));
+		assert.ok(helpers.includes("pi-voice-mpv-watchdog.lua"));
+	}
+	for (const path of ["README.md", "docs/installation.md", "docs/testing.md"]) {
+		const text = read(path);
+		assert.match(text, /\*\*7 files\*\*/);
+		assert.match(text, /pi-voice-native-proof\.py/);
+		assert.match(text, /Python 3 with stdlib `ctypes`/);
+		assert.match(text, /binding-v4/);
+		assert.match(text, /binding-v3/);
+		assert.match(text, /[Nn]ot? real Android validation/);
+	}
+	for (const path of ["README.md", "docs/installation.md"]) {
+		assert.match(read(path), /pkg install [^\n]*\bpython\b/);
+	}
+	const protocol = read("docs/endpoint-protocol.md");
+	assert.match(protocol, /probe \+ PID alignment \+ scope contract/);
+	assert.match(protocol, /hidepid=1/);
+	assert.match(protocol, /hidepid=2/);
+	assert.match(protocol, /libc `pidfd_open` through `ctypes`/);
+	assert.match(protocol, /no\s+numeric-PID signal fallback/);
+	assert.match(protocol, /`binding-v3` retains\s+its original unrestricted-procfs/);
+});
+
 test("playback and protocol docs retain current behavior and safe upgrade guidance", () => {
 	for (const path of ["README.md", "docs/usage.md"]) {
 		assert.match(read(path), /\| `F5`[^\n]*never switch projects/);

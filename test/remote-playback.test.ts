@@ -121,7 +121,8 @@ test(`${helper}: reboot proof independently reads device identity without fabric
 		const bootFile = path.join(root, "boot");
 		const script = path.join(root, "session");
 		fs.writeFileSync(script, fs.readFileSync(helper, "utf8").replace("/proc/sys/kernel/random/boot_id", bootFile));
-		fs.copyFileSync(path.join(path.dirname(helper), "pi-voice-mpv-watchdog.lua"), path.join(root, "pi-voice-mpv-watchdog.lua"));
+		for (const dependency of ["pi-voice-mpv-watchdog.lua", "pi-voice-native-proof.py"])
+			fs.copyFileSync(path.join(path.dirname(helper), dependency), path.join(root, dependency));
 		const env = { PATH: process.env.PATH, HOME: root, TMPDIR: root, XDG_RUNTIME_DIR: root, XDG_STATE_HOME: path.join(root, "state"), XDG_CONFIG_HOME: "", PI_VOICE_DEVICE_ID: "must-not-be-used" };
 		const deviceFile = path.join(root, ".config/pi-voice/device-id");
 		fs.mkdirSync(path.dirname(deviceFile), { recursive: true });

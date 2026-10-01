@@ -52,7 +52,7 @@ After registration, `Connected as <name>` confirms the **client's** identity, **
 
 ## Linux SSH client
 
-Install `openssh`, `socat`, `mpv`, `ffmpeg`, `flock` (util-linux), Python 3 with the pidfd facilities listed above, and PipeWire or PulseAudio recording utilities. From a Pi Voice checkout:
+Install `openssh`, `socat`, Lua-enabled `mpv`, `ffmpeg`, `flock` (util-linux), Python 3 with stdlib `ctypes` for native playback, and PipeWire or PulseAudio recording utilities. Desktop capture additionally requires the Python pidfd facilities listed above. Native playback requires working kernel pidfds; it uses `os.pidfd_open` or, if that Python API is absent, libc `pidfd_open` through `ctypes`. Missing libc/kernel support fails closed; there is no numeric-PID signal fallback. From a Pi Voice checkout:
 
 ```bash
 mkdir -p "$HOME/.local/bin"
@@ -73,8 +73,10 @@ Install Termux and the **Termux:API Android app from the same source**, normally
 
 ```bash
 pkg update
-pkg install git openssh socat mpv ffmpeg termux-api util-linux
+pkg install git openssh socat mpv ffmpeg termux-api util-linux python
 ```
+
+Python 3 with stdlib `ctypes` is required for Termux **native bridge playback**, even though the Android recorder does not use Python. Kernel pidfd support and the complete [binding-v4 proof contract](endpoint-protocol.md#native-watchdog-and-proof-limits) are required; a package install or kernel version alone does not establish compatibility.
 
 Install the bridge scripts from a checkout:
 
@@ -184,11 +186,13 @@ The quoted SCP wildcard is matched remotely, not expanded by the local shell.
 Only then reconnect with `"$CLIENT_BIN/pi-voice-ssh" "$VOICE_HOST"` and run `/reload` in Pi when safe.
 These are operator-run upgrade instructions, not deployment or stop-proof shortcuts.
 
-Desktop capture now requires Python 3 with `os.pidfd_open` and `signal.pidfd_send_signal`, plus Linux pidfd support (normally Python ≥3.9 / Linux ≥5.3). Install/verify this on local Linux Pi hosts and every desktop capture client before upgrading; Termux's Android recorder path does not use Python. The recorder acquires its own incarnation-safe signal handle before opening the device; unavailable support fails closed rather than signalling a potentially reused PID.
+Desktop capture now requires Python 3 with `os.pidfd_open` and `signal.pidfd_send_signal`, plus Linux pidfd support (normally Python ≥3.9 / Linux ≥5.3). Install/verify this on local Linux Pi hosts and every desktop capture client before upgrading; Termux's Android recorder path does not use Python, but native bridge playback now does. The recorder acquires its own incarnation-safe signal handle before opening the device; unavailable support fails closed rather than signalling a potentially reused PID.
 
 ### Audio protocol v4 native watchdog (host and every client)
 
-Update the host and **all installed helpers and SSH wrappers together** on every desktop and Termux client, including custom launcher paths. Copy the complete `client/pi-voice-*` set using the [local install or SCP commands below](#upgrade-device-name-support), not just `pi-voice-audio-session`. The glob includes the new **`pi-voice-mpv-watchdog.lua`**; install it beside the audio helper in every installed copy. mpv must include Lua support, with readable Linux boot identity and procfs. The watchdog runs inside mpv; no standalone Lua interpreter/package is required. Lua support was tested with isolated mpv 0.35 and 0.40 builds, not verified on every installed phone build. Binding failure denies audio rather than falling back. If using a separate `termux/` installation, update its complete `termux/pi-voice-*` set at its actual installed location too. Use the matching host checkout if these changes are not published upstream.
+Update the host and **all installed helpers and SSH wrappers together** on every desktop and Termux client, including custom launcher paths. Copy the complete `client/pi-voice-*` set using the [local install or SCP commands below](#upgrade-device-name-support), not just `pi-voice-audio-session`. The `client/pi-voice-*` and `termux/pi-voice-*` globs each currently match **7 files**, including **`pi-voice-mpv-watchdog.lua`** and **`pi-voice-native-proof.py`**; install both beside the audio helper in every installed copy. Native playback on both desktop and Termux requires Python 3 with stdlib `ctypes` and working kernel pidfds (`os.pidfd_open`, or libc `pidfd_open` via `ctypes` when Python lacks that API). This proof helper never sends signals. mpv must include Lua support and `mp.utils.getpid`, with readable Linux boot identity and the procfs metadata required by the proof contract. The watchdog runs inside mpv; no standalone Lua interpreter/package is required. Lua support was tested with isolated mpv 0.35 and 0.40 builds, not verified on every installed phone build. Binding failure denies audio rather than falling back. If using a separate `termux/` installation, update its complete `termux/pi-voice-*` set at its actual installed location too. Use the matching host checkout if these changes are not published upstream.
+
+New `binding-v4` permits restricted procfs with `hidepid=1` or `hidepid=2` only after a positive kernel pidfd probe, syscall/proc PID alignment for the proof reader and native player, and matching private scope, boot, UID and PID/mount/reader-time namespace evidence. Denied required metadata, unsupported pidfds or mismatched identity fail closed before PCM. Legacy `binding-v3` recovery retains its unrestricted-procfs rules; recopying helpers does not upgrade old bindings. Android 5.4 coverage is synthetic, **not real Android validation**. See [native proof limits](endpoint-protocol.md#native-watchdog-and-proof-limits).
 
 When probing a newly started bridge, both SSH wrapper variants require the exact v4 native-watchdog capability control-only `hello` acknowledgement; v1/v2/v3, malformed and empty replies are rejected without sending audio or starting a player. The existing-live-bridge command-line check can bypass that wrapper probe; wrapper reuse is not an upgrade check. Actual host admission still requires v4 prepare/journal/commit before PCM (and the current boot-bound microphone capability before START). Old wrappers requiring v2/v3 will reject a v4 bridge. Readiness is not a playback test.
 
@@ -234,7 +238,7 @@ scp "$VOICE_HOST:$VOICE_REPO/client/pi-voice-*" "$CLIENT_BIN/"
 chmod 755 "$CLIENT_BIN"/pi-voice-*
 ```
 
-Use the host's updated local checkout when the changes are not yet published upstream. For an installation that deliberately invokes the alternative `termux/pi-voice-ssh`, also replace its entire matching `termux/pi-voice-*` helper set, including the Lua watchdog; the standard `client/` copy above does not update a separate custom path. For example, on that Termux client:
+Use the host's updated local checkout when the changes are not yet published upstream. For an installation that deliberately invokes the alternative `termux/pi-voice-ssh`, also replace its entire matching `termux/pi-voice-*` helper set, including the Lua watchdog and Python proof helper; the standard `client/` copy above does not update a separate custom path. For example, on that Termux client:
 
 Reuse `VOICE_HOST` and `VOICE_REPO` from the preceding local-client block; set `CLIENT_BIN` below to the local directory containing the wrapper your custom launcher executes:
 

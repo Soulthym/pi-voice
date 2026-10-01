@@ -37,7 +37,7 @@ test("Socket VoiceWorkerClient reaches real mpv while paused before any PCM", { 
   for (const file of ["worker-mpv-sandbox.mjs", "worker-transport-mocks.mjs", "trusted-proc-sandbox.mjs"]) {
    await fs.copyFile(`test/helpers/${file}`, path.join(stage, file));
   }
-  for (const file of ["pi-voice-audio-session", "pi-voice-mpv-watchdog.lua"]) {
+  for (const file of ["pi-voice-audio-session", "pi-voice-mpv-watchdog.lua", "pi-voice-native-proof.py"]) {
    await fs.copyFile(`client/${file}`, path.join(stage, file));
   }
   run("create", "--pull=never", "--network=none", "--init", "--cap-drop=all", "--security-opt=no-new-privileges",

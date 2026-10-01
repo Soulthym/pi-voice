@@ -22,7 +22,9 @@ local mp = {
 package.preload['mp'] = function() return mp end
 package.preload['mp.utils'] = function()
     fail('utils')
-    return {subprocess = function(args)
+    return {getpid = function()
+        local f = assert(io.open('/proc/self/stat')); local pid = f:read('*a'):match('^(%d+)'); f:close(); return tonumber(pid)
+    end, subprocess = function(args)
         if args.args[1] == 'uname' then return {status=0, stdout='6.8.0\n'} end
         if args.args[1] == 'ls' then return {status=0, stdout='pid\nmnt\ntime\n'} end
         local name = args.args[2]:match('/ns/(%w+)$')

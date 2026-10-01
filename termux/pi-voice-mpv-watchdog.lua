@@ -119,7 +119,12 @@ guarded(function()
     local stat = read('/proc/self/stat')
     local pid, tail = stat:match('^(%d+) %(.+%) (.+)$')
     assert(pid and tail and #pid <= 10 and pid:match('^[1-9]%d*$'))
-    -- Reject overlays before using directory enumeration as evidence of absence.
+    -- getpid is the native player, not a subprocess or proc-mount PID view.
+    phase = 'pid-alignment'
+    cause = 'unsupported'
+    assert(type(utils.getpid) == 'function' and tostring(utils.getpid()) == pid)
+    cause = 'syscall-failed'
+    -- Restricted procfs is safe only with the helper's pre-admission pidfd probe.
     phase = 'proc-mounts'
     local mounts = read('/proc/self/mountinfo')
     local visible, device, seen = false, nil, {}
@@ -136,7 +141,8 @@ guarded(function()
             device, seen[mount] = dev, true
             if mount == '/proc' then visible = true end
             for option in (options .. ',' .. super):gmatch('[^,]+') do
-                assert(not option:match('^hidepid=') or option == 'hidepid=0')
+                assert(not option:match('^hidepid=') or option == 'hidepid=0' or
+                    option == 'hidepid=1' or option == 'hidepid=2')
             end
         elseif mount:sub(1, 6) == '/proc/' then
             local first = mount:match('^/proc/([^/]+)')
@@ -191,7 +197,7 @@ guarded(function()
     assert(#uid <= 10)
     local current_boot = read('/proc/sys/kernel/random/boot_id', 37)
     assert(current_boot == boot or current_boot == boot .. '\n')
-    local identity = table.concat({scope, boot, pid, ticks, uid, pidns, mntns, 'binding-v3', timens}, ' ')
+    local identity = table.concat({scope, boot, pid, ticks, uid, pidns, mntns, 'binding-v4', timens}, ' ')
     phase = 'binding-publish'
     publish(binding, identity .. '\n')
 end)()

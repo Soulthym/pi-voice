@@ -37,6 +37,7 @@ local mp = {
 }
 package.preload['mp']=function() return mp end
 package.preload['mp.utils']=function() return {
+ getpid=function() local f=assert(io.open('/proc/self/stat')); local pid=f:read('*a'):match('^(%d+)'); f:close(); return tonumber(pid) end,
  subprocess=function(args)
  if args.args[1]=='uname' then return {status=0,stdout='6.8.0\\n'} end
  if args.args[1]=='ls' then return {status=0,stdout='pid\\nmnt\\ntime\\n'} end
@@ -83,7 +84,7 @@ assert(ack()==nonce, 'a terminal lease must never be resurrected')
   const binding = fs.readFileSync(`${root}/binding`, "utf8").trim().split(" ");
   assert.equal(binding[0], id); assert.equal(binding[1], boot);
   assert.match(binding[2], /^[1-9][0-9]*$/); assert.match(binding[3], /^[0-9]+$/);
-  assert.deepEqual(binding.slice(7), ['binding-v3', 'time:[123]']);
+  assert.deepEqual(binding.slice(7), ['binding-v4', 'time:[123]']);
  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -105,12 +106,12 @@ for (const directory of ["client", "termux"]) test(`${directory}: native capabil
  }
 });
 
-for (const directory of ["client", "termux"]) test(`${directory}: binding-v3 synthetic Android/Linux capabilities fail closed`, () => {
- for (const mode of namespaceCases) {
+for (const directory of ["client", "termux"]) test(`${directory}: binding-v4 synthetic Android/Linux capabilities fail closed`, () => {
+ for (const mode of [...namespaceCases, 'getpid-missing', 'getpid-error', 'getpid-mismatch', 'procview-mismatch']) {
   const { root, env } = fixture();
-  const model = namespaceFixture(mode);
+  const model = namespaceFixture(mode, true);
   for (const key of ['mounts', 'release', 'listing'] as const) fs.writeFileSync(`${root}/${key}`, model[key]);
-  Object.assign(env, { ACCEPTED: String(model.accepted), EXPECTED_NAMESPACES: `${model.pid} mnt:[123] binding-v3 ${model.time}` });
+  Object.assign(env, { ACCEPTED: String(model.accepted), EXPECTED_NAMESPACES: `${model.pid} mnt:[123] binding-v4 ${model.time}` });
   try {
    const lua = spawnSync('lua', ['test/helpers/native-watchdog-timens.lua', path.resolve(directory, 'pi-voice-mpv-watchdog.lua'), mode], {
     env: { ...env, PI_VOICE_SCOPE: id, PI_VOICE_BOOT: boot, PI_VOICE_BINDING: `${root}/binding`, PI_VOICE_FIFO: `${root}/pcm` }, encoding: 'utf8',
@@ -130,14 +131,14 @@ const fs=require('fs'), net=require('net');
 const ipc=process.argv.find(v=>v.startsWith('--input-ipc-server=')).split('=')[1];
 const binding=process.env.PI_VOICE_BINDING, id=process.env.PI_VOICE_SCOPE;
 const ticks=fs.readFileSync('/proc/self/stat','utf8').replace(/^.*\\) /,'').split(' ')[19];
-fs.writeFileSync(binding, [id,process.env.PI_VOICE_BOOT,process.pid,ticks,process.getuid(),fs.readlinkSync('/proc/self/ns/pid'),fs.readlinkSync('/proc/self/ns/mnt'),'binding-v3',fs.readlinkSync('/proc/self/ns/time')].join(' ')+'\\n');
+fs.writeFileSync(binding, [id,process.env.PI_VOICE_BOOT,process.pid,ticks,process.getuid(),fs.readlinkSync('/proc/self/ns/pid'),fs.readlinkSync('/proc/self/ns/mnt'),'binding-v4',fs.readlinkSync('/proc/self/ns/time')].join(' ')+'\\n');
 
 if(fs.existsSync(process.env.HOME+'/binding-mode')) {
  const mode=fs.readFileSync(process.env.HOME+'/binding-mode','utf8');
  let value=fs.readFileSync(binding,'utf8');
  if(mode==='error') { fs.writeFileSync(binding+'.error','namespace-time namespace-read-failed\\n',{mode:0o600}); fs.unlinkSync(binding); }
  if(mode==='unsafe-error') { fs.writeFileSync(binding+'.error','secret/\\"'+ 'x'.repeat(4096),{mode:0o600}); fs.unlinkSync(binding); }
- if(mode==='old') value=value.replace(/ binding-v3 time:\\[\\d+\\]/,'');
+ if(mode==='old') value=value.replace(/ binding-v4 time:\\[\\d+\\]/,'');
  if(mode==='domain') value=value.replace(/time:\\[\\d+\\]/,'time:[1]');
  if(mode==='missing') value=value.replace(/ time:\\[\\d+\\]/,'');
  if(!mode.endsWith('error')) fs.writeFileSync(binding,value);
@@ -294,7 +295,10 @@ setTimeout(()=>{s.destroy();process.exit(0)},100);
   // Permission/listing failure and namespace changes must remain fenced.
   const source = fs.readFileSync(script, "utf8");
   const injected = `${root}/pi-voice-audio-session`;
-  fs.writeFileSync(injected, source.replace('listing=$(LC_ALL=C QUOTING_STYLE=literal ls -1 -- /proc)', 'listing=$(false)'));
+  fs.writeFileSync(injected, source);
+  const proof = fs.readFileSync(path.resolve(directory, 'pi-voice-native-proof.py'), 'utf8');
+  assert.ok(proof.includes('names = os.listdir("/proc/self/ns")'));
+  fs.writeFileSync(`${root}/pi-voice-native-proof.py`, proof.replace('names = os.listdir("/proc/self/ns")', 'raise PermissionError("injected namespace listing failure")'));
   assert.equal(await control(`stop ${prepared.id}`, injected), "");
   assert.equal(fs.existsSync(`${state}/exited`), false);
   const stopped = JSON.parse(await control(`stop ${prepared.id}`));

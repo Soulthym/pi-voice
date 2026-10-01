@@ -1,5 +1,64 @@
 # Tests
 
+## Current binding-v4 pidfd proof coverage
+
+New native playback bindings use `binding-v4` and the matching shell, Lua and
+`pi-voice-native-proof.py` helpers. Both install globs (`client/pi-voice-*` and
+`termux/pi-voice-*`) currently contain **7 files**. Desktop and Termux native
+playback require Python 3 with stdlib `ctypes` and working kernel pidfds.
+When Python lacks `os.pidfd_open`, the proof helper uses libc `pidfd_open` through
+`ctypes`; it never sends signals or falls back to numeric-PID signals.
+
+Restricted procfs (`hidepid=1`/`hidepid=2`) is supported **only** with a successful
+kernel pidfd probe, syscall/proc PID alignment and the full private scope, boot,
+UID and namespace contract. Legacy `binding-v3` still uses unrestricted-procfs
+absence/reuse proof; old bindings are not upgraded. Required read failures,
+identity mismatch, denied namespace links and unavailable pidfds remain fenced.
+See the [current proof contract](endpoint-protocol.md#native-watchdog-and-proof-limits).
+
+Run the focused proof checks without starting a player or using audio hardware:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s test -p test_native_proof.py
+node --import tsx --test test/documentation.test.ts
+```
+
+`test/test_native_proof.py` uses private synthetic bindings and mocked Android 5.4
+procfs/libc inputs for missing Python API fallback, ESRCH versus EPERM/ENOSYS,
+namespace/boot/UID mismatch, PID reuse, pidfd polling, private-file validation and
+overlay rejection. Its Linux pidfd check uses only the test process and an owned
+short-lived Python child; this is not an Android check. Documentation tests check
+install glob counts and the dependency/proof distinctions.
+
+Final validation: **10 Python checks** passed; default `npm test` passed
+**1385 / 35 skips**, and the installed-native run passed **1418 / 2 skips**
+(1420 total each, zero failures). The two opt-in sandbox cases were run separately.
+`npm run check`, workspace TypeScript diagnostics, Bash syntax, helper parity and
+`git diff --check` passed. Logs: `/tmp/voice-v4-{check,default-final,native-final}.log`.
+
+Disposable real mpv **0.35.1 and 0.40.0 passed 14 scenarios each** with null output;
+isolated real SSH passed **12/12**. The test-only proc view models hidepid=2,
+Android 5.4 uname, denied osrelease, absent PID/time namespaces and readable mnt.
+Python's `os.pidfd_open` is removed in the Android model; libc pidfd calls and
+native player processes remain real. Coverage includes renewal, position events,
+healthy EOF, guardian SIGKILL followed by lease expiry and pidfd retirement,
+native SIGKILL without a waiter, and proc/kernel PID mismatch rejection.
+No host proc mounts or runtime settings were changed. Logs:
+`/tmp/voice-test-v4-rerun/{mpv-bookworm,mpv-trixie,ssh,python,check}.log`.
+
+Review caught and fixed a restricted-proc polling guard, non-ASCII unrelated
+mount paths, and an obsolete zombie-proc-presence assertion. Final independent
+code review found no remaining blockers; parent review is still pending.
+
+**No end-to-end Android validation is claimed.** The reported Android 5.4 libc
+self-pidfd probe succeeded despite Python lacking `os.pidfd_open`; that confirms
+only kernel-handle capability. Synthetic layouts and Linux software tests do not
+establish phone playback or physical audio behavior.
+The historical checkpoints below preserve their original test counts and limits;
+their binding-v3/nonzero-hidepid restrictions describe that earlier implementation,
+not the conditional binding-v4 support above. The new real-mpv results above
+exercise this binding format with simulated proc capabilities, not phone hardware.
+
 ## Mountinfo literal question-mark regression
 
 Both shell helpers now detect actual NUL delimiters with Bash `read -d ''`
@@ -63,8 +122,8 @@ harness used its disposable public-package image and private loopback network.
 
 ## Android 5.4 namespace capability portability
 
-Both helper copies and Lua now use validated `uname -r` and binding-v3 capability
-identities. Synthetic Android 5.4-vendor layouts deny the osrelease leaf, omit PID
+At this historical checkpoint, both helper copies and Lua used validated `uname -r`
+and binding-v3 capability identities. Synthetic Android 5.4-vendor layouts deny the osrelease leaf, omit PID
 and time entries, and retain readable mount identity. Actual mpv null-output
 checks exercise native binding, normal PCM/EOF and guardian-crash recovery using
 that controlled namespace view. These are **not actual Android hardware results**.
@@ -97,8 +156,9 @@ were not rerun after this opt-in sandbox-only addition.
 Public-package builds used isolated containers; runtimes had no host audio/home/
 device mounts. No live sessions, inference, providers, models, deployment, runtime
 settings or fence clearing were used. Owned containers/images were removed.
-Nonzero hidepid and present-but-denied namespace links still fail before PCM;
-phone compatibility is unverified pending its actual namespace-directory evidence.
+At that checkpoint, nonzero hidepid and present-but-denied namespace links failed
+before PCM. Current binding-v4 conditionally supports hidepid as described above;
+present-but-denied required links still fail, and phone compatibility remains unverified.
 Independent review identified the mount-read and subtree-bind issues corrected
 here; final parent review is still required.
 

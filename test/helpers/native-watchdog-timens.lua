@@ -14,6 +14,11 @@ local function contents(name)
     local f = assert(open(root .. '/' .. name)); local value = f:read('*a'); f:close(); return value
 end
 io.open = function(file, access)
+    if file == '/proc/self/stat' and mode == 'procview-mismatch' then
+        local f = assert(open(file)); local value = f:read('*a'); f:close()
+        local fake = assert(open(root .. '/stat', 'w')); fake:write((value:gsub('^%d+', '2147483647'))); fake:close()
+        return open(root .. '/stat', access)
+    end
     if file == '/proc/sys/kernel/osrelease' then error('osrelease must not be read on Android') end
     if file == '/proc/self/mountinfo' then
         if mode == 'mount-error' then return nil, 'Permission denied' end
@@ -21,7 +26,11 @@ io.open = function(file, access)
     end
     return open(file, access)
 end
-package.preload['mp.utils'] = function() return {subprocess=function(args)
+package.preload['mp.utils'] = function() return {getpid=mode ~= 'getpid-missing' and function()
+    if mode == 'getpid-error' then error('getpid unavailable') end
+    local f = assert(open('/proc/self/stat')); local pid = tonumber(f:read('*a'):match('^(%d+)')); f:close()
+    return mode == 'getpid-mismatch' and pid + 1 or pid
+end or nil, subprocess=function(args)
     if args.args[1] == 'uname' then
         assert(args.args[2] == '-r')
         return {status=mode == 'uname-error' and 1 or 0, stdout=contents('release')}
@@ -45,7 +54,7 @@ if os.getenv('ACCEPTED') == 'true' then
     assert(#commands == 0)
     local f = assert(open(binding)); local value = f:read('*a'); f:close()
     local expected = os.getenv('EXPECTED_NAMESPACES')
-    assert(value:match(' (%S+ mnt:%[123%] binding%-v3 %S+)\n$') == expected, value)
+    assert(value:match(' (%S+ mnt:%[123%] binding%-v4 %S+)\n$') == expected, value)
     callbacks['pi-voice-start'](os.getenv('PI_VOICE_SCOPE'), os.getenv('PI_VOICE_BOOT'))
     assert(commands[1] == 'loadfile', 'validated capability admits PCM')
 else
@@ -53,7 +62,9 @@ else
     assert(commands[#commands-1] == 'stop' and commands[#commands] == 'quit')
     local f = assert(open(binding .. '.error')); local value = f:read('*a'); f:close()
     local phase, cause = 'namespace-list', 'namespace-malformed'
-    if mode:match('^mount%-') or mode:match('^overlay%-') or mode:match('^hidepid') then
+    if mode:match('^getpid%-') or mode == 'procview-mismatch' then
+        phase, cause = 'pid-alignment', 'unsupported'
+    elseif mode:match('^mount%-') or mode:match('^overlay%-') or mode:match('^hidepid') then
         phase, cause = 'proc-mounts', 'syscall-failed'
     elseif mode == 'uname-error' or mode:match('^release%-') then
         phase = 'kernel-release'

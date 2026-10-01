@@ -57,10 +57,12 @@ mkdir -p "$HOME/.local/bin"
 install -m755 client/pi-voice-* "$HOME/.local/bin/"
 ```
 
+Each helper glob currently contains **7 files**, including `pi-voice-mpv-watchdog.lua` and `pi-voice-native-proof.py`; keep both beside the audio helper. Native bridge playback on desktop and Termux requires Python 3 with stdlib `ctypes`, kernel pidfd support, and Lua-enabled mpv. Desktop capture has [separate Python pidfd requirements](docs/installation.md#linux-ssh-client).
+
 Termux additionally requires the Termux:API Android app and:
 
 ```bash
-pkg install openssh socat mpv ffmpeg termux-api util-linux
+pkg install openssh socat mpv ffmpeg termux-api util-linux python
 ```
 
 Connect with the wrapper, start Pi remotely, and enable spoken output:
@@ -76,7 +78,9 @@ pi
 
 **Device-name update:** recopy the SSH wrapper on every desktop/Termux client using the [upgrade commands](docs/installation.md#upgrade-device-name-support). `pi-voice-ssh --set-device-name` prompts visibly; `pi-voice-ssh --set-device-name "My device"` provisions/renames headlessly without SSH or changing the ID. No target or other options are allowed. Normal first-connection prompts are visible too. The editable name uses a one-row tail preview (`<` means earlier text is hidden); the full name is saved. Existing connections are not restarted; after confirmed stop, close all wrappers and reconnect to use the new name. If you have not completed the earlier protocol migration, its [safe upgrade steps](docs/installation.md#upgrading) still apply. Never discard outstanding [stop-recovery proof](docs/troubleshooting.md#unconfirmed-stop).
 
-**Native output watchdog update:** upgrade the host and **all** installed `client/pi-voice-*` / separate `termux/pi-voice-*` copies together, including `pi-voice-mpv-watchdog.lua` beside the audio helper. [Protocol v4 upgrade steps](docs/installation.md#audio-protocol-v4-native-watchdog-host-and-every-client) require confirmed stops first. The host renews native mpv's 30-second lease even while paused. Automatic stop-only recovery backs off from 3 to 60 seconds, retries only failed/eligible orphan scopes through verified original routes, and leaves healthy work alone; it never replays audio or restarts capture. Marked pre-intent reservations can prove sealed non-admission even after commit. Exact proof still gates release: legacy/uncertain admission, unknown microphone dispatch and frozen OS/player cases are not universally recoverable.
+**Native output watchdog update:** upgrade the host and **all** installed `client/pi-voice-*` / separate `termux/pi-voice-*` copies together, including `pi-voice-mpv-watchdog.lua` and `pi-voice-native-proof.py` beside the audio helper. [Protocol v4 upgrade steps](docs/installation.md#audio-protocol-v4-native-watchdog-host-and-every-client) require confirmed stops first. The host renews native mpv's 30-second lease even while paused. Automatic stop-only recovery backs off from 3 to 60 seconds, retries only failed/eligible orphan scopes through verified original routes, and leaves healthy work alone; it never replays audio or restarts capture. Marked pre-intent reservations can prove sealed non-admission even after commit. Exact proof still gates release: legacy/uncertain admission, unknown microphone dispatch and frozen OS/player cases are not universally recoverable.
+
+**Native proof status:** new `binding-v4` supports restricted procfs (`hidepid=1`/`hidepid=2`) only with a successful kernel pidfd probe, syscall/proc PID alignment and the full scoped identity contract. If Python lacks `os.pidfd_open`, playback uses libc `pidfd_open` through `ctypes`, never numeric-PID signals. Legacy `binding-v3` still requires unrestricted procfs. Android 5.4 layouts are synthetic test coverage, **not real Android validation**; see [proof limits](docs/endpoint-protocol.md#native-watchdog-and-proof-limits).
 
 **Microphone protocol update:** update the host and every installed desktop/Termux helper together, only after confirmed stops and closing old wrappers; use the [exact upgrade commands](docs/installation.md#stage-c-boot-bound-microphone-upgrade), then reconnect and reload. Network input now requires `ticket-admit` (`wait-v1` on desktop, `admit-v1` plus device identity on Termux). Fresh v4 covered input supports original-route live/orphan recovery and eligible same-device reboot proof; version alone does not establish coverage. Unknown Android start/quit and legacy uncertainty stay fenced. Local output still lacks a durable admission/child-wait guardian. See [stop recovery](docs/troubleshooting.md#unconfirmed-stop).
 

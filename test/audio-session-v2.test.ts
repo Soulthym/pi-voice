@@ -81,7 +81,9 @@ setTimeout(() => process.exit(0), 150);
 		const playback = path.join(stateHome || path.join(home, ".local/state"), "pi-voice/playback");
 		const receipt = (id: string) => path.join(playback, id, "exited");
 		fs.mkdirSync(home);
-		fs.copyFileSync(path.resolve(script, "../pi-voice-mpv-watchdog.lua"), path.join(root, "pi-voice-mpv-watchdog.lua"));
+		for (const helper of ["pi-voice-mpv-watchdog.lua", "pi-voice-native-proof.py"]) {
+			fs.copyFileSync(path.resolve(script, "..", helper), path.join(root, helper));
+		}
 		fs.writeFileSync(path.join(bin, "sync"), `#!/usr/bin/env bash
 printf '%s\\n' "$@" >> "$HOME/sync.log"
 [[ ! -f "$HOME/fail-sync" ]] || exit 1
@@ -433,10 +435,8 @@ exec /usr/bin/sync "$@"
 			lostOwner.child.kill("SIGKILL");
 			await until(() => lostOwner.child.signalCode !== null);
 			const orphanProof = await control(`stop ${lostOwner.id}`);
-			// An unreaped orphan remains visible in procfs; only verified absence/reuse
-			// may recover it, not successful quit dispatch or guardian death.
-			const nativePid = fs.readFileSync(lostOwner.base + ".pid", "utf8");
-			assert.equal(orphanProof, fs.existsSync(`/proc/${nativePid}`) ? "" :
+			// A v4 pidfd proves exit even while an unreaped zombie is visible.
+			assert.equal(orphanProof,
 				`{"type":"stopped","id":"${lostOwner.id}","proof":"native-process-exit"}\n`);
 			assert.equal(fs.existsSync(lostOwner.base + ".exit"), true);
 			assert.equal(fs.existsSync(receipt(lostOwner.id)), !!orphanProof);

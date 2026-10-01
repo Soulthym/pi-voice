@@ -85,7 +85,7 @@ trusted_proc() {
       local -a mount_options
       IFS=, read -r -a mount_options <<<"$options"
       for option in "${mount_options[@]}"; do
-        [[ $option != hidepid=* || $option == hidepid=0 ]] || return 1
+        [[ $option != hidepid=* || $option == hidepid=0 || ( ${1:-} == pidfd && ( $option == hidepid=1 || $option == hidepid=2 ) ) ]] || return 1
       done
     elif [[ $mount =~ ^/proc/(self|thread-self|[0-9]+|mounts)(/|$) || $mount == /proc/*\\* ]]; then
       return 1
@@ -97,7 +97,7 @@ trusted_proc() {
 # Absence requires a successful full listing; a failed readlink is never absence.
 reader_namespaces() {
   local release major minor names name seen=$'\n' pidns mntns timens LC_ALL=C
-  trusted_proc || return 1
+  trusted_proc "${1:-}" || return 1
   # Preserve trailing newlines and reject NULs rather than Bash silently dropping them.
   release=$(set -o pipefail; uname -r | tr '\000' '?' && printf '.') || return 1
   release=${release%.} release=${release%$'\n'}
@@ -145,6 +145,10 @@ native_gone() {
   [[ -z $extra && $bid == "${directory##*/}" && $bboot == "${boot_id//\"/}" && $boot_id != null ]] || return 1
   [[ $pid =~ ^[1-9][0-9]{0,9}$ && $ticks =~ ^[0-9]{1,20}$ && $uid =~ ^[0-9]{1,10}$ ]] || return 1
   [[ $(kernel_boot) == "$boot_id" && $(id -u) == "$uid" ]] || return 1
+  if [[ $version == binding-v4 ]]; then
+    python3 "$script_dir/pi-voice-native-proof.py" gone "$directory/bound" 2>/dev/null
+    return $?
+  fi
   [[ $version == binding-v3 && $(reader_namespaces) == "$pidns $mntns $timens" ]] || return 1
   listing=$(LC_ALL=C QUOTING_STYLE=literal ls -1 -- /proc) || return 1
   if [[ $'\n'$listing$'\n' != *$'\n'"$pid"$'\n'* ]]; then
@@ -161,7 +165,7 @@ native_gone() {
 publish_native_exit() (
   local directory=$1
   if [[ $directory == "$state_dir" && $native_child == true && $player_exited == true ]]; then
-    [[ $boot_id != null && $(kernel_boot) == "$boot_id" && $(id -u) == "$bound_uid" && $(reader_namespaces) == "$bound_pidns $bound_mntns $bound_timens" ]] || exit 1
+    [[ $boot_id != null && $(kernel_boot) == "$boot_id" && $(id -u) == "$bound_uid" && $(reader_namespaces pidfd) == "$bound_pidns $bound_mntns $bound_timens" ]] || exit 1
   else
     native_gone "$directory" || exit 1
   fi
@@ -344,6 +348,11 @@ fi
 # Raw PCM and v2 clients may not start physical output.
 [[ $protocol == 4 && $boot_id != null ]] || { printf '{"type":"error","phase":"prepare","message":"Native playback watchdog requires readable Linux kernel boot identity"}\n'; exit 1; }
 
+# Dependencies are known before claiming preparation; the kernel is probed at commit.
+command -v python3 >/dev/null && [[ -r $script_dir/pi-voice-native-proof.py ]] || {
+  printf '{"type":"error","phase":"prepare","message":"Native playback requires Python 3 and pi-voice-native-proof.py"}\n'; exit 1;
+}
+
 # Reserve a durable opaque scope before any player I/O.
 startup_phase=prepare
 (
@@ -376,6 +385,9 @@ flock -x -w 5 9 || exit 1
 [[ ! -f $state_dir/stopped ]] || exit 1
 # Persist possible spawn; only admission-intent below permits audio dispatch.
 (umask 077; touch "$state_dir/committed") && sync "$state_dir/committed" "$state_dir" || exit 1
+
+startup_phase=native-proof
+python3 "$script_dir/pi-voice-native-proof.py" probe >/dev/null 2>&1 || exit 1
 
 startup_phase=player-lock
 # Starting a new stream atomically requests the prior scope to quit. This is
@@ -443,7 +455,8 @@ identity=${identity%$'\n'}
 read -r bound_id bound_boot native_pid bound_ticks bound_uid bound_pidns bound_mntns bound_version bound_timens extra <<<"$identity" || exit 1
 [[ -z $extra && $bound_id == "$session_id" && $bound_boot == "${boot_id//\"/}" && $native_pid =~ ^[1-9][0-9]{0,9}$ && $bound_ticks =~ ^[0-9]{1,20}$ && $bound_uid =~ ^[0-9]{1,10}$ ]] || exit 1
 [[ $bound_uid == "$(id -u)" ]] || exit 1
-[[ $bound_version == binding-v3 && $(reader_namespaces) == "$bound_pidns $bound_mntns $bound_timens" ]] || exit 1
+[[ $bound_version == binding-v4 && $(reader_namespaces pidfd) == "$bound_pidns $bound_mntns $bound_timens" ]] || exit 1
+python3 "$script_dir/pi-voice-native-proof.py" validate "$state_dir/binding" >/dev/null 2>&1 || exit 1
 native_stat=$(cat "/proc/$native_pid/stat") || exit 1
 native_tail=${native_stat##*) }
 read -r -a native_fields <<<"$native_tail"
@@ -487,7 +500,7 @@ while :; do
   [[ ! -f $state_dir/binding.error ]] || exit 1
   [[ $native_child != true || -n $(builtin jobs -pr %pi_voice_player) ]] || break
   # An unverifiable reader domain cannot end polling or authorize cleanup.
-  if [[ $(reader_namespaces) != "$bound_pidns $bound_mntns $bound_timens" ]]; then sleep 0.08; continue; fi
+  if [[ $(reader_namespaces pidfd) != "$bound_pidns $bound_mntns $bound_timens" ]]; then sleep 0.08; continue; fi
   native_stat=$(cat "/proc/$native_pid/stat" 2>/dev/null) || break
   native_tail=${native_stat##*) }
   read -r -a native_fields <<<"$native_tail"
