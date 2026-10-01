@@ -1,5 +1,43 @@
 # Tests
 
+## Phased v4 startup and native diagnostics
+
+Fixed two source-proven startup defects: a single 5-second timer covered network,
+device preparation, host durable grant, commit locks and native binding; structured
+client errors were ignored and eventually mislabeled as upgrade failures. This
+establishes software defects, **not the cause of any particular live device failure**.
+No live hardware or Android/Termux kernel was inspected or validated.
+
+Final isolated full suites: default **1,381 passed / 35 skipped / zero failures**;
+installed-native Pi **1,414 passed / 2 skipped / zero failures**. Typecheck passed;
+LSP is unavailable. Default skips include 33 native-UI compatibility cases; both
+full runs skip the two explicitly opted-in mpv container tests. Full runs used
+private network/PID/home/XDG/temp sandboxes with read-only source and synthetic
+user/host records. An earlier run had two stale diagnostic-message assertions;
+those assertions now check structured native-bind errors and the final runs pass.
+
+Separately, both actual-mpv suites passed without skips on **0.35.1 and 0.40.0**:
+the existing five native scenarios plus four full-host scenarios through
+`VoiceWorkerClient → worker → TCP transport → actual shell/Lua → mpv --ao=null`.
+The new fixture covers paused startup and cancel/resume, session readiness before
+PCM, 5.6 seconds of cumulative hello/prepare/grant/commit delay, and injected
+namespace-read failure reaching the client promptly with zero PCM and a recoverable
+sealed-nonadmission receipt. Synthesis/alignment are mocked; the player, FIFO,
+IPC, binding and receipt paths are real. Readiness does not wait for file-loaded
+or PCM. Existing native tests retain frozen/unknown-process refusal coverage.
+
+The real SSH harness passed **12/12** on current source. Its cancelled-grant socket
+now drains the structured rejection before awaiting close. Earlier simultaneous
+SSH/mpv runs had EOF failures; sequential reruns passed, and that transient cause
+was not established. Container package/build networking was permitted; runtimes
+had no host home/audio/device mounts. No live session, endpoint, provider, model,
+real inference, settings change, deployment or physical playback was used.
+
+This fix requires host transport **and complete matching client/Termux shell/Lua
+helpers**; host-only installation improves budgets but cannot add native diagnostics.
+Nothing was deployed or restarted. See the [startup contract](endpoint-protocol.md#startup-deadlines-and-errors)
+and existing confirmed-stop installation instructions before any later rollout.
+
 ## Native renewal ACK compatibility (P1)
 
 Renewal now uses a private, ephemeral exact-nonce file atomically renamed by Lua,

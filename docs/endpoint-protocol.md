@@ -24,6 +24,40 @@ The host appends approximately one second of silence before clean EOF. After fee
 
 **Migration:** upgrade the host and every installed desktop/Termux helper and SSH wrapper together, including custom paths—not just audio-script copies. Both wrapper variants require the exact v4 capability `hello` reply for readiness; their probe sends only control `hello`, never prepare/commit or PCM. Follow the [confirmed-stop and complete-helper upgrade steps](installation.md#audio-protocol-v4-native-watchdog-host-and-every-client). V1/v2/v3 negotiation, unversioned prepare, old `PI_VOICE_AUDIO`, and raw PCM cannot start a player; there is no fallback. New reservations persist `admission-protocol` as `v4-start-intent-1`. Before durable `admission-intent`, stop can seal non-admission under the scope lock—even after commit or idle-player spawn. Once intent exists, even zero PCM requires exact exit proof (or separately eligible reboot proof). Old numeric receipts cannot confirm modern streams. V1 safely ignores `hello`; v2 is rejected without sending its audio header. Existing durable receipts are retained for scoped legacy cleanup, never for new admission.
 
+### Startup deadlines and errors
+
+Startup uses separate whole-phase budgets: connection **5s**, protocol hello **5s**,
+device preparation/fsync **15s**, host journal/grant **15s**, device commit **20s**,
+and native binding/validation/fsync **10s**. An independent **70s overall cap**
+remains. Successful startup does not sleep or consume these allowances. Commit
+allows the client's 5s scope lock, approximately 6s player-lock contention, prior
+player IPC, spawn and durable writes. The helper polls native binding for at most
+250 × 20ms; arbitrary filesystem stalls are not guaranteed to finish.
+
+Before native spawn the client may send
+`{"type":"phase","phase":"native-binding","id":"<uuid>","boot_id":"<boot>"}`.
+Only this matching, forward-only transition starts the native budget; duplicate,
+foreign, partial or trickled replies cannot extend the phase or overall deadline.
+Older v4 helpers without this phase remain bounded by the device-commit budget.
+The worker/controller has no shorter startup command watchdog: it waits for the
+TCP helper's readiness contract. Cancellation instead takes over once per scope
+with the separate stop deadline; pause/resume exchanges have an absolute 1.5s cap.
+
+Client errors are forwarded promptly, not ignored until a generic upgrade timeout.
+`{"type":"error","phase":"native-bind","id":"<uuid>","boot_id":"<boot>","message":"<bounded diagnostic>"}`
+is correlated to the current connection and, after preparation, the exact scope
+and boot. Messages must be 1–512 printable ASCII characters; phases are bounded
+lowercase codes. Connection failure and phase timeout do not imply an incompatible
+version. An explicit incompatible protocol reply still requests an upgrade.
+
+Guarded native Lua failures atomically publish private `binding.error` metadata
+containing fixed phase/cause codes, not arbitrary stderr, paths, speech or transcripts.
+The helper checks it before admission/readiness and during playback. Namespace
+read failures remain failures; they are not interpreted as proof that namespaces
+are unsupported. After commit, even zero PCM retains stop-proof requirements:
+only a valid sealed-nonadmission receipt or applicable exit/reboot proof retires
+the scope. The host's pre-grant `no-audio` marker is not player-exit evidence.
+
 ## Pause/resume control connection
 
 A second short connection to the same output endpoint starts with exactly 16 ASCII bytes followed by a command and player ID:
@@ -80,6 +114,15 @@ permits the explicit `unsupported-pre5.6` marker. Read/permission errors or miss
 links on newer kernels fail closed. Install matching shell/Lua helpers together;
 old unversioned bindings are not upgraded or reinterpreted, and cannot mint a new
 native-exit receipt. Previously durable receipts retain their existing meaning.
+
+Supported native binding requires a Lua-enabled mpv with the timer, IPC/script-message
+and subprocess APIs used here, readable boot/process metadata, and matching verified
+namespace domains. Linux null-output tests on mpv 0.35.1 and 0.40.0 do not validate
+a particular Android/Termux kernel or physical audio device. Android may permit
+self-process reads but restrict a subprocess reading the native player's namespace
+links; `namespace-read-failed` reports that boundary without bypassing it. An actual
+pre-5.6 kernel has not been validated; only the strict simulated branch is covered.
+There is no PID-only, no-watchdog or older-protocol fallback.
 
 The watchdog is not an OS/hardware guarantee: suspended/frozen native mpv, a frozen
 OS, uninterruptible kernel work and physical output buffers can exceed the timer.
