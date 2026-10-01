@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
+import * as net from "node:net";
+import { once } from "node:events";
 import * as path from "node:path";
 import test from "node:test";
 
@@ -74,17 +76,22 @@ for (const directory of ["client", "termux"]) test(`${directory}: native capabil
  for (const mode of ['setup-clock', 'setup-timer', 'setup-utils', 'setup-message', 'setup-event', 'setup-open', 'setup-write', 'setup-close', 'setup-rename', 'clock', 'open', 'write', 'close', 'rename', 'loadfile', 'load-return', 'end-file', 'complete', 'quit']) {
   const { root, env } = fixture();
   try {
-   const lua = spawnSync('lua', ['test/helpers/native-watchdog-failure.lua', path.resolve(directory, 'pi-voice-mpv-watchdog.lua'), mode], {
+   const lua = spawnSync('bash', ['-c', 'umask 077; exec lua "$@"', 'bash', 'test/helpers/native-watchdog-failure.lua', path.resolve(directory, 'pi-voice-mpv-watchdog.lua'), mode], {
     env: { ...env, PI_VOICE_SCOPE: id, PI_VOICE_BOOT: boot, PI_VOICE_BINDING: `${root}/binding`, PI_VOICE_FIFO: `${root}/pcm` }, encoding: 'utf8',
    });
    assert.equal(lua.status, 0, `${mode}: ${lua.stderr}`);
    assert.match(lua.stderr, /Pi Voice watchdog:/, 'native failures are reported');
+   assert.doesNotMatch(lua.stderr, /injected|voice-native-/, 'raw exception details stay private');
+   if (!['rename', 'setup-rename', 'complete'].includes(mode)) {
+    assert.match(fs.readFileSync(`${root}/binding.error`, 'utf8'), /^[a-z-]{1,64} (syscall-failed|unavailable|unsupported)\n$/);
+    assert.equal(fs.statSync(`${root}/binding.error`).mode & 0o777, 0o600);
+   }
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
  }
 });
 
 for (const directory of ["client", "termux"]) test(`${directory}: versioned native time domain distinguishes unsupported from unreadable`, () => {
- for (const mode of ['modern', 'old-present', 'old-absent', 'old-read-error', 'old-list-error', 'old-hidden', 'modern-absent', 'read-error', 'malformed', 'release-error']) {
+ for (const mode of ['modern', 'old-present', 'old-absent', 'old-read-error', 'old-list-error', 'old-hidden', 'modern-absent', 'read-error', 'malformed', 'subprocess-error', 'release-error']) {
   const { root, env } = fixture();
   try {
    const lua = spawnSync('lua', ['test/helpers/native-watchdog-timens.lua', path.resolve(directory, 'pi-voice-mpv-watchdog.lua'), mode], {
@@ -110,17 +117,27 @@ fs.writeFileSync(binding, [id,process.env.PI_VOICE_BOOT,process.pid,ticks,proces
 if(fs.existsSync(process.env.HOME+'/binding-mode')) {
  const mode=fs.readFileSync(process.env.HOME+'/binding-mode','utf8');
  let value=fs.readFileSync(binding,'utf8');
+ if(mode==='error') { fs.writeFileSync(binding+'.error','namespace-time namespace-read-failed\\n',{mode:0o600}); fs.unlinkSync(binding); }
+ if(mode==='unsafe-error') { fs.writeFileSync(binding+'.error','secret/\\"'+ 'x'.repeat(4096),{mode:0o600}); fs.unlinkSync(binding); }
  if(mode==='old') value=value.replace(/ binding-v2 time:\\[\\d+\\]/,'');
  if(mode==='domain') value=value.replace(/time:\\[\\d+\\]/,'time:[1]');
  if(mode==='missing') value=value.replace(/ time:\\[\\d+\\]/,'');
- fs.writeFileSync(binding,value);
+ if(!mode.endsWith('error')) fs.writeFileSync(binding,value);
 }
 net.createServer(s=>{let text='';s.on('data',b=>{text+=b;let p;while((p=text.indexOf('\\n'))>=0){
  const c=JSON.parse(text.slice(0,p)).command;text=text.slice(p+1);
  if(c[0]==='quit' && !fs.existsSync(process.env.HOME+'/hold')) process.exit(0);
  if(c[1]==='pi-voice-start') {
   if(!fs.existsSync(binding.replace(/binding$/,'bound')) || !fs.existsSync(binding.replace(/binding$/,'admission-intent'))) process.exit(99);
+  if(fs.existsSync(process.env.HOME+'/start-error')) {
+   fs.writeFileSync(binding+'.error','start syscall-failed\\n',{mode:0o600});
+   process.exit(1);
+  }
   fs.writeFileSync(process.env.HOME+'/started',String(process.pid));
+ }
+ if(c[1]==='time-pos' && fs.existsSync(process.env.HOME+'/playback-error')) {
+  fs.writeFileSync(binding+'.error','renew syscall-failed\\n',{mode:0o600});
+  process.exit(1);
  }
  if(c[1]==='pi-voice-renew') {
   const mode=fs.existsSync(process.env.HOME+'/ack-mode') ? fs.readFileSync(process.env.HOME+'/ack-mode','utf8') : 'exact';
@@ -153,9 +170,10 @@ setTimeout(()=>{s.destroy();process.exit(0)},100);
   for (const header of ["PI_VOICE_PREPARE", "PI_VOICE_AUDIO"]) {
    const old = start(); old.child.stdin.end(`PI_VOICE_CONTROLhello\n${header}\n`);
    await until(() => old.child.exitCode !== null);
+   assert.equal(JSON.parse(old.output().trim().split('\n').at(-1)!).phase, 'protocol');
    assert.match(old.output(), /upgrade host/); assert.equal(fs.existsSync(`${root}/started`), false);
   }
-  for (const mode of ['old', 'domain', 'missing']) {
+  for (const mode of ['old', 'domain', 'missing', 'error', 'unsafe-error']) {
    fs.writeFileSync(`${root}/binding-mode`, mode);
    const rejected = start(); rejected.child.stdin.write('PI_VOICE_CONTROLhello\nPI_VOICE_PREPARE 4\n');
    await until(() => rejected.output().includes('"prepared"'));
@@ -163,10 +181,63 @@ setTimeout(()=>{s.destroy();process.exit(0)},100);
    rejected.child.stdin.write(`PI_VOICE_COMMIT ${prepared.id} ${prepared.boot_id}\n`);
    await until(() => rejected.child.exitCode !== null);
    assert.equal(rejected.child.exitCode, 1, rejected.error());
+   const diagnostic = rejected.output().trim().split('\n').map(v => JSON.parse(v)).find(v => v.type === 'error');
+   assert.equal(diagnostic.id, prepared.id);
+   assert.equal(diagnostic.boot_id, prepared.boot_id);
+   assert.equal(diagnostic.phase, mode.endsWith('error') ? 'native-bind' : 'native-identity');
+   assert.equal(diagnostic.native_phase, mode === 'error' ? 'namespace-time' : mode === 'unsafe-error' ? 'unreadable' : '');
+   assert.equal(diagnostic.cause, mode === 'error' ? 'namespace-read-failed' : '');
+   const phases = rejected.output().trim().split('\n').map(v => JSON.parse(v)).filter(v => v.type === 'phase');
+   assert.deepEqual(phases, [{ type: 'phase', phase: 'native-binding', id: prepared.id, boot_id: prepared.boot_id }]);
+   assert.ok(JSON.stringify(diagnostic).length < 512);
+   assert.doesNotMatch(JSON.stringify(diagnostic), /secret/);
    assert.equal(fs.existsSync(`${root}/started`), false);
    assert.equal(fs.existsSync(`${root}/state/pi-voice/playback/${prepared.id}/exited`), false);
   }
   fs.unlinkSync(`${root}/binding-mode`);
+  // Actual host transport sees a bounded diagnostic, not a generic closed socket.
+  for (const failure of ['bind', 'start', 'playback']) {
+   if (failure === 'bind') fs.writeFileSync(`${root}/binding-mode`, 'error');
+   else fs.writeFileSync(`${root}/${failure}-error`, '');
+   const sockets: net.Socket[] = [];
+   const server = net.createServer({ allowHalfOpen: true }, socket => {
+    sockets.push(socket);
+    const session = start();
+    socket.on('error', () => {});
+    socket.pipe(session.child.stdin); session.child.stdout.pipe(socket);
+   });
+   server.listen(0, '127.0.0.1'); await once(server, 'listening');
+   const host = spawn(process.execPath, [path.resolve('src/tcp-playback.mjs'), `tcp://127.0.0.1:${(server.address() as net.AddressInfo).port}`, '24000', '1'], {
+    env, detached: true, stdio: ['pipe', 'pipe', 'pipe', 'pipe'],
+   });
+   children.push(host);
+   let output = '', errors = '', feedback = '', scope = '';
+   host.stdout!.on('data', b => output += b); host.stderr!.on('data', b => errors += b);
+   const channel = host.stdio[3] as net.Socket;
+   channel.on('data', b => {
+    feedback += b;
+    const match = /^prepared ([0-9a-f-]+) ([0-9a-f-]+) /m.exec(feedback);
+    if (match && !scope) { scope = match[1]; channel.write(`grant ${scope} ${match[2]}\n`); }
+   });
+   try {
+    host.stdin!.end(Buffer.alloc(64));
+    await until(() => host.exitCode !== null);
+    assert.equal(host.exitCode, 1, output + errors);
+    assert.match(output + errors, failure === 'bind' ? /namespace-time namespace-read-failed/ : failure === 'start' ? /start syscall-failed/ : /renew syscall-failed/);
+    if (failure !== 'playback') assert.doesNotMatch(feedback, /^ready$/m);
+    assert.doesNotMatch(output, /"type":"playback"/, 'no position feedback after observed failure');
+    assert.equal(fs.existsSync(`${root}/started`), failure === 'playback');
+    const state = `${root}/state/pi-voice/playback/${scope}`;
+    if (failure !== 'bind') {
+     await until(() => fs.existsSync(`${state}/exited`));
+     assert.deepEqual(JSON.parse(fs.readFileSync(`${state}/exited`, 'utf8')), { id: scope, boot_id: boot, proof: 'native-process-exit' });
+     assert.equal(JSON.parse(await control(`stop ${scope} ${boot}`)).proof, 'native-process-exit');
+    } else assert.equal(fs.existsSync(`${state}/exited`), false, 'unbound failure cannot prove native exit');
+   } finally {
+    host.kill('SIGKILL'); for (const socket of sockets) socket.destroy(); server.close();
+    for (const file of ['binding-mode', 'start-error', 'playback-error', 'started']) fs.rmSync(`${root}/${file}`, { force: true });
+   }
+  }
   const session = start(); session.child.stdin.write("PI_VOICE_CONTROLhello\nPI_VOICE_PREPARE 4\n");
   await until(() => session.output().includes('"prepared"'));
   const prepared = session.output().trim().split("\n").map(v => JSON.parse(v)).find(v => v.type === "prepared");
@@ -174,6 +245,8 @@ setTimeout(()=>{s.destroy();process.exit(0)},100);
   assert.equal(fs.existsSync(`${root}/started`), false);
   session.child.stdin.write(`PI_VOICE_COMMIT ${prepared.id} ${prepared.boot_id}\n`);
   await until(() => session.output().includes('"session"'));
+  // No PCM was sent: FIFO opening and native start must not gate session readiness.
+  assert.equal(fs.statSync(`${root}/pi-voice-mpv-${prepared.id}.pcm`).mode & 0o777, 0o600);
   await until(() => fs.existsSync(`${root}/started`));
   const state = `${root}/state/pi-voice/playback/${prepared.id}`;
   const bound = fs.readFileSync(`${state}/bound`, "utf8").trim().split(" ");

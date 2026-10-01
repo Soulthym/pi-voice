@@ -11,7 +11,7 @@ const helper = fileURLToPath(new URL("../src/tcp-playback.mjs", import.meta.url)
 const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const deviceId = "test-device-A";
 
-for (const scenario of ["delayed-stop", "delayed-startup-stop", "silent-stop", "trickle-stop", "complete", "broken-pipe", "broken-forward", "old-client", "v2", "v3", "no-watchdog", "wrong-lease", "prepared-no-watchdog", "prepared-wrong-lease", "prepared-v3", "session-v3", "premature", "lost-ack", "stop", "startup-stop", "ack-reset", "pause-failure", "numeric", "malformed", "forged-stop", "forged-complete", "no-grant", "wrong-boot", "null-boot", "fenced", "false-fenced", "invalid-fenced", "missing-device", "invalid-device", "dash-device"] as const) {
+for (const scenario of ["delayed-phases", "native-error", "wrong-scope-error", "invalid-error", "silent-startup", "trickle-startup", "delayed-stop", "delayed-startup-stop", "silent-stop", "trickle-stop", "complete", "broken-pipe", "broken-forward", "old-client", "v2", "v3", "no-watchdog", "wrong-lease", "prepared-no-watchdog", "prepared-wrong-lease", "prepared-v3", "session-v3", "premature", "lost-ack", "stop", "startup-stop", "ack-reset", "pause-failure", "numeric", "malformed", "forged-stop", "forged-complete", "no-grant", "wrong-boot", "null-boot", "fenced", "false-fenced", "invalid-fenced", "missing-device", "invalid-device", "dash-device"] as const) {
  test(`TCP prepare/commit proof: ${scenario}`, { timeout: 25_000 }, async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "voice-tcp-v4-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -22,17 +22,21 @@ for (const scenario of ["delayed-stop", "delayed-startup-stop", "silent-stop", "
   const device_id = mode === "missing-device" ? null : mode === "invalid-device" ? "bad id" : mode === "dash-device" ? "-" : deviceId;
   const preparedDevice = device_id === null || device_id === "bad id" ? ":" : device_id;
   const boot_fenced = ["fenced", "null-boot", "missing-device", "invalid-device", "dash-device"].includes(mode) ? true : mode === "false-fenced" ? false : mode === "invalid-fenced" ? "true" : undefined;
-  const completes = ["complete", "fenced", "false-fenced", "invalid-fenced", "missing-device", "invalid-device", "dash-device"].includes(mode);
+  const completes = ["complete", "delayed-phases", "wrong-scope-error", "fenced", "false-fenced", "invalid-fenced", "missing-device", "invalid-device", "dash-device"].includes(mode);
   const sockets = new Set<net.Socket>();
-  let bytes = "", committed = false;
+  let bytes = "", committed = false, stopRequests = 0;
   const server = net.createServer({ allowHalfOpen: true }, socket => {
    sockets.add(socket); socket.on("error", () => {});
-   const send = (event: object) => socket.write(JSON.stringify(event) + "\n");
+   const send = (event: object) => {
+    if (mode === "delayed-phases" && ["protocol", "prepared", "session"].includes((event as {type:string}).type)) timers.push(setTimeout(() => socket.write(JSON.stringify(event) + "\n"), 1600));
+    else socket.write(JSON.stringify(event) + "\n");
+   };
    if (mode === "broken-forward") { socket.end(); return; }
    socket.on("data", chunk => {
     const text = chunk.toString(); bytes += text;
     if (text.startsWith("PI_VOICE_CONTROLpause")) { socket.resetAndDestroy(); return; }
     if (text.startsWith("PI_VOICE_CONTROLstop")) {
+     stopRequests++;
      if (mode === "lost-ack") { socket.end(); return; }
      if (scenario === "silent-stop") return;
      if (scenario === "trickle-stop") { timers.push(setInterval(() => send({ type: "stopped", id: "wrong", boot_id }), 100)); return; }
@@ -46,6 +50,8 @@ for (const scenario of ["delayed-stop", "delayed-startup-stop", "silent-stop", "
      return;
     }
     if (text === "PI_VOICE_CONTROLhello\n") {
+     if (mode === "silent-startup") return;
+     if (mode === "trickle-startup") { timers.push(setInterval(() => socket.write(" "), 100)); return; }
      if (mode === "old-client") socket.end();
      else send({ type: "protocol", version: mode === "v2" ? 2 : mode === "v3" ? 3 : 4, native_watchdog: mode !== "no-watchdog", lease_seconds: mode === "wrong-lease" ? 31 : 30 });
     } else if (text === "PI_VOICE_PREPARE 4\n") {
@@ -53,6 +59,11 @@ for (const scenario of ["delayed-stop", "delayed-startup-stop", "silent-stop", "
     } else if (text.startsWith("PI_VOICE_COMMIT")) {
      assert.equal(text, `PI_VOICE_COMMIT ${id} ${boot_id}\n`);
      committed = true;
+     if (["native-error", "wrong-scope-error", "invalid-error"].includes(mode)) {
+      send({ type: "phase", phase: "native-binding", id, boot_id });
+      send({ type: "error", phase: "native-bind", id: mode === "wrong-scope-error" ? "wrong" : id, boot_id, message: mode === "invalid-error" ? "unsafe\nmessage" : "Native namespace-time readlink failed" });
+      if (mode !== "wrong-scope-error") return;
+     }
      send({ type: "session", version: mode === "session-v3" ? 3 : 4, id, boot_id });
     } else if (mode === "broken-pipe") socket.resetAndDestroy();
    });
@@ -72,19 +83,37 @@ for (const scenario of ["delayed-stop", "delayed-startup-stop", "silent-stop", "
   control.on("data", chunk => {
    feedback += chunk;
    for (const line of String(chunk).trim().split("\n")) {
+    if (line.startsWith("prepared ") && mode === "startup-stop") control.write("stop\nstop\n");
     if (line.startsWith("prepared ") && !["no-grant", "startup-stop"].includes(mode)) {
      assert.equal(line, `prepared ${id} ${boot_id} ${boot_fenced === true ? "fenced" : "unfenced"} ${preparedDevice} native-watchdog`);
      assert.equal(committed, false, "prepare cannot dispatch without the host ACK");
-     control.write(`grant ${id} ${mode === "wrong-boot" ? id : boot_id}\n`);
+     const grant = () => control.write(`grant ${id} ${mode === "wrong-boot" ? id : boot_id}\n`);
+     if (mode === "delayed-phases") timers.push(setTimeout(grant, 1600));
+     else grant();
     }
-    if (line === "ready" && ["stop", "ack-reset", "lost-ack", "forged-stop"].includes(mode)) control.write("stop\n");
+    if (line === "ready" && ["stop", "ack-reset", "lost-ack", "forged-stop"].includes(mode)) control.write("pause\nresume\n".repeat(10) + "stop\nstop\n");
    }
   });
   if (mode === "pause-failure") control.write("pause\n");
-  if (mode === "startup-stop") control.write("stop\n");
+  if (mode === "startup-stop") control.write("stop\nstop\n");
   if (!["stop", "ack-reset", "lost-ack", "forged-stop"].includes(mode)) child.stdin.end(Buffer.alloc(64));
+  const started = performance.now();
   const [code] = await exit;
-  const nonadmitted = ["broken-forward", "old-client", "v2", "v3", "no-watchdog", "wrong-lease", "prepared-no-watchdog", "prepared-wrong-lease", "prepared-v3", "null-boot", "numeric", "malformed", "no-grant", "wrong-boot"].includes(mode);
+  if (["startup-stop", "stop", "ack-reset", "lost-ack", "forged-stop"].includes(mode)) assert.equal(stopRequests, 1, "stop supersedes startup/control queue once");
+  if (mode === "native-error") {
+   assert.ok(performance.now() - started < 2000, "explicit scoped failure is immediate");
+   assert.match(events, /namespace-time readlink failed/);
+   assert.match(events, /REMOTE_PLAYBACK_UNCONFIRMED/);
+   assert.doesNotMatch(events, /upgrade|remote-released/);
+   assert.ok(!bytes.includes("\0"), "no PCM before native binding proof");
+  }
+  if (mode === "invalid-error") assert.match(events, /Invalid audio client error/);
+  if (["silent-startup", "trickle-startup"].includes(mode)) {
+   assert.ok(performance.now() - started < 7000, "trickling cannot renew a startup phase");
+   assert.match(events, /protocol startup timed out/);
+   assert.doesNotMatch(events, /upgrade/);
+  }
+  const nonadmitted = ["silent-startup", "trickle-startup","broken-forward", "old-client", "v2", "v3", "no-watchdog", "wrong-lease", "prepared-no-watchdog", "prepared-wrong-lease", "prepared-v3", "null-boot", "numeric", "malformed", "no-grant", "wrong-boot"].includes(mode);
   if (["silent-stop", "trickle-stop"].includes(scenario)) {
    assert.equal(code, 1, events);
    assert.match(events, /control timed out after 20000ms/);

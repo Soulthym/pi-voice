@@ -29,6 +29,7 @@ package.preload['mp.utils'] = function() return {subprocess=function(args)
         if mode == 'modern-absent' or mode == 'read-error' or mode == 'old-read-error' then
             return {status=1, stdout=''}
         end
+        if mode == 'subprocess-error' then error('private subprocess details') end
         if mode == 'malformed' then return {status=0, stdout='time:[123] garbage\n'} end
     end
     return {status=0, stdout=name .. ':[123]\n'}
@@ -42,4 +43,9 @@ if mode == 'modern' or mode == 'old-present' or mode == 'old-absent' then
 else
     assert(open(binding) == nil, 'unknown domain must not publish a binding')
     assert(commands[#commands-1] == 'stop' and commands[#commands] == 'quit')
+    local f = assert(open(binding .. '.error')); local value = f:read('*a'); f:close()
+    local cause = mode == 'release-error' and 'syscall-failed' or
+        mode == 'subprocess-error' and 'subprocess-failed' or
+        (mode == 'malformed' or mode == 'old-hidden') and 'namespace-malformed' or 'namespace-read-failed'
+    assert(value:sub(-#cause-1) == cause .. '\n', value)
 end

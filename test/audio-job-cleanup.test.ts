@@ -143,7 +143,9 @@ for (const script of scripts) {
    const exit = once(child, "exit");
    child.stdin.write("PI_VOICE_CONTROLhello\nPI_VOICE_PREPARE 4\n");
    assert.deepEqual(await exit, [1, null]);
-   assert.match(output, /mpv native watchdog failed to bind before audio/);
+   const error = output.split("\n").filter(Boolean).map(line => JSON.parse(line)).find(event => event.type === "error");
+   assert.equal(error.phase, "native-bind");
+   assert.match(error.message, /Native playback failed during native-bind/);
    assert.doesNotMatch(output, /"type":"session"/);
    const scopes = fs.readdirSync(path.join(root, "pi-voice/playback"));
    assert.equal(scopes.length, 1);

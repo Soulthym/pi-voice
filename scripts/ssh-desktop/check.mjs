@@ -33,6 +33,7 @@ assert.deepEqual(JSON.parse(await request(device.audioEndpoint, `PI_VOICE_CONTRO
  {type:'stopped', id:prepared.id, boot_id:prepared.boot_id, proof:'sealed-nonadmission'});
 const outputClosed = new Promise(resolve => output.once('close', resolve));
 output.end(`PI_VOICE_COMMIT ${prepared.id} ${prepared.boot_id}\n`);
+output.resume(); // Drain the correlated rejection of the tombstoned grant.
 await outputClosed; // The durable stop tombstone must defeat this late grant.
 const mode=process.argv[2];
 if(mode==='hold') {
