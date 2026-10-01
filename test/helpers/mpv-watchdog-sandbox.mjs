@@ -1,12 +1,15 @@
 // Run only through test/audio-mpv-sandbox.test.ts in a networkless container.
 import assert from 'node:assert/strict';
-import {spawn} from 'node:child_process';
+import {spawn, spawnSync} from 'node:child_process';
+import {trustedProcSandbox} from './trusted-proc-sandbox.mjs';
 import {once} from 'node:events';
 import fs from 'node:fs';
 import net from 'node:net';
 import {setTimeout as delay} from 'node:timers/promises';
 
 assert.equal(process.env.HOME, '/work/home');
+console.log(spawnSync('/usr/bin/mpv', ['--version'], {encoding:'utf8'}).stdout.split('\n')[0]);
+trustedProcSandbox('/work');
 const boot = fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
 const scope = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 async function until(check) {
@@ -22,7 +25,7 @@ async function run(mode) {
   '--idle=yes', '--demuxer=rawaudio', '--demuxer-rawaudio-format=floatle',
   '--demuxer-rawaudio-rate=24000', '--demuxer-rawaudio-channels=mono',
   `--input-ipc-server=${ipc}`, '--script=/work/pi-voice-mpv-watchdog.lua'], {
-  env: {...process.env, PI_VOICE_SCOPE:scope, PI_VOICE_BOOT:boot, PI_VOICE_BINDING:binding, PI_VOICE_FIFO:pcm},
+  env: {...process.env, PI_VOICE_TEST_ANDROID:mode === 'android' ? '1' : '0', PI_VOICE_SCOPE:scope, PI_VOICE_BOOT:boot, PI_VOICE_BINDING:binding, PI_VOICE_FIFO:pcm},
   stdio:['ignore','pipe','pipe'],
  });
  let log=''; child.stdout.on('data', b=>log+=b); child.stderr.on('data', b=>log+=b);
@@ -36,9 +39,9 @@ async function run(mode) {
   assert.equal(Number(identity[2]), child.pid, 'binding is native PID, not launcher');
   assert.equal(identity[3], fs.readFileSync(`/proc/${child.pid}/stat`,'utf8').replace(/^.*\) /,'').split(' ')[19]);
   assert.equal(identity[4], String(process.getuid()));
-  assert.equal(identity[5], fs.readlinkSync('/proc/self/ns/pid'));
+  assert.equal(identity[5], mode === 'android' ? 'unsupported-no-pid' : fs.readlinkSync('/proc/self/ns/pid'));
   assert.equal(identity[6], fs.readlinkSync('/proc/self/ns/mnt'));
-  assert.deepEqual(identity.slice(7), ['binding-v2', fs.readlinkSync('/proc/self/ns/time')]);
+  assert.deepEqual(identity.slice(7), ['binding-v3', mode === 'android' ? 'unsupported-pre5.6' : fs.readlinkSync('/proc/self/ns/time')]);
   socket=net.createConnection(ipc); await once(socket,'connect');
   socket.on('error',()=>{});
   let response=''; socket.on('data',b=>response+=b);
@@ -73,13 +76,14 @@ async function run(mode) {
   console.log(`PASS real mpv --ao=null: ${mode}`);
  } finally { clearTimeout(timeout); socket?.destroy(); if(child.exitCode===null && child.signalCode===null) {child.kill('SIGKILL'); await exited;} }
 }
-// The only executable override adds null output and pause to REAL mpv. No
-// proof files, procfs reads, clocks, sync, or guardian code are substituted.
+// The player override adds null output and defaults to pause for REAL mpv. Apart from the
+// explicit trusted mount-view fixture above, kernel identity/proof remains real.
 fs.mkdirSync('/work/bin');
-fs.writeFileSync('/work/bin/mpv', '#!/bin/sh\nexec /usr/bin/mpv --ao=null --pause "$@" --log-file="$PI_VOICE_BINDING.log"\n', {mode:0o755});
+fs.writeFileSync('/work/bin/mpv', '#!/bin/sh\nexec /usr/bin/mpv --ao=null --pause="${PI_VOICE_TEST_PAUSE:-yes}" "$@" --log-file="$PI_VOICE_BINDING.log"\n', {mode:0o755});
 async function api(mode) {
  const dir = `/work/${mode}`; fs.mkdirSync(dir);
- const env = {...process.env, PATH:`/work/bin:${process.env.PATH}`, XDG_RUNTIME_DIR:dir, XDG_STATE_HOME:dir};
+ const eof = mode === 'api-android-eof';
+ const env = {...process.env, PI_VOICE_TEST_PAUSE:eof ? 'no' : 'yes', PI_VOICE_TEST_ANDROID:mode === 'api-android' || eof ? '1' : '0', PATH:`/work/bin:${process.env.PATH}`, XDG_RUNTIME_DIR:dir, XDG_STATE_HOME:dir};
  const children=[];
  function helper(command) {
   const child=spawn('bash', ['/work/pi-voice-audio-session'], {env});
@@ -92,6 +96,7 @@ async function api(mode) {
   return {child,done,output:()=>output,errors:()=>errors};
  }
  const guardian=helper();
+ const eofClosed=eof ? once(guardian.child,'close') : undefined;
  try {
   guardian.child.stdin.write('PI_VOICE_CONTROLhello\nPI_VOICE_PREPARE 4\n');
   await until(()=>guardian.output().includes('"type":"prepared"'));
@@ -107,8 +112,16 @@ async function api(mode) {
   assert.match(fs.readFileSync(`/proc/${pid}/cmdline`,'utf8'), /\/usr\/bin\/mpv\u0000--ao=null/);
   assert.equal(fs.existsSync(`${state}/exited`),false);
   // PCM is supplied only after the real API confirms native binding/start.
-  guardian.child.stdin.write(Buffer.alloc(24000*4*90));
+  if(eof) {
+   assert.deepEqual(identity.slice(5), ['unsupported-no-pid', fs.readlinkSync('/proc/self/ns/mnt'), 'binding-v3', 'unsupported-pre5.6']);
+   guardian.child.stdin.end(Buffer.alloc(24000*4*0.1));
+  } else guardian.child.stdin.write(Buffer.alloc(24000*4*90));
   const began=performance.now();
+  if(mode==='api-android') {
+   assert.deepEqual(identity.slice(5), ['unsupported-no-pid', fs.readlinkSync('/proc/self/ns/mnt'), 'binding-v3', 'unsupported-pre5.6']);
+   guardian.child.kill('SIGKILL'); await guardian.done;
+   assert.equal(fs.existsSync(`${state}/exited`),false,'synthetic Android guardian death is not native exit');
+  }
   if(mode==='api-renew-crash') {
    await delay(12000);
    const renew=helper(`renew ${prepared.id} ${boot}`);
@@ -123,10 +136,16 @@ async function api(mode) {
   }
   // Container init reaps the orphan: production procfs oracle must see actual
   // absence, not a fixture-written receipt or a zombie mistaken for absence.
-  while(fs.existsSync(`/proc/${pid}`) && performance.now()-began<50000) await delay(100);
-  assert.equal(fs.existsSync(`/proc/${pid}`),false,'native lease expires without renewal');
+  while(fs.existsSync(`/proc/${pid}`) && performance.now()-began<(eof?8000:50000)) await delay(100);
+  assert.equal(fs.existsSync(`/proc/${pid}`),false,eof?'native exits on PCM EOF':'native lease expires without renewal');
   const elapsed=performance.now()-began;
-  assert.ok(elapsed>=(mode==='api-renew-crash'?41000:29000),`early native exit: ${elapsed}ms`);
+  if(eof) {
+   assert.equal((await eofClosed)[0],0,guardian.errors());
+   assert.equal(fs.readFileSync(`${state}/binding.complete`,'utf8'),prepared.id,'natural EOF, not watchdog expiry');
+   assert.deepEqual(guardian.output().trim().split('\n').map(line=>JSON.parse(line)).filter(event=>event.type==='complete'),
+    [{type:'complete',id:prepared.id,boot_id:boot}]);
+   assert.deepEqual(JSON.parse(fs.readFileSync(`${state}/exited`,'utf8')),{id:prepared.id,boot_id:boot,proof:'native-process-exit'});
+  } else assert.ok(elapsed>=(mode==='api-renew-crash'?41000:29000),`early native exit: ${elapsed}ms`);
   if(mode==='api-expiry') assert.equal((await guardian.done)[0],0,guardian.errors());
   const stop=helper(`stop ${prepared.id} ${boot}`);
   assert.equal((await stop.done)[0],0,stop.errors());
@@ -137,4 +156,4 @@ async function api(mode) {
   for(const child of children) if(child.exitCode===null && child.signalCode===null) child.kill('SIGKILL');
  }
 }
-await Promise.all([...['eof','paused','renewed'].map(run), ...['api-expiry','api-renew-crash'].map(api)]);
+await Promise.all([...['eof','paused','renewed','android'].map(run), ...['api-expiry','api-renew-crash','api-android','api-android-eof'].map(api)]);

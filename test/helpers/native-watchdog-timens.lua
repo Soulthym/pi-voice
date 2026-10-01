@@ -1,51 +1,75 @@
--- Trusted-kernel/proc metadata injection; never invokes mpv or an audio device.
+-- Synthetic Android/Linux proc capabilities; no hardware, mpv or audio device.
 local script, mode = arg[1], arg[2]
-local binding = os.getenv('PI_VOICE_BINDING')
-local commands = {}
+local binding, root = os.getenv('PI_VOICE_BINDING'), os.getenv('HOME')
+local commands, callbacks = {}, {}
 package.preload['mp'] = function() return {
     get_time=function() return 100 end,
     add_periodic_timer=function() return {} end,
     commandv=function(name) commands[#commands+1]=name; return true end,
-    register_script_message=function() end,
+    register_script_message=function(name, cb) callbacks[name]=cb end,
     register_event=function() end,
 } end
 local open = io.open
+local function contents(name)
+    local f = assert(open(root .. '/' .. name)); local value = f:read('*a'); f:close(); return value
+end
 io.open = function(file, access)
-    if file == '/proc/sys/kernel/osrelease' then
-        if mode == 'release-error' then return nil, 'Permission denied' end
-        return {read=function() return mode:match('^old') and '5.4.0-fp5\n' or '6.8.0\n' end, close=function() return true end}
+    if file == '/proc/sys/kernel/osrelease' then error('osrelease must not be read on Android') end
+    if file == '/proc/self/mountinfo' then
+        if mode == 'mount-error' then return nil, 'Permission denied' end
+        return open(root .. '/mounts', access)
     end
     return open(file, access)
 end
 package.preload['mp.utils'] = function() return {subprocess=function(args)
+    if args.args[1] == 'uname' then
+        assert(args.args[2] == '-r')
+        return {status=mode == 'uname-error' and 1 or 0, stdout=contents('release')}
+    end
     if args.args[1] == 'ls' then
-        if mode == 'old-list-error' then return {status=1, stdout=''} end
-        if mode == 'old-hidden' then return {status=0, stdout=''} end
-        return {status=0, stdout=mode == 'old-absent' and 'pid\nmnt\n' or 'pid\nmnt\ntime\n'}
+        assert(args.args[2] == '-1A')
+        assert(args.args[4]:match('^/proc/%d+/ns$'))
+        return {status=(mode == 'list-error' or mode == 'old-list-error') and 1 or 0, stdout=contents('listing')}
     end
-    local name = args.args[2]:match('/ns/(%w+)$')
-    if name == 'time' then
-        assert(not args.args[2]:match('/self/'), 'must identify the native reader, not the subprocess')
-        if mode == 'modern-absent' or mode == 'read-error' or mode == 'old-read-error' then
-            return {status=1, stdout=''}
-        end
-        if mode == 'subprocess-error' then error('private subprocess details') end
-        if mode == 'malformed' then return {status=0, stdout='time:[123] garbage\n'} end
-    end
+    local name = args.args[2]:match('^/proc/%d+/ns/(%w+)$')
+    assert(name, 'must identify the native reader, not the subprocess')
+    if mode == 'android' then assert(name == 'mnt', 'absent PID/time must not be read') end
+    if mode == name .. '-denied' or mode == 'old-' .. name .. '-denied' then return {status=1, stdout=''} end
+    if mode == 'link-malformed' then return {status=0, stdout=name .. ':[123] garbage\n'} end
+    if mode == 'link-nul' then return {status=0, stdout=name .. ':[123]\0\n'} end
+    if mode == 'link-long' then return {status=0, stdout=name .. ':[' .. string.rep('1', 21) .. ']\n'} end
     return {status=0, stdout=name .. ':[123]\n'}
 end} end
 dofile(script)
-if mode == 'modern' or mode == 'old-present' or mode == 'old-absent' then
+if os.getenv('ACCEPTED') == 'true' then
     assert(#commands == 0)
     local f = assert(open(binding)); local value = f:read('*a'); f:close()
-    local expected = mode == 'old-absent' and 'unsupported-pre5.6' or 'time:[123]'
-    assert(value:sub(-#expected-12) == 'binding-v2 ' .. expected .. '\n', value)
+    local expected = os.getenv('EXPECTED_NAMESPACES')
+    assert(value:match(' (%S+ mnt:%[123%] binding%-v3 %S+)\n$') == expected, value)
+    callbacks['pi-voice-start'](os.getenv('PI_VOICE_SCOPE'), os.getenv('PI_VOICE_BOOT'))
+    assert(commands[1] == 'loadfile', 'validated capability admits PCM')
 else
     assert(open(binding) == nil, 'unknown domain must not publish a binding')
     assert(commands[#commands-1] == 'stop' and commands[#commands] == 'quit')
     local f = assert(open(binding .. '.error')); local value = f:read('*a'); f:close()
-    local cause = mode == 'release-error' and 'syscall-failed' or
-        mode == 'subprocess-error' and 'subprocess-failed' or
-        (mode == 'malformed' or mode == 'old-hidden') and 'namespace-malformed' or 'namespace-read-failed'
-    assert(value:sub(-#cause-1) == cause .. '\n', value)
+    local phase, cause = 'namespace-list', 'namespace-malformed'
+    if mode:match('^mount%-') or mode:match('^overlay%-') or mode:match('^hidepid') then
+        phase, cause = 'proc-mounts', 'syscall-failed'
+    elseif mode == 'uname-error' or mode:match('^release%-') then
+        phase = 'kernel-release'
+        cause = mode == 'uname-error' and 'subprocess-failed' or 'namespace-malformed'
+    elseif mode:match('list%-error$') then
+        cause = 'namespace-read-failed'
+    elseif mode == 'modern-absent' then
+        phase = 'namespace-time'
+    elseif mode:match('%-denied$') then
+        phase = 'namespace-' .. assert(mode:match('([a-z]+)%-denied$'))
+        cause = 'namespace-read-failed'
+    elseif mode:match('^link%-') then
+        phase = 'namespace-mnt'
+    end
+    assert(value == phase .. ' ' .. cause .. '\n', value)
+    local count = #commands
+    if callbacks['pi-voice-start'] then callbacks['pi-voice-start'](os.getenv('PI_VOICE_SCOPE'), os.getenv('PI_VOICE_BOOT')) end
+    for i=count+1,#commands do assert(commands[i] ~= 'loadfile') end
 end

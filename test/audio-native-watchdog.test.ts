@@ -6,6 +6,7 @@ import * as net from "node:net";
 import { once } from "node:events";
 import * as path from "node:path";
 import test from "node:test";
+import { namespaceCases, namespaceFixture } from './helpers/namespace-fixture.js';
 
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 async function until(check: () => boolean) {
@@ -37,6 +38,8 @@ local mp = {
 package.preload['mp']=function() return mp end
 package.preload['mp.utils']=function() return {
  subprocess=function(args)
+ if args.args[1]=='uname' then return {status=0,stdout='6.8.0\\n'} end
+ if args.args[1]=='ls' then return {status=0,stdout='pid\\nmnt\\ntime\\n'} end
  local name=args.args[2]:match('/ns/(%w+)$')
  return {status=0,stdout=name..':[123]\\n'}
 end} end
@@ -68,7 +71,7 @@ assert(ack()==nonce, 'an expired lease must never be resurrected')
   const binding = fs.readFileSync(`${root}/binding`, "utf8").trim().split(" ");
   assert.equal(binding[0], id); assert.equal(binding[1], boot);
   assert.match(binding[2], /^[1-9][0-9]*$/); assert.match(binding[3], /^[0-9]+$/);
-  assert.deepEqual(binding.slice(7), ['binding-v2', 'time:[123]']);
+  assert.deepEqual(binding.slice(7), ['binding-v3', 'time:[123]']);
  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -90,9 +93,12 @@ for (const directory of ["client", "termux"]) test(`${directory}: native capabil
  }
 });
 
-for (const directory of ["client", "termux"]) test(`${directory}: versioned native time domain distinguishes unsupported from unreadable`, () => {
- for (const mode of ['modern', 'old-present', 'old-absent', 'old-read-error', 'old-list-error', 'old-hidden', 'modern-absent', 'read-error', 'malformed', 'subprocess-error', 'release-error']) {
+for (const directory of ["client", "termux"]) test(`${directory}: binding-v3 synthetic Android/Linux capabilities fail closed`, () => {
+ for (const mode of namespaceCases) {
   const { root, env } = fixture();
+  const model = namespaceFixture(mode);
+  for (const key of ['mounts', 'release', 'listing'] as const) fs.writeFileSync(`${root}/${key}`, model[key]);
+  Object.assign(env, { ACCEPTED: String(model.accepted), EXPECTED_NAMESPACES: `${model.pid} mnt:[123] binding-v3 ${model.time}` });
   try {
    const lua = spawnSync('lua', ['test/helpers/native-watchdog-timens.lua', path.resolve(directory, 'pi-voice-mpv-watchdog.lua'), mode], {
     env: { ...env, PI_VOICE_SCOPE: id, PI_VOICE_BOOT: boot, PI_VOICE_BINDING: `${root}/binding`, PI_VOICE_FIFO: `${root}/pcm` }, encoding: 'utf8',
@@ -112,14 +118,14 @@ const fs=require('fs'), net=require('net');
 const ipc=process.argv.find(v=>v.startsWith('--input-ipc-server=')).split('=')[1];
 const binding=process.env.PI_VOICE_BINDING, id=process.env.PI_VOICE_SCOPE;
 const ticks=fs.readFileSync('/proc/self/stat','utf8').replace(/^.*\\) /,'').split(' ')[19];
-fs.writeFileSync(binding, [id,process.env.PI_VOICE_BOOT,process.pid,ticks,process.getuid(),fs.readlinkSync('/proc/self/ns/pid'),fs.readlinkSync('/proc/self/ns/mnt'),'binding-v2',fs.readlinkSync('/proc/self/ns/time')].join(' ')+'\\n');
+fs.writeFileSync(binding, [id,process.env.PI_VOICE_BOOT,process.pid,ticks,process.getuid(),fs.readlinkSync('/proc/self/ns/pid'),fs.readlinkSync('/proc/self/ns/mnt'),'binding-v3',fs.readlinkSync('/proc/self/ns/time')].join(' ')+'\\n');
 
 if(fs.existsSync(process.env.HOME+'/binding-mode')) {
  const mode=fs.readFileSync(process.env.HOME+'/binding-mode','utf8');
  let value=fs.readFileSync(binding,'utf8');
  if(mode==='error') { fs.writeFileSync(binding+'.error','namespace-time namespace-read-failed\\n',{mode:0o600}); fs.unlinkSync(binding); }
  if(mode==='unsafe-error') { fs.writeFileSync(binding+'.error','secret/\\"'+ 'x'.repeat(4096),{mode:0o600}); fs.unlinkSync(binding); }
- if(mode==='old') value=value.replace(/ binding-v2 time:\\[\\d+\\]/,'');
+ if(mode==='old') value=value.replace(/ binding-v3 time:\\[\\d+\\]/,'');
  if(mode==='domain') value=value.replace(/time:\\[\\d+\\]/,'time:[1]');
  if(mode==='missing') value=value.replace(/ time:\\[\\d+\\]/,'');
  if(!mode.endsWith('error')) fs.writeFileSync(binding,value);

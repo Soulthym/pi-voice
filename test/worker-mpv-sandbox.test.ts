@@ -34,7 +34,7 @@ test("Socket VoiceWorkerClient reaches real mpv while paused before any PCM", { 
    await fs.writeFile(path.join(dir, "package.json"), '{"type":"module","exports":"./index.mjs"}');
    await fs.writeFile(path.join(dir, "index.mjs"), 'throw Error("Provider import escaped test mock");');
   }
-  for (const file of ["worker-mpv-sandbox.mjs", "worker-transport-mocks.mjs"]) {
+  for (const file of ["worker-mpv-sandbox.mjs", "worker-transport-mocks.mjs", "trusted-proc-sandbox.mjs"]) {
    await fs.copyFile(`test/helpers/${file}`, path.join(stage, file));
   }
   for (const file of ["pi-voice-audio-session", "pi-voice-mpv-watchdog.lua"]) {

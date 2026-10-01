@@ -7,10 +7,12 @@ import net from 'node:net';
 import {mock} from 'node:test';
 import {Transform} from 'node:stream';
 import {setTimeout as delay} from 'node:timers/promises';
+import {trustedProcSandbox} from './trusted-proc-sandbox.mjs';
 import {DEFAULT_VOICE_CONFIG} from './src/config.js';
 import {stopRemotePlayback} from './src/remote-playback.mjs';
 
 assert.equal(process.env.HOME, '/work/home');
+trustedProcSandbox('/work/fixture');
 console.log(spawnSync('/usr/bin/mpv', ['--version'], {encoding:'utf8'}).stdout.split('\n')[0]);
 fs.mkdirSync('/work/bin');
 fs.writeFileSync('/work/bin/mpv', '#!/bin/sh\nexec /usr/bin/mpv --ao=null "$@"\n', {mode:0o755});
@@ -24,8 +26,8 @@ fi
 exec /usr/bin/readlink "$@"
 `, {mode:0o755});
 process.env.PATH = `/work/bin:${process.env.PATH}`;
-// Only synthesis and alignment are replaced. Worker, sink, TCP transport,
-// shell guardian, Lua watchdog, FIFO, IPC, kernel identity and mpv are real.
+// Synthesis/alignment and the trusted mount view are modeled. Worker, sink,
+// TCP, shell/Lua validation, FIFO, IPC, remaining kernel identity and mpv are real.
 mock.module('node:child_process', {namedExports:{spawn:(command,args,options) =>
  spawn(command, ['--experimental-test-module-mocks', '--import', '/work/fixture/worker-transport-mocks.mjs', ...args], options),
 }});
@@ -159,7 +161,7 @@ for (const mode of ['cancel','resume','delayed-startup','namespace-failure']) {
    worker.setPlaybackPaused(false);
    await until(()=>events.some(e=>e.type==='idle'),'resume completes through native EOF');
    assert.ok(pcm>0,'resume delivers synthetic PCM');
-   assert.ok(replies.some(e=>e.type==='complete'),'real native EOF confirms completion');
+   assert.ok(replies.some(e=>e.type==='complete'),`real native EOF confirms completion: ${JSON.stringify({events,replies})}`);
   }
   assert.deepEqual(events.filter(e=>e.type==='error'),[]);
   assert.ok(events.some(e=>e.type==='remote-released' && e.id===session.id));

@@ -1,73 +1,98 @@
-import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
-import test from "node:test";
+import assert from 'node:assert/strict';
+import { spawn, spawnSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import test from 'node:test';
+import { namespaceCases, namespaceFixture } from './helpers/namespace-fixture.js';
 
-for (const directory of ["client", "termux"]) test(`${directory}: native exit proof requires trustworthy same-boot proc visibility`, () => {
- const root = fs.mkdtempSync(path.join(os.tmpdir(), "voice-proc-proof-"));
- const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
- const boot = fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+for (const directory of ['client', 'termux']) test(`${directory}: binding-v3 synthetic capability recovery requires trusted proc visibility`, () => {
+ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-proc-proof-'));
+ const id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+ const boot = fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
  const scope = `${root}/${id}`; fs.mkdirSync(scope);
- const source = fs.readFileSync(`${directory}/pi-voice-audio-session`, "utf8");
- const fn = source.slice(source.indexOf("reader_timens() {"), source.indexOf("\npublish_native_exit()"));
- const binding = `${id} ${boot} 424242 222 ${process.getuid!()} ${fs.readlinkSync("/proc/self/ns/pid")} ${fs.readlinkSync("/proc/self/ns/mnt")} binding-v2 time:[123]\n`;
- const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("PI_") && !key.startsWith("XDG_")));
+ const source = fs.readFileSync(`${directory}/pi-voice-audio-session`, 'utf8');
+ // Model a trusted proc mount explicitly; never bypass trusted_proc validation.
+ const fn = source.slice(source.indexOf('trusted_proc() {'), source.indexOf('\npublish_exit()'))
+  .replaceAll('/proc/self/mountinfo', `${root}/mounts`);
+ const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('PI_') && !key.startsWith('XDG_')));
  Object.assign(env, { HOME: root, TMPDIR: root, XDG_STATE_HOME: root, XDG_CONFIG_HOME: root, XDG_CACHE_HOME: root, XDG_RUNTIME_DIR: root });
  try {
-  for (const mode of ["absent", "reused", "live", "listing-error", "stat-error", "stat-malformed", "mount-error", "hidepid", "other-boot", "unknown-boot", "namespace", "uid", "legacy-unbound", "uncommitted", "old-binding", "unknown-version", "timens", "time-read-error", "time-malformed", "modern-absent", "old-unsupported", "old-present", "old-list-error", "old-hidden", "old-read-error", "missing-timens", "release-error"]) {
-   fs.writeFileSync(`${scope}/bound`, mode === "namespace" ? binding.replace(/pid:\[\d+\]/, "pid:[1]") : mode === "uid" ? binding.replace(` 222 ${process.getuid!()} `, " 222 999999 ") : binding);
-   if (mode === 'old-binding') fs.writeFileSync(`${scope}/bound`, binding.replace(/ binding-v2 time:\[123\]/, ''));
-   if (mode === 'unknown-version') fs.writeFileSync(`${scope}/bound`, binding.replace('binding-v2', 'binding-v1'));
-   if (mode === 'missing-timens') fs.writeFileSync(`${scope}/bound`, binding.replace(' time:[123]', ''));
-   if (mode.startsWith('old-') && !['old-binding', 'old-present'].includes(mode)) fs.writeFileSync(`${scope}/bound`, binding.replace('time:[123]', 'unsupported-pre5.6'));
-   fs.writeFileSync(`${scope}/committed`, "");
-   if (mode === "legacy-unbound") fs.unlinkSync(`${scope}/bound`);
-   if (mode === "uncommitted") fs.unlinkSync(`${scope}/committed`);
-   const result = spawnSync("bash", ["-c", `
+  for (const mode of [...namespaceCases, 'mount-reader-error', 'absent', 'live', 'listing-error', 'stat-error', 'stat-malformed', 'other-boot', 'unknown-boot', 'namespace', 'uid', 'legacy-unbound', 'uncommitted', 'old-binding', 'v2-binding', 'unknown-version', 'changed-time', 'backport-changed-time', 'missing-time', 'binding-nul', 'binding-newline', 'binding-long']) {
+   const model = namespaceFixture(mode === 'backport-changed-time' ? 'old-present' : mode);
+   for (const key of ['mounts', 'release', 'listing'] as const) fs.writeFileSync(`${root}/${key}`, model[key]);
+   if (mode === 'mount-error') fs.unlinkSync(`${root}/mounts`);
+   let binding = `${id} ${boot} 424242 222 ${process.getuid!()} ${model.pid} mnt:[123] binding-v3 ${model.time}\n`;
+   if (mode === 'namespace') binding = binding.replace('pid:[123]', 'pid:[1]');
+   if (mode === 'uid') binding = binding.replace(` 222 ${process.getuid!()} `, ' 222 999999 ');
+   if (mode === 'old-binding') binding = binding.replace(' binding-v3 time:[123]', '');
+   if (mode === 'v2-binding') binding = binding.replace('binding-v3', 'binding-v2');
+   if (mode === 'unknown-version') binding = binding.replace('binding-v3', 'binding-v99');
+   if (mode === 'missing-time') binding = binding.replace(' time:[123]', '');
+   if (mode === 'binding-nul') binding = binding.replace('binding-v3', 'binding-v3\0');
+   if (mode === 'binding-newline') binding += '\n';
+   if (mode === 'binding-long') binding += 'a'.repeat(1024);
+   fs.writeFileSync(`${scope}/bound`, binding);
+   fs.writeFileSync(`${scope}/committed`, '');
+   fs.rmSync(`${scope}/exited`, { force: true });
+   fs.rmSync(`${root}/stat-read`, { force: true });
+   if (mode === 'legacy-unbound') fs.unlinkSync(`${scope}/bound`);
+   if (mode === 'uncommitted') fs.unlinkSync(`${scope}/committed`);
+   const result = spawnSync('bash', ['-c', `
 set -u
 ${fn}
 boot_id='"${boot}"'
+state_dir='${scope}'
+native_child=false
 [[ $MODE != unknown-boot ]] || boot_id=null
 kernel_boot() { [[ $MODE == other-boot ]] && printf '"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"' || printf '%s' "$boot_id"; }
+uname() { [[ $* == -r && $MODE != uname-error ]] || return 1; command cat '${root}/release'; }
 readlink() {
- if [[ $1 == /proc/self/ns/time ]]; then
-  case $MODE in
-   time-read-error|modern-absent|old-read-error) return 1;;
-   timens) printf 'time:[456]';;
-   time-malformed) printf 'broken';;
-   *) printf 'time:[123]';;
-  esac
- else command readlink "$@"; fi
+ local name=\${1##*/}
+ [[ $MODE != android || $name == mnt ]] || { touch '${root}/absent-read'; return 1; }
+ [[ $MODE != "$name-denied" && $MODE != "old-$name-denied" ]] || return 1
+ case $MODE in
+  link-malformed) printf '%s:[123] garbage\\n' "$name";;
+  link-nul) printf '%s:[123]\\0\\n' "$name";;
+  link-long) printf '%s:[123456789012345678901]\\n' "$name";;
+  changed-time|backport-changed-time) [[ $name != time ]] && printf '%s:[123]\\n' "$name" || printf 'time:[456]\\n';;
+  *) printf '%s:[123]\\n' "$name";;
+ esac
 }
-ls() { if [[ \${*: -1} == /proc/self/ns ]]; then
- [[ $MODE != old-list-error ]] || return 1
- [[ $MODE != old-hidden ]] || return 0
- [[ $MODE != old-read-error && $MODE != old-present ]] || { printf 'pid\\nmnt\\ntime\\n'; return; }
- printf 'pid\\nmnt\\n'; return
+ls() {
+ if [[ \${*: -1} == /proc/self/ns ]]; then
+  [[ $MODE != list-error && $MODE != old-list-error ]] || return 1
+  command cat '${root}/listing'; return
  fi
- [[ $MODE == listing-error ]] && return 1; [[ $MODE == absent ]] && printf '1\\n2\\n' || printf '424242\\n'; }
+ [[ $MODE != listing-error ]] || return 1
+ [[ $MODE == absent || $MODE == android ]] && printf '1\\n2\\n' || printf '424242\\n'
+}
 cat() {
  case "$1" in
- /proc/sys/kernel/osrelease)
-  [[ $MODE != release-error ]] || return 1
-  [[ $MODE == old-* ]] && printf '5.4.0' || printf '6.8.0';;
- /proc/mounts)
-  [[ $MODE != mount-error ]] || return 1
-  [[ $MODE == hidepid ]] && printf 'proc /proc proc rw,hidepid=2 0 0\\n' || printf 'proc /proc proc rw 0 0\\n';;
+ '${root}/mounts')
+  command cat "$@"
+  # A complete valid prefix followed by EIO must not establish visibility.
+  [[ $MODE != mount-reader-error ]];;
+ /proc/sys/kernel/osrelease) touch '${root}/osrelease-read'; return 1;;
  /proc/424242/stat)
+  touch '${root}/stat-read'
   [[ $MODE != stat-error ]] || return 1
-  [[ $MODE != stat-malformed ]] || { printf 'broken'; return; }
+  [[ $MODE != stat-malformed ]] || { printf broken; return; }
   printf '424242 (native name (nested)) S'
   for ((i=0;i<18;i++)); do printf ' 0'; done
-  [[ $MODE == reused || $MODE == old-unsupported || $MODE == old-present || $MODE == timens ]] && printf ' 333\\n' || printf ' 222\\n';;
+  [[ $MODE == live ]] && printf ' 222\\n' || printf ' 333\\n';;
  *) command cat "$@";;
  esac
 }
-native_gone '${scope}'
-`], { env: { ...env, MODE: mode }, encoding: "utf8" });
-   assert.equal(result.status, ["absent", "reused", "old-unsupported", "old-present"].includes(mode) ? 0 : 1, `${mode}: ${result.stderr}`);
+publish_native_exit '${scope}'
+`], { env: { ...env, MODE: mode }, encoding: 'utf8' });
+   const accepted = (model.accepted && !mode.includes('changed-time')) || mode === 'absent';
+   assert.equal(result.status, accepted ? 0 : 1, `${mode}: ${result.stderr}`);
+   assert.equal(fs.existsSync(`${scope}/exited`), accepted, mode);
+   if (accepted) assert.deepEqual(JSON.parse(fs.readFileSync(`${scope}/exited`, 'utf8')), { id, boot_id: boot, proof: 'native-process-exit' });
+   if (mode.includes('changed-time')) assert.equal(fs.existsSync(`${root}/stat-read`), false, 'changed domain cannot consult misleading reused ticks');
+   assert.equal(fs.existsSync(`${root}/osrelease-read`), false);
+   assert.equal(fs.existsSync(`${root}/absent-read`), false);
   }
  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
@@ -90,10 +115,10 @@ for (const directory of ['client', 'termux']) test(`${directory}: stopped live P
   const scope = `${root}/${id}`; fs.mkdirSync(scope);
   const boot = fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
   const timens = fs.readlinkSync('/proc/self/ns/time');
-  fs.writeFileSync(`${scope}/bound`, `${id} ${boot} ${pid} ${ticks} ${process.getuid!()} ${fs.readlinkSync('/proc/self/ns/pid')} ${fs.readlinkSync('/proc/self/ns/mnt')} binding-v2 ${timens}\n`);
+  fs.writeFileSync(`${scope}/bound`, `${id} ${boot} ${pid} ${ticks} ${process.getuid!()} ${fs.readlinkSync('/proc/self/ns/pid')} ${fs.readlinkSync('/proc/self/ns/mnt')} binding-v3 ${timens}\n`);
   fs.writeFileSync(`${scope}/committed`, '');
   const source = fs.readFileSync(`${directory}/pi-voice-audio-session`, 'utf8');
-  const functions = source.slice(source.indexOf('reader_timens() {'), source.indexOf('\npublish_exit()'));
+  const functions = source.slice(source.indexOf('trusted_proc() {'), source.indexOf('\npublish_exit()'));
   const setup = `${functions}\nboot_id='"${boot}"'\nstate_dir='${scope}'\nnative_child=false\nkernel_boot() { printf '%s' "$boot_id"; }\n`;
   // Same live, stopped PID and a deliberately different observed tick value.
   // The domain guard must reject BEFORE reading that misleading stat at all.

@@ -23,11 +23,12 @@ test("real mpv native watchdog in an audio-null container", { timeout: 90000 }, 
    "--env", "XDG_RUNTIME_DIR=/work/runtime", "--env", "PI_CODING_AGENT_DIR=/work/pi",
    image, "-c", "mkdir -p /work/home /work/config /work/state /work/cache /work/runtime /work/pi; cp /tmp/pi-voice-mpv-watchdog.lua /tmp/pi-voice-audio-session /work/; exec node /tmp/mpv-watchdog-sandbox.mjs");
   run("cp", path.resolve("test/helpers/mpv-watchdog-sandbox.mjs"), `${name}:/tmp/mpv-watchdog-sandbox.mjs`);
+  run("cp", path.resolve("test/helpers/trusted-proc-sandbox.mjs"), `${name}:/tmp/trusted-proc-sandbox.mjs`);
   run("cp", path.resolve("client/pi-voice-mpv-watchdog.lua"), `${name}:/tmp/pi-voice-mpv-watchdog.lua`);
   run("cp", path.resolve("client/pi-voice-audio-session"), `${name}:/tmp/pi-voice-audio-session`);
   const output = run("start", "--attach", name);
   t.diagnostic(output);
-  assert.equal(output.split("\n").filter(line => line.startsWith("PASS real mpv")).length, 5);
+  assert.equal(output.split("\n").filter(line => line.startsWith("PASS real mpv")).length, 8);
  } finally {
   spawnSync("podman", ["rm", "--ignore", "-f", "-t", "1", name], { timeout: 15000 });
  }

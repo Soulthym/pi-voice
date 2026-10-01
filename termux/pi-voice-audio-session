@@ -53,47 +53,94 @@ stable_device_id() {
 }
 device_id=$(stable_device_id)
 
-# A missing link on modern kernels is not evidence of unsupported time namespaces.
-reader_timens() {
-  local release major minor names value
-  release=$(cat /proc/sys/kernel/osrelease) || return 1
-  [[ $release =~ ^([0-9]+)\.([0-9]+)\. ]] || return 1
-  major=${BASH_REMATCH[1]} minor=${BASH_REMATCH[2]}
-  if (( major < 5 || (major == 5 && minor < 6) )); then
-    names=$(LC_ALL=C QUOTING_STYLE=literal ls -1 -- /proc/self/ns) || return 1
-    [[ $'\n'$names$'\n' == *$'\npid\n'* && $'\n'$names$'\n' == *$'\nmnt\n'* ]] || return 1
-    if [[ $'\n'$names$'\n' != *$'\ntime\n'* ]]; then
-      printf 'unsupported-pre5.6'
-      return
+# Trust the procfs root, not directory/file overlays that could conceal identity.
+trusted_proc() {
+  local mounts line mount type options root option device= seen=$'\n' visible=false LC_ALL=C
+  local -a fields
+  # Require successful bounded I/O; preserve final newlines and reject NULs.
+  mounts=$(set -o pipefail; cat /proc/self/mountinfo | head -c 1048577 | tr '\000' '?' && printf '.') || return 1
+  mounts=${mounts%.}
+  [[ -n $mounts && ${#mounts} -le 1048576 && $mounts == *$'\n' && $mounts != *'?'* ]] || return 1
+  mounts=${mounts%$'\n'}
+  while IFS= read -r line; do
+    read -r -a fields <<<"$line"
+    [[ ${#fields[@]} -ge 10 && $line =~ ^[0-9]+\ [0-9]+\ [0-9]+:[0-9]+\  && $line == *' - '* ]] || return 1
+    root=${fields[3]} mount=${fields[4]} options=${fields[5]}
+    read -r type _ <<<"${line#* - }"
+    if [[ $mount == /proc || $mount == /proc/sys || $mount == /proc/sys/kernel || $mount == /proc/sys/kernel/random || $mount == /proc/sys/kernel/random/boot_id ]]; then
+      [[ $type == proc && $seen != *$'\n'"$mount"$'\n'* && ( -z $device || $device == "${fields[2]}" ) ]] || return 1
+      if [[ $mount == /proc ]]; then
+        [[ $root == / ]] || return 1
+        visible=true
+      else
+        [[ $root == "${mount#/proc}" ]] || return 1
+      fi
+      device=${fields[2]} seen+="$mount"$'\n'
+      options+=",${line##* }"
+      local -a mount_options
+      IFS=, read -r -a mount_options <<<"$options"
+      for option in "${mount_options[@]}"; do
+        [[ $option != hidepid=* || $option == hidepid=0 ]] || return 1
+      done
+    elif [[ $mount =~ ^/proc/(self|thread-self|[0-9]+|mounts)(/|$) || $mount == /proc/*\\* ]]; then
+      return 1
     fi
+  done <<<"$mounts"
+  [[ $visible == true && -r /proc/self/stat && -x /proc ]]
+}
+
+# Absence requires a successful full listing; a failed readlink is never absence.
+reader_namespaces() {
+  local release major minor names name seen=$'\n' pidns mntns timens LC_ALL=C
+  trusted_proc || return 1
+  # Preserve trailing newlines and reject NULs rather than Bash silently dropping them.
+  release=$(set -o pipefail; uname -r | tr '\000' '?' && printf '.') || return 1
+  release=${release%.} release=${release%$'\n'}
+  [[ ${#release} -le 64 && $release =~ ^([0-9]{1,3})\.([0-9]{1,3})\.[0-9]{1,6}([-+._a-zA-Z][-+._a-zA-Z0-9]*)?$ ]] || return 1
+  major=$((10#${BASH_REMATCH[1]})) minor=$((10#${BASH_REMATCH[2]}))
+  names=$(set -o pipefail; LC_ALL=C QUOTING_STYLE=literal ls -1A -- /proc/self/ns | tr '\000' '?' && printf '.') || return 1
+  names=${names%.}
+  [[ -n $names && ${#names} -le 4096 && $names == *$'\n' ]] || return 1
+  names=${names%$'\n'}
+  while IFS= read -r name; do
+    [[ $name =~ ^[a-z][a-z0-9_]{0,63}$ && $seen != *$'\n'"$name"$'\n'* ]] || return 1
+    seen+="$name"$'\n'
+  done <<<"$names"
+  [[ $seen == *$'\nmnt\n'* ]] || return 1
+  mntns=$(set -o pipefail; readlink /proc/self/ns/mnt | tr '\000' '?' && printf '.') || return 1
+  mntns=${mntns%.} mntns=${mntns%$'\n'}
+  [[ $mntns =~ ^mnt:\[[0-9]{1,20}\]$ ]] || return 1
+  pidns=unsupported-no-pid
+  if [[ $seen == *$'\npid\n'* ]]; then
+    pidns=$(set -o pipefail; readlink /proc/self/ns/pid | tr '\000' '?' && printf '.') || return 1
+    pidns=${pidns%.} pidns=${pidns%$'\n'}
+    [[ $pidns =~ ^pid:\[[0-9]{1,20}\]$ ]] || return 1
   fi
-  value=$(readlink /proc/self/ns/time) || return 1
-  [[ $value =~ ^time:\[[0-9]+\]$ ]] || return 1
-  printf '%s' "$value"
+  timens=unsupported-pre5.6
+  if [[ $seen == *$'\ntime\n'* ]]; then
+    timens=$(set -o pipefail; readlink /proc/self/ns/time | tr '\000' '?' && printf '.') || return 1
+    timens=${timens%.} timens=${timens%$'\n'}
+    [[ $timens =~ ^time:\[[0-9]{1,20}\]$ ]] || return 1
+  else
+    (( major < 5 || (major == 5 && minor < 6) )) || return 1
+  fi
+  printf '%s %s %s' "$pidns" "$mntns" "$timens"
 }
 
 # Only a successfully read, unrestricted procfs in the original namespaces can
 # establish absence. A failed stat/read/permission check is never absence.
 native_gone() {
-  local directory=$1 identity bid bboot pid ticks uid pidns mntns version timens extra mounts listing stat tail current_ticks
+  local directory=$1 identity bid bboot pid ticks uid pidns mntns version timens extra listing stat tail current_ticks
   [[ -f $directory/bound && -f $directory/committed ]] || return 1
-  identity=$(cat "$directory/bound") || return 1
+  if IFS= read -r -d '' -n 1025 identity <"$directory/bound"; then return 1; fi
+  [[ ${#identity} -le 1024 && $identity == *$'\n' ]] || return 1
+  identity=${identity%$'\n'}
+  [[ $identity != *$'\n'* ]] || return 1
   read -r bid bboot pid ticks uid pidns mntns version timens extra <<<"$identity"
   [[ -z $extra && $bid == "${directory##*/}" && $bboot == "${boot_id//\"/}" && $boot_id != null ]] || return 1
-  [[ $pid =~ ^[1-9][0-9]*$ && $ticks =~ ^[0-9]+$ && $uid =~ ^[0-9]+$ && $pidns =~ ^pid:\[[0-9]+\]$ && $mntns =~ ^mnt:\[[0-9]+\]$ ]] || return 1
+  [[ $pid =~ ^[1-9][0-9]{0,9}$ && $ticks =~ ^[0-9]{1,20}$ && $uid =~ ^[0-9]{1,10}$ ]] || return 1
   [[ $(kernel_boot) == "$boot_id" && $(id -u) == "$uid" ]] || return 1
-  [[ $(readlink /proc/self/ns/pid) == "$pidns" && $(readlink /proc/self/ns/mnt) == "$mntns" ]] || return 1
-  [[ $version == binding-v2 && -n $timens && $(reader_timens) == "$timens" ]] || return 1
-  mounts=$(cat /proc/mounts) || return 1
-  local source mount type options rest visible=false
-  while read -r source mount type options rest; do
-    if [[ $mount == /proc ]]; then
-      [[ $type == proc ]] || return 1
-      [[ ,$options, != *,hidepid=* || ,$options, == *,hidepid=0,* ]] || return 1
-      visible=true
-    fi
-  done <<<"$mounts"
-  [[ $visible == true && -r /proc/self/stat && -x /proc ]] || return 1
+  [[ $version == binding-v3 && $(reader_namespaces) == "$pidns $mntns $timens" ]] || return 1
   listing=$(LC_ALL=C QUOTING_STYLE=literal ls -1 -- /proc) || return 1
   if [[ $'\n'$listing$'\n' != *$'\n'"$pid"$'\n'* ]]; then
     return 0
@@ -109,7 +156,7 @@ native_gone() {
 publish_native_exit() (
   local directory=$1
   if [[ $directory == "$state_dir" && $native_child == true && $player_exited == true ]]; then
-    [[ $boot_id != null && $(kernel_boot) == "$boot_id" && $(reader_timens) == "$bound_timens" ]] || exit 1
+    [[ $boot_id != null && $(kernel_boot) == "$boot_id" && $(id -u) == "$bound_uid" && $(reader_namespaces) == "$bound_pidns $bound_mntns $bound_timens" ]] || exit 1
   else
     native_gone "$directory" || exit 1
   fi
@@ -383,10 +430,15 @@ for _ in {1..250}; do
 done
 [[ ! -f $state_dir/binding.error && -f $state_dir/binding && -S $ipc_socket ]] || exit 1
 startup_phase=native-identity
-read -r bound_id bound_boot native_pid bound_ticks bound_uid bound_pidns bound_mntns bound_version bound_timens extra <"$state_dir/binding" || exit 1
-[[ -z $extra && $bound_id == "$session_id" && $bound_boot == "${boot_id//\"/}" && $native_pid =~ ^[1-9][0-9]*$ && $bound_ticks =~ ^[0-9]+$ ]] || exit 1
-[[ $bound_uid == "$(id -u)" && $bound_pidns == "$(readlink /proc/self/ns/pid)" && $bound_mntns == "$(readlink /proc/self/ns/mnt)" ]] || exit 1
-[[ $bound_version == binding-v2 && -n $bound_timens && $(reader_timens) == "$bound_timens" ]] || exit 1
+identity=
+if IFS= read -r -d '' -n 1025 identity <"$state_dir/binding"; then exit 1; fi
+[[ ${#identity} -le 1024 && $identity == *$'\n' ]] || exit 1
+identity=${identity%$'\n'}
+[[ $identity != *$'\n'* ]] || exit 1
+read -r bound_id bound_boot native_pid bound_ticks bound_uid bound_pidns bound_mntns bound_version bound_timens extra <<<"$identity" || exit 1
+[[ -z $extra && $bound_id == "$session_id" && $bound_boot == "${boot_id//\"/}" && $native_pid =~ ^[1-9][0-9]{0,9}$ && $bound_ticks =~ ^[0-9]{1,20}$ && $bound_uid =~ ^[0-9]{1,10}$ ]] || exit 1
+[[ $bound_uid == "$(id -u)" ]] || exit 1
+[[ $bound_version == binding-v3 && $(reader_namespaces) == "$bound_pidns $bound_mntns $bound_timens" ]] || exit 1
 native_stat=$(cat "/proc/$native_pid/stat") || exit 1
 native_tail=${native_stat##*) }
 read -r -a native_fields <<<"$native_tail"
@@ -430,7 +482,7 @@ while :; do
   [[ ! -f $state_dir/binding.error ]] || exit 1
   [[ $native_child != true || -n $(builtin jobs -pr %pi_voice_player) ]] || break
   # An unverifiable reader domain cannot end polling or authorize cleanup.
-  if [[ $(reader_timens) != "$bound_timens" ]]; then sleep 0.08; continue; fi
+  if [[ $(reader_namespaces) != "$bound_pidns $bound_mntns $bound_timens" ]]; then sleep 0.08; continue; fi
   native_stat=$(cat "/proc/$native_pid/stat" 2>/dev/null) || break
   native_tail=${native_stat##*) }
   read -r -a native_fields <<<"$native_tail"

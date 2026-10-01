@@ -38,10 +38,12 @@ local function alive()
     if expired or mp.get_time() >= deadline then quit(); return false end
     return true
 end
-local function read(file)
+local function read(file, limit)
+    limit = limit or 1048576
     local f = assert(io.open(file, 'r'))
-    local value = assert(f:read('*a'))
+    local value = assert(f:read(limit + 1))
     assert(f:close())
+    assert(#value <= limit and not value:find('\0', 1, true))
     return value
 end
 local function publish(file, value)
@@ -62,7 +64,9 @@ guarded(function()
         cause = 'namespace-read-failed'
         assert(result.status == 0)
         cause = 'namespace-malformed'
+        assert(type(result.stdout) == 'string' and #result.stdout <= 32)
         local value = assert(result.stdout:match('^(' .. name .. ':%[%d+%])\n?$'))
+        assert(#assert(value:match('%[(%d+)%]')) <= 20)
         cause = 'syscall-failed'
         return value
     end
@@ -110,33 +114,80 @@ guarded(function()
     phase = 'identity'
     local stat = read('/proc/self/stat')
     local pid, tail = stat:match('^(%d+) %(.+%) (.+)$')
-    assert(pid and tail)
-    -- Read the native reader's namespace, not the subprocess's or time_for_children.
-    phase = 'kernel-release'
-    local major, minor = read('/proc/sys/kernel/osrelease'):match('^(%d+)%.(%d+)%.')
-    assert(major and minor)
-    local timens
-    if tonumber(major) < 5 or (tonumber(major) == 5 and tonumber(minor) < 6) then
-        phase = 'namespace-list'
-        cause = 'subprocess-failed'
-        local result = utils.subprocess({args={'ls', '-1', '--', '/proc/' .. pid .. '/ns'}, cancellable=false})
-        cause = 'namespace-read-failed'
-        assert(result.status == 0)
-        cause = 'namespace-malformed'
-        local names = '\n' .. result.stdout .. '\n'
-        assert(names:match('\npid\n') and names:match('\nmnt\n'))
-        if not names:match('\ntime\n') then timens = 'unsupported-pre5.6' end
-        cause = 'syscall-failed'
+    assert(pid and tail and #pid <= 10 and pid:match('^[1-9]%d*$'))
+    -- Reject overlays before using directory enumeration as evidence of absence.
+    phase = 'proc-mounts'
+    local mounts = read('/proc/self/mountinfo')
+    local visible, device, seen = false, nil, {}
+    assert(mounts:sub(-1) == '\n' and not mounts:find('\n\n', 1, true))
+    for line in mounts:gmatch('([^\n]+)\n') do
+        local dev, root, mount, options = line:match('^%d+ %d+ (%d+:%d+) (%S+) (%S+) (%S+) ')
+        local kind, super = line:match(' %- (%S+) %S+ (%S+)$')
+        assert(root and kind)
+        if mount == '/proc' or mount == '/proc/sys' or mount == '/proc/sys/kernel' or
+            mount == '/proc/sys/kernel/random' or mount == '/proc/sys/kernel/random/boot_id' then
+            -- Only the identical procfs subtree may cover the boot identity ancestry.
+            assert(kind == 'proc' and not seen[mount] and (not device or device == dev))
+            assert(root == (mount == '/proc' and '/' or mount:sub(6)))
+            device, seen[mount] = dev, true
+            if mount == '/proc' then visible = true end
+            for option in (options .. ',' .. super):gmatch('[^,]+') do
+                assert(not option:match('^hidepid=') or option == 'hidepid=0')
+            end
+        elseif mount:sub(1, 6) == '/proc/' then
+            local first = mount:match('^/proc/([^/]+)')
+            assert(first ~= 'self' and first ~= 'thread-self' and
+                first ~= 'mounts' and not first:match('^%d+$') and not mount:find('\\', 1, true))
+        end
     end
-    timens = timens or namespace(pid, 'time')
+    assert(visible)
+    -- uname works on Android where the procfs osrelease leaf may not exist.
+    phase = 'kernel-release'
+    cause = 'subprocess-failed'
+    local result = utils.subprocess({args={'uname', '-r'}, cancellable=false})
+    assert(result.status == 0)
+    cause = 'namespace-malformed'
+    assert(type(result.stdout) == 'string' and #result.stdout <= 65)
+    local release = result.stdout:gsub('\n$', '')
+    local major, minor, patch, suffix = release:match('^(%d+)%.(%d+)%.(%d+)(.*)$')
+    assert(major and #major <= 3 and #minor <= 3 and #patch <= 6 and #release <= 64)
+    assert(suffix == '' or suffix:match('^[-+._a-zA-Z][-+._a-zA-Z0-9]*$'))
+    -- Read the native reader's namespace, not the subprocess's or time_for_children.
+    phase = 'namespace-list'
+    cause = 'subprocess-failed'
+    result = utils.subprocess({args={'ls', '-1A', '--', '/proc/' .. pid .. '/ns'}, cancellable=false})
+    cause = 'namespace-read-failed'
+    assert(result.status == 0)
+    cause = 'namespace-malformed'
+    assert(type(result.stdout) == 'string' and #result.stdout <= 4096 and result.stdout:sub(-1) == '\n')
+    local names = {}
+    for name in result.stdout:gmatch('([^\n]*)\n') do
+        assert(#name <= 64 and name:match('^[a-z][a-z0-9_]*$') and not names[name])
+        names[name] = true
+    end
+    assert(names.mnt)
+    local mntns = namespace(pid, 'mnt')
+    local pidns = names.pid and namespace(pid, 'pid') or 'unsupported-no-pid'
+    local timens
+    if names.time then
+        timens = namespace(pid, 'time')
+    else
+        phase = 'namespace-time'
+        cause = 'namespace-malformed'
+        assert(tonumber(major) < 5 or (tonumber(major) == 5 and tonumber(minor) < 6))
+        timens = 'unsupported-pre5.6'
+    end
     phase = 'identity'
+    cause = 'syscall-failed'
     local fields = {}
     for value in tail:gmatch('%S+') do fields[#fields+1] = value end
     local ticks = assert(fields[20])
-    assert(ticks:match('^%d+$'))
+    assert(#ticks <= 20 and ticks:match('^%d+$'))
     local uid = assert(read('/proc/self/status'):match('\nUid:%s+(%d+)%s'))
-    assert(read('/proc/sys/kernel/random/boot_id'):match('^(%S+)') == boot)
-    local identity = table.concat({scope, boot, pid, ticks, uid, namespace(pid, 'pid'), namespace(pid, 'mnt'), 'binding-v2', timens}, ' ')
+    assert(#uid <= 10)
+    local current_boot = read('/proc/sys/kernel/random/boot_id', 37)
+    assert(current_boot == boot or current_boot == boot .. '\n')
+    local identity = table.concat({scope, boot, pid, ticks, uid, pidns, mntns, 'binding-v3', timens}, ' ')
     phase = 'binding-publish'
     publish(binding, identity .. '\n')
 end)()

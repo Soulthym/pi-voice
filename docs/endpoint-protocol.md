@@ -105,15 +105,24 @@ prebinding crash after commit without signalling a reconstructed PID. Missing
 metadata or existing intent cannot use that proof.
 
 The private native binding format is now
-`<scope> <boot> <pid> <startticks> <uid> <pidns> <mntns> binding-v2 <reader-timens>`.
-Lua records its own reader time namespace (`time:[inode]`, not `time_for_children`);
-the helper validates its reader domain before any start-tick comparison. Different
-or unverifiable time domains cannot prove PID reuse. Only a readable pre-5.6 kernel
-release plus a successful namespace listing showing PID/mount but no time namespace
-permits the explicit `unsupported-pre5.6` marker. Read/permission errors or missing
-links on newer kernels fail closed. Install matching shell/Lua helpers together;
-old unversioned bindings are not upgraded or reinterpreted, and cannot mint a new
-native-exit receipt. Previously durable receipts retain their existing meaning.
+`<scope> <boot> <pid> <startticks> <uid> <pidns> <mntns> binding-v3 <reader-timens>`.
+Both readers obtain a strictly validated, bounded kernel release from `uname -r`,
+including vendor suffixes; neither reads the Android-restricted osrelease proc leaf.
+Successful complete namespace-directory enumeration on trusted procfs may establish
+an absent PID entry (`unsupported-no-pid`, for kernels without CONFIG_PID_NS).
+Mount namespace identity is mandatory. A missing time entry permits
+`unsupported-pre5.6` only with a verified pre-5.6 release; a backported time entry
+must be readable and match exactly, regardless of version. Present-but-unreadable
+links, failed/malformed listings and unknown kernel releases always fail closed.
+
+Lua records its own PID from proc stat and reader time namespace (`time:[inode]`,
+not `time_for_children`). Recovery revalidates the same capability state, boot,
+UID and namespace identities before any start-tick comparison. Mount checks reject
+hidepid and identity-concealing overlays; identical-device procfs subtree mounts
+along boot identity ancestry are allowed. Different or unverifiable domains cannot
+prove PID reuse. Install matching shell/Lua helpers together: older bindings,
+including binding-v2, are not upgraded and cannot mint new native-exit receipts.
+Previously durable receipts retain their existing meaning.
 
 Supported native binding requires a Lua-enabled mpv with the timer, IPC/script-message
 and subprocess APIs used here, readable boot/process metadata, and matching verified
@@ -121,8 +130,13 @@ namespace domains. Linux null-output tests on mpv 0.35.1 and 0.40.0 do not valid
 a particular Android/Termux kernel or physical audio device. Android may permit
 self-process reads but restrict a subprocess reading the native player's namespace
 links; `namespace-read-failed` reports that boundary without bypassing it. An actual
-pre-5.6 kernel has not been validated; only the strict simulated branch is covered.
-There is no PID-only, no-watchdog or older-protocol fallback.
+pre-5.6 kernel has not been validated; Android 5.4 capability layouts are synthetic
+fixtures, including actual mpv with null output. Nonzero hidepid remains unsupported,
+including Android configurations using it: this patch does not establish that an
+actual phone meets the complete proof requirements. A present-but-denied PID link
+also remains unsupported and needs a separately reviewed trustworthy identity,
+not an absence marker. There is no receipt-only, PID-only, no-watchdog or
+older-protocol fallback.
 
 The watchdog is not an OS/hardware guarantee: suspended/frozen native mpv, a frozen
 OS, uninterruptible kernel work and physical output buffers can exceed the timer.

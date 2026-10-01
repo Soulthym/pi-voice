@@ -1,5 +1,45 @@
 # Tests
 
+## Android 5.4 namespace capability portability
+
+Both helper copies and Lua now use validated `uname -r` and binding-v3 capability
+identities. Synthetic Android 5.4-vendor layouts deny the osrelease leaf, omit PID
+and time entries, and retain readable mount identity. Actual mpv null-output
+checks exercise native binding, normal PCM/EOF and guardian-crash recovery using
+that controlled namespace view. These are **not actual Android hardware results**.
+
+Shared shell/Lua fixtures cover present-but-denied PID/time links, denied listings,
+missing mount identity, failed/malformed/oversized uname, backported time identity,
+changed modern time identity, malformed/NUL/truncated directory output, legacy
+bindings, hidepid and identity overlays. Mount checks include failed reads after
+a valid prefix, identical procfs subtree binds, and unrelated binfmt mounts.
+Static checks forbid osrelease reads in both production Lua copies. Existing
+startup-error, callback and EOF checks remain enabled.
+
+Final isolated validation: typecheck passed; default **1,381 passed / 35 skipped**;
+installed-native Pi **1,414 passed / 2 skipped**; zero failures. Isolated real SSH
+**12/12 passed**. The full-suite skips include the two explicitly opted-in mpv
+container tests. LSP is unavailable. Logs: `/tmp/bf.PWVD`; earlier logs:
+`/tmp/v3-*.log`.
+
+After adding an explicit unpaused Android-fixture API EOF/completion regression,
+actual mpv **0.40.0 passed all 12 scenarios**; **0.35.1 passed all eight native
+scenarios**, including Android EOF and guardian crash, but the full-host delayed
+startup EOF check failed on its final run. Earlier 0.35.1 runs passed all previous
+11 scenarios; intermittent host completion failures remain unresolved, so the
+final 0.35.1 suite is **not green**. A first new EOF assertion also failed before
+the fixture waited for stream closure rather than just process exit. Final logs:
+`/tmp/ae.eGaV`. Typecheck/syntax checks were repeated; full default/native suites
+were not rerun after this opt-in sandbox-only addition.
+
+Public-package builds used isolated containers; runtimes had no host audio/home/
+device mounts. No live sessions, inference, providers, models, deployment, runtime
+settings or fence clearing were used. Owned containers/images were removed.
+Nonzero hidepid and present-but-denied namespace links still fail before PCM;
+phone compatibility is unverified pending its actual namespace-directory evidence.
+Independent review identified the mount-read and subtree-bind issues corrected
+here; final parent review is still required.
+
 ## Phased v4 startup and native diagnostics
 
 Fixed two source-proven startup defects: a single 5-second timer covered network,
