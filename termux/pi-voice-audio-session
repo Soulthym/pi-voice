@@ -23,6 +23,7 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 native_pid=
 native_child=false
 renew_ack=
+startup_phase=
 state_home=${XDG_STATE_HOME:-${HOME:?}/.local/state}
 playback_dir="$state_home/pi-voice/playback"
 state_dir="$playback_dir/$session_id"
@@ -131,7 +132,21 @@ pi_voice_feeder() { exec cat; }
 stop_feeder() { builtin kill -KILL %pi_voice_feeder 2>/dev/null || true; }
 
 cleanup() {
+  local status=$? native_phase= native_cause= metadata=
   trap - EXIT
+  if [[ $status != 0 && -n $startup_phase ]]; then
+    # Bounded fixed-code native metadata, never arbitrary stderr or paths.
+    if [[ -f $state_dir/binding.error && ! -L $state_dir/binding.error ]]; then
+      IFS= read -r -n 130 metadata <"$state_dir/binding.error" || true
+      if [[ $metadata =~ ^([a-z-]{1,64})\ (syscall-failed|subprocess-failed|namespace-read-failed|namespace-malformed|unavailable|unsupported)$ ]]; then
+        native_phase=${BASH_REMATCH[1]} native_cause=${BASH_REMATCH[2]}
+      else
+        native_phase=unreadable
+      fi
+    fi
+    printf '{"type":"error","id":"%s","boot_id":%s,"phase":"%s","native_phase":"%s","cause":"%s","message":"Native playback failed during %s%s"}\n' \
+      "$session_id" "$boot_id" "$startup_phase" "$native_phase" "$native_cause" "$startup_phase" "${native_phase:+ (native $native_phase $native_cause)}" || true
+  fi
   trap '' INT TERM
   [[ -z $renew_ack ]] || rm -f "$renew_ack"
   flock -u 9 2>/dev/null || true
@@ -180,11 +195,11 @@ if cmp -s "$header_file" <(printf 'PI_VOICE_CONTROL'); then
   [[ -z $expected_boot || $command == stop || $command == renew ]] || exit 0
   if [[ $command == hello && -z $target_id ]]; then
     protocol=4
-    [[ -r $script_dir/pi-voice-mpv-watchdog.lua ]] || { printf '{"type":"error","message":"Install all matching Pi Voice client helpers, including pi-voice-mpv-watchdog.lua"}\n'; exit 1; }
+    [[ -r $script_dir/pi-voice-mpv-watchdog.lua ]] || { printf '{"type":"error","phase":"protocol","message":"Install all matching Pi Voice client helpers, including pi-voice-mpv-watchdog.lua"}\n'; exit 1; }
     printf '{"type":"protocol","version":4,"native_watchdog":true,"lease_seconds":30}\n' || exit 1
     audio_header=
     IFS= read -r -n 128 audio_header <&3 || exit 1
-    [[ $audio_header == 'PI_VOICE_PREPARE 4' ]] || { printf '{"type":"error","message":"Pi Voice requires v4 native watchdog support; upgrade host and all client helpers together"}\n'; exit 1; }
+    [[ $audio_header == 'PI_VOICE_PREPARE 4' ]] || { printf '{"type":"error","phase":"protocol","message":"Pi Voice requires v4 native watchdog support; upgrade host and all client helpers together"}\n'; exit 1; }
   else
     [[ $target_id =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || exit 0
     target_socket="$runtime_dir/pi-voice-mpv-$target_id.sock"
@@ -275,9 +290,10 @@ if cmp -s "$header_file" <(printf 'PI_VOICE_CONTROL'); then
 fi
 
 # Raw PCM and v2 clients may not start physical output.
-[[ $protocol == 4 && $boot_id != null ]] || { printf '{"type":"error","message":"Native playback watchdog requires readable Linux kernel boot identity"}\n'; exit 1; }
+[[ $protocol == 4 && $boot_id != null ]] || { printf '{"type":"error","phase":"prepare","message":"Native playback watchdog requires readable Linux kernel boot identity"}\n'; exit 1; }
 
 # Reserve a durable opaque scope before any player I/O.
+startup_phase=prepare
 (
   umask 077
   durable_parent=$state_home
@@ -299,6 +315,7 @@ fi
   done
 ) || exit 1
 printf '{"type":"prepared","version":4,"id":"%s","boot_id":%s,"device_id":%s,"boot_fenced":true,"native_watchdog":true,"lease_seconds":30}\n' "$session_id" "$boot_id" "$device_id" || exit 1
+startup_phase=commit
 commit=
 IFS= read -r -n 128 commit <&3 || exit 1
 [[ $commit == "PI_VOICE_COMMIT $session_id ${boot_id//\"/}" ]] || exit 1
@@ -308,6 +325,7 @@ flock -x -w 5 9 || exit 1
 # Persist possible spawn; only admission-intent below permits audio dispatch.
 (umask 077; touch "$state_dir/committed") && sync "$state_dir/committed" "$state_dir" || exit 1
 
+startup_phase=player-lock
 # Starting a new stream atomically requests the prior scope to quit. This is
 # best-effort only: host ownership gates admission; the native lease bounds orphans.
 for _ in {1..100}; do
@@ -335,8 +353,9 @@ if [[ $old_id =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f
 fi
 
 # ponytail: retain receipts indefinitely; add expiry only with a safe retry horizon.
+startup_phase=fifo
 rm -f "$ipc_socket" "$audio_fifo"
-mkfifo "$audio_fifo"
+(umask 077; mkfifo "$audio_fifo") || exit 1
 
 # A known preparation boot must still be observable immediately before spawn.
 [[ $boot_id == null || $(kernel_boot) == "$boot_id" ]] || exit 1
@@ -351,14 +370,19 @@ exec mpv --no-config --load-scripts=no --script="$script_dir/pi-voice-mpv-watchd
   --demuxer-rawaudio-rate=24000 \
   --demuxer-rawaudio-channels=mono
 }
+startup_phase=native-bind
+printf '{"type":"phase","phase":"native-binding","id":"%s","boot_id":%s}\n' "$session_id" "$boot_id" || exit 1
 pi_voice_player 9>&- > /dev/null 2>/dev/null &
 mpv_pid=$!
+# Five seconds leaves room for identity validation/fsync in the host's 10s budget.
 # The idle native player must identify itself before PCM can be opened.
-for _ in {1..100}; do
+for _ in {1..250}; do
   [[ -f $state_dir/binding && -S $ipc_socket ]] && break
+  [[ -f $state_dir/binding.error ]] && break
   sleep 0.02
 done
-[[ -f $state_dir/binding && -S $ipc_socket ]] || { printf '{"type":"error","message":"mpv native watchdog failed to bind before audio; install matching client helpers and an mpv build with Lua support"}\n'; exit 1; }
+[[ ! -f $state_dir/binding.error && -f $state_dir/binding && -S $ipc_socket ]] || exit 1
+startup_phase=native-identity
 read -r bound_id bound_boot native_pid bound_ticks bound_uid bound_pidns bound_mntns bound_version bound_timens extra <"$state_dir/binding" || exit 1
 [[ -z $extra && $bound_id == "$session_id" && $bound_boot == "${boot_id//\"/}" && $native_pid =~ ^[1-9][0-9]*$ && $bound_ticks =~ ^[0-9]+$ ]] || exit 1
 [[ $bound_uid == "$(id -u)" && $bound_pidns == "$(readlink /proc/self/ns/pid)" && $bound_mntns == "$(readlink /proc/self/ns/mnt)" ]] || exit 1
@@ -367,6 +391,7 @@ native_stat=$(cat "/proc/$native_pid/stat") || exit 1
 native_tail=${native_stat##*) }
 read -r -a native_fields <<<"$native_tail"
 [[ ${native_fields[19]:-} == "$bound_ticks" && $(kernel_boot) == "$boot_id" ]] || exit 1
+startup_phase=binding-persist
 chmod 600 "$state_dir/binding" && sync "$state_dir/binding" && mv "$state_dir/binding" "$state_dir/bound" && sync "$state_dir" || exit 1
 [[ $native_pid != "$mpv_pid" ]] || native_child=true
 printf '%s %s\n' "$session_id" "$native_pid" >"$active_player_file"
@@ -375,8 +400,13 @@ lock_held=false
 
 # stdin is the TCP audio direction. stdout is deliberately kept free for JSON
 # playback-position feedback over the reverse direction of the same socket.
+startup_phase=admission
+[[ ! -f $state_dir/binding.error ]] || exit 1
 [[ ! -f $state_dir/stopped ]] || exit 1
 (umask 077; touch "$state_dir/admission-intent") && sync "$state_dir/admission-intent" "$state_dir" || exit 1
+# The child may block opening the FIFO; readiness must never wait for PCM.
+startup_phase=native-start
+[[ ! -f $state_dir/binding.error ]] || exit 1
 pi_voice_feeder <&3 9>&- >"$audio_fifo" &
 feeder_pid=$!
 printf '{"command":["script-message","pi-voice-start","%s","%s"]}\n' "$session_id" "${boot_id//\"/}" |
@@ -388,13 +418,17 @@ for _ in {1..50}; do
   [[ -S "$ipc_socket" ]] && break
   sleep 0.02
 done
-[[ -S "$ipc_socket" ]] || exit 1
+[[ -S "$ipc_socket" && ! -f $state_dir/binding.error ]] || exit 1
+[[ $native_child != true || -n $(builtin jobs -pr %pi_voice_player) ]] || exit 1
 [[ ! -f $state_dir/stopped ]] || exit 0
 printf '{"type":"session","version":4,"id":"%s","boot_id":%s}\n' "$session_id" "$boot_id" || true
+startup_phase=playback
 
 request_id=0
 # Identity reads only guide polling; they never authorize signals or receipts.
 while :; do
+  [[ ! -f $state_dir/binding.error ]] || exit 1
+  [[ $native_child != true || -n $(builtin jobs -pr %pi_voice_player) ]] || break
   # An unverifiable reader domain cannot end polling or authorize cleanup.
   if [[ $(reader_timens) != "$bound_timens" ]]; then sleep 0.08; continue; fi
   native_stat=$(cat "/proc/$native_pid/stat" 2>/dev/null) || break
@@ -406,6 +440,7 @@ while :; do
     printf '{"command":["get_property","time-pos"],"request_id":%d}\n' "$request_id" |
       socat -T 0.08 - "UNIX-CONNECT:$ipc_socket" 2>/dev/null || true
   )
+  [[ ! -f $state_dir/binding.error ]] || exit 1
   position=${response#*\"data\":}
   position=${position%%,*}
   if [[ "$position" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
@@ -431,6 +466,7 @@ if [[ $(cat "$active_player_file" 2>/dev/null || true) == "$session_id ${native_
 fi
 mpv_pid=
 publish_exit || exit 1
+[[ ! -f $state_dir/binding.error ]] || exit 1
 if [[ $protocol == 4 && $player_status == 0 && $feeder_status == 0 && ! -f $state_dir/stopped && $(cat "$state_dir/binding.complete" 2>/dev/null) == "$session_id" ]]; then
   printf '{"type":"complete","id":"%s","boot_id":%s}\n' "$session_id" "$boot_id" || true
 fi

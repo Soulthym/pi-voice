@@ -17,6 +17,7 @@ let audioAdmitted = false;
 let negotiated = false;
 let complete = false;
 let stopping = false;
+let stopSent = false;
 let pendingPause = false;
 let finished = false;
 let failing = false;
@@ -76,12 +77,24 @@ const connect = () => endpoint.protocol === "unix:"
 	? net.createConnection({ path: decodeURIComponent(endpoint.pathname) })
 	: net.createConnection({ host: endpoint.hostname.replace(/^\[|\]$/g, ""), port: Number(endpoint.port) });
 const socket = connect();
-const deadline = setTimeout(() => fail(new Error("Audio client v4 native-watchdog prepare/commit timed out; upgrade the client")), 5000);
+// Independent wall-clock budgets include durable device/host writes, not just RTT.
+// Only validated forward progress changes phase; trickled bytes never extend either cap.
+const startupBudgets = { connection: 5_000, protocol: 5_000, prepare: 15_000, "host-grant": 15_000, "device-commit": 20_000, "native-binding": 10_000 };
+let startupPhase = "connection";
+let phaseDeadline;
+const deadline = setTimeout(() => fail(new Error(`Audio client ${startupPhase} startup timed out (70000ms overall limit)`)), 70_000);
+function enterPhase(phase) {
+	startupPhase = phase;
+	clearTimeout(phaseDeadline);
+	phaseDeadline = setTimeout(() => fail(new Error(`Audio client ${phase} startup timed out after ${startupBudgets[phase]}ms`)), startupBudgets[phase]);
+}
+function clearStartup() { clearTimeout(deadline); clearTimeout(phaseDeadline); }
+enterPhase("connection");
 function finish(code) {
 	if (finished) return;
 	finished = true;
 	stopRenewal();
-	clearTimeout(deadline);
+	clearStartup();
 	socket.destroy();
 	process.exit(code);
 }
@@ -89,6 +102,7 @@ function fail(error) {
 	if (finished || failing) return;
 	failing = true;
 	stopRenewal();
+	clearStartup();
 	const detail = error instanceof Error ? error.message : String(error);
 	if (audioAdmitted) error = new RemotePlaybackUnconfirmedError(detail);
 	const message = error instanceof Error ? error.message : String(error);
@@ -98,14 +112,17 @@ function fail(error) {
 	process.stdout.write(`${JSON.stringify({ type: "error", message, ...(audioAdmitted ? { code: error.code } : {}), utterance })}\n`, () => finish(audioAdmitted ? 1 : 2));
 }
 function command(command) {
+	if (stopping && command !== "stop") return Promise.resolve();
 	if (command === "stop") stopRenewal();
 	if (!session) {
 		if (command === "stop") stopping = true;
 		return Promise.resolve();
 	}
 	if (command === "stop") {
+		if (stopSent) return controlQueue;
+		stopSent = true;
 		// Stop owns its deadline even if cancelled during prepare/commit.
-		clearTimeout(deadline);
+		clearStartup();
 		return controlQueue = controlQueue.then(async () => {
 			try {
 				await stopRemotePlayback({ output, id: session, bootId, nativeWatchdog: true });
@@ -114,20 +131,22 @@ function command(command) {
 		});
 	}
 	return controlQueue = controlQueue.then(() => new Promise(resolve => {
+		if (stopping || failing || finished) return resolve();
 		const peer = connect();
 		let reply = "";
-		peer.setTimeout(1500, () => peer.destroy(new Error("Remote playback control timed out")));
+		const timeout = setTimeout(() => peer.destroy(new Error("Remote playback control timed out")), 1500);
 		peer.on("connect", () => peer.end(`PI_VOICE_CONTROL${command} ${session}\n`));
 		peer.on("data", chunk => {
 			reply += chunk;
 			if (reply.length > 8192) return peer.destroy(new Error("Invalid playback control response"));
 		});
-		peer.on("error", fail);
-		peer.on("close", resolve);
+		peer.on("error", error => { if (!stopSent) fail(error); });
+		peer.on("close", () => { clearTimeout(timeout); resolve(); });
 	}));
 }
 input.on("data", chunk => {
 	commands += chunk;
+	if (commands.length > 8192) return fail(new Error("Invalid host playback control"));
 	for (;;) {
 		const end = commands.indexOf("\n");
 		if (end < 0) break;
@@ -137,6 +156,7 @@ input.on("data", chunk => {
 			committed = true;
 			// Commit can open physical output even before PCM: death now needs a receipt.
 			audioAdmitted = true;
+			enterPhase("device-commit");
 			socket.write(`PI_VOICE_COMMIT ${session} ${bootId}\n`);
 			continue;
 		}
@@ -148,8 +168,11 @@ input.on("data", chunk => {
 });
 control.on("end", () => { stopping = true; void command("stop"); });
 // This is an existing control header, not an audio probe. V1 safely ignores hello.
-socket.on("connect", () => socket.write("PI_VOICE_CONTROLhello\n"));
-socket.on("error", error => { if (!complete) fail(error); });
+socket.on("connect", () => {
+	enterPhase("protocol");
+	socket.write("PI_VOICE_CONTROLhello\n");
+});
+socket.on("error", error => { if (!complete && !stopSent) fail(error); });
 socket.on("data", chunk => {
 	if (finished || failing) return;
 	feedback += chunk;
@@ -161,21 +184,37 @@ socket.on("data", chunk => {
 		feedback = feedback.slice(end + 1);
 		let event;
 		try { event = JSON.parse(line); } catch { continue; }
-		if (!negotiated && event.type === "protocol") {
+		if (!event || typeof event !== "object") continue;
+		if (stopSent) continue; // Only the separate stop exchange can finish this scope.
+		if (event.type === "error") {
+			// This dedicated startup channel supplies correlation before a scope exists.
+			// Once prepared, only the exact current scope/boot may report failures.
+			if (session ? event.id !== session || event.boot_id !== bootId :
+				(event.id !== undefined && !validStreamId(event.id)) || (event.boot_id !== undefined && !validBootId(event.boot_id))) continue;
+			if (typeof event.message !== "string" || !/^[\x20-\x7e]{1,512}$/.test(event.message) ||
+				(event.phase !== undefined && (typeof event.phase !== "string" || !/^[a-z-]{1,64}$/.test(event.phase)))) return fail(new Error(`Invalid audio client error during ${startupPhase}`));
+			return fail(new Error(`Audio client ${event.phase ?? startupPhase}: ${event.message}`));
+		}
+		if (event.type === "phase" && committed && startupPhase === "device-commit" && event.id === session && event.boot_id === bootId && event.phase === "native-binding") {
+			enterPhase("native-binding");
+		} else if (!negotiated && event.type === "protocol") {
 			if (event.version !== 4 || event.native_watchdog !== true || event.lease_seconds !== 30) return fail(new Error("Audio client requires v4 native watchdog with a 30-second lease; upgrade the client"));
 			negotiated = true;
+			enterPhase("prepare");
 			socket.write("PI_VOICE_PREPARE 4\n");
 		} else if (negotiated && event.type === "prepared") {
 			if (session || event.version !== 4 || event.native_watchdog !== true || event.lease_seconds !== 30 || !validStreamId(event.id) || !validBootId(event.boot_id)) return fail(new Error("Invalid prepared output scope or kernel boot ID"));
 			session = event.id;
 			bootId = event.boot_id;
+			enterPhase("host-grant");
 			// Missing identity must not collide with any valid registered ID (including "-").
 			const deviceId = typeof event.device_id === "string" && /^[a-zA-Z0-9._-]{1,128}$/.test(event.device_id) ? event.device_id : ":";
 			control.write(`prepared ${session} ${bootId} ${event.boot_fenced === true ? "fenced" : "unfenced"} ${deviceId} native-watchdog\n`);
 			if (stopping) void command("stop");
 		} else if (negotiated && event.type === "session") {
 			if (!committed || renewalTimer || event.version !== 4 || event.id !== session || event.boot_id !== bootId) return fail(new Error("Output commit identity mismatch"));
-			clearTimeout(deadline);
+			clearStartup();
+			startupPhase = "playback";
 			if (stopping) command("stop");
 			else {
 				armLease();
@@ -201,6 +240,6 @@ socket.on("close", () => {
 	stopRenewal();
 	if (stopping) return; // Only the separate stop receipt proves remote termination.
 	if (complete) process.stdout.write(`${JSON.stringify({ type: "remote-released", id: session })}\n`, () => finish(0));
-	else fail(new Error("Audio client closed without v4 readiness/completion proof; upgrade client or repair forwarding (no replay)"));
+	else fail(new Error(`Audio client connection closed during ${renewalTimer ? "playback" : startupPhase} without readiness/completion proof (no replay)`));
 });
 process.stdin.on("error", fail);
