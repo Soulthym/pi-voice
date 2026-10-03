@@ -1,8 +1,14 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { mock, test } from "node:test";
+import * as fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { FakeVoiceHost, MockedVoiceWorkerClient, assistant as response } from "./helpers/fake-voice-host.js";
+
+mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: MockedVoiceWorkerClient } });
 import { extractAnsiCode } from "@earendil-works/pi-tui/dist/utils.js";
 import { invalidateNarrationMarkdown } from "../src/narration-render.js";
-import { NarrationProgress } from "../src/narration-progress.js";
+import { NarrationProgress, NARRATION_ACTIVE_MARKER } from "../src/narration-progress.js";
 import { PlaybackHistory } from "../src/playback-history.js";
 
 const native = await import(process.env.PI_VOICE_TEST_TUI_MODULE ?? "@earendil-works/pi-tui");
@@ -133,4 +139,64 @@ test("native streaming and canonical final prose retain active audio paint witho
 		const start = unread.map(cell => cell.char).join("").indexOf("Unread");
 		assert.ok(unread.slice(start, start + 6).every(cell => cell.dim));
 	}
+});
+
+for (const mode of ["assistant", "yield"] as const) test(`native replay paint survives unrelated ${mode} model lifecycle`, async t => {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "highlight-"));
+	const env = { PI_VOICE_CONFIG: path.join(root, "voice.json"), PI_VOICE_COORDINATOR_DIR: path.join(root, "coordinator"), PI_VOICE_DEVICE_DIR: path.join(root, "devices") };
+	const old = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
+	Object.assign(process.env, env);
+	await fs.writeFile(env.PI_VOICE_CONFIG, JSON.stringify({ enabled: true, mode, input: "disabled", output: "local", audioCache: false,
+		codeDescriptionPreprocessConcurrency: 0, timingPreprocessConcurrency: 0 }));
+	const host = new FakeVoiceHost(root, `highlight-${mode}`);
+	const source = "😀 Alpha **bravo** charlie delta echo foxtrot golf hotel. Unread sentence continues here.";
+	const original = response(source);
+	const theme = { ...getMarkdownTheme(), bold: (text: string) => `\x1b[1m${text}\x1b[0m` };
+	const component = new AssistantMessageComponent(original, false, theme, "Thinking...", 1,
+		[(text: string, context: { messageType: string }) => host.render(text, context.messageType)]);
+	const view = new native.ScrollView(component, { primary: true, follow: "end", scrollbar: "hidden" });
+	Object.assign(host.tui, { getMountedRoots: () => [view], invalidate: () => component.invalidate() });
+	host.ctx.ui.theme.fg = (name: string, text: string) => name === "dim" ? dim(text) : text;
+	host.ctx.ui.theme.bg = (_name: string, text: string) => active(text);
+	host.addMessage("original", null, original);
+	const settle = () => new Promise(resolve => setTimeout(resolve, 120));
+	t.after(async () => {
+		await host.shutdown();
+		for (const [key, value] of Object.entries(old)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+		await fs.rm(root, { recursive: true, force: true });
+	});
+	await host.start();
+	host.idle = false;
+	await host.shortcut("f5"); await settle();
+	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
+	const first = worker.sent.find(segment => (segment as { text: string }).text.includes("Alpha")) as { utterance: number; segmentId: number };
+	worker.emit({ type: "segment-audio", utterance: first.utterance, segmentId: first.segmentId, start: 0, duration: 20 });
+	worker.emit({ type: "playback", utterance: first.utterance, position: 0 });
+	await settle();
+	view.updateLayout(28, 3, () => {});
+	view.scrollTo(2, { disableFollow: true });
+	const baseline = component.render(28);
+	const sent = worker.sent.length;
+	const check = (phase: string) => {
+		const lines: string[] = component.render(28);
+		const glyphs = (line: string) => native.stripTerminalSequences(line).replaceAll(NARRATION_ACTIVE_MARKER, "");
+		assert.deepEqual(lines.map(glyphs), baseline.map(glyphs), phase);
+		for (const word of ["Alpha", "echo", "Unread"]) {
+			const row = cells(lines.find(line => native.stripTerminalSequences(line).includes(word))!);
+			const at = row.map(cell => cell.char).join("").indexOf(word);
+			assert.ok(row.slice(at, at + word.length).every(cell => word === "Unread" ? cell.dim : cell.bg === "48;5;236"), `${phase}: effective ${word} paint`);
+		}
+		assert.equal(view.scrollTop, 2, `${phase}: manual scrolling is preserved`);
+		assert.equal(worker.sent.length, sent, `${phase}: unrelated output cannot enter the replay transport`);
+	};
+	check("initial");
+	const incoming = response("Unrelated model response. "); delete incoming.stopReason;
+	for (const phase of ["message_start", "message_update", "message_end", "turn_end", "agent_settled", "before_agent_start"] as const) {
+		if (phase === "message_end") { incoming.stopReason = "stop"; host.addMessage("new", "original", incoming); }
+		await host.emit(phase, { message: incoming, toolResults: [], assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: incoming.content[0].text } });
+		await settle();
+		component.invalidate(); // Native model/widget redraw rebuilds the old message's leaves.
+		check(phase); // No subsequent playback tick repairs the source/cursor.
+	}
+	assert.equal(host.modelRequests.length, 0);
 });

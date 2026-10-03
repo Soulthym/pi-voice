@@ -4224,7 +4224,7 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	pi.on("before_agent_start", async () => {
-		if (!interactiveVoiceSession || playbackPaused || (playbackTailIntent && !ownsSpeech)) return;
+		if (!interactiveVoiceSession || playbackPaused || (ownsSpeech && speechPurpose === "replay") || (playbackTailIntent && !ownsSpeech)) return;
 		speechBlocked = false;
 		blockedMessageHasSpeech = false;
 		blockedWarningIssued = false;
@@ -4243,10 +4243,13 @@ export default async function (pi: ExtensionAPI) {
 		if (interactiveVoiceSession && (event.message as { role?: string })?.role === "assistant") {
 			attentionSuppressed = false;
 			coordinator?.setAttentionEnabled(config.enabled);
-			queueIncomingWhilePaused = config.enabled && (playbackPaused || !!pendingReplay);
+			// A running replay owns its source/cursor just like a paused one. Model
+			// output queues behind it; reacquiring "turn" would erase paint while audio plays.
+			const replaying = ownsSpeech && speechPurpose === "replay";
+			queueIncomingWhilePaused = config.enabled && (playbackPaused || !!pendingReplay || replaying);
 			liveBlockIndex = undefined;
 			liveBlockIds = new Map();
-			if (pendingReplay) livePlaybackId = undefined;
+			if (pendingReplay || replaying) livePlaybackId = undefined;
 			liveSource = { assistant: event.message, final: false,
 				existingEntries: new Set(activeContext?.sessionManager.getBranch().filter(entry => entry.type !== "message" || entry.message !== event.message).map(entry => entry.id)), before: activeContext && config.codeDescriptionContext === "conversation"
 				? liveConversationBefore(activeContext).messages : [], waiters: new Set() };
