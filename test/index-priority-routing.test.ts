@@ -16,7 +16,13 @@ import { FakeVoiceHost, MockedVoiceWorkerClient, assistant } from "./helpers/fak
 
 class Worker extends MockedVoiceWorkerClient {
 	outputs: string[] = [];
+	cleanupPending = false;
+	cleanupDispatches = 0;
 	override sendSegment(utterance: number, segmentId: number, text: string, config?: VoiceConfig) {
+		if (this.cleanupPending) {
+			this.cleanupDispatches++;
+			throw new Error("Voice worker transport cleanup is in progress");
+		}
 		this.outputs.push(config!.output);
 		super.sendSegment(utterance, segmentId, text);
 	}
@@ -151,6 +157,74 @@ test("pending takeover waits for a disconnected route to return without another 
 	} finally { other.shutdown(); }
 });
 
+test("dormant disconnected F5 waits for the arrival after a manual handoff before dispatch", async t => {
+	const f = await fixture(t);
+	const other = new SessionCoordinator(join(f.root, "other"), "other");
+	other.start();
+	const proof = Promise.withResolvers<void>();
+	try {
+		assert.equal(other.tryAcquireSpeech(), true);
+		await f.host.shortcut("f5"); await settle();
+		await f.event();
+		other.releaseSpeech();
+		await new Promise(resolve => setTimeout(resolve, 75)); await settle();
+		assert.equal(f.worker.sent.length, 0, "F5 has retired without admitting the disconnected route");
+		await f.event("d4");
+		const termination = t.mock.method(f.worker, "terminate", () => proof.promise);
+		const manual = f.host.command("device d4"); await settle();
+		assert.equal(termination.mock.callCount(), 1);
+		await f.event("d2", "d4");
+		assert.equal(f.worker.sent.length, 0, "manual adoption still awaits original stop proof");
+		proof.resolve(); await manual; await settle(); termination.mock.restore();
+		assert.equal(f.selected().selected, "d2");
+		assert.deepEqual((f.worker.sent as Array<{ text: string }>).filter(s => !s.text.startsWith("Project ")).map(s => s.text),
+			["First sentence.", "Second sentence.", "Third sentence."]);
+		assert.ok(f.worker.outputs.every(output => output === "unix:///fixture/d2"), "obsolete manual destination must never receive replay");
+	} finally { proof.resolve(); other.shutdown(); }
+});
+
+for (const disconnect of [false, true]) test(`dormant disconnected F5 reranks a manual retry after foreign acquisition (disconnect: ${disconnect})`, async t => {
+	const f = await fixture(t);
+	const other = new SessionCoordinator(join(f.root, "other"), "other");
+	other.start();
+	try {
+		assert.equal(other.tryAcquireSpeech(), true);
+		await f.host.shortcut("f5"); await settle();
+		await f.event();
+		other.releaseSpeech();
+		await new Promise(resolve => setTimeout(resolve, 75)); await settle();
+		assert.equal(f.worker.sent.length, 0);
+		await f.event("d4");
+		assert.equal(other.tryAcquireSpeech(), true);
+		const force = t.mock.method(SessionCoordinator.prototype, "forceAcquireSpeech");
+		const manual = f.host.command("device d4"); await settle();
+		assert.equal(f.selected().selected, "d4", "manual route has already been adopted");
+		assert.equal(force.mock.callCount(), 1, "manual retry is blocked in acquisition, not termination");
+		await f.event(...(disconnect ? [] : ["d2", "d4"]));
+		assert.equal(other.ownsSpeech(), true);
+		assert.equal(f.worker.sent.length, 0);
+		other.releaseSpeech();
+		await manual; await settle();
+		if (disconnect) {
+			assert.equal(f.selected().selected, "d4");
+			assert.match(f.host.widgetLines()?.join(" ") ?? "", /WAIT/i);
+			assert.equal(f.worker.sent.length, 0, "unused acquisition must not dispatch I/O");
+			assert.equal(f.worker.outputs.length, 0);
+			await assert.rejects(fs.stat(join(f.root, "coordinator", "speech.lock", "lease.json")), { code: "ENOENT" });
+			await f.event("d4");
+			assert.equal(force.mock.callCount(), 1, "retained intent resumes without another takeover");
+			assert.deepEqual((f.worker.sent as Array<{ text: string }>).filter(s => !s.text.startsWith("Project ")).map(s => s.text),
+				["First sentence.", "Second sentence.", "Third sentence."]);
+			assert.ok(f.worker.outputs.every(output => output === "unix:///fixture/d4"));
+			return;
+		}
+		assert.equal(f.selected().selected, "d2");
+		assert.deepEqual((f.worker.sent as Array<{ text: string }>).filter(s => !s.text.startsWith("Project ")).map(s => s.text),
+			["First sentence.", "Second sentence.", "Third sentence."]);
+		assert.ok(f.worker.outputs.every(output => output === "unix:///fixture/d2"), "obsolete manual destination must never receive replay");
+	} finally { other.shutdown(); }
+});
+
 for (const pause of [false, true]) test(`pending takeover retains an independent streaming source across arrival (pause: ${pause})`, async t => {
 	const f = await fixture(t);
 	const other = new SessionCoordinator(join(f.root, "other"), "other");
@@ -218,6 +292,298 @@ for (const cancel of ["none", "stop", "pause"]) test(`cold F5 retains explicit i
 		assert.equal(new Set(replay.map(s => s.utterance)).size, cancel === "none" ? 1 : 0, JSON.stringify(f.worker.sent));
 		assert.ok(f.worker.outputs.every(output => output === "unix:///fixture/d2"));
 	} finally { gate.mock.restore(); now.mock.restore(); release?.(); other.shutdown(); }
+});
+
+test("live F5 cancel ACK cannot bypass pending handoff termination or newest routing", async t => {
+	const f = await fixture(t);
+	let text = "Live first sentence. Live second sentence. ";
+	await f.host.emit("message_start", { message: assistant("", "pending") });
+	const delta = async (chunk: string) => f.host.emit("message_update", { message: assistant(text, "pending"), assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: chunk } });
+	await delta(text); await settle();
+	assert.ok(f.worker.sent.length, "live playback owns an actual sink before F5");
+	const before = f.worker.sent.length;
+	let cancelId = 0;
+	const cancellation = t.mock.method(f.worker, "cancel", (() => ++cancelId) as unknown as typeof f.worker.cancel);
+	const proof = Promise.withResolvers<void>();
+	const termination = t.mock.method(f.worker, "terminate", async () => {
+		f.worker.cleanupPending = true;
+		await proof.promise;
+		f.worker.cleanupPending = false;
+	});
+	try {
+		await f.host.shortcut("f5"); await settle();
+		assert.equal(cancelId, 1, "F5 is waiting for its own cancel ACK");
+		await f.event("d2", "d3");
+		assert.equal(termination.mock.callCount(), 1, "automatic handoff independently awaits termination");
+		await f.event("d1", "d2", "d3");
+		text += "During cleanup sentence. ";
+		await delta("During cleanup sentence. ");
+		f.worker.emit({ type: "idle", cancelId: 1 }); await settle();
+		assert.equal(f.worker.cleanupPending, true, "cancel ACK is not shutdown proof");
+		assert.equal(f.worker.cleanupDispatches, 0, "F5 must not even attempt dispatch during cleanup");
+		assert.equal(f.worker.sent.length, before);
+		assert.equal(f.selected().selected, "d3", "no route adoption before termination proof");
+		proof.resolve(); await settle();
+		assert.equal(f.selected().selected, "d1");
+		assert.deepEqual((f.worker.sent.slice(before) as Array<{ text: string }>).map(s => s.text),
+			["Live first sentence.", "Live second sentence.", "During cleanup sentence."]);
+		assert.ok(f.worker.outputs.slice(before).every(output => output === "unix:///fixture/d1"));
+		for (let i = 0; i < 10; i++) f.poll();
+		await settle();
+		assert.equal(f.worker.sent.length, before + 3, "one replay after the newest route settles");
+	} finally {
+		proof.resolve(); cancellation.mock.restore(); await settle(); termination.mock.restore();
+	}
+});
+
+test("recovered explicit live replay drains a later block finalized during failed cleanup only once", async t => {
+	const f = await fixture(t);
+	const message = assistant("Live first sentence. ", "pending");
+	await f.host.emit("message_start", { message });
+	await f.host.emit("message_update", { message, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: message.content[0].text } });
+	await settle();
+	const before = f.worker.sent.length;
+	assert.ok(before);
+	const proof = Promise.withResolvers<void>();
+	const termination = t.mock.method(f.worker, "terminate", () => proof.promise);
+	try {
+		await f.event("d2", "d3");
+		await f.host.shortcut("f5"); await settle();
+		proof.reject(new Error("original stop unconfirmed")); await settle();
+		message.content.push({ type: "text", text: "Later block sentence. " });
+		await f.host.emit("message_update", { message, assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: message.content[1].text } });
+		const final = { ...message, stopReason: "stop" };
+		f.host.addMessage("live-complete", "message", final);
+		await f.host.emit("message_end", { message: final });
+		await f.host.emit("turn_end", { message: final, toolResults: [] }); await settle();
+		assert.equal(f.worker.sent.length, before);
+		termination.mock.restore();
+		await f.event("d2", "d3", "d4");
+		assert.equal(f.selected().selected, "d2");
+		assert.deepEqual((f.worker.sent.slice(before) as Array<{ text: string }>).map(s => s.text),
+			["Live first sentence.", "Later block sentence."]);
+		for (let i = 0; i < 2; i++) {
+			f.worker.emit({ type: "idle", utterance: (f.worker.sent.at(-1) as { utterance: number }).utterance }); await settle();
+		}
+		assert.equal(f.worker.sent.length, before + 2, "EOF must not replay the later block left in the paused queue");
+	} finally { proof.resolve(); termination.mock.restore(); }
+});
+
+test("recovered nonexplicit live continuation drains finalized source once after failed admission", async t => {
+	const f = await fixture(t);
+	await f.host.shortcut("f5"); await settle();
+	f.worker.emit({ type: "idle", utterance: (f.worker.sent.at(-1) as { utterance: number }).utterance }); await settle();
+	await f.host.shortcut("f10"); await settle();
+	await f.host.shortcut("f8"); await settle();
+	await assert.rejects(fs.stat(join(f.root, "coordinator", "speech.lock", "lease.json")), { code: "ENOENT" });
+	const message = assistant("Live first sentence. ", "pending");
+	await f.host.emit("message_start", { message });
+	await f.host.emit("message_update", { message, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: message.content[0].text } });
+	await settle();
+	const before = f.worker.sent.length;
+	const proof = Promise.withResolvers<void>();
+	const termination = t.mock.method(f.worker, "terminate", () => proof.promise);
+	try {
+		await f.event("d2", "d3");
+		assert.equal(termination.mock.callCount(), 1);
+		await f.host.shortcut("f8"); await settle(); // Lease-free Tail resumes with queued=true, not explicit F5.
+		proof.reject(new Error("original stop unconfirmed")); await settle();
+		message.content.push({ type: "text", text: "Later block sentence. " });
+		await f.host.emit("message_update", { message, assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: message.content[1].text } });
+		const final = { ...message, stopReason: "stop" };
+		f.host.addMessage("live-complete", "message", final);
+		await f.host.emit("message_end", { message: final });
+		await f.host.emit("turn_end", { message: final, toolResults: [] }); await settle();
+		assert.equal(f.worker.sent.length, before);
+		termination.mock.restore();
+		await f.event("d2", "d3", "d4");
+		assert.equal(f.selected().selected, "d2");
+		assert.deepEqual((f.worker.sent.slice(before) as Array<{ text: string }>).map(s => s.text),
+			["Live first sentence.", "Later block sentence."]);
+		for (let i = 0; i < 2; i++) {
+			f.worker.emit({ type: "idle", utterance: (f.worker.sent.at(-1) as { utterance: number }).utterance }); await settle();
+		}
+		assert.equal(f.worker.sent.length, before + 2, "EOF must not drain a duplicate queued source block");
+	} finally { proof.resolve(); termination.mock.restore(); }
+});
+
+test("F8 cancelling rerouted live Tail retains the paused suffix after the old coroutine retires", async t => {
+	const f = await fixture(t);
+	let text = "Already heard sentence. ";
+	await f.host.emit("message_start", { message: assistant("", "pending") });
+	const delta = async (chunk: string) => f.host.emit("message_update", { message: assistant(text, "pending"), assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: chunk } });
+	await delta(text); await settle();
+	const before = f.worker.sent.length;
+	const cancellation = t.mock.method(f.worker, "cancel", (() => 1) as unknown as typeof f.worker.cancel);
+	const proof = Promise.withResolvers<void>();
+	const termination = t.mock.method(f.worker, "terminate", () => proof.promise);
+	try {
+		await f.host.shortcut("f10"); await settle();
+		assert.ok(cancellation.mock.callCount(), "Tail is pending cancellation of the live sink");
+		await f.event("d2", "d3");
+		await f.host.shortcut("f8"); await settle();
+		text += "Only retained suffix. ";
+		await delta("Only retained suffix. ");
+		proof.resolve(); await settle();
+		cancellation.mock.restore(); termination.mock.restore();
+		assert.equal(f.worker.sent.length, before);
+		assert.equal(f.worker.pauses.at(-1), true);
+		assert.match(f.host.widgetLines()?.join(" ") ?? "", /Paused/);
+		await f.host.shortcut("f8"); await settle();
+		assert.deepEqual((f.worker.sent.slice(before) as Array<{ text: string }>).map(s => s.text), ["Only retained suffix."]);
+		assert.equal(f.worker.pauses.at(-1), false);
+	} finally { proof.resolve(); cancellation.mock.restore(); termination.mock.restore(); }
+});
+
+test("Pause after failed Tail rebind retires resumes only the retained suffix", async t => {
+	const f = await fixture(t);
+	let text = "Already heard sentence. ";
+	await f.host.emit("message_start", { message: assistant("", "pending") });
+	const delta = async (chunk: string) => f.host.emit("message_update", { message: assistant(text, "pending"), assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: chunk } });
+	await delta(text); await settle();
+	const before = f.worker.sent.length;
+	assert.ok(before, "the Tail prefix was already dispatched");
+	const cancellation = t.mock.method(f.worker, "cancel", (() => 1) as unknown as typeof f.worker.cancel);
+	const proof = Promise.withResolvers<void>();
+	const termination = t.mock.method(f.worker, "terminate", () => proof.promise);
+	try {
+		await f.host.shortcut("f10"); await settle();
+		assert.ok(cancellation.mock.callCount());
+		await f.event("d2", "d3");
+		assert.equal(termination.mock.callCount(), 1);
+		proof.reject(new Error("original stop unconfirmed")); await settle();
+		assert.equal(f.selected().selected, "d3");
+		assert.equal(f.worker.sent.length, before);
+		// Unlike cancellation before proof, Pause now sees a dormant retained request.
+		await f.host.shortcut("f8"); await settle();
+		text += "Only retained suffix. ";
+		await delta("Only retained suffix. ");
+		cancellation.mock.restore(); termination.mock.restore();
+		await f.event("d2", "d3", "d4");
+		assert.equal(f.selected().selected, "d2");
+		assert.equal(f.worker.pauses.at(-1), true, "recovery must respect Pause even if it prepares paused segments");
+		await f.host.shortcut("f8"); await settle();
+		assert.deepEqual((f.worker.sent.slice(before) as Array<{ text: string }>).map(s => s.text), ["Only retained suffix."]);
+		assert.ok(f.worker.outputs.slice(before).every(output => output === "unix:///fixture/d2"));
+	} finally { proof.resolve(); cancellation.mock.restore(); termination.mock.restore(); }
+});
+
+test("F8 cancellation at the post-acquisition handoff barrier releases an unused lease", async t => {
+	const f = await fixture(t);
+	const other = new SessionCoordinator(join(f.root, "other"), "other");
+	other.start();
+	const acquired = Promise.withResolvers<void>();
+	const admit = Promise.withResolvers<void>();
+	const proof = Promise.withResolvers<void>();
+	const originalForce = SessionCoordinator.prototype.forceAcquireSpeech;
+	const force = t.mock.method(SessionCoordinator.prototype, "forceAcquireSpeech", async function (this: SessionCoordinator) {
+		const result = await originalForce.call(this);
+		if (result) acquired.resolve();
+		await admit.promise;
+		return result;
+	});
+	const termination = t.mock.method(f.worker, "terminate", () => proof.promise);
+	try {
+		assert.equal(other.tryAcquireSpeech(), true);
+		await f.host.shortcut("f5"); await settle();
+		assert.equal(force.mock.callCount(), 1);
+		other.releaseSpeech();
+		await acquired.promise;
+		const leasePath = join(f.root, "coordinator", "speech.lock", "lease.json");
+		const owner = JSON.parse(await fs.readFile(leasePath, "utf8"));
+		assert.notEqual(owner.instanceId, other.instanceId, "F5 really acquired the lease before the handoff");
+		await f.host.shortcut("f8"); await settle(); // Paused replay forces old-transport shutdown during adoption.
+		await f.event("d2", "d3");
+		assert.equal(termination.mock.callCount(), 1);
+		assert.equal(f.worker.pauses.at(-1), true);
+		admit.resolve(); await settle();
+		assert.equal(f.worker.sent.length, 0, "acquired replay is blocked at the post-acquisition barrier");
+		await f.host.shortcut("f8"); await settle(); // Resume remains behind the same barrier.
+		await f.host.shortcut("f8"); await settle(); // Pause now cancels the rerouted request.
+		proof.resolve(); await settle();
+		assert.equal(f.worker.sent.length, 0, "stale replay must not use its acquired lease");
+		await assert.rejects(fs.stat(leasePath), { code: "ENOENT" }, "cancelled admission must not strand an unused lease");
+		assert.equal(other.tryAcquireSpeech(), true, "another project can acquire after stale admission retires");
+	} finally { admit.resolve(); proof.resolve(); force.mock.restore(); termination.mock.restore(); other.shutdown(); }
+});
+
+test("fresh F5 promotes a queued Tail resume on the same target to explicit takeover across arrival", async t => {
+	const f = await fixture(t);
+	await f.host.shortcut("f5"); await settle();
+	f.worker.emit({ type: "idle", utterance: (f.worker.sent.at(-1) as any).utterance }); await settle();
+	await f.host.shortcut("f8"); await settle();
+	const message = assistant("Queued Tail sentence.");
+	await f.host.emit("message_start", { message: assistant("", "pending") });
+	await f.host.emit("message_update", { message, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: message.content[0].text } });
+	f.host.addMessage("queued-tail", "message", message);
+	await f.host.emit("message_end", { message });
+	await f.host.emit("turn_end", { message, toolResults: [] }); await settle();
+	const before = f.worker.sent.length;
+	const other = new SessionCoordinator(join(f.root, "other"), "other");
+	other.start();
+	try {
+		assert.equal(other.tryAcquireSpeech(), true);
+		const force = t.mock.method(SessionCoordinator.prototype, "forceAcquireSpeech");
+		await f.host.shortcut("f8"); await settle();
+		assert.equal(force.mock.callCount(), 1, "queued Tail resume is waiting behind the foreign owner");
+		await f.host.shortcut("f5"); await settle();
+		assert.equal(force.mock.callCount(), 2, "fresh F5 authorizes the same selected target");
+		await f.event("d2", "d3");
+		assert.equal(f.worker.sent.length, before);
+		other.releaseSpeech();
+		await new Promise(resolve => setTimeout(resolve, 75)); await settle();
+		assert.equal(force.mock.callCount(), 2, "arrival retains rather than replaces explicit takeover");
+		assert.deepEqual((f.worker.sent.slice(before) as Array<{ text: string }>).map(s => s.text), ["Queued Tail sentence."]);
+		assert.ok(f.worker.outputs.slice(before).every(output => output === "unix:///fixture/d2"));
+		assert.equal(f.worker.pauses.at(-1), false);
+	} finally { other.shutdown(); }
+});
+
+for (const missing of [false, true]) test(`owning cold F5 preserves WAIT across selected disconnect (missing row: ${missing})`, async t => {
+	const f = await fixture(t);
+	await f.host.shortcut("f5"); await settle();
+	const leasePath = join(f.root, "coordinator", "speech.lock", "lease.json");
+	const owner = JSON.parse(await fs.readFile(leasePath, "utf8"));
+	const before = f.worker.sent.length;
+	f.host.addMessage("cold", "message", assistant("Unselected cold history sentence."));
+	const immediate = globalThis.setImmediate;
+	let release: (() => void) | undefined;
+	let clock = 0;
+	const now = t.mock.method(performance, "now", () => clock += 9);
+	const gate = t.mock.method(globalThis, "setImmediate", ((callback: () => void, ...args: unknown[]) => {
+		if (new Error().stack?.includes("preparePlaybackMessages")) {
+			release = callback;
+			return immediate(() => {});
+		}
+		return immediate(() => Reflect.apply(callback, undefined, args));
+	}) as typeof setImmediate);
+	try {
+		await f.host.shortcut("f5"); await settle();
+		assert.ok(release, "owning F5 preparation is actually gated");
+		assert.equal(f.worker.pauses.at(-1), false);
+		await f.event();
+		assert.equal(f.worker.pauses.at(-1), true, "disconnect physically pauses the retained sink even during cold preparation");
+		const disconnectedOwner = JSON.parse(await fs.readFile(leasePath, "utf8"));
+		assert.equal(disconnectedOwner.instanceId, owner.instanceId);
+		assert.equal(disconnectedOwner.speechGeneration, owner.speechGeneration, "disconnect retains the original acquisition");
+		const resolution = missing ? t.mock.method(DeviceRouter.prototype, "resolve", () => undefined) : undefined;
+		if (missing) { f.store.forget("d3"); await settle(); f.poll(); await settle(); }
+		now.mock.restore(); gate.mock.restore(); release(); await settle();
+		assert.equal(f.worker.sent.length, before, "existing ownership cannot admit disconnected IO");
+		assert.match(f.host.widgetLines()?.join(" ") ?? "", /WAIT/i);
+		const waitingOwner = JSON.parse(await fs.readFile(leasePath, "utf8"));
+		assert.equal(waitingOwner.instanceId, owner.instanceId);
+		assert.equal(waitingOwner.speechGeneration, owner.speechGeneration, "retired cold preparation must retain the same lease throughout WAIT");
+		resolution?.mock.restore();
+		await f.event("d3");
+		assert.deepEqual((f.worker.sent.slice(before) as Array<{ text: string }>).map(s => s.text),
+			["First sentence.", "Second sentence.", "Third sentence."], "return resumes the selected source, not newly appended history");
+		assert.ok(f.worker.outputs.slice(before).every(output => output === "unix:///fixture/d3"));
+		assert.equal(f.worker.pauses.at(-1), false);
+		for (let i = 0; i < 10; i++) f.poll();
+		await settle();
+		assert.equal(f.worker.sent.length, before + 3);
+	} finally { gate.mock.restore(); now.mock.restore(); release?.(); }
 });
 
 for (const resume of ["return", "selection"]) test(`forgotten disconnected pending route retains WAIT (${resume})`, async t => {
@@ -612,7 +978,7 @@ for (const changed of ["generation", "output", "input"]) test(`picker rejects a 
 	assert.equal(f.selected().selected, "d3");
 });
 
-test("automatic handoff retains real output scopes after wrong identity and partial cleanup", async t => {
+for (const automatic of [false, true]) test(`automatic handoff retains real output scopes after wrong identity and partial cleanup (timer recovery: ${automatic})`, async t => {
 	const f = await fixture(t);
 	await f.host.shortcut("f5"); await settle();
 	const ids = ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"];
@@ -643,10 +1009,20 @@ test("automatic handoff retains real output scopes after wrong identity and part
 	await f.host.shortcut("f5"); await settle();
 	assert.equal(f.worker.sent.length, before, "failed scoped proof fences superseding replay too");
 	proveAll = true;
-	await f.event({ ...device("d3", 2), audioEndpoint: endpoint }, "d2", "d4");
+	if (automatic) await new Promise(resolve => setTimeout(resolve, 3_100));
+	else await f.event({ ...device("d3", 2), audioEndpoint: endpoint }, "d2", "d4");
 	for (let i = 0; i < 100 && f.selected().selected !== "d2"; i++) await new Promise(resolve => setTimeout(resolve, 10));
 	assert.equal(retained(), undefined);
 	assert.equal(f.selected().selected, "d2");
+	await settle();
+	assert.deepEqual((f.worker.sent.slice(before) as Array<{ text: string }>).map(s => s.text),
+		["First sentence.", "Second sentence.", "Third sentence."], "successful scoped retry must resume the abandoned F5 exactly once");
+	assert.ok(f.worker.outputs.slice(before).every(output => output === "unix:///fixture/d2"));
+	assert.equal(f.worker.pauses.at(-1), false);
+	for (let i = 0; i < 10; i++) f.poll();
+	await settle();
+	f.worker.emit({ type: "idle", utterance: (f.worker.sent.at(-1) as { utterance: number }).utterance }); await settle();
+	assert.equal(f.worker.sent.length, before + 3, "neither stable polling nor EOF repeats the recovered replay");
 	assert.ok(commands.includes(ids[1]));
 	assert.equal(commands.filter(id => id === ids[0]).length, 1, "proved scopes are not retried");
 });
