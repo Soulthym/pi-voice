@@ -95,6 +95,86 @@ test("lease-free paused Tail changes route without acquiring or preempting anoth
 	} finally { other.shutdown(); }
 });
 
+for (const cancel of ["none", "stop", "pause", "session", "source"]) test(`F5 takeover survives automatic arrival (cancel: ${cancel})`, async t => {
+	const f = await fixture(t);
+	const other = new SessionCoordinator(join(f.root, "other"), "other");
+	other.start();
+	try {
+		assert.equal(other.tryAcquireSpeech(), true);
+		const force = t.mock.method(SessionCoordinator.prototype, "forceAcquireSpeech");
+		await f.host.shortcut("f5"); await settle();
+		assert.equal(force.mock.callCount(), 1);
+		const preemption = join(f.root, "coordinator", "preemption");
+		const files = await fs.readdir(preemption);
+		assert.equal(files.length, 1);
+		const request = await fs.readFile(join(preemption, files[0]), "utf8");
+		await f.event("d2", "d3");
+		assert.equal(f.selected().selected, "d2");
+		assert.equal(f.worker.sent.length, 0, "foreign owner proof still gates playback");
+		assert.equal(await fs.readFile(join(preemption, files[0]), "utf8"), request, "retain the one authorized preemption request");
+		if (cancel === "stop") await f.host.command("stop");
+		if (cancel === "pause") await f.host.shortcut("f8");
+		if (cancel === "session") await f.host.emit("session_start", {});
+		if (cancel === "source") {
+			f.host.addMessage("new", "message", assistant("Replacement source."));
+			await f.host.shortcut("f10"); await settle();
+		}
+		other.releaseSpeech();
+		await new Promise(resolve => setTimeout(resolve, 75)); await settle();
+		assert.equal(force.mock.callCount(), cancel === "source" ? 2 : 1, "only another user selection can issue another takeover");
+		const replay = (f.worker.sent as Array<{ utterance: number; text: string }>).filter(s => s.text.includes("sentence."));
+		assert.equal(new Set(replay.map(s => s.utterance)).size, cancel === "none" ? 1 : 0);
+		if (cancel === "source") assert.ok((f.worker.sent as Array<{ text: string }>).some(s => s.text === "Replacement source."));
+		if (cancel === "none") {
+			assert.ok(f.worker.outputs.every(output => output === "unix:///fixture/d2"));
+			assert.equal(f.worker.pauses.at(-1), false, "authorized replay must not remain paused");
+		}
+	} finally { other.shutdown(); }
+});
+
+test("pending takeover waits for a disconnected route to return without another takeover", async t => {
+	const f = await fixture(t);
+	const other = new SessionCoordinator(join(f.root, "other"), "other");
+	other.start();
+	try {
+		assert.equal(other.tryAcquireSpeech(), true);
+		const force = t.mock.method(SessionCoordinator.prototype, "forceAcquireSpeech");
+		await f.host.shortcut("f5"); await settle();
+		await f.event();
+		other.releaseSpeech();
+		await new Promise(resolve => setTimeout(resolve, 75)); await settle();
+		assert.equal(f.worker.sent.length, 0, "no playback on a disconnected route");
+		await f.event("d3");
+		assert.equal(force.mock.callCount(), 1);
+		assert.ok((f.worker.sent as Array<{ text: string }>).some(s => s.text === "First sentence."));
+		assert.equal(f.worker.pauses.at(-1), false);
+	} finally { other.shutdown(); }
+});
+
+test("pending takeover retains an independent streaming source across arrival", async t => {
+	const f = await fixture(t);
+	const other = new SessionCoordinator(join(f.root, "other"), "other");
+	other.start();
+	try {
+		assert.equal(other.tryAcquireSpeech(), true);
+		await f.host.shortcut("f5"); await settle();
+		await f.host.emit("message_start", { message: assistant("", "pending") });
+		await f.host.emit("message_update", { message: assistant("New answer. ", "pending"), assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "New answer. " } });
+		await f.event("d2", "d3");
+		other.releaseSpeech();
+		await new Promise(resolve => setTimeout(resolve, 75)); await settle();
+		const replay = (f.worker.sent.at(-1) as { utterance: number }).utterance;
+		const message = assistant("New answer. Later sentence.");
+		await f.host.emit("message_update", { message, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Later sentence." } });
+		f.host.addMessage("new", "message", message);
+		await f.host.emit("message_end", { message });
+		await f.host.emit("turn_end", { message, toolResults: [] }); await settle();
+		const before = f.worker.sent.length;
+		f.worker.emit({ type: "idle", utterance: replay }); await settle();
+		assert.deepEqual((f.worker.sent.slice(before) as Array<{ text: string }>).map(s => s.text), ["New answer.", "Later sentence."]);
+	} finally { other.shutdown(); }
+});
+
 for (const afterManual of [false, true]) test(`queued priority arrival is fenced by manual selection (new arrival after manual: ${afterManual})`, async t => {
 	const f = await fixture(t);
 	await f.host.shortcut("f5"); await settle();

@@ -628,6 +628,8 @@ export default async function (pi: ExtensionAPI) {
 				restoreTail: boolean;
 				paused: boolean;
 				waiting: boolean;
+				acquiring: boolean;
+				rerouted: boolean;
 				phase: PlaybackPhase;
 				continueLiveTurn: boolean;
 				source: typeof liveSource;
@@ -2749,7 +2751,12 @@ export default async function (pi: ExtensionAPI) {
 
 	// Logical suspension never retires a physical scope. All admission still runs
 	// through adoptCurrentConnection's original-resource recovery barrier.
-	const suspendDevicePlayback = (): void => {
+	const suspendDevicePlayback = (manual = false): void => {
+		// Automatic routing changes the destination, not an in-flight user takeover.
+		if (!manual && pendingReplay?.acquiring) {
+			pendingReplay.rerouted = true;
+			return;
+		}
 		if (routeIntent?.request === playbackRequestEpoch && routeIntent.context === contextEpoch) return;
 		const active = !!pendingReplay || (ownsSpeech &&
 			((lastOwnerUtterance !== undefined && playbackUtterances.has(lastOwnerUtterance)) ||
@@ -2771,14 +2778,17 @@ export default async function (pi: ExtensionAPI) {
 
 	const handoffDevice = async (id: string, current: () => boolean, manual = false): Promise<void> => {
 		devicePicker?.abort();
-		suspendDevicePlayback();
-		const epoch = ++playbackRequestEpoch;
+		suspendDevicePlayback(manual);
+		const acquisition = pendingReplay?.acquiring ? pendingReplay : undefined;
+		const epoch = acquisition ? playbackRequestEpoch : ++playbackRequestEpoch;
 		if (routeIntent) routeIntent = { ...routeIntent, request: epoch };
 		const intent = routeIntent;
 		const origin: ConnectionDevice = id === "local" ? { kind: "intentional_local" } : { kind: "device", id };
 		if (!await adoptCurrentConnection(epoch, true, origin, current, manual ? id : undefined, true, !manual) ||
 			!current() || epoch !== playbackRequestEpoch || !interactiveVoiceSession) return;
 		playbackUtterances.clear();
+		// The original playTarget continues after all routing decisions settle.
+		if (acquisition) return;
 		// A post-selection event must choose the destination before replay admission.
 		if (manual && routePending) return;
 		if (routeIntent !== intent) return;
@@ -3052,6 +3062,8 @@ export default async function (pi: ExtensionAPI) {
 			restoreTail,
 			paused: explicitPlay ? false : pendingReplay?.paused ?? playbackPaused,
 			waiting: true,
+			acquiring: false,
+			rerouted: false,
 			phase: (prepareContext ? "queued" : "connecting") as PlaybackPhase,
 			continueLiveTurn,
 			source: replaySource,
@@ -3130,15 +3142,19 @@ export default async function (pi: ExtensionAPI) {
 			else {
 				request.phase = "queued";
 				refreshPlaybackTimeline();
+				// Queued handoff playback is already inside routeFlight; it cannot await itself.
+				request.acquiring = !queued;
 				acquired = await coordinator.forceAcquireSpeech();
 				newlyAcquired = acquired;
+				if (request.acquiring) while (routeFlight) await routeFlight;
+				request.acquiring = false;
 			}
 		}
 		if (pendingReplay !== request || request.epoch !== playbackRequestEpoch || owner !== coordinator || !interactiveVoiceSession) {
 			// A newer playback request can reuse this lease. A non-playback action
 			// that superseded the wait has no use for it and must release it.
 			if (newlyAcquired && owner !== coordinator) owner?.releaseSpeech();
-			else if (newlyAcquired && !pendingReplay && !ownsSpeech) owner?.releaseSpeech();
+			else if (newlyAcquired && !ownsSpeech && (!pendingReplay || pendingReplay === request)) owner?.releaseSpeech();
 			return;
 		}
 		if (!acquired) {
@@ -3153,6 +3169,13 @@ export default async function (pi: ExtensionAPI) {
 			return;
 		}
 
+		if (newlyAcquired && request.rerouted && routing?.rows.some(row => row.id === activeDeviceId && !row.available)) {
+			// No routing flight exists when the selected device has no eligible replacement.
+			// Keep resume intent, but do not hold the newly obtained lease while disconnected.
+			suspendDevicePlayback();
+			owner?.releaseSpeech();
+			return;
+		}
 		request.phase = "connecting";
 		refreshPlaybackTimeline();
 		const completedAssistant = waitingSource && !replaySource && !target.source && activeContext && completedAssistantMessages(activeContext, config.mode, false)
@@ -3203,7 +3226,8 @@ export default async function (pi: ExtensionAPI) {
 		}
 		if (liveSource?.final) queueIncomingWhilePaused = false;
 		if (!queued) {
-			queueIncomingWhilePaused = false;
+			// A source that arrived during acquisition still belongs behind this replay.
+			queueIncomingWhilePaused = queueIncomingWhilePaused && !!liveSource && !liveSource.final && liveSource !== requestedLiveSource;
 			// Only discard this request's source; later tool responses must drain normally.
 			for (let i = queuedPausedMessages.length - 1; i >= 0; i--) {
 				if (queuedPausedMessages[i].source === requestedLiveSource) queuedPausedMessages.splice(i, 1);
@@ -5101,6 +5125,12 @@ export default async function (pi: ExtensionAPI) {
 					return;
 				}
 				request.paused = !request.paused;
+				if (request.paused && request.acquiring && request.rerouted) {
+					coordinator?.cancelSpeechAcquisition();
+					playbackRequestEpoch += 1;
+					request.acquiring = false;
+					request.waiting = false;
+				}
 				playbackPaused = request.paused;
 				narration.setPaused(playbackPaused);
 				vocalizer.setPlaybackPaused(request.paused);

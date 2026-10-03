@@ -1,6 +1,16 @@
 # Tests
 
-## Priority review follow-up — host-only, undeployed
+## Explicit takeover across automatic routing — host-only, undeployed
+
+Seven added real-coordinator/fake-worker regressions cover one pending F5 preemption across a higher arrival, Stop/Pause/session/source cancellation, disconnected-route return, and independent streaming B draining after A. The preemption file must remain identical until owner release; replay uses only the winning route, with one content utterance (the existing project announcement is separate). Existing lease-free paused-Tail zero-acquisition, stale manual-event, source-queue and delayed-handoff paused-preparation assertions remain unchanged.
+
+Failing-first: initial takeover cases **2/2 failed** because routing removed the authorized preemption file (`/tmp/ve/baseline.log`). Final seven regressions against archived `8a577ba`: **6 failed / 1 passed** (`/tmp/ve/baseline-final.log`); disconnected-route return was already green. Read-only review caught independent-source loss and disconnected admission in the intermediate fix; both were reproduced before correction (`/tmp/ve/{queue-review,disconnect-before}.log`). Follow-up static review found no actionable issues.
+
+Final isolated typecheck passed; focused routing/queue/live-tail/delayed-handoff **59/59**. Full default **1467 passed / 45 skipped**, installed-native **1510 passed / 2 skipped**, zero failures, **1512 total each**. Logs: `/tmp/ve/{check,focus,default,native}.log`. An intermediate default run exposed 16 failures from an overbroad disconnected-route guard and changed ordinary paused preparation; narrowing to actually rerouted requests restored all unchanged tests. The first native run had one cold-history heartbeat failure (**100.7ms**); the unchanged full rerun passed. An earlier default invocation was interrupted by the tool's 120-second timeout, not a completed result.
+
+Runs used `env -i`, private HOME/TMPDIR/XDG/Pi directories, and installed agent/TUI/keybindings test overrides for native validation. LSP is unavailable; TypeScript supplies diagnostics. No live caches/settings, hardware, providers, models/inference, SSH/Pi/client restarts, probes, deployment or push. No client/helper/protocol changes.
+
+## Historical priority review follow-up — host-only, undeployed
 
 Eight added cases preserve all prior pause regressions. Baseline evidence:
 
@@ -12,7 +22,7 @@ The first two-case baseline invocation had incorrect second-coordinator teardown
 
 Final typecheck passed (`/tmp/vr-check.log`). Focused priority/queue/live-tail-pause **51/51** (`/tmp/vr-focus.log`). Full default **1460 passed / 45 skipped / zero failures**, installed-native **1503 passed / 2 skipped / zero failures**, **1505 total each** (`/tmp/vr-{default,native}.log`). Tests used private HOME, TMPDIR, XDG cache/config/data/state/runtime and Pi directories; inherited PI/SSH/tmux settings were removed. Native opt-ins used the installed agent/TUI/keybindings modules through `PI_VOICE_TEST_{AGENT,TUI,KEYBINDINGS}_MODULE`. LSP is not configured.
 
-No live devices, SSH sessions, inference, providers, runtime configuration, helpers or deployment changed. Parent review remains pending; the explicit-acquisition/rerouting policy edge is recorded in FINDINGS, not claimed resolved.
+No live devices, SSH sessions, inference, providers, runtime configuration, helpers or deployment changed at this checkpoint. The then-open explicit-acquisition/rerouting edge is fixed and validated in the newer section above.
 
 ## Historical TODO6 fixed-source validation — host-only, undeployed
 
