@@ -1,6 +1,12 @@
 # Pi Voice — implemented agreements and live-validation handoff
 
-## Current delivery — combinatorial priority fixes (UNDEPLOYED)
+## Current delivery — replay lifecycle barriers (UNDEPLOYED)
+
+- Source `bea1612` revalidates current routing/transport barriers and availability after asynchronous replay steps, without awaiting its own routing flight. Running continuations retire on every exit; retryable disconnected/transport intent preserves source/Tail/pause independently. Recovery emits once; unrelated preparation failure does not authorize automatic retry. Existing disconnected sink leases remain retained, while unused acquisitions release on cancellation/defer. Custom/local endpoints remain authoritative.
+- Against `b370350`, original three-hole regressions: **43 passed / 4 failed**. Final typecheck passed; routing **57/57**, focused lifecycle/budget **114/114**; default **1486 passed / 45 skipped**, installed-native **1529 passed / 2 skipped**, zero failures (**1531 total**). Independent parent review findings were corrected with additional tests; final scoped read-through found no further issue in the last correction. [Evidence and limitations](docs/testing.md#current-replay-lifecycle-validation--host-only-undeployed).
+- Host-only, no helper/protocol update, live validation, deployment, runtime/provider/model action, restart or push. Later safe host reload remains operator work. Root TODO/HANDOFF, ISSUES and demos are untouched; earlier evidence below remains checkpoint-specific.
+
+## Historical delivery — combinatorial priority fixes (UNDEPLOYED at checkpoint)
 
 - Source `90f056b` preserves current explicit F5 intent throughout cold preparation, rebind and acquisition; automatic events never create takeover authority from expired/completed requests or lease-free paused Tail. Stop and rerouted Pause cancel pending admission. Historical A retries retain their own source identity while independent B drains exactly once after A. Missing selected-device rows retain WAIT, like unavailable rows; explicit endpoints and local fallback retain their existing semantics.
 - Regression-first against `6dd8e19`: **5 failures / 39 passes** in the expanded routing file. Six added cases; previous pause assertions unchanged. Typecheck passed; focused **151/151**; full default **1473 passed / 45 skipped**, installed-native **1516 passed / 2 skipped**, zero failures (**1518 total**). See [testing](docs/testing.md).

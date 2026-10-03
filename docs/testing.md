@@ -1,6 +1,22 @@
 # Tests
 
-## Current combinatorial priority validation — host-only, undeployed
+## Current replay lifecycle validation — host-only, undeployed
+
+Source `bea1612` fixes the three request-lifecycle holes reported against `b370350`. The original regression file against archived `b370350` reports **43 passed / 4 failed** (`/tmp/v3holes.oKzp/baseline-full.log`):
+
+- Live F5's cancel ACK admits playback while independent handoff termination proof is still pending. The fake worker rejects attempted dispatch during cleanup; ACK and termination are separately controlled.
+- Owning cold F5 dispatches **7 rather than 4** segments after disconnect, both with an unavailable registration and with its priority row removed. Cached metadata alone must not admit I/O.
+- Scoped cleanup retry adopts the new route but emits **zero** replay sentences. Route selection alone was an insufficient assertion; recovery now asserts exactly-once current audio.
+
+Lifecycle contract: `waiting` describes a running continuation and is cleared in `finally` on every exit. Retryable routing/transport intent retains the selected source, Tail prefix, pause state and epoch independently; unrelated preparation failure is not automatically retried. Admission drains the newest route/rebind/output/input barriers after asynchronous steps, then synchronously checks request identity, availability and pending manual routing. Only handoff-owned replay bypasses its own routing flight. Dormant recovery starts one replacement continuation without automatic foreign preemption. Pause clones retained intent rather than lending a cancelled coroutine its new epoch. Existing sink leases survive disconnected WAIT; newly acquired unused leases are released on cancellation or deferred retry. Authoritative custom/local output semantics are unchanged.
+
+Independent static review found and drove additional regressions/corrections: manual retries bypassing the first routing fence and then the post-acquisition fence; duplicate later blocks for explicit and nonexplicit live recovery; paused Tail metadata lost on continuation retirement and after failed rebind; physical Pause missing for the retained disconnected sink; automatic scoped cleanup not waking dormant intent; post-acquisition cancellation stranding a lease; fresh F5 inheriting nonexplicit authority; insufficient original-lease assertions during WAIT; and deferred manual disconnect retaining an unused acquired lease. All reported findings were addressed. The final parent read-through confirmed the last lease correction; this is scoped static review, not exhaustive interleaving proof. Existing assertions were preserved; the scoped-proof test was parameterized to exercise both event-driven and timer-driven recovery, with audio assertions added.
+
+Final isolated validation: `npm run check` passed; routing **57/57**; routing/queue/live-tail/transcript/device lifecycle plus backfill/cache/render/cold-history budget focus **114/114**. Full default **1486 passed / 45 skipped / zero failures**; installed-native **1529 passed / 2 skipped / zero failures**, **1531 total each**. Logs: `/tmp/vlife/{check,focus-final,default-final,native-final}.log`. An intermediate full run exposed eight timing regressions from unconditional extra async yields; synchronous admission predicates removed those yields, and both final full suites passed without weakening assertions. The original three-hole baseline above was recorded before those corrections; no failing-baseline claim is made for every later review-added test. After checkpoint-document updates, typecheck, documentation checks **3/3** and `git diff --check` passed (`/tmp/vlife/{check-docs,docs}.log`); these were documentation-only changes after the final full suites.
+
+All runs used `env -i`, private HOME/TMPDIR/XDG/Pi directories, and installed agent/TUI/keybindings module overrides for native tests. LSP is unavailable; TypeScript supplies diagnostics. No user caches/settings, providers/models/inference, hardware/device probes, live Pi/SSH/client sessions, runtime settings, deployment or push were touched. No transport/client/helper changes or helper update required. This remains host-only synthetic validation, not live hardware confirmation; a safe host reload is later operator work. Root TODO/HANDOFF, ISSUES and demos remain untouched.
+
+## Historical combinatorial priority validation — host-only, undeployed
 
 Source `90f056b` adds six regression cases without changing existing pause assertions. Against archived unfixed `6dd8e19`, the final routing file reports **5 failures / 39 passes** (`/tmp/vf/baseline-final.log`):
 

@@ -2,11 +2,18 @@
 
 Updated incrementally. Companion: `PLAN.md`. Reorganize freely while preserving evidence and disposition.
 
-## Current combinatorial priority fixes — UNDEPLOYED
+## Current replay lifecycle fixes — UNDEPLOYED
+
+- `bea1612` closes the three `b370350` lifecycle holes: cancel ACK is not handoff termination proof; existing ownership cannot admit a disconnected auto route; a retired continuation cannot stand in for retryable intent. Shared admission checks drain newest barriers after asynchronous steps, retaining the self-flight exception only for handoff replay.
+- Retry preserves source/Tail/pause while retiring actual waits on every exit. Pause clones intent to cancel old coroutines safely. Explicit and nonexplicit source queues drain once; manual routing events after proof or acquisition fence obsolete output. Existing sink leases remain held through WAIT; unused acquisitions release on cancellation/defer. Fresh F5 retains explicit authority, but automatic recovery cannot invent foreign takeover authority or retry unrelated preparation failures.
+- Original baseline **43 passed / 4 failed** against `b370350`; final routing **57/57**, lifecycle/budget focus **114/114**, typecheck passed. Default **1486 passed / 45 skipped**, installed-native **1529 passed / 2 skipped**, zero failures (**1531 total**). [Current evidence](docs/testing.md#current-replay-lifecycle-validation--host-only-undeployed) records baseline failures, intermediate validation regressions, and every independent review finding's disposition. Earlier assertions remain intact; review-added tests strengthen audio, lease and retry checks.
+- Final parent static review confirmed the last correction after preceding reported full-suite results; both final full suites subsequently passed. No exhaustive concurrency or live-hardware claim. Host-only, no helper/protocol changes, user cache/settings, provider/model/inference, probe, session/restart, deployment or push. Root TODO/HANDOFF, ISSUES and demos remain untouched.
+
+## Historical combinatorial priority fixes — UNDEPLOYED at checkpoint
 
 - Source `90f056b`: preserve only current waiting explicit requests across preparation/rebind/acquisition, not just acquisition. Stop/rerouted Pause fence admission; completed/expired requests and lease-free paused Tail cannot authorize automatic takeover.
 - Historical retry identity is retained even when its source is undefined; it never falls back to an unrelated current live response. Acquisition + arrival + Pause/Resume now drains independent B exactly once after A. Missing selected rows retain WAIT rather than dispatching a cached dead endpoint; return/new selection can resume through existing proof rules. Explicit endpoints/local fallback remain authoritative.
-- Final regressions against `6dd8e19`: **5 failed / 39 passed**. Typecheck and focused **151/151** passed; full default **1473 passed / 45 skipped**, installed-native **1516 passed / 2 skipped**, zero failures (**1518 total**). [Current evidence](docs/testing.md#current-combinatorial-priority-validation--host-only-undeployed) records baseline failures and fixture corrections. Existing pause assertions are unchanged.
+- Final regressions against `6dd8e19`: **5 failed / 39 passed**. Typecheck and focused **151/151** passed; full default **1473 passed / 45 skipped**, installed-native **1516 passed / 2 skipped**, zero failures (**1518 total**). [Checkpoint evidence](docs/testing.md#historical-combinatorial-priority-validation--host-only-undeployed) records baseline failures and fixture corrections. Existing pause assertions are unchanged.
 - TODO6 and the earlier acquisition-only F5 edge are fixed. Host-only, no helper/protocol update, deployment or live validation. No runtime changes, provider/model calls, restart or push. Parent independent follow-review remains outstanding; notes, absent demos and parent planning files remain untouched.
 
 ## Historical priority review fixes — UNDEPLOYED at checkpoint
