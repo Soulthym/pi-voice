@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
+import * as net from "node:net";
+import { StopRecovery } from "../src/stop-recovery.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mock, test, type TestContext } from "node:test";
@@ -25,7 +27,7 @@ mock.module("../src/device-picker-ui.js", { namedExports: { deviceProgressCompon
 const settle = async () => { for (let i = 0; i < 40; i++) await new Promise(resolve => setImmediate(resolve)); };
 const device = (id: string, connectedAt = 1): VoiceDeviceRegistration => ({ version: 1, id, name: id, platform: "linux", connectedAt, lastActive: 1, audioEndpoint: `unix:///fixture/${id}`, inputEndpoint: `unix:///fixture/${id}-input` });
 
-async function fixture(t: TestContext, output = "auto", input = "disabled") {
+async function fixture(t: TestContext, output = "auto", input = "disabled", config: Partial<VoiceConfig> = {}) {
 	picker = async () => undefined;
 	const root = await fs.mkdtemp(join(tmpdir(), "priority-integration-"));
 	const keys = ["PI_VOICE_CONFIG", "PI_VOICE_DEVICE_DIR", "PI_VOICE_COORDINATOR_DIR"];
@@ -33,7 +35,7 @@ async function fixture(t: TestContext, output = "auto", input = "disabled") {
 	process.env.PI_VOICE_CONFIG = join(root, "config.json");
 	process.env.PI_VOICE_DEVICE_DIR = join(root, "devices");
 	process.env.PI_VOICE_COORDINATOR_DIR = join(root, "coordinator");
-	await fs.writeFile(process.env.PI_VOICE_CONFIG, JSON.stringify({ enabled: true, output, input, audioCache: false, timingPreprocessConcurrency: 0 }));
+	await fs.writeFile(process.env.PI_VOICE_CONFIG, JSON.stringify({ enabled: true, output, input, audioCache: false, timingPreprocessConcurrency: 0, ...config }));
 	const store = new DevicePriorityStore(join(root, "device-priorities.json"));
 	store.discover([1, 2, 3, 4].map(n => ({ id: `d${n}`, date: n })));
 	let devices = [device("d3")];
@@ -59,7 +61,7 @@ async function fixture(t: TestContext, output = "auto", input = "disabled") {
 	const worker = Worker.instances[index] as Worker;
 	const routePoll = poll;
 	const selected = () => host.entries.filter(e => e.customType === "pi-voice.device-selection").at(-1)?.data;
-	const event = async (...ids: string[]) => { devices = ids.map(id => device(id)); routePoll(); await settle(); };
+	const event = async (...ids: (string | VoiceDeviceRegistration)[]) => { devices = ids.map(id => typeof id === "string" ? device(id) : id); routePoll(); await settle(); };
 	const progress = (position: number) => {
 		const segments = worker.sent as Array<{ utterance: number; segmentId: number; text: string }>;
 		const current = segments.at(-1)!.utterance;
@@ -190,13 +192,13 @@ test("paused intent survives return; manual lower choice holds until a genuine e
 	assert.equal(f.selected().selected, "d2", "real connection event ends the temporary choice");
 });
 
-test("higher arrival can bypass waiting; explicit output override never hands off", async t => {
-	const f = await fixture(t, "local");
+for (const output of ["local", "unix:///fixture/custom-output"]) test(`explicit output override ${output} never hands off`, async t => {
+	const f = await fixture(t, output);
 	await f.host.shortcut("f5"); await settle();
 	const count = f.worker.sent.length;
 	await f.event("d1", "d2");
 	assert.equal(f.worker.sent.length, count);
-	assert.equal(f.worker.outputs.at(-1), "local");
+	assert.equal(f.worker.outputs.at(-1), output);
 	assert.notEqual(f.worker.pauses.at(-1), true);
 });
 
@@ -241,8 +243,8 @@ test("picker pin/reorder races fence stale adoption and remain independent from 
 	assert.equal(discover.mock.callCount(), 0);
 });
 
-test("automatic routing finalizes input for review and never restarts capture", async t => {
-	const f = await fixture(t, "auto", "local");
+for (const manual of [false, true]) test(`automatic routing awaits ASR for review without submitting or replacing manual editor tickets (${manual})`, async t => {
+	const f = await fixture(t, "auto", "local", { submitMode: "auto", editMode: "append" });
 	let draft = "Existing draft";
 	let submissions = 0;
 	f.host.ctx.ui.getEditorText = () => draft;
@@ -250,16 +252,22 @@ test("automatic routing finalizes input for review and never restarts capture", 
 	f.host.api.sendUserMessage = () => { submissions++; };
 	const capture = Promise.withResolvers<PhoneCapture>();
 	const record = t.mock.method(PhoneInputClient.prototype, "capture", () => capture.promise);
-	t.mock.method(PhoneInputClient.prototype, "stop", async () => { capture.resolve({ type: "text", data: "" }); });
+	const transcript = Promise.withResolvers<string[]>();
+	t.mock.method(f.worker, "transcribe", () => transcript.promise);
+	t.mock.method(PhoneInputClient.prototype, "stop", async () => { capture.resolve({ type: "audio", data: Buffer.from("mock audio") }); });
 	t.mock.method(PhoneInputClient.prototype, "cancel", async () => {});
 	await f.host.command("talk"); await settle();
 	assert.equal(record.mock.callCount(), 1);
 	await f.event("d2", "d3");
+	assert.equal(f.selected().selected, "d3", "routing waits for delayed ASR");
+	assert.equal(submissions, 0);
+	if (manual) draft = "Manual editor ticket";
+	transcript.resolve(["Nonempty dictation."]); await settle();
 	assert.equal(f.selected().selected, "d2");
 	await f.event("d3"); await f.event("d2", "d3");
 	assert.equal(record.mock.callCount(), 1);
 	assert.equal(submissions, 0);
-	assert.equal(draft, "Existing draft");
+	assert.equal(draft, manual ? "Manual editor ticket" : "Existing draft Nonempty dictation.");
 	await assert.rejects(fs.stat(join(f.root, "coordinator", "speech.lock", "lease.json")), { code: "ENOENT" });
 });
 
@@ -351,4 +359,57 @@ test("picker accepts a lower device added to its live snapshot", async t => {
 	};
 	await f.host.command("devices"); await settle();
 	assert.equal(f.selected().selected, "d4");
+});
+
+for (const changed of ["generation", "output", "input"]) test(`picker rejects a displayed device whose ${changed} changed after its snapshot`, async t => {
+	const f = await fixture(t);
+	picker = async options => {
+		await f.event("d3", "d4");
+		assert.ok(options.snapshot().devices.some(row => row.id === "d4"));
+		const replacement = { ...device("d4"), ...(changed === "generation" ? { connectedAt: 2 }
+			: changed === "output" ? { audioEndpoint: "unix:///fixture/replaced-output" } : { inputEndpoint: "unix:///fixture/replaced-input" }) };
+		t.mock.method(DeviceRouter.prototype, "connected", () => [device("d3"), replacement]);
+		return "d4";
+	};
+	await f.host.command("devices"); await settle();
+	assert.equal(f.selected().selected, "d3");
+});
+
+test("automatic handoff retains real output scopes after wrong identity and partial cleanup", async t => {
+	const f = await fixture(t);
+	await f.host.shortcut("f5"); await settle();
+	const ids = ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"];
+	const bootId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+	const endpoint = `unix://${join(f.root, "proof.sock")}`;
+	let proveAll = false;
+	const commands: string[] = [];
+	const server = net.createServer(socket => socket.on("data", data => {
+		const id = String(data).trim().split(" ")[1];
+		commands.push(id);
+		socket.end(`${JSON.stringify({ type: "stopped", id, proof: "reboot", expected_boot_id: bootId,
+			boot_id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", device_id: proveAll || id === ids[0] ? "d3" : "wrong-device" })}\n`);
+	}));
+	await new Promise<void>(resolve => server.listen(endpoint.slice(7), resolve));
+	t.after(() => new Promise<void>(resolve => server.close(() => resolve())));
+	for (const id of ids) f.worker.emit({ type: "remote-handle", output: "unix:///fixture/d3", id, utterance: 1, bootId, rebootSafe: true, deviceId: "d3" });
+	const leasePath = join(f.root, "coordinator", "speech.lock", "lease.json");
+	const owner = JSON.parse(await fs.readFile(leasePath, "utf8"));
+	const retained = () => new StopRecovery(join(f.root, "coordinator"), owner.instanceId).episode("output")?.handles.map(handle => handle.id);
+	const before = f.worker.sent.length;
+	await f.event({ ...device("d3", 2), audioEndpoint: endpoint }, "d2");
+	// Socket proof has real asynchronous IO, unlike the worker-only fixture.
+	for (let i = 0; i < 100 && retained()?.length !== 1; i++) await new Promise(resolve => setTimeout(resolve, 10));
+	assert.deepEqual(retained(), [ids[1]], "only the correctly identified scope may retire");
+	assert.equal(f.selected().selected, "d3");
+	assert.equal(f.worker.sent.length, before);
+	assert.equal(JSON.parse(await fs.readFile(leasePath, "utf8")).instanceId, owner.instanceId);
+	await f.host.shortcut("f5"); await settle();
+	assert.equal(f.worker.sent.length, before, "failed scoped proof fences superseding replay too");
+	proveAll = true;
+	await f.event({ ...device("d3", 2), audioEndpoint: endpoint }, "d2", "d4");
+	for (let i = 0; i < 100 && f.selected().selected !== "d2"; i++) await new Promise(resolve => setTimeout(resolve, 10));
+	assert.equal(retained(), undefined);
+	assert.equal(f.selected().selected, "d2");
+	assert.ok(commands.includes(ids[1]));
+	assert.equal(commands.filter(id => id === ids[0]).length, 1, "proved scopes are not retried");
 });
