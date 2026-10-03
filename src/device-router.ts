@@ -118,7 +118,7 @@ export class DeviceRouter {
 	}
 
 	/** Best-effort menu candidates only. Neither procfs nor route() proves client connectivity. */
-	connected(): VoiceDeviceRegistration[] {
+	connected(direction?: DeviceDirection): VoiceDeviceRegistration[] {
 		let names: string[] = [];
 		try {
 			names = fs.readdirSync(this.directory);
@@ -133,7 +133,8 @@ export class DeviceRouter {
 			})
 			.filter((device): device is VoiceDeviceRegistration => device !== undefined)
 			.filter(device => validDeviceEndpoint(device.audioEndpoint) && validDeviceEndpoint(device.inputEndpoint))
-			.filter(device => endpointIsAvailable(device.audioEndpoint) || endpointIsAvailable(device.inputEndpoint))
+			.filter(device => direction ? endpointIsAvailable(direction === "output" ? device.audioEndpoint : device.inputEndpoint)
+				: endpointIsAvailable(device.audioEndpoint) || endpointIsAvailable(device.inputEndpoint))
 			.sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
 	}
 

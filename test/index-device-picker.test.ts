@@ -5,6 +5,8 @@ import path from "node:path";
 import { mock, test } from "node:test";
 import { stripTerminalSequences } from "@earendil-works/pi-tui";
 import { DeviceRouter } from "../src/device-router.js";
+import { devicePickerLabels } from "../src/status-text.js";
+import type { DevicePickerOptions } from "../src/device-picker-ui.js";
 import { PhoneInputClient, type PhoneCapture } from "../src/phone-input.js";
 import { FakeVoiceHost, MockedVoiceWorkerClient, assistant } from "./helpers/fake-voice-host.js";
 
@@ -12,9 +14,12 @@ mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: Mock
 const pickerUI = await import("../src/device-picker-ui.js");
 // This suite checks routing transactions; mounted native overlay/lifecycle coverage lives separately.
 mock.module("../src/device-picker-ui.js", { namedExports: { ...pickerUI,
-	selectDeviceOverlay: (ctx: any, labels: string[], signal: AbortSignal, _screen: unknown, initialIndex: number) => {
-		assert.match(labels[initialIndex], /current|Local/);
-		return ctx.ui.select("Voice device", labels, { signal });
+	selectPriorityDeviceOverlay: async (ctx: any, options: DevicePickerOptions, signal: AbortSignal) => {
+		const snapshot = options.snapshot();
+		const rows = [...snapshot.devices].filter(row => row.available).sort((a, b) => a.id === "local" ? -1 : b.id === "local" ? 1 : a.id.localeCompare(b.id));
+		const labels = devicePickerLabels(rows, snapshot.selectedId ?? "auto");
+		const choice = await ctx.ui.select("Voice device", labels, { signal });
+		return rows[labels.indexOf(choice)]?.id;
 	},
 } });
 const settle = async () => { for (let i = 0; i < 30; i++) await new Promise(resolve => setImmediate(resolve)); };
@@ -102,7 +107,7 @@ test("picker snapshots unique labels, cancels read-only, revalidates and uses th
 	assert.equal(terminateCurrent.mock.callCount(), 0, "confirming current does not stop audio");
 	terminateCurrent.mock.restore();
 	assert.equal(worker.pauses.length, before.pauses, "confirming current does not pause");
-	assert.equal(pins().at(-1).data.selection, ids[0], "confirming auto current makes the pin manual");
+	assert.equal(pins().at(-1).data.selection, ids[0], "confirming auto current records a temporary manual selection");
 	before.pins = pins().length;
 	answer = Promise.withResolvers(); opening = host.command("devices");
 	await fs.rm(path.join(root, ids[1]));
@@ -113,17 +118,18 @@ test("picker snapshots unique labels, cancels read-only, revalidates and uses th
 	answer = Promise.withResolvers(); opening = host.shortcut("alt+s");
 	await host.command("device local");
 	answer.resolve(options[2]); await opening;
-	assert.equal(pins().at(-1).data.pin, "local", "newer explicit control supersedes the picker");
+	assert.equal(pins().at(-1).data.selected, "local", "newer explicit control supersedes the picker");
 	answer = Promise.withResolvers(); opening = host.shortcut("alt+s");
 	const stop = Promise.withResolvers<void>();
 	const terminate = t.mock.method(worker, "terminate", () => stop.promise);
 	answer.resolve(options[2]); await settle();
-	assert.equal(pins().at(-1).data.pin, "local", "selection awaits actual stop proof");
+	assert.equal(pins().at(-1).data.selected, "local", "selection awaits actual stop proof");
 	assert.match(host.widgetLines()![0], /Connecting/);
 	assert.doesNotMatch(host.widgetLines()![0], /Paused/, "internal handoff transport pause is not user pause presentation");
 	stop.resolve(); await opening;
 	terminate.mock.restore();
-	assert.equal(pins().at(-1).data.pin, ids[1]);
+	assert.equal(pins().at(-1).data.selected, ids[1]);
+	assert.equal(pins().at(-1).data.pin, undefined, "selection is not pinning");
 	assert.equal(pins().at(-1).data.selection, ids[1]);
 	assert.equal(editor, "Keep my draft");
 	assert.equal(host.scrollView.scrollTop, 20);
@@ -136,18 +142,18 @@ test("picker snapshots unique labels, cancels read-only, revalidates and uses th
 	answer.resolve(options[1]); await settle();
 	await fs.rm(path.join(root, ids[0]));
 	delayedStop.resolve(); await opening; delayed.mock.restore();
-	assert.equal(pins().at(-1).data.pin, ids[1], "post-stop revalidation rejects expired endpoints");
+	assert.equal(pins().at(-1).data.selected, ids[1], "post-stop revalidation rejects expired endpoints");
 	await register(ids[0]);
 	answer = Promise.withResolvers(); opening = host.shortcut("alt+s");
 	const failed = t.mock.method(worker, "terminate", async () => { throw new Error("stop unconfirmed"); });
 	answer.resolve(options[1]); await opening; failed.mock.restore();
-	assert.equal(pins().at(-1).data.pin, ids[1], "failed stop cannot commit picker choice");
+	assert.equal(pins().at(-1).data.selected, ids[1], "failed stop cannot commit picker choice");
 	await host.command(`device ${ids[1]}`);
 	answer = Promise.withResolvers(); opening = host.shortcut("alt+s");
 	const sessionId = host.sessionManager.getSessionId;
 	host.sessionManager.getSessionId = () => "replacement";
 	answer.resolve(options[0]); await opening;
-	assert.equal(pins().at(-1).data.pin, ids[1], "dynamic session replacement fences an old choice");
+	assert.equal(pins().at(-1).data.selected, ids[1], "dynamic session replacement fences an old choice");
 	host.sessionManager.getSessionId = sessionId;
 	await fs.rm(path.join(root, ids[1]));
 	answer = Promise.withResolvers(); opening = host.shortcut("alt+s");
@@ -166,7 +172,7 @@ test("picker snapshots unique labels, cancels read-only, revalidates and uses th
 });
 
 for (const scenario of ["playback", "recording", "endpoint", "generation", "unknown", "unavailable", "failed cleanup"]) {
-	test(`fresh restored manual pin: current confirmation during ${scenario}`, async t => {
+	test(`fresh restored manual selection: current confirmation during ${scenario}`, async t => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-picker-restore-"));
 		const keys = ["PI_VOICE_CONFIG", "PI_VOICE_COORDINATOR_DIR", "PI_VOICE_DEVICE_DIR"];
 		const old = keys.map(key => process.env[key]);
@@ -189,7 +195,7 @@ for (const scenario of ["playback", "recording", "endpoint", "generation", "unkn
 		const cancel = t.mock.method(PhoneInputClient.prototype, "cancel", async () => { if (record.mock.callCount()) capture.resolve({ type: "text", data: "" }); });
 		// A new extension closure, not session_start on an already initialized host.
 		const host = new FakeVoiceHost(root, `restore-${scenario}`);
-		host.entries.push({ type: "custom", customType: "pi-voice.device-selection", data: { version: 1, selection: "A", pin: "A" } });
+		host.entries.push({ type: "custom", customType: "pi-voice.device-selection", data: { version: 2, selection: "A", selected: "A" } });
 		let labels: string[] = [];
 		const answer = Promise.withResolvers<string | undefined>();
 		host.ctx.ui.select = (_title: string, options: string[]) => { labels = options; return answer.promise; };

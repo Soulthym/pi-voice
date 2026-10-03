@@ -81,7 +81,7 @@ test("session pins, fresh explicit attachment, read-only metadata and lookup/sto
 	});
 	await host.start();
 	const worker = Worker.instances[index] as Worker;
-	const pin = () => host.entries.filter(e => e.customType === "pi-voice.device-selection").at(-1)?.data.pin;
+	const pin = () => host.entries.filter(e => e.customType === "pi-voice.device-selection").at(-1)?.data.selected;
 	assert.equal(pin(), "A");
 	const connected = () => host.notices.filter(notice => notice.message.startsWith("Voice · Connected to "));
 	assert.match(connected().at(-1)!.message, /^Voice · Connected to Desktop 雪 'quoted' · identity selected; audio readiness not checked$/);
@@ -101,8 +101,9 @@ test("session pins, fresh explicit attachment, read-only metadata and lookup/sto
 	assert.equal(connected().length, beforeAutomatic, "automatic activity must not repeat connection toasts");
 	await host.shortcut("f8");
 	assert.equal(resolve.mock.callCount(), 1, "pause-only must not look up identity");
+	await host.command("reconnect");
 	await host.shortcut("f8"); await settle();
-	assert.equal(pin(), "B", "resume adopts the fresh attachment in one action");
+	assert.equal(pin(), "B", "explicit reconnect adopts attachment without implicitly pinning");
 	assert.match(connected().at(-1)!.message, /^Voice · Connected to Phone B/);
 	assert.equal(worker.outputs.at(-1), "unix:///test/B");
 	await host.shortcut("f5"); await settle();
@@ -158,6 +159,7 @@ test("session pins, fresh explicit attachment, read-only metadata and lookup/sto
 
 	// Old-device termination must finish before explicit playback can use a new pin.
 	current = { kind: "device", id: "A" };
+	await host.command("reconnect");
 	await host.command("test Active A.");
 	const active = worker.sent.at(-1) as { utterance: number };
 	worker.emit({ type: "error", utterance: active.utterance, message: "Reverse forward accepted but client disconnected" });
@@ -179,7 +181,7 @@ test("session pins, fresh explicit attachment, read-only metadata and lookup/sto
 	assert.equal(worker.sent.length, beforeRebind);
 	terminated.resolve(); await reconnect; await settle();
 	assert.equal(connected().length, beforeBlockedRebind, "unavailable registration cannot claim connected");
-	assert.equal(worker.sent.length, beforeRebind, "missing B does not start after old sink terminates");
+	assert.ok(worker.outputs.slice(beforeRebind).every(output => output === "unix:///test/A"), "superseding replay may use only the retained selection after stop proof, never missing B or fallback");
 });
 
 for (const setting of ["device", "input", "output"]) test(`${setting} setters fence stale requests and tolerate metadata-only failures`, async t => {

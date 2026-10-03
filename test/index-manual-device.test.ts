@@ -58,7 +58,7 @@ test("manual names/IDs and cycles are sticky across ambiguous attachments, contr
 	const pin = () => host.entries.filter(e => e.customType === "pi-voice.device-selection").at(-1)?.data;
 	const calls = lookup.mock.callCount();
 	await host.command('device "Linux Mint PC"');
-	assert.deepEqual(pin(), { version: 1, selection: "A", pin: "A" });
+	assert.deepEqual(pin(), { version: 2, selection: "A", selected: "A", pin: undefined });
 	assert.equal(worker.sent.length, 0, "selection is silent");
 	await new Promise(resolve => setTimeout(resolve, 100));
 	assert.match(host.widgetLines()![0], /Voice · ready.*\[🎧:Linux Mint PC\]$/);
@@ -123,7 +123,7 @@ test("manual names/IDs and cycles are sticky across ambiguous attachments, contr
 	assert.equal(pin().selection, "A", "failed auto lookup leaves the old manual pin");
 	lookup.mock.mockImplementation(async () => ({ kind: "device" as const, id: "B" }));
 	await host.command("reconnect");
-	assert.deepEqual(pin(), { version: 1, selection: "auto", pin: "B" });
+	assert.deepEqual(pin(), { version: 2, selection: "auto", selected: "B", pin: undefined });
 	await host.command("output tcp://127.0.0.1:23456");
 	await host.command("input unix:///custom-mic");
 	const overrides = await fs.readFile(process.env.PI_VOICE_CONFIG, "utf8");

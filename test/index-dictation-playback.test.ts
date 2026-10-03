@@ -72,7 +72,8 @@ test("playback finalizes capture into a review draft; Stop and second microphone
 	assert.equal(editor, "New draft after Stop"); assert.equal(worker.sent.length, before);
 
 	const lookup = mock.method(DeviceRouter.prototype, "resolveCurrentConnection");
-	for (const action of ["device auto", "reconnect"]) {
+	// Priority auto uses the cached winner; only explicit reconnect resolves attachment identity.
+	for (const action of ["reconnect"]) {
 		for (const fail of [false, true]) {
 			lookup.mock.mockImplementation(async () => ({ kind: "intentional_local" }));
 			capture = Promise.withResolvers<PhoneCapture>();
@@ -94,6 +95,14 @@ test("playback finalizes capture into a review draft; Stop and second microphone
 			assert.equal(submissions, 0);
 		}
 	}
+	const lookups = lookup.mock.callCount();
+	capture = Promise.withResolvers<PhoneCapture>(); transcript = Promise.withResolvers<string[]>();
+	await host.command("talk"); await settle();
+	const automatic = host.command("device auto"); await settle();
+	assert.equal(recording, false, "cached priority selection finalizes capture for review");
+	transcript.resolve(["Priority switch draft."]); await automatic; await settle();
+	assert.equal(lookup.mock.callCount(), lookups, "priority selection does not resolve attachment identity");
+	assert.equal(submissions, 0);
 	lookup.mock.restore();
 
 	const other = new SessionCoordinator(path.join(root, "other"), "other"); other.start(); other.tryAcquireSpeech();

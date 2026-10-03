@@ -1,13 +1,25 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { DevicePriorityStore } from "../src/device-priorities.js";
 import { DeviceRouting } from "../src/device-routing.js";
-import type { VoiceDeviceRegistration } from "../src/device-router.js";
+import { DeviceRouter, type VoiceDeviceRegistration } from "../src/device-router.js";
 
 const device = (id: string, connectedAt = 1): VoiceDeviceRegistration => ({ version: 1, id, name: id, platform: "linux", connectedAt, lastActive: 1, audioEndpoint: `unix:///fixture/${id}`, inputEndpoint: `unix:///fixture/${id}-input` });
+
+test("output discovery does not mistake a surviving microphone endpoint for connected playback", t => {
+	const root = mkdtempSync(join(tmpdir(), "routing-output-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const registration = { ...device("remote"), inputEndpoint: `unix://${root}/input`, audioEndpoint: `unix://${root}/output` };
+	writeFileSync(join(root, "remote.json"), JSON.stringify(registration));
+	writeFileSync(join(root, "input"), "");
+	const router = new DeviceRouter(root, "", {});
+	assert.equal(router.connected().length, 1);
+	assert.equal(router.connected("input").length, 1);
+	assert.equal(router.connected("output").length, 0);
+});
 
 test("relational routing caches heartbeat snapshots and compares local fallback by position", t => {
 	const root = mkdtempSync(join(tmpdir(), "routing-cache-"));

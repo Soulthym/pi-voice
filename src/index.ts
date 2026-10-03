@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
 import { hostname } from "node:os";
+import { mkdirSync, watch, type FSWatcher } from "node:fs";
+import { dirname, join } from "node:path";
+import { DevicePriorityStore } from "./device-priorities.js";
+import { DeviceRouting } from "./device-routing.js";
 import type { Message, Tool } from "@earendil-works/pi-ai";
 import { getMarkdownTheme, highlightCode, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Markdown, truncateToWidth, type TUI } from "@earendil-works/pi-tui";
@@ -45,7 +49,7 @@ import {
 	type VoiceSubmitMode,
 } from "./config.js";
 import { chunkCodeNarration, plainCodeNarration, type CodeNarrationPlan } from "./code-narration.js";
-import { deviceProgressComponent, selectDeviceOverlay } from "./device-picker-ui.js";
+import { deviceProgressComponent, selectPriorityDeviceOverlay } from "./device-picker-ui.js";
 import { DeviceRouter, validDeviceName, type ConnectionDevice, type VoiceDeviceSelection } from "./device-router.js";
 import { LiveTranscriptionSession } from "./live-transcription.js";
 import {
@@ -62,7 +66,7 @@ import { PhoneInputClient } from "./phone-input.js";
 import { StopRecovery, boundedStopRecovery } from "./stop-recovery.js";
 import { prioritizeFromCurrent, processConcurrently, resolveTimingConcurrency } from "./preprocessing.js";
 import { SpeakableStream, type FencedCodeBlock, type SpeakableSourceRange } from "./speakable.js";
-import { devicePickerLabels, notifyVoice, playbackTimingStatus, voiceProgressLines, type ReadyProgress } from "./status-text.js";
+import { notifyVoice, playbackTimingStatus, voiceProgressLines, type ReadyProgress } from "./status-text.js";
 import { anchorLineForMessage, computeAutoScrollTop, isManualScrollAway } from "./auto-scroll.js";
 import { applySpokenEdit, parseEditModelSelector, resolveDictationCandidates } from "./prompt-editor.js";
 import { formatAsrDisplay } from "./asr-display.js";
@@ -247,19 +251,21 @@ function playbackTimingSnapshots(ctx: ExtensionContext, currentIds: Set<string>)
 	return snapshots;
 }
 
-function sessionDeviceSelection(ctx: ExtensionContext): { selection: VoiceDeviceSelection; pin?: string } {
+function sessionDeviceSelection(ctx: ExtensionContext): { selection: VoiceDeviceSelection; pin?: string; selected?: string } {
 	let selection: VoiceDeviceSelection = "auto";
 	let pin: string | undefined;
+	let selected: string | undefined;
 	for (const entry of ctx.sessionManager.getBranch()) {
 		if (entry.type !== "custom" || entry.customType !== DEVICE_SELECTION_ENTRY) continue;
 		const data = entry.data;
 		if (!data || typeof data !== "object" || !("selection" in data) || typeof data.selection !== "string") continue;
 		if (data.selection === "auto" || data.selection === "local" || /^[a-zA-Z0-9._-]{1,128}$/.test(data.selection)) {
 			selection = data.selection;
+			selected = "selected" in data && typeof data.selected === "string" && data.selected !== "auto" && /^[a-zA-Z0-9._-]{1,128}$/.test(data.selected) ? data.selected : undefined;
 			pin = "pin" in data && typeof data.pin === "string" && /^[a-zA-Z0-9._-]{1,128}$/.test(data.pin) ? data.pin : undefined;
 		}
 	}
-	return { selection, pin };
+	return { selection, pin, selected };
 }
 
 function codeDescriptionSnapshots(ctx: ExtensionContext): unknown[] {
@@ -323,6 +329,14 @@ export default async function (pi: ExtensionAPI) {
 	const deviceRouter = new DeviceRouter();
 	let deviceSelection: VoiceDeviceSelection = "auto";
 	let activeDeviceId: string | undefined;
+	let devicePin: string | undefined;
+	let routing: DeviceRouting | undefined;
+	let devicePoll: NodeJS.Timeout | undefined;
+	let priorityWatch: FSWatcher | undefined;
+	let routeFlight: Promise<void> | undefined;
+	let routePending = false;
+	let routeIntent: { request: number; context: number; playing: boolean } | undefined;
+	const persistDevice = () => pi.appendEntry(DEVICE_SELECTION_ENTRY, { version: 2, selection: deviceSelection, selected: activeDeviceId, pin: devicePin });
 	let ownsSpeech = false;
 	let speechLeaseEpoch = 0;
 	let speechPurpose: SpeechPurpose | undefined;
@@ -815,7 +829,7 @@ export default async function (pi: ExtensionAPI) {
 					? line.text
 					: ctx.ui.theme.fg(line.kind === "stop" ? "warning" : line.kind === "playback" && state === "speaking" ? "accent" : "dim", line.text),
 			);
-			if (config.enabled && voiceStatusLine && (!lines.length || transportStopPending || deviceRetryRequired ||
+			if (config.enabled && voiceStatusLine && (!lines.length || transportStopPending || routeIntent || deviceRetryRequired ||
 				pausedForAttention || state === "error")) lines.splice(1, 0, voiceStatusLine);
 			const canJump = config.enabled && ownsSpeech && narration.activeWordStart !== undefined;
 			if (canJump !== jumpWidgetVisible) {
@@ -1717,6 +1731,9 @@ export default async function (pi: ExtensionAPI) {
 		if (transportStopPending) {
 			label = "Voice · stopping · waiting for device confirmation";
 			color = "warning";
+		} else if (routeIntent) {
+			label = `Voice · waiting for ${selectedDeviceLabel} · device switch requires stop proof`;
+			color = "warning";
 		} else if (deviceRetryRequired) {
 			label = "Voice · blocked · /voice reconnect";
 			color = "warning";
@@ -1864,6 +1881,12 @@ export default async function (pi: ExtensionAPI) {
 				// Retired errors cannot cancel a replacement; remote uncertainty above
 				// still belongs to the original transport until matching stop proof.
 				if (event.utterance !== undefined && !currentUtterance && event.code !== "REMOTE_PLAYBACK_UNCONFIRMED") return;
+				if (currentUtterance && event.code === "REMOTE_PLAYBACK_UNCONFIRMED" && config.output === "auto") suspendDevicePlayback();
+				if (currentUtterance && routeIntent?.request === playbackRequestEpoch && routeIntent.context === contextEpoch) {
+					deviceRetryRequired = true;
+					refreshStatus();
+					return;
+				}
 				if (currentUtterance) {
 					attentionSuppressed = true;
 					deviceRetryRequired = true;
@@ -1954,6 +1977,7 @@ export default async function (pi: ExtensionAPI) {
 	);
 	const clearPlaybackTransport = (): number | undefined => {
 		devicePicker?.abort();
+		routeIntent = undefined;
 		playbackTailIntent = false;
 		playbackUtterances.clear();
 		lastPlaybackTick = undefined;
@@ -2011,6 +2035,9 @@ export default async function (pi: ExtensionAPI) {
 		const leaseEpoch = speechLeaseEpoch;
 		void Promise.all([waitForTransportCancellation(cancelId), inputCancelled, inputStopBarrier]).then(() => {
 			const release = (): void => {
+				// A superseding Stop must survive the routing continuation as well as
+				// its physical rebind, without releasing a replacement playback lease.
+				if (routeFlight) { void routeFlight.then(release).catch(notifyStopFailure); return; }
 				if (Object.values(stopResources).some(resource => resource.episode || resource.cleanup)) return;
 				if (ownsSpeech && speechLeaseEpoch === leaseEpoch) releaseSpeechOwnership(announceNext);
 			};
@@ -2136,7 +2163,7 @@ export default async function (pi: ExtensionAPI) {
 			deferredRelease = undefined;
 			return;
 		}
-		if (inputInProgress || speechReservedForInput || deviceRebind || transportStopPending || inputStopPending || stopsUnresolved()) return;
+		if (inputInProgress || speechReservedForInput || routeIntent || routeFlight || deviceRebind || transportStopPending || inputStopPending || stopsUnresolved()) return;
 		deferredRelease = undefined;
 		releaseSpeechOwnership(pending.announceNext);
 	};
@@ -2150,7 +2177,7 @@ export default async function (pi: ExtensionAPI) {
 			flushDeferredRelease();
 			return;
 		}
-		if (deviceRebind || transportStopPending || inputStopPending || stopsUnresolved()) return;
+		if (routeIntent || routeFlight || deviceRebind || transportStopPending || inputStopPending || stopsUnresolved()) return;
 		if (pendingSpeechPreemption) {
 			finishSpeechPreemption();
 			return;
@@ -2530,6 +2557,10 @@ export default async function (pi: ExtensionAPI) {
 					if (!attempted || !valid()) return;
 					if (stopsUnresolved()) return;
 					if (rebind === deviceRebind && rebind && unconfirmedDeviceStops.has(rebind)) deviceRebind = undefined;
+					if (routeIntent?.request === playbackRequestEpoch && routeIntent.context === contextEpoch) {
+						routePending = true;
+						queueMicrotask(pollDeviceRouting);
+					}
 					// Do not release a healthy sibling transport or announce/play anything.
 					if (!inputInProgress && !recovery.episode("input")?.handles.length && !recovery.episode("output")?.handles.length && (failedOutput || lastOwnerUtterance === undefined)) {
 						if (deferredRelease) deferredRelease.announceNext = false;
@@ -2552,7 +2583,7 @@ export default async function (pi: ExtensionAPI) {
 	};
 	// Persist only session metadata. Reattachment alone never changes an existing pin.
 	const adoptCurrentConnection = (epoch: number, force = false, origin?: ConnectionDevice, current = () => true, manual?: VoiceDeviceSelection, recover = false): Promise<boolean> => {
-		if (!force && (deviceSelection !== "auto" || (!origin && config.output !== "auto"))) {
+		if (!force && (deviceSelection !== "auto" || (!origin && (activeDeviceId !== undefined || config.output !== "auto")))) {
 			deviceRetryRequired = false;
 			return Promise.resolve(true);
 		}
@@ -2615,10 +2646,12 @@ export default async function (pi: ExtensionAPI) {
 					inputStopPending = false;
 					stopUnconfirmed = false;
 				}
-				const connection = origin ?? await deviceRouter.resolveCurrentConnection();
+				const resolvedConnection = origin ?? await deviceRouter.resolveCurrentConnection();
+				const pinned = config.output === "auto" ? routing?.rows.find(row => row.pinned && row.available) : undefined;
+				const connection: ConnectionDevice = pinned ? pinned.id === "local" ? { kind: "intentional_local" } : { kind: "device", id: pinned.id } : resolvedConnection;
 				if (!current() || epoch !== playbackRequestEpoch || ctx !== activeContext || !interactiveVoiceSession) return false;
 				const selection = connection.kind === "device" ? connection.id : "local";
-				// Pin identity even if its registration is temporarily absent; operations validate their own direction.
+				// Retain identity even if its registration is temporarily absent; operations validate their own direction.
 				// A reconnect is metadata adoption, never a readiness claim.
 				const identityChanged = selection !== (activeDeviceId ?? deviceSelection);
 				let changed = identityChanged;
@@ -2658,7 +2691,8 @@ export default async function (pi: ExtensionAPI) {
 				else if (force || origin) deviceSelection = "auto";
 				activeDeviceId = selection;
 				deviceRouter.setEnvironmentDevice(connection.kind === "device" ? connection.id : undefined);
-				pi.appendEntry(DEVICE_SELECTION_ENTRY, { version: 1, selection: deviceSelection, pin: selection });
+				routing?.select(selection);
+				persistDevice();
 				if (outputRoute) {
 					outputEndpoint = outputRoute.endpoint;
 					outputGeneration = outputRoute.kind === "device" ? outputRoute.device.connectedAt : undefined;
@@ -2706,12 +2740,89 @@ export default async function (pi: ExtensionAPI) {
 		return adoption.catch(() => false);
 	};
 
+	// Logical suspension never retires a physical scope. All admission still runs
+	// through adoptCurrentConnection's original-resource recovery barrier.
+	const suspendDevicePlayback = (): void => {
+		if (routeIntent?.request === playbackRequestEpoch && routeIntent.context === contextEpoch) return;
+		const active = playbackPaused || !!pendingReplay || (ownsSpeech &&
+			(lastOwnerUtterance !== undefined || (speechPurpose === "turn" && liveTurnNarrationActive && !ownerTurnEnded)));
+		if (!active) { routeIntent = undefined; return; }
+		const playing = !(pendingReplay?.paused ?? playbackPaused);
+		pendingReplay = undefined;
+		coordinator?.cancelSpeechAcquisition();
+		routeIntent = { request: ++playbackRequestEpoch, context: contextEpoch, playing };
+		pausedOwnerUtterance = undefined;
+		playbackPaused = true;
+		queueIncomingWhilePaused = true;
+		attentionSuppressed = true;
+		coordinator?.setAttentionEnabled(false);
+		narration.setPaused(true);
+		vocalizer.setPlaybackPaused(true);
+		refreshStatus();
+	};
+
+	const handoffDevice = async (id: string, current: () => boolean, manual = false): Promise<void> => {
+		devicePicker?.abort();
+		suspendDevicePlayback();
+		const epoch = ++playbackRequestEpoch;
+		if (routeIntent) routeIntent = { ...routeIntent, request: epoch };
+		const intent = routeIntent;
+		const origin: ConnectionDevice = id === "local" ? { kind: "intentional_local" } : { kind: "device", id };
+		if (!await adoptCurrentConnection(epoch, true, origin, current, manual ? id : undefined, true) ||
+			!current() || epoch !== playbackRequestEpoch || !interactiveVoiceSession) return;
+		playbackUtterances.clear();
+		if (routeIntent !== intent) return;
+		routeIntent = undefined;
+		if (!intent || intent.context !== contextEpoch) return;
+		const target = playbackHistory.resumeTarget();
+		playbackPaused = !intent.playing;
+		narration.setPaused(playbackPaused);
+		if (target) await playTarget(target, false, false, true);
+		else refreshStatus();
+	};
+
+	const pollDeviceRouting = (): void => {
+		if (!routing || !interactiveVoiceSession) return;
+		try {
+			if (routing.update(deviceRouter.connected(config.output === "auto" ? "output" : undefined), activeDeviceId, devicePin, JSON.stringify([config.input, config.output]))) routePending = true;
+			if (!routePending || routeFlight) return;
+			routePending = false;
+			// Explicit endpoints remain authoritative; discovery must not pause their audio.
+			if (config.output !== "auto" || orphanRecoveryBlocked) return;
+			const selected = activeDeviceId;
+			const row = routing.rows.find(row => row.id === selected);
+			if (selected && !row?.available) suspendDevicePlayback();
+			const winner = routing.winner(selected);
+			if (!winner) return;
+			const device = routing.devices.find(device => device.id === winner);
+			const changed = winner !== selected || (device && (device.connectedAt !== outputGeneration || device.audioEndpoint !== outputEndpoint ||
+				(inputInProgress && config.input === "auto" && device.inputEndpoint !== inputEndpoint)));
+			if (!changed && !routeIntent) return;
+			const revision = routing.revision;
+			const context = contextEpoch;
+			const current = () => context === contextEpoch && routing?.revision === revision;
+			const flight = handoffDevice(winner, current).catch(error => notifyStopFailure(error)).finally(() => {
+				if (routeFlight === flight) routeFlight = undefined;
+				flushDeferredRelease();
+				if (routePending) pollDeviceRouting();
+			});
+			routeFlight = flight;
+		} catch (error) { notifyVoice(activeContext, `Device routing: ${String(error)}`, "error"); }
+	};
+
 	const selectDevice = async (ctx: ExtensionContext, requested: VoiceDeviceSelection, available = () => true, confirmCurrent = false): Promise<void> => {
 		devicePicker?.abort();
 		const sessionId = ctx.sessionManager.getSessionId();
 		const sessionEpoch = contextEpoch;
 		const current = () => sessionEpoch === contextEpoch && sessionId === activeContext?.sessionManager.getSessionId() && available();
-		// Confirming the same healthy route may pin auto selection, but must not interrupt audio.
+		if (requested === "auto") requested = routing?.winner() ?? requested;
+		const pinned = routing?.rows.find(row => row.pinned && row.available);
+		if (config.output === "auto" && pinned && requested !== pinned.id) { requested = pinned.id; confirmCurrent = true; }
+		if (routeIntent && requested !== "auto") {
+			await handoffDevice(requested, current, true);
+			return;
+		}
+		// Confirming the same healthy route must not interrupt audio or implicitly pin.
 		if (confirmCurrent && requested !== "auto" && requested === (activeDeviceId ?? deviceSelection) && current() &&
 			!deviceRetryRequired && !deviceRebind && !transportStopPending && !inputStopPending) {
 			try {
@@ -2722,7 +2833,7 @@ export default async function (pi: ExtensionAPI) {
 					(input.kind === "device" ? input.device.connectedAt : undefined) === inputGeneration) {
 					if (deviceSelection !== requested) {
 						deviceSelection = requested;
-						pi.appendEntry(DEVICE_SELECTION_ENTRY, { version: 1, selection: requested, pin: requested });
+						persistDevice();
 					}
 					return;
 				}
@@ -2755,6 +2866,7 @@ export default async function (pi: ExtensionAPI) {
 	let devicePicker: AbortController | undefined;
 	const pickDevice = async (ctx: ExtensionContext): Promise<void> => {
 		if (!interactiveVoiceSession || devicePicker) return;
+		pollDeviceRouting();
 		const session = ctx.sessionManager.getSessionId();
 		const context = contextEpoch;
 		const request = playbackRequestEpoch;
@@ -2763,24 +2875,32 @@ export default async function (pi: ExtensionAPI) {
 		const framing = framingIntent;
 		const settings = config;
 		const controller = devicePicker = new AbortController();
-		const selected = activeDeviceId ?? deviceSelection;
-		const devices = deviceRouter.connected().filter(device => device.id !== "local" && device.id !== "auto");
-		// Numbered snapshot labels remain unique even with duplicate names/short IDs.
-		const choices = [{ id: "local", name: "Local (host audio)", device: undefined as typeof devices[number] | undefined },
-			...devices.map(device => ({ id: device.id, name: device.name, device }))];
-		const labels = devicePickerLabels(choices, selected);
+		if (!routing) { devicePicker = undefined; return; }
+		const cache = routing;
+		const current = () => context === contextEpoch && session === activeContext?.sessionManager.getSessionId() &&
+			request === playbackRequestEpoch && setting === deviceSettingEpoch && input === inputEpoch &&
+			framing === framingIntent && settings === config && interactiveVoiceSession;
+		const devices = cache.devices;
 		try {
-			const choice = await selectDeviceOverlay(ctx, labels, controller.signal, narrationTui ?? undefined,
-				Math.max(0, choices.findIndex(choice => choice.id === selected)));
+			const choice = await selectPriorityDeviceOverlay(ctx, {
+				snapshot: () => cache.snapshot,
+				onAction: (action, snapshot) => {
+					if (!current() || controller.signal.aborted || cache.snapshot !== snapshot) return;
+					if (action.kind === "pin") { devicePin = action.id; persistDevice(); }
+					else if (action.kind === "place") cache.store.place(action.id, action.index);
+					else cache.store.reset(action.id);
+					pollDeviceRouting();
+				},
+			}, controller.signal, narrationTui ?? undefined);
 			if (controller.signal.aborted || context !== contextEpoch || session !== activeContext?.sessionManager.getSessionId() ||
 				request !== playbackRequestEpoch || setting !== deviceSettingEpoch || input !== inputEpoch ||
 				framing !== framingIntent || settings !== config || !interactiveVoiceSession) return;
-			const target = choice === undefined ? undefined : choices[labels.indexOf(choice)];
-			if (!target) return;
-			const available = () => !target.device || deviceRouter.connected().some(device => device.id === target.id &&
-				device.connectedAt === target.device!.connectedAt && device.audioEndpoint === target.device!.audioEndpoint && device.inputEndpoint === target.device!.inputEndpoint);
+			if (choice === undefined) return;
+			const target = devices.find(device => device.id === choice);
+			const available = () => choice === "local" || !!target && deviceRouter.connected().some(device => device.id === choice &&
+				device.connectedAt === target.connectedAt && device.audioEndpoint === target.audioEndpoint && device.inputEndpoint === target.inputEndpoint);
 			if (!available()) { notifyVoice(ctx, "Device is no longer available; reopen the picker", "warning"); return; }
-			await selectDevice(ctx, target.id, available, true);
+			await selectDevice(ctx, choice, available, true);
 		} catch (error) {
 			if (context === contextEpoch && interactiveVoiceSession) notifyVoice(ctx, `Device picker: ${String(error)}`, "error");
 		} finally {
@@ -2868,6 +2988,7 @@ export default async function (pi: ExtensionAPI) {
 		explicitPlay = false,
 	): Promise<void> => {
 		if (!interactiveVoiceSession) return;
+		routeIntent = undefined;
 		if (!queued) restoreBottomAfterSpeech = restoreTail;
 		const sourceOffset = Math.max(0, Math.min(target.text.length, target.sourceOffset));
 		let suffix = target.text.slice(sourceOffset);
@@ -3631,6 +3752,7 @@ export default async function (pi: ExtensionAPI) {
 		}
 		await saveVoiceConfig(next);
 		config = next;
+		if (previous.input !== next.input || previous.output !== next.output) pollDeviceRouting();
 		const renderDependenciesChanged =
 			previous.ttsModel !== config.ttsModel ||
 			previous.ttsDtype !== config.ttsDtype ||
@@ -3910,6 +4032,10 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	pi.on("session_start", async (_event, ctx) => {
+		clearInterval(devicePoll);
+		priorityWatch?.close();
+		routing = undefined;
+		routeIntent = undefined;
 		cancelAutomaticRecovery();
 		if (automaticRecoveryFlight) await automaticRecoveryFlight;
 		cancelTimingRetry();
@@ -3954,7 +4080,8 @@ export default async function (pi: ExtensionAPI) {
 		scheduleAutomaticRecovery();
 		const savedDevice = sessionDeviceSelection(ctx);
 		deviceSelection = savedDevice.selection;
-		activeDeviceId = savedDevice.pin ?? (deviceSelection === "auto" || deviceSelection === "local" ? undefined : deviceSelection);
+		devicePin = savedDevice.pin;
+		activeDeviceId = savedDevice.selected ?? savedDevice.pin ?? (deviceSelection === "auto" ? undefined : deviceSelection);
 		deviceRouter.setEnvironmentDevice(undefined);
 		// A new session must not inherit route snapshots from the previous pin.
 		outputEndpoint = inputEndpoint = "disabled";
@@ -3979,6 +4106,22 @@ export default async function (pi: ExtensionAPI) {
 			} catch { /* Unknown routes cannot match a later available endpoint. */ }
 			notifyConnectedDevice(ctx);
 		}
+		const priorityFile = join(dirname(deviceRouter.directory), "device-priorities.json");
+		routing = new DeviceRouting(new DevicePriorityStore(priorityFile));
+		for (const id of [activeDeviceId, devicePin]) {
+			if (id && id !== "auto" && id !== "local" && !Object.hasOwn(routing.store.snapshot.discovery, id)) routing.store.discover([{ id, date: Date.now() }]);
+		}
+		mkdirSync(dirname(priorityFile), { recursive: true, mode: 0o700 });
+		priorityWatch = watch(dirname(priorityFile), (_event, file) => {
+			if (String(file) !== "device-priorities.json") return;
+			try { routing?.store.refresh(); pollDeviceRouting(); } catch (error) { notifyVoice(activeContext, String(error), "error"); }
+		});
+		priorityWatch.on("error", error => notifyVoice(activeContext, `Device priority watch: ${String(error)}`, "warning"));
+		priorityWatch.unref();
+		pollDeviceRouting();
+		if (routeFlight) await routeFlight;
+		devicePoll = setInterval(pollDeviceRouting, 1_000);
+		devicePoll.unref();
 		inputProgressMessage = undefined;
 		// Remove progress widgets from versions before the unified, ordered display.
 		ctx.ui.setWidget("pi-voice-input", undefined);
@@ -4095,6 +4238,10 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
+		clearInterval(devicePoll);
+		priorityWatch?.close();
+		routing = undefined;
+		routeIntent = undefined;
 		cancelAutomaticRecovery();
 		if (automaticRecoveryFlight) await automaticRecoveryFlight;
 		cancelTimingRetry();
@@ -4870,6 +5017,15 @@ export default async function (pi: ExtensionAPI) {
 		description: "⏯ Pause or resume playback",
 		handler: async ctx => {
 			if (!requireEnabledVoice(ctx)) return;
+			if (routeIntent) {
+				// Explicit pause supersedes saved playing intent without admitting a sink.
+				routeIntent = undefined;
+				++playbackRequestEpoch;
+				playbackPaused = true;
+				narration.setPaused(true);
+				refreshStatus();
+				return;
+			}
 			if (playbackTailIntent && !ownsSpeech && !pendingReplay && !attentionSuppressed) {
 				playbackPaused = !playbackPaused;
 				narration.setPaused(playbackPaused);
@@ -5125,7 +5281,7 @@ export default async function (pi: ExtensionAPI) {
 			}
 			if (parts[0] === "device") {
 				return [
-					{ value: "device auto", label: "auto", description: "Pin the current connection; never fall back to another device" },
+					{ value: "device auto", label: "auto", description: "Select by priority; use the picker to pin separately" },
 					{ value: "device local", label: "local", description: "Use devices on the machine running Pi" },
 					{ value: "device next", label: "next", description: "Select the next registered device (stable ID order)" },
 					{ value: "device prev", label: "prev", description: "Select the previous registered device" },
@@ -5459,6 +5615,15 @@ export default async function (pi: ExtensionAPI) {
 					await pickDevice(ctx);
 					return;
 				case "device": {
+					if (value === "forget" && restArgs.length === 1 && routing) {
+						const id = restArgs[0];
+						try { routing.store.forget(id); }
+						catch (error) { notifyVoice(ctx, String(error), "error"); return; }
+						if (devicePin === id) { devicePin = undefined; persistDevice(); }
+						pollDeviceRouting();
+						notifyVoice(ctx, "Device priority forgotten; available devices can be discovered again", "info");
+						return;
+					}
 					let requested: VoiceDeviceSelection;
 					try { requested = deviceRouter.select(args.slice(action.length), activeDeviceId ?? deviceSelection); }
 					catch (error) { notifyVoice(ctx, String(error), "error"); return; }
@@ -5840,6 +6005,7 @@ export default async function (pi: ExtensionAPI) {
 						"Playback · mode | voice | speed | device | output | highlight | autoscroll | scroll-to | bottom",
 						"Models · tts-model | tts-dtype | tts-workers | alignment-model | alignment-dtype",
 						"Input · input | shortcut | stt-model | stt-dtype | stt-candidates | edit | edit-model | submit",
+						"Device selection is temporary until a connection/ranking event; pinning is the persistent priority-0 override. Disconnect waits; switching requires stop proof. /voice device forget <id> removes remembered priority, not registration.",
 						`Devices · /voice devices picker · ${devicePickerConflict ? "Alt+S reserved by configured voice control" : "Alt+S"} · click existing [device] in supported fullscreen Pi`,
 						"Cache · code-narration | code-preprocess | code-budget | code-retry current|historical | audio-cache | audio-bitrate",
 						"Timing · timing (quality, latency, workers) | timing workers [auto|<1..8>] | timing retry current|all|<min>-<max>|<exact-id>",
