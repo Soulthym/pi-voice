@@ -222,7 +222,7 @@ test("unified progress widget orders input, playback, and preprocessing and clea
 	await settle();
 
 	let lines = await waitForWidgetLines(host, candidate => /Queued|Describing/.test(candidate[0] ?? ""));
-	assert.match(lines[0], /^◷ (?:Queued|Describing) \[━+\] --:-- · 2\/2 · timing pending\s+\[🎧:/);
+	assert.match(lines[0], /^◷ (?:Queued|Describing) \[━+\] --:-- · 1\/1 · timing pending\s+\[🎧:/);
 	assert.equal(lines.length, 1);
 	assert.equal(lines.some(line => line.includes("Preparing code descriptions")), false,
 		"background descriptions must not contend with the deferred foreground utterance");

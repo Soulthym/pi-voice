@@ -742,9 +742,25 @@ export default async function (pi: ExtensionAPI) {
 		const ctx = activeContext;
 		if (!ctx) return;
 		try {
-			// Rendering must not synchronously prepare a cold branch; replay warms it in bounded slices.
-			completedBranch(ctx);
-			const completed = completedMessagesCache.get(ctx.sessionManager)!.messages.get(`${config.mode}:false`) ?? [];
+			// Count raw eligible sources, never the timing/identity-hydrated selection prefix.
+			const completed = completedAssistantMessages(ctx, config.mode);
+			const sourceIds = new Map(liveBlockIds);
+			const provisional = livePlaybackId ?? playbackHistory.status(vocalizer.playbackUtterance)?.messageId;
+			if (!sourceIds.size && liveSource && provisional?.startsWith("live:")) {
+				sourceIds.set(eligibleAssistantBlocks(liveSource.assistant, config.mode)[0]?.contentIndex ?? 0, provisional);
+			}
+			const liveIds = (liveSource && !liveSource.final) || pendingCanonicalizations.size ? [...sourceIds.values()] : [];
+			// Session insertion can precede canonicalization. Resolve aliases for counting
+			// without preparing render identities or disturbing the audible capture.
+			const aliases = new Map<string, string>();
+			const sourceBlocks = liveSource ? eligibleAssistantBlocks(liveSource.assistant, config.mode) : [];
+			if (liveSource) for (const [index, id] of sourceIds) {
+				const saved = completed.findLast(message => message.contentIndex === index &&
+					!liveSource!.existingEntries.has(message.entryId) &&
+					message.text === sourceBlocks.find(block => block.contentIndex === index)?.text);
+				if (saved) aliases.set(id, saved.id);
+			}
+			const timeline = [...new Set([...completed.map(message => message.id), ...liveIds.map(id => aliases.get(id) ?? id)])];
 			const unreadWaiting = (speechBlocked && blockedMessageHasSpeech) || (pausedForAttention && !!waitingSource);
 			const activePlayback = handoffConnecting || playbackPaused || (!inputInProgress && !attentionSuppressed && (unreadWaiting || !!pendingReplay || playbackTailIntent ||
 				(ownsSpeech && (speechPurpose === "turn" || speechPurpose === "replay") &&
@@ -763,15 +779,8 @@ export default async function (pi: ExtensionAPI) {
 			} : undefined) : undefined;
 			let playbackLine: string | undefined;
 			if (playback) {
-				if (playback.messageIndex < 0 && playback.messageId && !playback.messageId.startsWith("live:")) {
-					playback.messageIndex = completed.findIndex(message => message.id === playback.messageId);
-					playback.messageCount = completed.length;
-				}
-				if (playback.messageIndex < 0 && playback.messageId.startsWith("live:")) {
-					const liveIds = [...liveBlockIds.values()];
-					playback.messageIndex = completed.length + Math.max(0, liveIds.indexOf(playback.messageId));
-					playback.messageCount = completed.length + Math.max(1, liveIds.length);
-				}
+				playback.messageIndex = timeline.indexOf(aliases.get(playback.messageId) ?? playback.messageId);
+				playback.messageCount = timeline.length;
 				const phase = handoffConnecting ? "connecting" : playbackPaused || pendingReplay?.paused ? "paused"
 					: pendingReplay?.waiting ? pendingReplay.phase : activePlayback ? (blockedUnread || playbackPhase === "idle" || playbackPhase === "paused" ? "queued" : playbackPhase) : "idle";
 				const labels: Record<PlaybackPhase, string> = { idle: "○ Idle", playing: "▶ Playing", paused: "⏯ Paused",
@@ -788,7 +797,9 @@ export default async function (pi: ExtensionAPI) {
 				const time = live ? ctx.ui.theme.fg("error", "● live")
 					: known ? `${formatPlaybackTime(playback.position)} / ${formatPlaybackTime(playback.duration)}`
 					: playback.hasTimings || playback.position > 0 ? formatPlaybackTime(playback.position) : "--:--";
-				const message = playback.messageIndex >= 0 ? `${playback.messageIndex + 1}/${playback.messageCount}` : "current response";
+				const nextAtTail = live && waitingAtTail && !playbackPaused;
+				const message = nextAtTail ? `${timeline.length + 1}/${timeline.length}`
+					: playback.messageIndex >= 0 ? `${playback.messageIndex + 1}/${playback.messageCount}` : "current response";
 				playbackLine = `${labels[live ? "playing" : phase]} ${playbackBar(playback.position, known ? playback.duration : 0)} ${time} · ${message}${!known && !live ? " · timing pending" : ""}`;
 			}
 			if (paintPreprocessing) {
