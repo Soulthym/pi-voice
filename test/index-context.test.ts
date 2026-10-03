@@ -156,6 +156,7 @@ test("live, rendering, replay, and timing share one contextual description reque
 	await settle();
 	assert.equal(host.modelRequests.length, 1);
 
+	await host.command("stop"); // Finish the mocked replay before exercising a new live foreground.
 	host.addMessage("user-2", "assistant-1", user("Explain the second, unrelated use."));
 	const second = "Second answer.\n```ts\nrun();\n```";
 	await streamCompletedResponse(host, "assistant-2", "user-2", second);

@@ -116,7 +116,7 @@ test("manual playback controls work while a response is generating", async t => 
 	// F6/F10 navigate completed snapshots during generation too.
 	await host.shortcut("f10");
 	await settle();
-	assert.match(host.widgetLines()?.join("\n") ?? "", /1\/1/);
+	assert.match(host.widgetLines()?.join("\n") ?? "", /2\/1/);
 
 	await host.shortcut("f6");
 	await settle();

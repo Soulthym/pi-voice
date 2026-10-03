@@ -116,6 +116,7 @@ test("sticky pause queues new responses; settings preserve ownership and dirty a
 	await host.emit("turn_end", { message: late }); await settle();
 	assert.equal(segments.at(-1)!.text, "Late queued response.");
 
+	worker.emit({ type: "idle", utterance: segments.at(-1)!.utterance }); await settle();
 	// Dirty a live asset before message_end; its eventual completed text must
 	// remain resumable without either auto-starting or queueing a duplicate.
 	const dirty = assistant("Live dirty response.");

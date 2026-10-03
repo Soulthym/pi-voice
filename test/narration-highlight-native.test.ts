@@ -198,5 +198,7 @@ for (const mode of ["assistant", "yield"] as const) test(`native replay paint su
 		component.invalidate(); // Native model/widget redraw rebuilds the old message's leaves.
 		check(phase); // No subsequent playback tick repairs the source/cursor.
 	}
+	worker.emit({ type: "idle", utterance: first.utterance }); await settle();
+	assert.equal((worker.sent.at(-1) as { text: string }).text, "Unrelated model response.", "queued model output starts only after replay completes");
 	assert.equal(host.modelRequests.length, 0);
 });
