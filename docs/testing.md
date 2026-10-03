@@ -1,5 +1,48 @@
 # Tests
 
+## TODO6 fixed-source validation — host-only, undeployed
+
+Original regression (corrected fixture, unchanged assertions): **16/16 passed**.
+Combined focused checks: **110/110 passed**, log `/tmp/vp6/focused-pass.log`.
+Run with `env -i`, PATH retained solely for installed tools, private
+HOME/TMPDIR/XDG_CONFIG_HOME/XDG_CACHE_HOME/XDG_DATA_HOME/XDG_STATE_HOME/
+XDG_RUNTIME_DIR under `/tmp/vp6`, and no inherited PI/SSH settings:
+
+```sh
+node --import tsx --test --experimental-test-module-mocks --test-concurrency=4 \
+  test/index-live-tail-pause.test.ts test/index-transcript.test.ts \
+  test/index-replay-tail.test.ts test/index-auto-scroll.test.ts \
+  test/index-lifecycle.test.ts test/index-device-switch-lifecycle.test.ts \
+  test/index-priority-routing.test.ts test/index-input-cancellation.test.ts \
+  test/index-dictation-playback.test.ts test/worker-pause-startup.test.ts \
+  test/worker-playback-clock.test.ts test/vocalizer-phases.test.ts
+```
+
+`npm run check` passed (`/tmp/vp6/check-final.log`). Full default `npm test`:
+**1452 passed / 45 skipped / zero failures (1497 total)**,
+`/tmp/vp6/default.log`. Installed-native `npm test`: **1495 passed / 2 skipped /
+zero failures (1497 total)**, `/tmp/vp6/native.log`. Native opt-ins used the
+installed agent's `dist/index.js`, its `node_modules/@earendil-works/pi-tui/dist/index.js`
+and `dist/core/keybindings.js` for the existing `PI_VOICE_TEST_{AGENT,TUI,KEYBINDINGS}_MODULE`
+variables; all other isolation remained identical. Documentation checks **3/3**
+(`/tmp/vp6/docs.log`) and `git diff --check` passed. LSP diagnostics:
+`No language server found`.
+
+The existing replay-tail fixture had two failures after the fix: its second
+iteration tried idle F8 Replay while F7 audio from the first was still active.
+Each manual-scroll scenario now has its own idle host (12 instead of 6 tests),
+retaining every assertion. A Stop-based setup was rejected because Stop carries
+attention suppression; a synthetic EOF alone also did not model the seek state.
+No production semantics were weakened to satisfy the fixture.
+
+Focused coverage includes ordinary replay, streaming versus completed turns,
+started versus startup-pending audio, additional paused chunks, provisional ID
+canonicalization, late ready/playback frames, frozen source/position, explicit
+single Resume, Stop/session supersession, routing rebind and input barriers.
+No worker/transport/client helper changes. Real mpv and SSH were not rerun for
+this host-only guard; synthetic checks do not establish live phone behavior.
+No runtime/provider/inference/hardware operations, deployment or restart.
+
 ## TODO6 regression baseline — source `0d898ef` (before fix)
 
 Fixture correction, retaining every original assertion: recorded mock segments

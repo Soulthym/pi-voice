@@ -8,7 +8,7 @@ import { FakeVoiceHost, MockedVoiceWorkerClient, assistant } from "./helpers/fak
 
 mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: MockedVoiceWorkerClient } });
 const settle = async () => { for (let i = 0; i < 12; i++) await new Promise(resolve => setImmediate(resolve)); };
-for (const key of ["f5", "f8"]) for (const pauseResume of (key === "f5" ? [false, true, "retry", "delayed"] as const : [false, true] as const)) test(`${key} replay from tail restores bottom unless the user browses away (pause/resume: ${pauseResume})`, async t => {
+for (const manual of [false, true]) for (const key of ["f5", "f8"]) for (const pauseResume of (key === "f5" ? [false, true, "retry", "delayed"] as const : [false, true] as const)) test(`${key} replay from tail restores bottom unless the user browses away (pause/resume: ${pauseResume}, manual: ${manual})`, async t => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-tail-"));
 	const keys = ["PI_VOICE_CONFIG", "PI_VOICE_COORDINATOR_DIR", "PI_VOICE_DEVICE_DIR"];
 	const previous = keys.map(key => process.env[key]);
@@ -26,7 +26,8 @@ for (const key of ["f5", "f8"]) for (const pauseResume of (key === "f5" ? [false
 	host.addMessage("answer", null, assistant("First sentence. Second sentence."));
 	await host.start();
 	host.scrollView.setDocument(Array.from({ length: 300 }, (_, i) => i === 100 ? () => host.render("First sentence. Second sentence.") : `line ${i}`), 40);
-	for (const manual of [false, true]) {
+	// Each scenario gets an idle host; a previous F7 seek must not turn F8 into Pause.
+	{
 		if (pauseResume === "delayed") {
 			await host.command("stop");
 			host.scrollView.setDocument(Array.from({ length: 300 }, (_, i) => i === 299 ? () => host.render("First sentence. Second sentence.") : `line ${i}`), 40);
@@ -57,7 +58,7 @@ for (const key of ["f5", "f8"]) for (const pauseResume of (key === "f5" ? [false
 			worker.emit({ type: "idle", utterance: last.utterance }); await settle();
 			assert.equal(host.scrollView.scrollTop, manual ? 50 : 360, "delayed ownership preserves return-tail unless manually overridden");
 			assert.equal(host.scrollView.isFollowingEnd, !manual);
-			continue;
+			return;
 		}
 		if (pauseResume === "retry") await host.command("stop");
 		await host.command("bottom");

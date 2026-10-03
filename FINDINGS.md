@@ -2,7 +2,19 @@
 
 Updated incrementally. Companion: `PLAN.md`. Reorganize freely while preserving evidence and disposition.
 
-## Current priority routing integration — UNDEPLOYED
+## Current live-tail Pause root cause — UNDEPLOYED
+
+The F8 viewport-tail shortcut treated `ownerTurnEnded` as evidence that audio had finished. After a latest message autoplays and the model completes, the existing sink can still be playing or waiting for startup. At pinned transcript bottom F8 called `replaySelected` → `previewHistoricalTarget` (time/source offset zero) → `playTarget` instead of `pauseCurrentPlayback`. Persisted history produced two replacement segments (`5 !== 3`); provisional history produced no pause at all. Ongoing-streaming/non-bottom cases passed already, including the earlier `c02bd7e^` archived-source check.
+
+The guard now recognizes owned turn **and replay** audio until its utterance is retired, independent of model completion. Existing F8 preparation still provides input barriers, cancellation epochs and pending-request handling; the pause path retains source/lease/sink, and explicit Resume unpauses once. No priority/routing logic, Vocalizer, worker-client, worker clock or transport helpers changed. The existing sticky worker startup pause and paused frame filtering were already correct once F8 reached them.
+
+Baseline commit `21eda82` and fixture-correction/position-regression commit `3dccc35` precede the fix. The original assertions are unchanged; the documented `segment-audio` spread correction was revalidated against an isolated archive of unfixed source, preserving **four original failures** plus **two** supplemental live/replay restart failures. Corrected regression hash, exact assertions, commands and logs are in [testing](docs/testing.md). Supplemental position reads use observational status, not mutating `resumeTarget`, and exclude legitimate background timing metadata changes.
+
+Focused validation **110/110**, original regression **16/16**, full default **1452 passed / 45 skipped / zero failures (1497 total)**; installed-native **1495 passed / 2 skipped / zero failures (1497 total)**. Typecheck, documentation **3/3** and whitespace checks passed. Logs `/tmp/vp6/{check-final,focused-pass,default,native,docs}.log`. Coverage includes canonical source adoption, continued chunks while paused, late ready/playback callbacks, exact source/playhead freezing, one explicit Resume, ordinary replay, startup pause, session/Stop supersession, device handoff and input-release barriers. The old replay-tail test reused the F7-started sink across scenarios; separating their idle hosts preserves all assertions without requiring the bug.
+
+Host-only and undeployed. No actual mpv/SSH rerun, live phone/hardware/provider/inference validation, runtime changes or session restart. Parent review/live confirmation remain pending. User notes, absent demos and root planning files were untouched.
+
+## Historical priority routing integration — UNDEPLOYED at checkpoint
 
 Current source integrates `DevicePriorityStore` → event-cached `DeviceRouting` → native priority picker → proof-fenced `index.ts` handoff. All five reviewer findings are fixed by `be727b4`, with scoped-proof/delayed-dictation regressions strengthened in `daa79d5`:
 
@@ -22,7 +34,7 @@ Fresh isolated final validation at `bcb185a`: `npm run check` passed; full defau
 
 Initial default validation had **26 failures**: 22 obsolete per-replay identity fixture gates repaired with real reconnect barriers/assertions (`c8c2c9b`), and four UNIX socket paths exceeding 108 bytes resolved with short private TMPDIR. The initial native run's one stale picker fixture was corrected in `f6ea1a6`. Final runs have no failures. No transport/helper changes were made in this routing batch; isolated real SSH **12/12** and mpv **0.35.1 / 0.40.0, 14 scenarios each**, remain earlier stability evidence, not freshly rerun.
 
-These are synthetic/offline checks, not live phone/tmux/hardware validation. Priority commits are **host-only, no clients changed**, **UNDEPLOYED**. **TODO6 remains unimplemented, deferred to the parent.** Previous protocol/helper upgrades remain necessary if absent; no upgrade/reload clears missing proof. This docs-only task changes no runtime settings, live sessions, providers/inference, clients, root TODO/HANDOFF or `ISSUES.md`.
+These are synthetic/offline checks, not live phone/tmux/hardware validation. Priority commits are **host-only, no clients changed**, **UNDEPLOYED**. **At this historical checkpoint TODO6 remained unimplemented, deferred to the parent; see the current follow-up above.** Previous protocol/helper upgrades remain necessary if absent; no upgrade/reload clears missing proof. This docs-only task changes no runtime settings, live sessions, providers/inference, clients, root TODO/HANDOFF or `ISSUES.md`.
 
 ## Historical example variables
 

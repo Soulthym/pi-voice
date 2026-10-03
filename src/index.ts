@@ -5058,7 +5058,10 @@ export default async function (pi: ExtensionAPI) {
 				refreshPlaybackTimeline();
 				return;
 			}
-			if (atTranscriptTail && !playbackPaused && !attentionSuppressed && !(ownsSpeech && speechPurpose === "turn" && !ownerTurnEnded) &&
+			// Model completion is not audio completion: a started or startup-pending
+			// turn/replay still owns its sink, even when the viewport is at the tail.
+			if (atTranscriptTail && !playbackPaused && !attentionSuppressed &&
+				!(ownsSpeech && (speechPurpose === "turn" || speechPurpose === "replay") && (lastOwnerUtterance !== undefined || !ownerTurnEnded)) &&
 				(pausedOwnerUtterance === undefined || !ownsSpeech) && !pendingReplay) {
 				await replaySelected(ctx);
 				return;
