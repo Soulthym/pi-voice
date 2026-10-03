@@ -25,11 +25,13 @@ let controlQueue = Promise.resolve();
 let feedback = "";
 let commands = "";
 let renewalTimer;
+let renewalDeadline;
 let renewalPeer;
 let leaseDeadline;
 let leaseExpiresAt = 0;
 function stopRenewal() {
 	clearInterval(renewalTimer);
+	clearTimeout(renewalDeadline);
 	clearTimeout(leaseDeadline);
 	renewalPeer?.destroy();
 	renewalPeer = undefined;
@@ -46,8 +48,12 @@ function renew() {
 	const peer = renewalPeer = connect();
 	let reply = "";
 	let acknowledged = false;
-	// Bound the whole exchange, not socket inactivity (a trickle is not a renewal).
-	const timeout = setTimeout(() => peer.destroy(new Error("Native playback renewal timed out")), 5000);
+	let failure;
+	// Bound the whole exchange, including EOF receipt publication on the PCM stream.
+	// Native EOF can remove IPC before that stream delivers matching completion.
+	renewalDeadline = setTimeout(() => {
+		if (renewalPeer === peer) fail(failure ?? new Error("Native playback renewal timed out"));
+	}, 5000);
 	peer.on("connect", () => peer.end(`PI_VOICE_CONTROLrenew ${session} ${bootId}\n`));
 	peer.on("data", chunk => {
 		reply += chunk;
@@ -62,15 +68,18 @@ function renew() {
 			reply = reply.slice(end + 1);
 		}
 	});
-	peer.on("error", error => { if (!stopping && !complete && !finished && !failing) fail(error); });
+	peer.on("error", error => { failure = error; });
 	peer.on("close", () => {
-		clearTimeout(timeout);
 		if (renewalPeer !== peer) return; // A stopped/expired scope cannot be revived by a late ACK.
-		renewalPeer = undefined;
 		if (stopping || failing || finished || complete) return;
 		if (performance.now() >= leaseExpiresAt) return fail(new Error("Native playback lease expired"));
-		if (!acknowledged) fail(new Error("Missing scoped native renewal acknowledgment"));
-		else armLease(performance.now() - sentAt);
+		if (!acknowledged || failure) {
+			failure ??= new Error("Missing scoped native renewal acknowledgment");
+			return; // Keep the existing deadline; only matching natural completion can win.
+		}
+		clearTimeout(renewalDeadline);
+		renewalPeer = undefined;
+		armLease(performance.now() - sentAt);
 	});
 }
 const connect = () => endpoint.protocol === "unix:"

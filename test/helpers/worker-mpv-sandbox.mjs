@@ -54,10 +54,11 @@ async function property(ipc, name) {
   throw Error('IPC closed without response');
  } finally {socket.destroy();}
 }
-for (const mode of ['cancel','resume','delayed-startup','namespace-failure']) {
+for (const mode of ['cancel','resume','delayed-startup','namespace-failure','eof-renewal']) {
  const events=[], replies=[], commands=[], children=[], sockets=[], delayed=[];
  const started=performance.now();
- let commitAt;
+ let commitAt, pendingComplete;
+ let renewalClosedBeforeComplete=false;
  let pcm=0, sessionPcm;
  const server=net.createServer({allowHalfOpen:true},socket=>{
   sockets.push(socket); socket.on('error',()=>{});
@@ -66,7 +67,7 @@ for (const mode of ['cancel','resume','delayed-startup','namespace-failure']) {
   });
   children.push(child);
   child.stdin.on('error',()=>{});
-  let header='', streaming=false, output='', errors='';
+  let header='', streaming=false, output='', errors='', renewal=false;
   child.stderr.on('data',b=>errors+=b);
   socket.on('data',b=>{
    if(streaming) { pcm+=b.length; return; }
@@ -74,6 +75,7 @@ for (const mode of ['cancel','resume','delayed-startup','namespace-failure']) {
    let end;
    while((end=header.indexOf('\n'))>=0) {
     const line=header.slice(0,end); header=header.slice(end+1); commands.push(line);
+    if(line.startsWith('PI_VOICE_CONTROLrenew ')) renewal=true;
     if(line.startsWith('PI_VOICE_COMMIT ')) {commitAt=performance.now(); streaming=true; pcm+=Buffer.byteLength(header,'latin1'); header=''; break;}
    }
   });
@@ -85,7 +87,13 @@ for (const mode of ['cancel','resume','delayed-startup','namespace-failure']) {
     if(reply.type==='session') sessionPcm=pcm;
    }
   });
-  child.on('close',code=>{if(code && errors) console.error(errors);});
+  child.on('close',code=>{
+   if(code && errors) console.error(errors);
+   if(renewal && pendingComplete) {
+    renewalClosedBeforeComplete=true;
+    setTimeout(pendingComplete,100);
+   }
+  });
   // Delay actual bridge sends, not production deadlines or helper responses.
   socket.pipe(new Transform({transform(chunk, encoding, callback) {
    const command=chunk.toString().split('\n')[0];
@@ -94,7 +102,11 @@ for (const mode of ['cancel','resume','delayed-startup','namespace-failure']) {
     setTimeout(()=>callback(null,chunk),1400);
    } else callback(null,chunk);
   }})).pipe(child.stdin);
-  child.stdout.pipe(socket);
+  child.stdout.pipe(new Transform({transform(chunk, encoding, callback) {
+   // Hold real native completion until a real renewal has failed against exited mpv.
+   if(mode==='eof-renewal' && chunk.toString().includes('"type":"complete"')) pendingComplete=()=>callback(null,chunk);
+   else callback(null,chunk);
+  }})).pipe(socket);
   socket.on('close',()=>child.stdin.destroy());
  });
  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
@@ -162,6 +174,11 @@ for (const mode of ['cancel','resume','delayed-startup','namespace-failure']) {
    await until(()=>events.some(e=>e.type==='idle'),'resume completes through native EOF');
    assert.ok(pcm>0,'resume delivers synthetic PCM');
    assert.ok(replies.some(e=>e.type==='complete'),`real native EOF confirms completion: ${JSON.stringify({events,replies})}`);
+  }
+  if(mode==='eof-renewal') {
+   assert.equal(renewalClosedBeforeComplete,true);
+   assert.ok(!replies.some(e=>e.type==='renewed'),'exited native player cannot ACK renewal');
+   assert.ok(!commands.some(c=>c.startsWith('PI_VOICE_CONTROLstop ')),'EOF race must not trigger stop recovery');
   }
   assert.deepEqual(events.filter(e=>e.type==='error'),[]);
   assert.ok(events.some(e=>e.type==='remote-released' && e.id===session.id));

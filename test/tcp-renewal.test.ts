@@ -11,7 +11,7 @@ const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const boot = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-for (const mode of ["paused-gap", "stop-pending", "disconnect-pending", "wrong-scope", "wrong-boot", "missing-ack", "silent", "expired-ack"] as const) {
+for (const mode of ["paused-gap", "stop-pending", "disconnect-pending", "wrong-scope", "wrong-boot", "missing-ack", "silent", "expired-ack", "eof-race", "eof-wrong-scope", "eof-wrong-boot", "stop-receipt"] as const) {
  test(`v4 native renewal: ${mode}`, { timeout: 45000 }, async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "voice-renew-"));
   const socketPath = path.join(root, "audio.sock");
@@ -41,7 +41,17 @@ for (const mode of ["paused-gap", "stop-pending", "disconnect-pending", "wrong-s
      if (["stop-pending", "disconnect-pending", "silent"].includes(mode)) latePeer = peer;
      else {
       if (mode === "expired-ack") fs.writeFileSync(clock, "31000");
-      if (mode !== "missing-ack") send({ type: "renewed", id: mode === "wrong-scope" ? boot : id, boot_id: mode === "wrong-boot" ? id : boot });
+      if (mode.startsWith("eof-") || mode === "stop-receipt") {
+       if (mode === "stop-receipt") send({ type: "stopped", id, boot_id: boot, proof: "native-process-exit" });
+       // Native EOF removes the IPC socket before the owner publishes completion.
+       // A renewal connection can close first, while the PCM stream is still open.
+       setTimeout(() => {
+        stream.write(JSON.stringify(mode === "stop-receipt"
+         ? { type: "stopped", id, boot_id: boot, proof: "native-process-exit" }
+         : { type: "complete", id: mode === "eof-wrong-scope" ? boot : id, boot_id: mode === "eof-wrong-boot" ? id : boot }) + "\n");
+        if (mode === "eof-race") setTimeout(() => stream.end(), 50);
+       }, 100);
+      } else if (mode !== "missing-ack") send({ type: "renewed", id: mode === "wrong-scope" ? boot : id, boot_id: mode === "wrong-boot" ? id : boot });
       peer.end();
      }
      renewed.resolve();
@@ -59,7 +69,7 @@ for (const mode of ["paused-gap", "stop-pending", "disconnect-pending", "wrong-s
   const clockMock = `import { readFileSync } from 'node:fs'; const now = performance.now.bind(performance); performance.now = () => now() + Number(readFileSync(${JSON.stringify(clock)}, 'utf8'));`;
   const child = spawn(process.execPath, ["--import", `data:text/javascript,${encodeURIComponent(clockMock)}`, new URL("../src/tcp-playback.mjs", import.meta.url).pathname, `unix://${socketPath}`, "24000", "1"], {
    stdio: ["pipe", "pipe", "pipe", "pipe"],
-   env: { PATH: process.env.PATH, HOME: root, XDG_CONFIG_HOME: root, XDG_STATE_HOME: root, XDG_CACHE_HOME: root, XDG_RUNTIME_DIR: root, PI_CODING_AGENT_DIR: root },
+   env: { PATH: process.env.PATH, HOME: root, TMPDIR: root, XDG_CONFIG_HOME: root, XDG_STATE_HOME: root, XDG_CACHE_HOME: root, XDG_RUNTIME_DIR: root, PI_CODING_AGENT_DIR: root },
   });
   t.after(() => { child.kill("SIGKILL"); for (const peer of sockets) peer.destroy(); server.close(); fs.rmSync(root, { recursive: true, force: true }); });
   const exited = once(child, "exit");
@@ -86,12 +96,15 @@ for (const mode of ["paused-gap", "stop-pending", "disconnect-pending", "wrong-s
    latePeer?.end(JSON.stringify({ type: "renewed", id, boot_id: boot }) + "\n");
   }
   const [code] = await exited;
-  assert.equal(code, ["paused-gap", "stop-pending"].includes(mode) ? 0 : 1, events);
+  assert.equal(code, ["paused-gap", "stop-pending", "eof-race"].includes(mode) ? 0 : 1, events);
   assert.equal(renewals, mode === "paused-gap" ? 7 : 1);
-  if (!["paused-gap", "stop-pending"].includes(mode)) {
+  if (!["paused-gap", "stop-pending", "eof-race"].includes(mode)) {
    assert.match(events, /REMOTE_PLAYBACK_UNCONFIRMED/);
    if (mode === "expired-ack") assert.match(events, /lease expired/);
    assert.doesNotMatch(events, /remote-released/);
+  } else {
+   assert.doesNotMatch(events, /"type":"error"/);
+   assert.equal(events.split("\n").filter(line => line.includes('"type":"remote-released"')).length, 1);
   }
  });
 }

@@ -49,7 +49,7 @@ test("Socket VoiceWorkerClient reaches real mpv while paused before any PCM", { 
   run("cp", stage, `${name}:/tmp/fixture`);
   const output = run("start", "--attach", name);
   t.diagnostic(output);
-  assert.equal(output.split("\n").filter(line => line.startsWith("PASS host")).length, 4);
+  assert.equal(output.split("\n").filter(line => line.startsWith("PASS host")).length, 5);
  } finally {
   spawnSync("podman", ["rm", "--ignore", "-f", "-t", "1", name], { timeout: 15000 });
   await fs.rm(stage, { recursive: true, force: true });
