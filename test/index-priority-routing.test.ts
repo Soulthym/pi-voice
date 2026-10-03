@@ -151,7 +151,7 @@ test("pending takeover waits for a disconnected route to return without another 
 	} finally { other.shutdown(); }
 });
 
-test("pending takeover retains an independent streaming source across arrival", async t => {
+for (const pause of [false, true]) test(`pending takeover retains an independent streaming source across arrival (pause: ${pause})`, async t => {
 	const f = await fixture(t);
 	const other = new SessionCoordinator(join(f.root, "other"), "other");
 	other.start();
@@ -161,17 +161,89 @@ test("pending takeover retains an independent streaming source across arrival", 
 		await f.host.emit("message_start", { message: assistant("", "pending") });
 		await f.host.emit("message_update", { message: assistant("New answer. ", "pending"), assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "New answer. " } });
 		await f.event("d2", "d3");
+		if (pause) await f.host.shortcut("f8");
 		other.releaseSpeech();
 		await new Promise(resolve => setTimeout(resolve, 75)); await settle();
-		const replay = (f.worker.sent.at(-1) as { utterance: number }).utterance;
 		const message = assistant("New answer. Later sentence.");
 		await f.host.emit("message_update", { message, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Later sentence." } });
 		f.host.addMessage("new", "message", message);
 		await f.host.emit("message_end", { message });
 		await f.host.emit("turn_end", { message, toolResults: [] }); await settle();
+		if (pause) {
+			assert.equal(f.worker.sent.length, 0, "Pause cancels pending admission");
+			await f.host.shortcut("f8"); await settle();
+		}
+		const replay = (f.worker.sent.at(-1) as { utterance: number }).utterance;
+		assert.equal(new Set((f.worker.sent as Array<{ text: string; utterance: number }>).filter(s => s.text === "First sentence.").map(s => s.utterance)).size, 1);
 		const before = f.worker.sent.length;
 		f.worker.emit({ type: "idle", utterance: replay }); await settle();
 		assert.deepEqual((f.worker.sent.slice(before) as Array<{ text: string }>).map(s => s.text), ["New answer.", "Later sentence."]);
+		f.worker.emit({ type: "idle", utterance: (f.worker.sent.at(-1) as { utterance: number }).utterance }); await settle();
+		assert.equal(f.worker.sent.length, before + 2, "B drains exactly once");
+	} finally { other.shutdown(); }
+});
+
+for (const cancel of ["none", "stop", "pause"]) test(`cold F5 retains explicit intent through arrival (cancel: ${cancel})`, async t => {
+	const f = await fixture(t);
+	f.host.addMessage("cold", "message", assistant("Cold history sentence."));
+	const other = new SessionCoordinator(join(f.root, "other"), "other");
+	other.start();
+	const immediate = globalThis.setImmediate;
+	let release: (() => void) | undefined;
+	let clock = 0;
+	const now = t.mock.method(performance, "now", () => clock += 9);
+	const gate = t.mock.method(globalThis, "setImmediate", ((callback: () => void, ...args: unknown[]) => {
+		if (new Error().stack?.includes("preparePlaybackMessages")) {
+			release = callback;
+			return immediate(() => {});
+		}
+		return immediate(() => Reflect.apply(callback, undefined, args));
+	}) as typeof setImmediate);
+	try {
+		assert.equal(other.tryAcquireSpeech(), true);
+		const force = t.mock.method(SessionCoordinator.prototype, "forceAcquireSpeech");
+		await f.host.shortcut("f5"); await settle();
+		assert.ok(release, "cold history preparation is actually gated");
+		assert.equal(force.mock.callCount(), 0, "arrival precedes acquisition");
+		await f.event("d2", "d3");
+		assert.equal(f.selected().selected, "d2");
+		if (cancel === "stop") await f.host.command("stop");
+		if (cancel === "pause") await f.host.shortcut("f8");
+		now.mock.restore(); gate.mock.restore(); release(); await settle();
+		assert.equal(force.mock.callCount(), cancel === "none" ? 1 : 0, "only current explicit intent may request takeover");
+		assert.equal(f.worker.sent.length, 0, "foreign proof still gates IO");
+		other.releaseSpeech();
+		await new Promise(resolve => setTimeout(resolve, 75)); await settle();
+		const replay = (f.worker.sent as Array<{ text: string; utterance: number }>).filter(s => s.text === "First sentence.");
+		assert.equal(new Set(replay.map(s => s.utterance)).size, cancel === "none" ? 1 : 0, JSON.stringify(f.worker.sent));
+		assert.ok(f.worker.outputs.every(output => output === "unix:///fixture/d2"));
+	} finally { gate.mock.restore(); now.mock.restore(); release?.(); other.shutdown(); }
+});
+
+for (const resume of ["return", "selection"]) test(`forgotten disconnected pending route retains WAIT (${resume})`, async t => {
+	const f = await fixture(t);
+	const other = new SessionCoordinator(join(f.root, "other"), "other");
+	other.start();
+	try {
+		assert.equal(other.tryAcquireSpeech(), true);
+		const force = t.mock.method(SessionCoordinator.prototype, "forceAcquireSpeech");
+		await f.host.shortcut("f5"); await settle();
+		await f.event();
+		const missing = t.mock.method(DeviceRouter.prototype, "resolve", () => undefined);
+		f.store.forget("d3"); await settle(); f.poll(); await settle();
+		other.releaseSpeech();
+		await new Promise(resolve => setTimeout(resolve, 75)); await settle();
+		assert.equal(f.worker.sent.length, 0, "missing row must not dispatch to its dead cached endpoint");
+		assert.match(f.host.widgetLines()?.join(" ") ?? "", /WAIT/i);
+		missing.mock.restore();
+		if (resume === "return") await f.event("d3");
+		else {
+			await f.event("d4");
+			await f.host.command("device d4"); await settle();
+		}
+		assert.equal(force.mock.callCount(), 1);
+		assert.equal((f.worker.sent as Array<{ text: string }>).filter(s => s.text === "First sentence.").length, 1);
+		assert.ok(f.worker.outputs.every(output => output === `unix:///fixture/${resume === "return" ? "d3" : "d4"}`));
 	} finally { other.shutdown(); }
 });
 

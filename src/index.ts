@@ -629,6 +629,7 @@ export default async function (pi: ExtensionAPI) {
 				paused: boolean;
 				waiting: boolean;
 				acquiring: boolean;
+				explicit: boolean;
 				rerouted: boolean;
 				phase: PlaybackPhase;
 				continueLiveTurn: boolean;
@@ -2749,12 +2750,15 @@ export default async function (pi: ExtensionAPI) {
 		return adoption.catch(() => false);
 	};
 
+	const currentExplicitReplay = () => pendingReplay?.explicit && pendingReplay.waiting &&
+		pendingReplay.epoch === playbackRequestEpoch ? pendingReplay : undefined;
+
 	// Logical suspension never retires a physical scope. All admission still runs
 	// through adoptCurrentConnection's original-resource recovery barrier.
 	const suspendDevicePlayback = (manual = false): void => {
 		// Automatic routing changes the destination, not an in-flight user takeover.
-		if (!manual && pendingReplay?.acquiring) {
-			pendingReplay.rerouted = true;
+		if (!manual && currentExplicitReplay()) {
+			pendingReplay!.rerouted = true;
 			return;
 		}
 		if (routeIntent?.request === playbackRequestEpoch && routeIntent.context === contextEpoch) return;
@@ -2779,7 +2783,7 @@ export default async function (pi: ExtensionAPI) {
 	const handoffDevice = async (id: string, current: () => boolean, manual = false): Promise<void> => {
 		devicePicker?.abort();
 		suspendDevicePlayback(manual);
-		const acquisition = pendingReplay?.acquiring ? pendingReplay : undefined;
+		const acquisition = currentExplicitReplay();
 		const epoch = acquisition ? playbackRequestEpoch : ++playbackRequestEpoch;
 		if (routeIntent) routeIntent = { ...routeIntent, request: epoch };
 		const intent = routeIntent;
@@ -3030,11 +3034,12 @@ export default async function (pi: ExtensionAPI) {
 		let suffix = target.text.slice(sourceOffset);
 		const retry = pendingReplay?.target.id === target.id ? pendingReplay : undefined;
 		const replayBlockIds = retry?.blockIds ?? liveBlockIds;
-		const requestedLiveSource = retry?.source ?? target.source ?? liveSource;
 		const displacedLiveTurn = ownsSpeech && speechPurpose === "turn" && !ownerTurnEnded;
 		let liveTargetIndex = [...replayBlockIds].find(([, id]) => id === target.id)?.[0];
-		const replaySource = retry?.source ?? (liveSource && !liveSource.final &&
+		// Undefined on a retry is an established historical source, not today's live turn.
+		const replaySource = retry ? retry.source : (liveSource && !liveSource.final &&
 			(livePlaybackId === target.id || liveTargetIndex !== undefined) ? liveSource : undefined);
+		const requestedLiveSource = retry ? retry.source : target.source ?? replaySource;
 		const continueLiveTurn = !!replaySource;
 		const prefix = target.tailPrefix ?? target.text.slice(0, sourceOffset);
 		const content = (replaySource?.assistant as { content?: unknown[] } | undefined)?.content;
@@ -3063,6 +3068,7 @@ export default async function (pi: ExtensionAPI) {
 			paused: explicitPlay ? false : pendingReplay?.paused ?? playbackPaused,
 			waiting: true,
 			acquiring: false,
+			explicit: !queued,
 			rerouted: false,
 			phase: (prepareContext ? "queued" : "connecting") as PlaybackPhase,
 			continueLiveTurn,
@@ -3169,9 +3175,11 @@ export default async function (pi: ExtensionAPI) {
 			return;
 		}
 
-		if (newlyAcquired && request.rerouted && routing?.rows.some(row => row.id === activeDeviceId && !row.available)) {
+		if (newlyAcquired && request.rerouted && config.output === "auto" && activeDeviceId &&
+			!routing?.rows.find(row => row.id === activeDeviceId)?.available) {
 			// No routing flight exists when the selected device has no eligible replacement.
 			// Keep resume intent, but do not hold the newly obtained lease while disconnected.
+			request.waiting = false;
 			suspendDevicePlayback();
 			owner?.releaseSpeech();
 			return;
@@ -5125,7 +5133,7 @@ export default async function (pi: ExtensionAPI) {
 					return;
 				}
 				request.paused = !request.paused;
-				if (request.paused && request.acquiring && request.rerouted) {
+				if (request.paused && currentExplicitReplay() && request.rerouted) {
 					coordinator?.cancelSpeechAcquisition();
 					playbackRequestEpoch += 1;
 					request.acquiring = false;
