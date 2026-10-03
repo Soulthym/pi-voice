@@ -2788,7 +2788,7 @@ export default async function (pi: ExtensionAPI) {
 		}
 		const target = playbackHistory.resumeTarget();
 		playbackPaused = !intent.playing;
-		queueIncomingWhilePaused = playbackPaused;
+		queueIncomingWhilePaused = playbackPaused || (queueIncomingWhilePaused && !!liveSource && !liveSource.final);
 		narration.setPaused(playbackPaused);
 		if (target) await playTarget(target, false, false, true);
 		else refreshStatus();
