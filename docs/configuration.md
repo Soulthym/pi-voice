@@ -45,7 +45,7 @@ For playback concurrency, a valid persisted `ttsWorkers` wins over legacy `PI_VO
 
 The three shortcut settings are registered when the extension loads, so edit their JSON values and run `/reload`. The old `ctrl+e` and `alt+end` bottom defaults are migrated because Pi reserves Ctrl+E for editor line-end and compact Termux keyboards may have no End key. The current defaults avoid Ctrl, Shift, and an End key.
 
-The device picker uses fixed **Alt+S** and `/voice devices`; there is no new JSON setting. Alt+S is unused by checked Pi/Voice defaults; Alt+D remains native forward-delete-word. A loaded voice shortcut already using Alt+S wins instead, with a warning; Pi also diagnoses its own/custom-extension conflicts. See [picker controls](usage.md#device-picker). Open/cancel never saves settings; choosing persists only the session pin and leaves endpoint overrides unchanged.
+The device picker uses fixed **Alt+S** and `/voice devices`; there is no new JSON setting. Alt+S is unused by checked Pi/Voice defaults; Alt+D remains native forward-delete-word. A loaded voice shortcut already using Alt+S wins instead, with a warning; Pi also diagnoses its own/custom-extension conflicts. See [picker controls](usage.md#device-picker). Open/cancel never saves settings; Select persists session selection separately from Pin; priority actions persist the shared order. Endpoint overrides stay unchanged. This priority integration is UNDEPLOYED, not live-validated.
 
 ## Voice catalog
 
@@ -68,9 +68,9 @@ Use `/voice voice` to report the current voice, or `/voice voice <id>` to set it
 
 ## Automatic and explicit devices
 
-`auto` uses the session's saved current-connection pin. New sessions resolve fresh attachment identity; ambiguous or unavailable identity fails closed, never falling back to the newest registered client or host audio. Genuinely local connections can pin local I/O. Explicit `local`, `disabled`, TCP, and Unix values bypass automatic endpoint selection.
+With `output: auto`, genuine connection/ranking/configuration events evaluate the priority order. Select is temporary until such an event; Pin is a separate session-persisted priority-0 override. Connected 0 wins, then the manual-order prefix, then earliest discovery dates; offline devices retain positions. Local -1 is last resort, not a numeric minimum; manual placement gives Local a positive position. Heartbeats do not rerank. Disconnect WAIT does not fall down to a lower route: return/higher arrival or manual clearing requires original-resource stop proof before current playing intent can resume. Routing never starts capture or submits a draft; explicit reconnect never resumes playback.
 
-`/voice device <exact-id>`, `/voice device "unique name"`, `next`, `prev`, and `local` set a sticky per-session selection persisted in the existing non-context-injecting Pi custom entry. Reload and ordinary controls retain that manual mode; successful `/voice reconnect` or `/voice device auto` returns to automatic attachment adoption. Failed handoff retains the old pin/mode. `/voice device` lists candidates and the effective selection read-only. Names are labels, not credentials. These commands do not change global JSON settings: explicit per-direction endpoint overrides keep precedence, and custom endpoints are not mapped to a guessed host. See [Devices and SSH](devices-and-ssh.md).
+Selection and Pin use the existing non-context-injecting session entry; shared discovery/order uses the separate store below, not new JSON settings. `/voice device auto` selects the priority winner, not unpin/reset. Explicit `local`, `disabled`, TCP and Unix endpoint values remain authoritative per direction; non-auto output bypasses automatic output handoffs. Names are labels, not credentials. See [Devices and SSH](devices-and-ssh.md#priority-routing-undeployed).
 
 ## Model-assisted features
 
@@ -100,6 +100,7 @@ Background description work is split from live work:
 - Cached Opus: `~/.cache/pi-voice/audio`
 - Coordinator state: `~/.cache/pi-voice/coordinator`
 - Device registrations: `~/.cache/pi-voice/devices`
-- Timing maps, code descriptions, and per-session device choice: non-context-injecting Pi custom session entries
+- Shared discovery dates/manual order: `~/.cache/pi-voice/device-priorities.json`, outside the registry. Its actual path is `join(dirname(PI_VOICE_DEVICE_DIR or default registry), "device-priorities.json")`; no independent priority-path variable. Requires working `flock`, fsync and atomic rename. Malformed state is not silently reset; keep its `.lock` inode.
+- Timing maps, code descriptions, and per-session selection and separate pin: non-context-injecting Pi custom session entries
 
 No raw PCM is persisted.

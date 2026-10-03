@@ -13,7 +13,7 @@ npm install
 pi install .
 ```
 
-Speech ownership requires Linux (including an otherwise supported Termux host) with `flock` (util-linux) in `PATH` and a local filesystem supporting directory fsync and symlinks. Missing locking support fails closed before acquiring speech; native macOS/Windows hosting is not supported by this recovery path.
+Speech ownership and shared priority-store writes require Linux (including an otherwise supported Termux host) with `flock` (util-linux) in `PATH` and a local filesystem supporting directory fsync and symlinks. Missing locking support fails closed before acquiring speech; native macOS/Windows hosting is not supported by this recovery path.
 
 Install `ffmpeg` for microphone decoding and Opus cache reads/writes. Without it, synthesis still works, but microphone input and audio caching do not.
 
@@ -107,7 +107,7 @@ See [Usage](usage.md#optional-termux-function-key-row) for one-tap F4–F10 cont
 
 ## Local Termux Pi
 
-Local audio routing supports Termux, but hosting inference also requires a working native ONNX runtime. The pinned Node runtime package does not list Android as a supported platform; the client dependencies alone do not establish stock-Termux host support. With a compatible runtime installed, run normal `pi`. With `input` and `output` set to `auto`, a genuinely local session pins Termux's microphone and `mpv`; no SSH wrapper is required.
+Local audio routing supports Termux, but hosting inference also requires a working native ONNX runtime. The pinned Node runtime package does not list Android as a supported platform; the client dependencies alone do not establish stock-Termux host support. With a compatible runtime installed, run normal `pi`. With `input` and `output` set to `auto`, a genuinely local session initially selects Termux's microphone and `mpv`; Local then participates as the -1 last-resort route unless manually prioritized or pinned; no SSH wrapper is required.
 
 ## SSH server configuration
 
@@ -123,6 +123,12 @@ GatewayPorts no
 Validate with `sshd -t`, then reload `sshd` after changing its configuration. These settings do not control Tailscale's built-in SSH server; its version and policy must permit TCP reverse forwarding. Managed endpoint metadata is stored under `~/.cache/pi-voice/devices` on the Pi host.
 
 ## Upgrading
+
+### Priority routing integration — UNDEPLOYED
+
+Current host source integrates shared discovery/manual order, separate temporary Select and session Pin, event-driven handoff and proof-gated disconnect WAIT/resume. The priority commits, including reviewer fixes `be727b4` and regression commit `daa79d5`, are **host-only; no clients changed**. They have not been deployed or live-validated. A later host update/reload at the operator's chosen safe time loads this behavior; no client recopy or SSH restart is required solely for priorities. This does **not** waive the microphone/audio protocol migrations below if compatible helpers are absent.
+
+Selection is no longer a sticky implicit pin: use the picker's explicit **Pin (priority 0)** for that session override. An available 0 wins. Shared order lives at `~/.cache/pi-voice/device-priorities.json`, outside `devices/`; a custom `PI_VOICE_DEVICE_DIR` relocates it to that directory's parent. No settings migration or separate priority variable is required. Keep stop receipts, journals and lock files; reload is not stop proof. See [routing rules](devices-and-ssh.md#priority-routing-undeployed) before deployment. Explicit `/voice reconnect` never resumes playback.
 
 ### Stage C boot-bound microphone upgrade
 
@@ -198,17 +204,19 @@ When probing a newly started bridge, both SSH wrapper variants require the exact
 
 Before replacing scripts or exiting wrappers, explicitly stop playback/capture and confirm actual device stop. If unconfirmed, preserve the connection, tickets, receipts, leases and runtime state and follow [stop recovery](troubleshooting.md#unconfirmed-stop); an upgrade is not stop proof. After confirmed stop, close every old wrapper on that client (they share a bridge), replace the complete helper set, reconnect and reload the host extension when ready. Retain device IDs, names/configuration and durable recovery evidence; remote tmux may remain. Earlier host-only notes below do not waive this v4 upgrade.
 
-The host renews the 30-second native lease even while paused; it is not a universal stop deadline under OS/player freeze. New helper reservations persist admission-protocol metadata and lock-protected intent before feeder/start dispatch, permitting durable `sealed-nonadmission` before intent even after commit. Existing scopes without that metadata are not upgraded. Automatic stop-only retries back off from 3 to 60 seconds through verified original routes, without stopping healthy work, adopting a new connection or restarting playback/capture. Ownership still requires exact proof; uncertain output admission, unknown microphone dispatch and local-output uncertainty remain fenced. See [native proof limits](endpoint-protocol.md#native-watchdog-and-proof-limits).
+The host renews the 30-second native lease even while paused; it is not a universal stop deadline under OS/player freeze. New helper reservations persist admission-protocol metadata and lock-protected intent before feeder/start dispatch, permitting durable `sealed-nonadmission` before intent even after commit. Existing scopes without that metadata are not upgraded. Automatic stop-only retries back off from 3 to 60 seconds through verified original routes, without stopping healthy work, adopting a new connection or restarting playback/capture in the recovery step. The separate priority-routing continuation may then resume still-current WAIT playback after proof; explicit reconnect never resumes. Ownership still requires exact proof; uncertain output admission, unknown microphone dispatch and local-output uncertainty remain fenced. See [native proof limits](endpoint-protocol.md#native-watchdog-and-proof-limits).
 
 ### Never-admitted orphan recovery
 
 This earlier change was host-only; **no client scripts or endpoint protocol changed**. Load the updated extension when it is safe to do so; no SSH/client restart or hardware test is needed for this change. New owners get durable pre-dispatch admission evidence. Old journals are not upgraded, and an existing unresolved fence is not cleared by `/reload` or updating clients. Read the [legacy incident limitations](troubleshooting.md#disconnected-replay-incident-2026-09-27) before attempting recovery. Do not interrupt live sessions or delete coordination/runtime state to install this update.
 
-### Sticky device selection and selected-device badge
+<a id="sticky-device-selection-and-selected-device-badge"></a>
+
+### Selected-device badge and manual selection
 
 The badge picker is **host-only**: update this extension and run `/reload` when ready. Alt+S and `/voice devices` open Pi's native selector; fullscreen Pi with native `MouseRegion` also accepts clicks/taps on `[🎧:device]` at the right end of the first VoiceUI line, including idle status. The badge is no longer in the built-in footer. Older/regular TTYs retain keyboard access. No wrapper recopy, reconnect, runtime-settings change, or live-session restart is needed for this picker. See [Alt+S conflicts and usage](usage.md#device-picker).
 
-Update the host extension and run `/reload` when ready. Existing clients already publishing names/IDs need **no protocol upgrade or reconnect for manual routing**: `/voice device "Linux Mint PC"`, an exact ID, or `next`/`prev` selects a sticky session pin, usable even with multiple attached tmux clients. `/voice device` is read-only; successful `/voice reconnect` returns to auto mode. Selection honors explicit input/output overrides and does not itself play audio. See [handoff and shared-terminal trust](devices-and-ssh.md#explicit-selection-in-a-shared-terminal).
+Update the host extension and run `/reload` when ready. Existing clients already publishing names/IDs need **no protocol upgrade or reconnect for manual routing**: `/voice device "Linux Mint PC"`, an exact ID, or `next`/`prev` makes a temporary selection, usable even with multiple attached tmux clients. Pin is now a separate picker action; connected 0 wins. `/voice device` is read-only; explicit `/voice reconnect` adopts attachment identity subject to that pin and never resumes playback. Selection honors endpoint overrides; outside disconnect WAIT it leaves prior playback paused, while WAIT clearing follows the proof-gated retained-intent rules. See [handoff and shared-terminal trust](devices-and-ssh.md#explicit-selection-in-a-shared-terminal).
 
 Only the wrapper identity wording changed on clients (`Connected to` → `Connected as`). Recopy both installed wrapper variants using the commands below to get that wording on future connections; no live connection needs restarting merely for the text. Never discard unconfirmed stop state to apply an update.
 

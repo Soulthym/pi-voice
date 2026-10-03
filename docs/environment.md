@@ -12,8 +12,10 @@
 | `HF_HUB_OFFLINE` | unset | Set to `1` to prohibit model downloads in synthesis/transcription workers. The alignment worker currently does **not** honor this flag; it may download missing weights. |
 | `PI_VOICE_AUDIO_CACHE_DIR` | `~/.cache/pi-voice/audio` | Content-addressed Opus cache. |
 | `PI_VOICE_COORDINATOR_DIR` | `~/.cache/pi-voice/coordinator` | Cross-session presence, leases, and attention. |
-| `PI_VOICE_DEVICE_DIR` | `~/.cache/pi-voice/devices` | Device registry scanned by the extension. On clients it doubles as the intended remote registry for managed wrappers; on the Pi host pass the same absolute path to `pi-voice-ssh --device-dir`. |
+| `PI_VOICE_DEVICE_DIR` | `~/.cache/pi-voice/devices` | Device registry scanned by the extension. Shared priorities live in its **parent**, as `device-priorities.json`. On clients it doubles as the intended remote registry for managed wrappers; pass the same absolute path to `pi-voice-ssh --device-dir`. |
 | `PI_VOICE_PLAYER` | automatic | Alternate executable accepting `pw-play`-compatible raw-player arguments. |
+
+The UNDEPLOYED priority integration has no separate priority-path/pin environment variable. For example, a host registry `/absolute/path/to/devices` puts shared discovery dates/manual order at `/absolute/path/to/device-priorities.json`, never inside the registry. Session pins remain session entries. `PI_VOICE_CONFIG` changes the settings file, and `PI_VOICE_COORDINATOR_DIR` changes ownership/recovery storage; neither relocates priorities. These are generic example paths, not instructions to change a live installation.
 
 ## Client bridge
 
@@ -37,6 +39,6 @@ See [installation and upgrades](installation.md#install-a-device-name) for visib
 
 ## Internal wrapper variables
 
-`pi-voice-ssh` injects `PI_VOICE_DEVICE_ID` into the remote environment. The extension uses fresh connection identity to pin a new session or auto-mode playback/reconnect action. A manual device selection remains sticky until successful explicit reconnect/`device auto`. In tmux it resolves the current attachment rather than trusting Pi's startup environment; missing or ambiguous identity fails closed. Users normally should not set it manually; `/voice device` is the supported explicit override and `/voice reconnect` adopts the current attachment without playback.
+`pi-voice-ssh` injects `PI_VOICE_DEVICE_ID` into the remote environment. The extension uses fresh connection identity for initial attachment adoption and explicit reconnect; subsequent automatic output routing evaluates cached priority events. Manual Select is temporary until a genuine connection/ranking/configuration event; Pin is a separate session-persisted override. Heartbeats do not rerank. In tmux it resolves the current attachment rather than trusting Pi's startup environment; missing or ambiguous identity fails closed. Users normally should not set it manually; `/voice device` is the supported explicit override and `/voice reconnect` adopts the current attachment without playback.
 
 The wrapper also exports target bookkeeping for its own lifecycle. Variables not listed above are implementation details and may change.

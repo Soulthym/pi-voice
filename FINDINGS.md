@@ -2,6 +2,22 @@
 
 Updated incrementally. Companion: `PLAN.md`. Reorganize freely while preserving evidence and disposition.
 
+## Current priority routing integration — UNDEPLOYED
+
+Current source integrates `DevicePriorityStore` → event-cached `DeviceRouting` → native priority picker → proof-fenced `index.ts` handoff. All five reviewer findings are fixed by `be727b4`, with scoped-proof/delayed-dictation regressions strengthened in `daa79d5`:
+
+1. A newer playback request retires automatic resume, not the still-current routing decision; session/routing revision checks still fence adoption.
+2. Completed-history handoff restores the queue flag from actual pause intent, allowing EOF to release ownership.
+3. Untracked test/announcement utterances do not enter tracked playback history or resume an unrelated selection.
+4. Explicit reconnect retires WAIT resume intent and never resumes playback; later F8 remains usable.
+5. Picker selection uses current cached devices after snapshot refresh, while generation/output/input endpoint changes invalidate stale choices.
+
+Operational policy now separates temporary Select from persisted session Pin. Connected priority 0 wins; shared manual-order prefix precedes the earliest-discovery-date automatic tail. Offline rows retain positive positions; Local -1 is a last-resort sentinel, not a numeric winner, and explicit manual Local gets a positive position. Heartbeats/label changes neither rerank nor end temporary selection. Actual store is `join(dirname(deviceRouter.directory), "device-priorities.json")`, normally `~/.cache/pi-voice/device-priorities.json`, **outside** the registry; `PI_VOICE_DEVICE_DIR` controls that location indirectly. Pins remain session metadata. Forget is not a blacklist or receipt deletion.
+
+Disconnect WAIT retains current cursor/playing intent, blocks lower fallback and admits return/higher arrival/manual clearing only through original-resource proof. Paused or superseded intent stays silent; new playback can coexist with safe completion of an older route decision without reviving its old source. Routing never starts capture or submits a draft; existing dictation finalizes review-only, preserving manual edits. Explicit reconnect is stop/adoption only, never resume. [Operational rules](docs/devices-and-ssh.md#priority-routing-undeployed) replace historical sticky-manual/no-autohandoff claims below, whose evidence is preserved.
+
+Reported implementation checks: focused **182 passed**, routing integration **25 passed**, typecheck passed. Final full suites are pending the parent run, not claimed green here. These are synthetic/offline checks, not live phone/tmux validation. Priority commits are **host-only, no clients changed**, **UNDEPLOYED**. Previous protocol/helper upgrades remain necessary if absent; no upgrade/reload clears missing proof. This docs-only task changes no runtime settings, live sessions, providers/inference, clients, root TODO/HANDOFF or `ISSUES.md`.
+
 ## Historical example variables
 
 Operational examples are anonymized; dates, counts and technical evidence are retained, not private identities. `phone` is an anonymous device label; `dev` preserves three-column UI examples. Angle-bracket IDs and recovery archive names are descriptive placeholders, not runnable recovery targets; first/second owner labels distinguish incidents.
@@ -16,7 +32,7 @@ PI_AGENT_ROOT="$(npm root -g)/@earendil-works/pi-coding-agent"
 
 `PI_AGENT_ROOT` auto-discovers the global Pi package in the active Node environment on the machine running tests; override it with your installed package root if Pi lives elsewhere. `VOICE_HOST` is used from the local client, not from inside the remote SSH shell. Client config paths such as `$HOME/.config/pi-voice` refer to that client's home (or its configured XDG config root). These historical commands record evidence, not authorization to repeat live actions.
 
-## Integrated host/helper recovery validation (baseline `eac9b9e`)
+## Historical integrated host/helper recovery validation (baseline `eac9b9e`)
 
 - Host fixes `586b34c` / `7a2481c` replay journal-only output scopes after dispatch shutdown and preserve the retiring owner's original router/configuration for both resources. Failed durable clearing keeps the warning; successful retired cleanup recomputes the stop barrier rather than retaining a stale failure. Healthy retained capture finishes into review without submitting or overwriting manual edits; proved input recovery clears the rejected cancellation barrier before later controls.
 - The two host `admit-v1` fixtures now quote identity `"A"` for `6c1a0a5`; assertions are unchanged. Helper fixes `775418d` / `4989641` / `b891b48` and nullable identity behavior are described below. Fresh covered phone-style network input **and** output support ordinary completed-start/stop receipts and eligible same-device changed-boot proof. This is not live phone validation or recovery of its historical uncertain journal.

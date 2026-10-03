@@ -23,7 +23,11 @@ Kokoro, Whisper, Wav2Vec2 alignment, and audio-cache processing run on the machi
 
 > Short demonstration videos will be added alongside the relevant features.
 
+> **Priority routing — UNDEPLOYED:** current host source separates temporary **Select** from session-persisted **Pin (0)** and integrates event-driven priority handoffs and proof-gated disconnect WAIT/resume. Connected 0 wins; heartbeats do not rerank. No microphone starts or draft submissions are automatic. Explicit reconnect never resumes playback. This host-only batch changes no clients; earlier helper/protocol upgrades still apply if absent. Not live-validated; see [routing rules and store](docs/devices-and-ssh.md#priority-routing-undeployed).
+
 ## Supported setups
+
+These are initial connection routes; with auto output, subsequent priority events can change selection as described above.
 
 | Pi host and connection | Automatic microphone and output |
 | --- | --- |
@@ -78,7 +82,7 @@ pi
 
 **Device-name update:** recopy the SSH wrapper on every desktop/Termux client using the [upgrade commands](docs/installation.md#upgrade-device-name-support). `pi-voice-ssh --set-device-name` prompts visibly; `pi-voice-ssh --set-device-name "My device"` provisions/renames headlessly without SSH or changing the ID. No target or other options are allowed. Normal first-connection prompts are visible too. The editable name uses a one-row tail preview (`<` means earlier text is hidden); the full name is saved. Existing connections are not restarted; after confirmed stop, close all wrappers and reconnect to use the new name. If you have not completed the earlier protocol migration, its [safe upgrade steps](docs/installation.md#upgrading) still apply. Never discard outstanding [stop-recovery proof](docs/troubleshooting.md#unconfirmed-stop).
 
-**Native output watchdog update:** upgrade the host and **all** installed `client/pi-voice-*` / separate `termux/pi-voice-*` copies together, including `pi-voice-mpv-watchdog.lua` and `pi-voice-native-proof.py` beside the audio helper. [Protocol v4 upgrade steps](docs/installation.md#audio-protocol-v4-native-watchdog-host-and-every-client) require confirmed stops first. The host renews native mpv's 30-second lease even while paused. Automatic stop-only recovery backs off from 3 to 60 seconds, retries only failed/eligible orphan scopes through verified original routes, and leaves healthy work alone; it never replays audio or restarts capture. Marked pre-intent reservations can prove sealed non-admission even after commit. Exact proof still gates release: legacy/uncertain admission, unknown microphone dispatch and frozen OS/player cases are not universally recoverable.
+**Native output watchdog update:** upgrade the host and **all** installed `client/pi-voice-*` / separate `termux/pi-voice-*` copies together, including `pi-voice-mpv-watchdog.lua` and `pi-voice-native-proof.py` beside the audio helper. [Protocol v4 upgrade steps](docs/installation.md#audio-protocol-v4-native-watchdog-host-and-every-client) require confirmed stops first. The host renews native mpv's 30-second lease even while paused. Automatic stop-only recovery backs off from 3 to 60 seconds, retries only failed/eligible orphan scopes through verified original routes, and leaves healthy work alone; the recovery step itself never replays audio or restarts capture. A separate priority-routing continuation can resume still-current WAIT playback after proof. Marked pre-intent reservations can prove sealed non-admission even after commit. Exact proof still gates release: legacy/uncertain admission, unknown microphone dispatch and frozen OS/player cases are not universally recoverable.
 
 **Native proof status:** new `binding-v4` supports restricted procfs (`hidepid=1`/`hidepid=2`) only with a successful kernel pidfd probe, syscall/proc PID alignment and the full scoped identity contract. If Python lacks `os.pidfd_open`, playback uses libc `pidfd_open` through `ctypes`, never numeric-PID signals. Legacy `binding-v3` still requires unrestricted procfs. Android 5.4 layouts are synthetic test coverage, **not real Android validation**; see [proof limits](docs/endpoint-protocol.md#native-watchdog-and-proof-limits).
 
@@ -168,11 +172,12 @@ Speak after pressing the microphone key. Recording normally stops after about 1.
 /voice device                       # read-only selection + candidates
 /voice device "Linux Mint PC"        # unique exact name (or exact ID)
 /voice device next|prev|local|auto
-/voice reconnect                    # return to auto attachment mode; no playback
+/voice device forget <exact-id>      # forget priority metadata; not a blacklist
+/voice reconnect                    # attachment adoption/stop cleanup; no resume
 /voice setup
 ```
 
-Manual device selection is session-sticky, including reload and shared tmux controls. Switching waits for confirmed stop, preserves the draft/cursor, and leaves existing playback paused; F8 resumes. Idle/input-only selection does not pause future narration. The right end of the first VoiceUI line, including idle status, carries `[🎧:device]`; click it in mouse-capable fullscreen Pi or press Alt+S for the same native picker. It is no longer an idle-footer click target. Open/cancel is read-only. Regular/older TTYs keep a plain label and keyboard access. The badge shows no picker shortcut hint; Alt+S remains in help. Alt+S is unused by checked Pi/Voice defaults; Alt+D remains native forward-delete-word; configured voice-control conflicts retain their binding with a warning. See [picker controls and limitations](docs/usage.md#device-picker).
+Manual Select is temporary until a genuine connection/ranking/configuration event; Pin is a separate session-persisted priority-0 override. A connected pin takes precedence. Normal manual switching waits for confirmed stop, preserves the draft/cursor, and leaves existing playback paused; F8 resumes. Disconnect WAIT can resume still-current playing intent after return/higher-priority arrival or manual clearing, but only after original-resource stop proof. Idle/input-only selection does not pause future narration. The right end of the first VoiceUI line, including idle status, carries `[🎧:device]`; click it in mouse-capable fullscreen Pi or press Alt+S for the same native picker. It is no longer an idle-footer click target. Open/cancel is read-only. Regular/older TTYs keep a plain label and keyboard access. The badge shows no picker shortcut hint; Alt+S remains in help. Alt+S is unused by checked Pi/Voice defaults; Alt+D remains native forward-delete-word; configured voice-control conflicts retain their binding with a warning. See [picker controls and limitations](docs/usage.md#device-picker).
 
 Playback phases are **Idle, Playing, Paused, Synthesizing, Loading, Describing, Connecting, Queued**. The separate native error-red **`● live`** replaces the time at the unpaused chronological playback edge, including between completed responses (Playing + `● live`, with the audio lease released). F8 pauses that following intent even without a transport; one F8 resumes queued output. Idle means no playback intent, or finished historical playback behind the latest response. Merely playing audio or viewing the bottom does not establish live. Foreground description/context waits show Describing, device handoff Connecting, and another project's ownership Queued. End/Alt+T change viewport follow only. Unknown times stay `--:-- / --:--`; no duration is invented. See [status details](docs/usage.md#highlighting-and-status). Explicit endpoint overrides still win. See [routing and trust](docs/devices-and-ssh.md).
 
@@ -180,7 +185,7 @@ Playback phases are **Idle, Playing, Paused, Synthesizing, Loading, Describing, 
 
 ### Termux extended keyboard
 
-`/voice attention` explicitly attends the oldest eligible waiting session using the requesting session's manual pin (fresh attachment identity in auto mode), falling back to this project's replay when current/none waiting. F5 always stays in this project. Handoff waits for confirmed stop; stop/newer playback actions cancel pending requests.
+`/voice attention` explicitly attends the oldest eligible waiting session using the requesting session's manual selection (fresh attachment identity in auto mode), subject to receiver selection/pin guards, falling back to this project's replay when current/none waiting. F5 always stays in this project. Handoff waits for confirmed stop; stop/newer playback actions cancel pending requests.
 
 Termux can expose one-tap microphone, message navigation, sentence/newline navigation, pause/resume, and replay controls through an optional F4–F10 extra-key row.
 

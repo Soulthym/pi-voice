@@ -1,6 +1,15 @@
 # Pi Voice — implemented agreements and live-validation handoff
 
-## Current final delivery — input-release lifecycle follow-up after `263959c`
+## Current delivery — priority routing integration (UNDEPLOYED)
+
+- Host integration through `7b0c234`, with all five reviewer findings fixed in `be727b4` and strengthened regression coverage in `daa79d5`. Pending route decisions survive newer playback without reviving obsolete resume; completed-history handoff clears queue state so EOF releases ownership; untracked test/announcement speech cannot resume unrelated history; reconnect clears WAIT resume intent; picker selection uses the latest event snapshot and rejects changed generation/endpoints.
+- Select is temporary until a genuine connection/ranking/configuration event, not a sticky implicit pin. Pin is separate, session-scoped and persisted; connected 0 wins. Shared `user_order` is a manual prefix, separate from chronological earliest discovery `date`; offline rows retain positive positions. Local -1 is a last-resort sentinel, explicit manual Local has a positive position. Cached heartbeat/label-only updates do not rerank.
+- Selected-output disconnect enters WAIT, not lower-device/host fallback. Same-device return, relationally higher arrival or manual clearing can resume still-current playing intent from the current cursor only after original-resource proof; paused/superseded intent remains silent. Stop/pause/new playback/dirty assets/session changes fence old intent. Explicit reconnect **never resumes**. Routing never starts capture or submits drafts; handoff finalizes existing dictation review-only and preserves manual edits.
+- Actual store: `join(dirname(deviceRouter.directory), "device-priorities.json")`, normally `~/.cache/pi-voice/device-priorities.json`, outside the registry. `PI_VOICE_DEVICE_DIR` changes its parent location; no separate priority-path variable. Session selection/pin stays in session entries. Forget removes priority metadata/matching session pin, not registration or stop evidence; available devices may be rediscovered immediately.
+- Reported implementation validation: focused **182 passed**, routing integration **25 passed**, typecheck passed. Final full default/native suites are **pending the parent run**; no new full counts claimed. See [testing](docs/testing.md). Historical counts below are checkpoint-specific.
+- **UNDEPLOYED, not live-validated. Host-only priority commits; no clients changed.** Later host reload when safe is sufficient for already-compatible clients; previous microphone/audio helper upgrades remain mandatory if absent. No live operations, runtime changes, inference/provider calls or deployment in this docs task. Preserve `ISSUES.md` and root TODO/HANDOFF; no edits to them.
+
+## Historical delivery — input-release lifecycle follow-up after `263959c`
 
 - Current source covers durable admission/retirement for **all remote output routes, network input and local desktop capture**. New covered scopes use v3 output grants/receipts, network `ticket-admit` and desktop child-wait proof. Matching scoped receipts or eligible same-device validated changed-kernel-boot proof can retire scopes; ownership releases only after both directions are durably idle. Unknown boot is receipt-only. **Local output remains the admission/proof coverage gap**; unknown same-boot Android start/quit dispatch and legacy/uncovered journals remain fenced. This is not universal recovery or proof that all live audio now works.
 - Independent review findings were addressed by the original-route/journal-only replay, durable-clear/barrier, healthy capture finalization, PID-safe desktop cleanup, ticket-bound retirement replay, canonical recording-path and nullable-identity fixes. The follow-up after `263959c` replaces the retained-handle-only release condition from `844fa76` with one shared deferred input-release request, fenced by input/lease/session epochs and both stop barriers. Completed reservations retire immediately; ordinary cancellation carries the matching request forward, while newer input or playback cannot inherit it. Earlier findings and validation failures remain historical evidence below and in [FINDINGS](FINDINGS.md).
@@ -288,7 +297,9 @@ Read `docs/installation.md` and `docs/endpoint-protocol.md` for migration/recove
 - Old shutdown/reload/acquisition/worker events cannot reacquire ownership, release a newer lease, mutate retired UI, or revive cancelled work. Failed-stop cleanup remains fenced across same-PID reloads.
 - Newer partial/completed sources and waiting attention survive older replay queue drains. Explicit user intent wins over automatic draining; rapid controls accumulate their provisional selection before asynchronous preparation.
 
-### Device routing and commands
+### Device routing and commands (historical pre-priority agreement)
+
+These bullets preserve the earlier agreement, superseded for current routing by the UNDEPLOYED priority integration above.
 
 - Pin the connecting device; no silent host/other-device fallback if unavailable.
 - `/voice reconnect` adopts fresh connection identity for this session. Explicit replay/resume/navigation also repins as appropriate; automatic speech retains the pin. Pause-only actions do not repin.

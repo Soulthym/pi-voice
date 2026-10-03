@@ -1,6 +1,16 @@
 # Tests
 
-## Current binding-v4 pidfd proof coverage
+## Current priority integration — UNDEPLOYED
+
+Implementation validation reported through `be727b4` / `daa79d5`: focused **182 passed**, routing integration **25 passed**, typecheck passed. All five reviewer findings are fixed: retained route decisions without obsolete replay; completed-history EOF lease release; untracked-speech history isolation; reconnect clearing saved WAIT resume; current picker snapshots with stale generation/endpoint rejection. Final full default/native suites are **pending the parent run**; earlier counts below are historical, not current full validation.
+
+`test/index-priority-routing.test.ts` covers the exact 3→2/disconnect/return/manual-3/2-return sequence at the current cursor, WAIT versus lower fallback/higher arrival, pause/Stop/new-source/session supersession, growing/finalized live sources, explicit endpoints, pin/order races, forgetting without blacklisting, delayed ASR/manual draft preservation without submission, and picker snapshot freshness. Real temporary StopRecovery scopes test wrong identity and partial cleanup retaining ownership; only matching proof admits replacement. `test/device-priorities.test.ts` and `test/device-routing.test.ts` cover shared order, discovery dates, offline numbering, Local sentinel/manual placement, persistence and heartbeat-stable cached events.
+
+This host-only priority batch changes no client helpers/protocol. It is **UNDEPLOYED and not live-validated**; no microphone auto-start or draft auto-submit is authorized by routing. Explicit reconnect never resumes playback. Prior helper/protocol migrations still apply if absent. These synthetic checks are not phone/tmux/hardware/inference tests. No live operations or runtime changes were performed for documentation.
+
+Documentation-only validation: `npm run check` and `test/documentation.test.ts` **3/3 passed**, with private HOME/TMPDIR/XDG roots and a sanitized environment; `git diff --check` passed. Logs: `/tmp/vdocs.0G0SNH/{check,docs}.log`. No LSP is configured. This is not a full-suite rerun; final full validation remains parent-owned.
+
+## Historical binding-v4 pidfd proof coverage
 
 New native playback bindings use `binding-v4` and the matching shell, Lua and
 `pi-voice-native-proof.py` helpers. Both install globs (`client/pi-voice-*` and
