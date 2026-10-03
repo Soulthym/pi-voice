@@ -1,6 +1,12 @@
 # Pi Voice — implemented agreements and live-validation handoff
 
-## Current delivery — live-tail Pause follow-up (UNDEPLOYED)
+## Current delivery — priority review follow-up (UNDEPLOYED)
+
+- Fixed lease-free paused Tail replay/preemption, premanual queued-event selection reversal, and loss of independently streaming response B during historical A handoff. Automatic route replay cannot force-acquire foreign speech. Manual revisions retire old events; events arriving during manual adoption are reconsidered before replay admission. Pause/WAIT and original stop-proof barriers remain intact.
+- Regression-first evidence: three original findings reproduced; review added failing idle-manual event and stale-destination admission cases. Eight new cases, unchanged prior pause assertions. Final focused **51/51**; typecheck passed; default **1460 passed / 45 skipped**, installed-native **1503 passed / 2 skipped**, zero failures (**1505 total**). See [testing](docs/testing.md).
+- Host-only; no clients/helpers, live sessions, hardware, providers, deployment or push touched. Independent review identified one remaining policy edge for parent follow-up: rerouting an explicit F5 takeover already waiting on foreign ownership cancels its acquisition and conservatively pauses rather than issuing automatic preemption. No claim of live validation or exhaustive interleaving coverage. Parent review remains required.
+
+## Historical delivery — live-tail Pause follow-up (UNDEPLOYED at checkpoint)
 
 - F8 now distinguishes model completion from audio completion. An owned turn/replay with an allocated utterance (including startup-pending audio), or an unfinished turn, reaches the existing pause lifecycle instead of the viewport-tail zero-offset Replay shortcut. No new transport state or priority policy was added.
 - Regression-first commits: `21eda82` recorded current-source failure (`5 !== 3` replacement segments; provisional source never paused). `3dccc35` corrected a demonstrated event-spread fixture bug without changing the original assertions, and added frozen source/position coverage. Corrected tests failed again against archived unfixed source; [testing](docs/testing.md) records hashes, commands, outputs and supplemental fixture corrections. Plain non-bottom cases passed on current source and the isolated earlier parent; no earlier fix was falsely credited.

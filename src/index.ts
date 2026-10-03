@@ -335,6 +335,8 @@ export default async function (pi: ExtensionAPI) {
 	let priorityWatch: FSWatcher | undefined;
 	let routeFlight: Promise<void> | undefined;
 	let routePending = false;
+	let manualRouteRevision = 0;
+	let manualRoutesPending = 0;
 	let routeIntent: { request: number; context: number; playing: boolean } | undefined;
 	const persistDevice = () => pi.appendEntry(DEVICE_SELECTION_ENTRY, { version: 2, selection: deviceSelection, selected: activeDeviceId, pin: devicePin });
 	let ownsSpeech = false;
@@ -2749,7 +2751,7 @@ export default async function (pi: ExtensionAPI) {
 	// through adoptCurrentConnection's original-resource recovery barrier.
 	const suspendDevicePlayback = (): void => {
 		if (routeIntent?.request === playbackRequestEpoch && routeIntent.context === contextEpoch) return;
-		const active = playbackPaused || !!pendingReplay || (ownsSpeech &&
+		const active = !!pendingReplay || (ownsSpeech &&
 			((lastOwnerUtterance !== undefined && playbackUtterances.has(lastOwnerUtterance)) ||
 				(speechPurpose === "turn" && liveTurnNarrationActive && !ownerTurnEnded)));
 		if (!active) { routeIntent = undefined; return; }
@@ -2777,6 +2779,8 @@ export default async function (pi: ExtensionAPI) {
 		if (!await adoptCurrentConnection(epoch, true, origin, current, manual ? id : undefined, true, !manual) ||
 			!current() || epoch !== playbackRequestEpoch || !interactiveVoiceSession) return;
 		playbackUtterances.clear();
+		// A post-selection event must choose the destination before replay admission.
+		if (manual && routePending) return;
 		if (routeIntent !== intent) return;
 		routeIntent = undefined;
 		if (!intent || intent.context !== contextEpoch) {
@@ -2790,7 +2794,7 @@ export default async function (pi: ExtensionAPI) {
 		playbackPaused = !intent.playing;
 		queueIncomingWhilePaused = playbackPaused || (queueIncomingWhilePaused && !!liveSource && !liveSource.final);
 		narration.setPaused(playbackPaused);
-		if (target) await playTarget(target, false, false, true);
+		if (target) await playTarget(target, false, false, true, false, false, undefined, false, !manual);
 		else refreshStatus();
 	};
 
@@ -2798,7 +2802,7 @@ export default async function (pi: ExtensionAPI) {
 		if (!routing || !interactiveVoiceSession) return;
 		try {
 			if (routing.update(deviceRouter.connected(config.output === "auto" ? "output" : undefined), activeDeviceId, devicePin, JSON.stringify([config.input, config.output]))) routePending = true;
-			if (!routePending || routeFlight) return;
+			if (!routePending || routeFlight || manualRoutesPending) return;
 			routePending = false;
 			// Explicit endpoints remain authoritative; discovery must not pause their audio.
 			if (config.output !== "auto" || orphanRecoveryBlocked) return;
@@ -2813,7 +2817,8 @@ export default async function (pi: ExtensionAPI) {
 			if (!changed && !routeIntent) return;
 			const revision = routing.revision;
 			const context = contextEpoch;
-			const current = () => context === contextEpoch && routing?.revision === revision;
+			const manualRevision = manualRouteRevision;
+			const current = () => context === contextEpoch && routing?.revision === revision && manualRouteRevision === manualRevision;
 			const flight = handoffDevice(winner, current).catch(error => notifyStopFailure(error)).finally(() => {
 				if (routeFlight === flight) routeFlight = undefined;
 				flushDeferredRelease();
@@ -2825,55 +2830,63 @@ export default async function (pi: ExtensionAPI) {
 
 	const selectDevice = async (ctx: ExtensionContext, requested: VoiceDeviceSelection, available = () => true, confirmCurrent = false): Promise<void> => {
 		devicePicker?.abort();
-		const sessionId = ctx.sessionManager.getSessionId();
-		const sessionEpoch = contextEpoch;
-		const current = () => sessionEpoch === contextEpoch && sessionId === activeContext?.sessionManager.getSessionId() && available();
-		if (requested === "auto") requested = routing?.winner() ?? requested;
-		const pinned = routing?.rows.find(row => row.pinned && row.available);
-		if (config.output === "auto" && pinned && requested !== pinned.id) { requested = pinned.id; confirmCurrent = true; }
-		if (routeIntent && requested !== "auto") {
-			await handoffDevice(requested, current, true);
-			return;
-		}
-		// Confirming the same healthy route must not interrupt audio or implicitly pin.
-		if (confirmCurrent && requested !== "auto" && requested === (activeDeviceId ?? deviceSelection) && current() &&
-			!deviceRetryRequired && !deviceRebind && !transportStopPending && !inputStopPending) {
-			try {
-				const output = deviceRouter.routeMetadata(requested, "output", config.output);
-				const input = deviceRouter.routeMetadata(requested, "input", config.input);
-				if (output.endpoint === outputEndpoint && input.endpoint === inputEndpoint &&
-					(output.kind === "device" ? output.device.connectedAt : undefined) === outputGeneration &&
-					(input.kind === "device" ? input.device.connectedAt : undefined) === inputGeneration) {
-					if (deviceSelection !== requested) {
-						deviceSelection = requested;
-						persistDevice();
+		const manualRevision = ++manualRouteRevision;
+		routePending = false; // Events already observed cannot supersede this newer manual choice.
+		manualRoutesPending++;
+		try {
+			const sessionId = ctx.sessionManager.getSessionId();
+			const sessionEpoch = contextEpoch;
+			const current = () => manualRevision === manualRouteRevision && sessionEpoch === contextEpoch && sessionId === activeContext?.sessionManager.getSessionId() && available();
+			if (requested === "auto") requested = routing?.winner() ?? requested;
+			const pinned = routing?.rows.find(row => row.pinned && row.available);
+			if (config.output === "auto" && pinned && requested !== pinned.id) { requested = pinned.id; confirmCurrent = true; }
+			if (routeIntent && requested !== "auto") {
+				await handoffDevice(requested, current, true);
+				return;
+			}
+			// Confirming the same healthy route must not interrupt audio or implicitly pin.
+			if (confirmCurrent && requested !== "auto" && requested === (activeDeviceId ?? deviceSelection) && current() &&
+				!deviceRetryRequired && !deviceRebind && !transportStopPending && !inputStopPending) {
+				try {
+					const output = deviceRouter.routeMetadata(requested, "output", config.output);
+					const input = deviceRouter.routeMetadata(requested, "input", config.input);
+					if (output.endpoint === outputEndpoint && input.endpoint === inputEndpoint &&
+						(output.kind === "device" ? output.device.connectedAt : undefined) === outputGeneration &&
+						(input.kind === "device" ? input.device.connectedAt : undefined) === inputGeneration) {
+						if (deviceSelection !== requested) {
+							deviceSelection = requested;
+							persistDevice();
+						}
+						return;
 					}
-					return;
-				}
-			} catch { /* Unavailable routes retain the normal validated transition. */ }
+				} catch { /* Unavailable routes retain the normal validated transition. */ }
+			}
+			const epoch = ++playbackRequestEpoch;
+			const paused = playbackPaused || !!pendingReplay || (ownsSpeech &&
+				(lastOwnerUtterance !== undefined || (speechPurpose === "turn" && liveTurnNarrationActive && !ownerTurnEnded)));
+			pendingReplay = undefined;
+			coordinator?.cancelSpeechAcquisition();
+			playbackPaused = paused;
+			narration.setPaused(paused);
+			vocalizer.setPlaybackPaused(true);
+			const origin: ConnectionDevice | undefined = requested === "auto" ? undefined
+				: requested === "local" ? { kind: "intentional_local" } : { kind: "device", id: requested };
+			if (!await adoptCurrentConnection(epoch, true, origin, current, requested) ||
+				epoch !== playbackRequestEpoch || !current() || !interactiveVoiceSession) return;
+			playbackUtterances.clear();
+			queueIncomingWhilePaused = paused;
+			attentionSuppressed = paused;
+			coordinator?.setAttentionEnabled(config.enabled && !paused);
+			playbackPaused = paused;
+			narration.setPaused(paused);
+			vocalizer.setPlaybackPaused(paused);
+			state = "idle";
+			refreshStatus();
+			refreshPlaybackTimeline();
+		} finally {
+			manualRoutesPending--;
+			if (routePending) pollDeviceRouting();
 		}
-		const epoch = ++playbackRequestEpoch;
-		const paused = playbackPaused || !!pendingReplay || (ownsSpeech &&
-			(lastOwnerUtterance !== undefined || (speechPurpose === "turn" && liveTurnNarrationActive && !ownerTurnEnded)));
-		pendingReplay = undefined;
-		coordinator?.cancelSpeechAcquisition();
-		playbackPaused = paused;
-		narration.setPaused(paused);
-		vocalizer.setPlaybackPaused(true);
-		const origin: ConnectionDevice | undefined = requested === "auto" ? undefined
-			: requested === "local" ? { kind: "intentional_local" } : { kind: "device", id: requested };
-		if (!await adoptCurrentConnection(epoch, true, origin, current, requested) ||
-			epoch !== playbackRequestEpoch || !current() || !interactiveVoiceSession) return;
-		playbackUtterances.clear();
-		queueIncomingWhilePaused = paused;
-		attentionSuppressed = paused;
-		coordinator?.setAttentionEnabled(config.enabled && !paused);
-		playbackPaused = paused;
-		narration.setPaused(paused);
-		vocalizer.setPlaybackPaused(paused);
-		state = "idle";
-		refreshStatus();
-		refreshPlaybackTimeline();
 	};
 
 	let devicePicker: AbortController | undefined;
@@ -2998,6 +3011,7 @@ export default async function (pi: ExtensionAPI) {
 		restoreTail = false,
 		prepareContext?: ExtensionContext,
 		explicitPlay = false,
+		automaticRoute = false,
 	): Promise<void> => {
 		if (!interactiveVoiceSession) return;
 		routeIntent = undefined;
@@ -3112,6 +3126,7 @@ export default async function (pi: ExtensionAPI) {
 		let newlyAcquired = false;
 		if (coordinator && !(ownsSpeech && coordinator.ownsSpeech())) {
 			if (coordinator.tryAcquireSpeech()) newlyAcquired = true;
+			else if (automaticRoute) acquired = false;
 			else {
 				request.phase = "queued";
 				refreshPlaybackTimeline();

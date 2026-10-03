@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
 import * as net from "node:net";
+import { SessionCoordinator } from "../src/session-coordinator.js";
 import { StopRecovery } from "../src/stop-recovery.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -70,6 +71,62 @@ async function fixture(t: TestContext, output = "auto", input = "disabled", conf
 	};
 	return { host, worker, store, selected, event, progress, poll: routePoll, root };
 }
+
+test("lease-free paused Tail changes route without acquiring or preempting another project", async t => {
+	const f = await fixture(t);
+	await f.host.shortcut("f5"); await settle();
+	f.worker.emit({ type: "idle", utterance: (f.worker.sent.at(-1) as any).utterance }); await settle();
+	await assert.rejects(fs.stat(join(f.root, "coordinator", "speech.lock", "lease.json")), { code: "ENOENT" });
+	await f.host.shortcut("f8"); await settle();
+	const other = new SessionCoordinator(join(f.root, "other"), "other");
+	other.start();
+	try {
+		assert.equal(other.tryAcquireSpeech(), true);
+		const acquire = t.mock.method(SessionCoordinator.prototype, "tryAcquireSpeech");
+		const force = t.mock.method(SessionCoordinator.prototype, "forceAcquireSpeech");
+		const before = f.worker.sent.length;
+		await f.event("d2", "d3");
+		assert.equal(f.selected().selected, "d2");
+		assert.equal(acquire.mock.callCount(), 0, "device event must not attempt speech acquisition");
+		assert.equal(force.mock.callCount(), 0, "device event must never request foreign preemption");
+		assert.equal(other.ownsSpeech(), true);
+		assert.equal(f.worker.sent.length, before);
+		assert.deepEqual(await fs.readdir(join(f.root, "coordinator", "preemption")), []);
+	} finally { other.shutdown(); }
+});
+
+for (const afterManual of [false, true]) test(`queued priority arrival is fenced by manual selection (new arrival after manual: ${afterManual})`, async t => {
+	const f = await fixture(t);
+	await f.host.shortcut("f5"); await settle();
+	const proof = Promise.withResolvers<void>();
+	const termination = t.mock.method(f.worker, "terminate", () => proof.promise);
+	await f.event("d2", "d3");
+	await f.event("d1", "d2", "d3");
+	const before = f.worker.outputs.length;
+	const manual = f.host.command("device d3"); await settle();
+	if (afterManual) await f.event("d1", "d2", "d3", "d4");
+	proof.resolve(); await manual; await settle(); termination.mock.restore();
+	assert.equal(f.selected().selected, afterManual ? "d1" : "d3");
+	assert.ok(f.worker.outputs.length > before);
+	assert.ok(f.worker.outputs.slice(before).every(output => output === `unix:///fixture/${afterManual ? "d1" : "d3"}`));
+	for (let i = 0; i < 10; i++) f.poll();
+	await settle();
+	assert.equal(f.selected().selected, afterManual ? "d1" : "d3", "unchanged polls cannot retire manual choice");
+	if (!afterManual) {
+		await f.event("d1", "d2", "d3", "d4");
+		assert.equal(f.selected().selected, "d1", "a later genuine event reranks");
+	}
+});
+
+test("event during idle manual adoption reranks even when the old selection is still the winner", async t => {
+	const f = await fixture(t);
+	const proof = Promise.withResolvers<void>();
+	const termination = t.mock.method(f.worker, "terminate", () => proof.promise);
+	const manual = f.host.command("device local"); await settle();
+	await f.event("d3", "d4");
+	proof.resolve(); await manual; await settle(); termination.mock.restore();
+	assert.equal(f.selected().selected, "d3", "postmanual arrival must be evaluated against the adopted selection");
+});
 
 test("exact 3→2 connect/disconnect/return/manual3/2 return sequence uses current cursor and proof", async t => {
 	const f = await fixture(t);

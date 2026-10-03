@@ -2,7 +2,15 @@
 
 Updated incrementally. Companion: `PLAN.md`. Reorganize freely while preserving evidence and disposition.
 
-## Current live-tail Pause root cause — UNDEPLOYED
+## Current priority review fixes — UNDEPLOYED
+
+- `playbackPaused` alone admitted lease-free Tail into resumable routing. EOF → F8 → foreign owner → higher arrival attempted acquisition. Removing that idle-only criterion preserves owned paused audio/WAIT; automatic replay now also refuses force-acquisition when another project owns speech. Regression uses the host's real coordinator plus a second real coordinator sharing an ephemeral directory.
+- A coalesced premanual event survived manual selection and later selected priority 1 instead of manually chosen 3. Manual revision fencing and retiring observed pending events prevent reassertion. Events after manual selection remain pending through adoption. Independent review reproduced two further interleavings: an idle manual switch whose old selection was still winner lost a new event, and deferred reranking admitted audio to obsolete manual output first. Both now have failing-first regressions and fixes.
+- Handoff restored the collection flag solely from A's pause state, dropping streaming B. Preserve collection for an unfinished live source independently of A; four combinations cover prior pause and F8 during withheld proof, with exactly-once B playback after A completes. Completed-history EOF lease-release tests remain green.
+- Final offline validation: focused **51/51**, default **1460 passed / 45 skipped**, installed-native **1503 passed / 2 skipped**, zero failures (**1505 total**); typecheck passed. No transport/client changes or live validation. Existing pause assertions, user notes, demos and parent planning files preserved.
+- Remaining review edge for parent: a device event during an explicit F5 foreign-owner takeover cancels the old acquisition and leaves replay paused if ownership is still foreign. Preserving that explicit acquisition across rerouting would need separate intent handling; automatic device events must never initiate foreign preemption. Not claimed fixed by this delivery.
+
+## Historical live-tail Pause root cause — UNDEPLOYED at checkpoint
 
 The F8 viewport-tail shortcut treated `ownerTurnEnded` as evidence that audio had finished. After a latest message autoplays and the model completes, the existing sink can still be playing or waiting for startup. At pinned transcript bottom F8 called `replaySelected` → `previewHistoricalTarget` (time/source offset zero) → `playTarget` instead of `pauseCurrentPlayback`. Persisted history produced two replacement segments (`5 !== 3`); provisional history produced no pause at all. Ongoing-streaming/non-bottom cases passed already, including the earlier `c02bd7e^` archived-source check.
 

@@ -1,6 +1,20 @@
 # Tests
 
-## TODO6 fixed-source validation — host-only, undeployed
+## Priority review follow-up — host-only, undeployed
+
+Eight added cases preserve all prior pause regressions. Baseline evidence:
+
+- Lease-free paused Tail with a second real coordinator: acquisition count **1 instead of 0**. Queued premanual priority arrival: selected **d1 instead of d3**. Clean baseline run **2 failed / 1 passed**, `/tmp/vr-baseline.log`.
+- Independently streaming B behind historical A: baseline produced **no B segments** after A EOF instead of both expected sentences. Original assertions retained; expanded to four playing/paused and F8-during-proof combinations.
+- Review follow-ups: idle manual adoption lost a postmanual event (**local instead of d3**), `/tmp/vr-review-baseline.log`; postmanual higher arrival admitted obsolete output before reranking, `/tmp/vr-admission-baseline.log`. Both reproduced before their fixes.
+
+The first two-case baseline invocation had incorrect second-coordinator teardown ordering and timed out retrying cleanup after fixture removal. Moving shutdown into `finally` before fixture cleanup fixed the harness; assertions were unchanged, and the clean run above reproduced both production failures.
+
+Final typecheck passed (`/tmp/vr-check.log`). Focused priority/queue/live-tail-pause **51/51** (`/tmp/vr-focus.log`). Full default **1460 passed / 45 skipped / zero failures**, installed-native **1503 passed / 2 skipped / zero failures**, **1505 total each** (`/tmp/vr-{default,native}.log`). Tests used private HOME, TMPDIR, XDG cache/config/data/state/runtime and Pi directories; inherited PI/SSH/tmux settings were removed. Native opt-ins used the installed agent/TUI/keybindings modules through `PI_VOICE_TEST_{AGENT,TUI,KEYBINDINGS}_MODULE`. LSP is not configured.
+
+No live devices, SSH sessions, inference, providers, runtime configuration, helpers or deployment changed. Parent review remains pending; the explicit-acquisition/rerouting policy edge is recorded in FINDINGS, not claimed resolved.
+
+## Historical TODO6 fixed-source validation — host-only, undeployed
 
 Original regression (corrected fixture, unchanged assertions): **16/16 passed**.
 Combined focused checks: **110/110 passed**, log `/tmp/vp6/focused-pass.log`.
