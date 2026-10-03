@@ -299,6 +299,49 @@ for (const persistedBeforeEnd of [true, false]) test(`canonical batch preserves 
 	t.mock.timers.reset();
 });
 
+for (const replay of [false, true]) test(`tail Pause freezes source/cursor through late callbacks (ordinary replay: ${replay})`, async t => {
+	const { host, worker } = await setup(t, "assistant");
+	let history: PlaybackHistory | undefined;
+	const begin = PlaybackHistory.prototype.beginCapture;
+	t.mock.method(PlaybackHistory.prototype, "beginCapture", function(this: PlaybackHistory, ...args: Parameters<typeof begin>) { history = this; return begin.apply(this, args); });
+	const message = assistant("First sentence. Second sentence. ");
+	await host.shortcut("f10");
+	await host.emit("message_start", { message });
+	await host.emit("message_update", { message, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: message.content[0].text } });
+	await host.emit("message_end", { message });
+	await host.emit("turn_end", { message });
+	host.addMessage("answer", null, message);
+	await host.emit("agent_settled", {}); await settle();
+	if (replay) { await host.shortcut("f5"); await settle(); }
+	const segment = worker.sent.at(-1) as { utterance: number; segmentId: number };
+	worker.emit({ ...segment, type: "segment-audio", start: 0, duration: 10 });
+	worker.emit({ type: "playback", utterance: segment.utterance, position: 3 });
+	await settle();
+	const readCursor = () => {
+		const { messageId, position } = history!.status()!;
+		return { messageId, position };
+	};
+	const cursor = readCursor();
+	assert.ok(cursor.position > 0, "fixture has advanced beyond zero");
+	const sent = worker.sent.length;
+	await host.command("bottom");
+	await host.shortcut("f8"); await settle();
+	assert.equal(worker.sent.length, sent, "Pause never queues replacement audio");
+	assert.equal(worker.pauses.at(-1), true);
+	assert.deepEqual(readCursor(), cursor, "Pause retains source identity and position");
+	worker.emit({ type: "ready" });
+	worker.emit({ type: "playback", utterance: segment.utterance, position: 7 });
+	await host.emit("agent_settled", {}); await settle();
+	assert.deepEqual(readCursor(), cursor, "late callbacks cannot advance the frozen cursor");
+	const pauses = worker.pauses.length;
+	await host.shortcut("f8"); await settle();
+	assert.deepEqual(worker.pauses.slice(pauses), [false]);
+	assert.equal(worker.sent.length, sent, "Resume reuses the frozen sink exactly once");
+	worker.emit({ type: "playback", utterance: segment.utterance, position: 3.5 });
+	assert.equal(history!.status()!.messageId, cursor.messageId);
+	assert.equal(history!.status()!.position, 3.5);
+});
+
 test("a message with no live targets cannot block later history sync", async t => {
 	const { host } = await setup(t, "yield", "block-only");
 	await host.emit("message_end", { message: assistant("Uncaptured tool response.", "toolUse") });

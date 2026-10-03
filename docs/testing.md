@@ -2,6 +2,27 @@
 
 ## TODO6 regression baseline — source `0d898ef` (before fix)
 
+Fixture correction, retaining every original assertion: recorded mock segments
+carry `type: "segment"`; spreading them **after** `type: "segment-audio"`
+overrode the simulated audio event. Moving `type` after the spread makes the
+started-audio cases real. Corrected regression SHA-256:
+`f33e0a840c61430ec4b1123645cb11e9cdf970c5c0babe358acb00c92cf21579`.
+Rerun against an isolated archive of regression commit `21eda82` (unchanged
+`0d898ef` implementation): the same **12 pass / 4 fail**, including the same
+`5 !== 3` restart assertion. The two added source/position cases in
+`index-transcript.test.ts` also fail specifically on replacement audio
+(live `5 !== 3`, ordinary replay `7 !== 5`); combined **28 pass / 6 fail**.
+Evidence: `/tmp/vp6/baseline-corrected-final.log`.
+
+The supplemental position test initially used `resumeTarget()`, which **mutates**
+the cursor to its sentence boundary rather than observing the playhead. It now
+reads `status()` and compares only message ID/position. Full-status comparison
+was a demonstrated test mistake: background timing completion legitimately
+changed duration 10→11 and timing metadata while position stayed 3. These
+fixture corrections do not weaken the no-restart or frozen-position contract.
+The original 16-case regression assertions are unchanged.
+
+
 `test/index-live-tail-pause.test.ts`: **12 passed / 4 failed** under private
 HOME/XDG/TMP roots and an `env -i` environment. Command: `node --import tsx
 --test --experimental-test-module-mocks test/index-live-tail-pause.test.ts`.

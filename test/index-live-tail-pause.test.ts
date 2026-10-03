@@ -37,7 +37,7 @@ for (const canonicalBefore of [false, true]) for (const bottom of [false, true])
 	assert.ok(worker, "new latest message autoplays without Replay");
 	const segment = worker.sent.at(-1) as { utterance: number; segmentId: number };
 	if (started) {
-		worker.emit({ type: "segment-audio", ...segment, start: 0, duration: 10 });
+		worker.emit({ ...segment, type: "segment-audio", start: 0, duration: 10 });
 		worker.emit({ type: "playback", utterance: segment.utterance, position: 3 });
 	}
 	await settle();
