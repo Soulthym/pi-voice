@@ -342,7 +342,7 @@ for (const action of ["auto tail start", "auto tail small", "auto tail resize", 
 		assert.equal(tui.hasOverlay(), true);
 		const pickerRows = tui.previousScreen.map((row: string) => native.stripTerminalSequences(row));
 		assert.ok(pickerRows.every((row: string) => native.visibleWidth(row) <= 40));
-		for (const label of ["1. current (local)", "2. (same-pref...)", "3. (same-pref...)"]) {
+		for (const label of ["1. 1 (same-pref...)", "2. 2 (same-pref...)", "3. -1S (local)"]) {
 			assert.ok(pickerRows.some((row: string) => row.includes(label)), `${label}\n${pickerRows.join("\n")}`);
 		}
 		assert.equal(view.scrollTop, before.top);
@@ -356,16 +356,26 @@ for (const action of ["auto tail start", "auto tail small", "auto tail resize", 
 		// The rendered number maps to the full ID, never the clipped duplicate prefix/name.
 		let choosing = host.shortcut("alt+s");
 		tui.doRender();
-		const optionY = tui.previousScreen.findIndex((row: string) => native.stripTerminalSequences(row).includes("3. (same-pref...)"));
+		const optionY = tui.previousScreen.findIndex((row: string) => native.stripTerminalSequences(row).includes("2. 2 (same-pref...)"));
+		assert.notEqual(optionY, -1, "second duplicate is visible");
 		tui.handleTerminalInput(`\x1b[<0;8;${optionY + 1}M`);
 		tui.handleTerminalInput(`\x1b[<0;8;${optionY + 1}m`);
+		await settle();
+		tui.doRender();
+		assert.ok(tui.previousScreen.some((row: string) => native.stripTerminalSequences(row).includes("Select (temporary)")));
+		assert.equal(host.entries.length, before.entries, "opening device actions cannot select or pin");
+		tui.handleTerminalInput("\r");
 		await choosing;
-		assert.equal(host.entries.filter(entry => entry.customType === "pi-voice.device-selection").at(-1)!.data.pin, ids[1]);
+		const selection = () => host.entries.filter(entry => entry.customType === "pi-voice.device-selection").at(-1)!.data;
+		assert.equal(selection().selection, ids[1]);
+		assert.equal(selection().pin, undefined, "Select is temporary, not a pin");
 		choosing = host.shortcut("alt+s");
 		tui.doRender();
-		assert.ok(tui.previousScreen.some((row: string) => native.stripTerminalSequences(row).includes("3. current (same-pref...)")), "selected duplicate's current marker and ID stay visible at 40 columns");
+		assert.ok(tui.previousScreen.some((row: string) => native.stripTerminalSequences(row).includes("2. 2S (same-pref...)")), "selected duplicate's marker and ID stay visible at 40 columns");
+		tui.handleTerminalInput("\r"); await settle(); // Current device -> actions.
 		tui.handleTerminalInput("\r"); await choosing;
-		assert.equal(host.entries.filter(entry => entry.customType === "pi-voice.device-selection").at(-1)!.data.pin, ids[1], "default keyboard choice retains the exact current ID");
+		assert.equal(selection().selection, ids[1], "default keyboard choice retains the exact current ID");
+		assert.equal(selection().pin, undefined, "confirming current does not pin");
 		for (const command of ["stop", "device local"]) {
 			const opening = host.shortcut("alt+s");
 			assert.equal(tui.hasOverlay(), true);
