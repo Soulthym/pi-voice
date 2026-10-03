@@ -17,7 +17,7 @@ const { InteractiveMode } = await import(new URL("./modes/interactive/interactiv
 const { FooterComponent, initTheme } = await import(agentURL);
 const themes = await import(new URL("./modes/interactive/theme/theme.js", agentURL).href);
 const { getEditorTheme } = themes;
-const { deviceProgressComponent, attachDeviceFooter, selectDeviceOverlay } = await import("../src/device-picker-ui.js");
+const { deviceProgressComponent, attachDeviceFooter, selectDeviceOverlay, selectPriorityDeviceOverlay } = await import("../src/device-picker-ui.js");
 const { deviceProgressLines, deviceFooterText, devicePickerLabels } = await import("../src/status-text.js");
 initTheme("dark");
 
@@ -66,6 +66,201 @@ function mounted(t: TestContext, width = 90) {
 	const ctx = { mode: "tui", ui: { theme: themes.theme, onTerminalInput: (handler: any) => tui.addInputListener(handler) } } as any;
 	return { tui, mode, editor, transcript, terminal, mount, input, click, screen, locate, clickText, ctx };
 }
+
+function priorityFixture() {
+	let userOrder: string[] = [];
+	let pin: string | undefined;
+	let online = new Set(["local", "phone-A"]);
+	const names: Record<string, string> = { local: "Local", "phone-A": "duplicate 手机", "phone-B": "duplicate 手机" };
+	const actions: any[] = [];
+	let snapshot: import("../src/device-picker-ui.js").DevicePickerSnapshot;
+	const refresh = () => {
+		const order = [...userOrder, ...["phone-A", "phone-B"].filter(id => !userOrder.includes(id))];
+		const devices = order.map((id, i) => ({ id, priority: i + 1, name: names[id], manual: userOrder.includes(id), pinned: false, available: online.has(id) }));
+		if (!userOrder.includes("local")) devices.push({ id: "local", priority: -1, name: "Local", manual: false, pinned: false, available: true });
+		const pinned = devices.find(device => device.id === pin);
+		snapshot = { devices: pinned ? [{ ...pinned, priority: 0, pinned: true }, ...devices.filter(device => device.id !== pin)] : devices, userOrder, selectedId: "phone-A" };
+	};
+	refresh();
+	const options: import("../src/device-picker-ui.js").DevicePickerOptions = {
+		snapshot: () => snapshot,
+		onAction(action, expected) {
+			assert.equal(expected, snapshot);
+			actions.push(action);
+			if (action.kind === "pin") pin = action.id;
+			else {
+				userOrder = userOrder.filter(id => id !== action.id);
+				if (action.kind === "place") userOrder.splice(action.index, 0, action.id);
+			}
+			refresh();
+		},
+	};
+	return { options, actions, change() { online = new Set(["local"]); refresh(); } };
+}
+
+test("priority picker keyboard Select never pins, Pin is a separate action", async t => {
+	const h = mounted(t);
+	h.mount(new native.Text("status", 0, 0));
+	const fixture = priorityFixture();
+	const result = selectPriorityDeviceOverlay(h.ctx, fixture.options, new AbortController().signal, h.tui);
+	h.input("\r"); await tick(); // current device -> actions
+	h.input("\r");
+	assert.equal(await result, "phone-A");
+	assert.deepEqual(fixture.actions, []);
+	const controller = new AbortController();
+	const pin = selectPriorityDeviceOverlay(h.ctx, fixture.options, controller.signal, h.tui);
+	h.input("\r"); await tick();
+	h.input("\x1b[B"); h.input("\r"); await tick();
+	assert.deepEqual(fixture.actions, [{ kind: "pin", id: "phone-A" }]);
+	assert.deepEqual(fixture.options.snapshot().userOrder, []);
+	assert.equal(fixture.options.snapshot().devices[0].priority, 0);
+	controller.abort(); await pin;
+});
+
+test("priority keyboard actions promote and reset an offline device without selecting it", async t => {
+	const h = mounted(t);
+	h.mount(new native.Text("status", 0, 0));
+	const fixture = priorityFixture();
+	const controller = new AbortController();
+	const result = selectPriorityDeviceOverlay(h.ctx, fixture.options, controller.signal, h.tui);
+	h.input("\x1b[B"); h.input("\r"); await tick(); // offline B -> actions
+	h.input("\x1b[B"); h.input("\r"); await tick(); // promote, not Select
+	assert.deepEqual(fixture.options.snapshot().userOrder, ["phone-B"]);
+	h.input("\r"); await tick(); // same focused B -> actions
+	h.input("\x1b[B"); h.input("\x1b[B"); h.input("\r"); await tick(); // reset
+	assert.deepEqual(fixture.options.snapshot().userOrder, []);
+	assert.deepEqual(fixture.actions, [{ kind: "place", id: "phone-B", index: 0 }, { kind: "reset", id: "phone-B" }]);
+	controller.abort(); assert.equal(await result, undefined);
+});
+
+for (const width of [28, 40, 90]) {
+	test(`priority actions use native pointer input at ${width} columns; offline reorder and local reset`, nativeOptions, async t => {
+		const h = mounted(t, width);
+		h.mount(new native.Text("status", 0, 0));
+		const fixture = priorityFixture();
+		const controller = new AbortController();
+		t.after(() => controller.abort());
+		const result = selectPriorityDeviceOverlay(h.ctx, fixture.options, controller.signal, h.tui);
+		h.clickText("(phone-B)"); await tick();
+		assert.ok(!h.screen().some(line => line.includes("Select (temporary)")), "offline has no Select action");
+		h.clickText("Set priority"); await tick();
+		h.clickText("Priority 1"); await tick();
+		assert.deepEqual(fixture.options.snapshot().userOrder, ["phone-B"]);
+		h.clickText("(local)"); await tick();
+		h.clickText("Set priority"); await tick();
+		h.clickText("Priority 1"); await tick();
+		assert.deepEqual(fixture.options.snapshot().userOrder, ["local", "phone-B"]);
+		h.clickText("(local)"); await tick();
+		h.clickText("Move down"); await tick();
+		assert.deepEqual(fixture.options.snapshot().userOrder, ["phone-B", "local"]);
+		h.clickText("(local)"); await tick();
+		h.clickText("Move up"); await tick();
+		assert.deepEqual(fixture.options.snapshot().userOrder, ["local", "phone-B"]);
+		h.clickText("(local)"); await tick();
+		h.clickText("Reset priority"); await tick();
+		assert.equal(fixture.options.snapshot().devices.at(-1)?.priority, -1);
+		assert.ok(h.screen().every(line => native.visibleWidth(line) <= width));
+		h.clickText("(phone-B)"); await tick();
+		h.clickText("Pin (priority 0)"); await tick();
+		assert.equal(fixture.options.snapshot().devices[0].id, "phone-B");
+		assert.equal(fixture.options.snapshot().devices[0].pinned, true);
+		h.clickText("(phone-B)"); await tick();
+		h.clickText("Unpin"); await tick();
+		assert.equal(fixture.options.snapshot().devices[0].pinned, false);
+		controller.abort(); assert.equal(await result, undefined);
+		assert.equal(h.tui.getFocusedComponent(), h.editor);
+	});
+}
+
+test("priority picker rejects stale action clicks after an event snapshot changes", nativeOptions, async t => {
+	const h = mounted(t);
+	h.mount(new native.Text("status", 0, 0));
+	const fixture = priorityFixture();
+	const controller = new AbortController();
+	t.after(() => controller.abort());
+	const result = selectPriorityDeviceOverlay(h.ctx, fixture.options, controller.signal, h.tui);
+	h.clickText("(phone-A)"); await tick();
+	const { x, y } = h.locate("Pin (priority 0)");
+	h.input(`\x1b[<0;${x + 1};${y + 1}M`);
+	fixture.change();
+	h.input(`\x1b[<0;${x + 1};${y + 1}m`); await tick();
+	assert.deepEqual(fixture.actions, []);
+	assert.ok(h.screen().some(line => line.includes("offline")));
+	controller.abort(); assert.equal(await result, undefined);
+});
+
+for (const stage of ["actions", "priority"] as const) {
+	test(`priority ${stage} cancellation never reopens over an expired prompt`, nativeOptions, async t => {
+		const h = mounted(t);
+		h.mount(new native.Text("status", 0, 0));
+		const abort = new AbortController();
+		const prompt = h.mode.showExtensionSelector("Original prompt", ["Keep"], { signal: abort.signal });
+		const fixture = priorityFixture();
+		const result = selectPriorityDeviceOverlay(h.ctx, fixture.options, new AbortController().signal, h.tui);
+		h.clickText("(phone-A)"); await tick();
+		if (stage === "priority") { h.clickText("Set priority"); await tick(); }
+		abort.abort();
+		h.input("!");
+		await prompt;
+		assert.equal(await result, undefined);
+		assert.equal(h.tui.hasOverlay(), false);
+		assert.equal(h.tui.getFocusedComponent(), h.editor);
+		assert.equal(h.editor.getText(), "draft 手机");
+		assert.deepEqual(fixture.actions, []);
+	});
+}
+
+for (const action of ["pin", "priority"] as const) {
+	test(`async ${action} persistence cannot reclaim an expired prompt's focus`, nativeOptions, async t => {
+		const h = mounted(t);
+		h.mount(new native.Text("status", 0, 0));
+		const abort = new AbortController();
+		const prompt = h.mode.showExtensionSelector("Original prompt", ["Keep"], { signal: abort.signal });
+		const fixture = priorityFixture();
+		let finish!: () => void;
+		const pending = new Promise<void>(resolve => { finish = resolve; });
+		const apply = fixture.options.onAction!;
+		fixture.options.onAction = async (action, snapshot) => { await pending; await apply(action, snapshot); };
+		const result = selectPriorityDeviceOverlay(h.ctx, fixture.options, new AbortController().signal, h.tui);
+		h.clickText("(phone-A)"); await tick();
+		if (action === "pin") h.clickText("Pin (priority 0)");
+		else {
+			h.clickText("Set priority"); await tick();
+			h.clickText("Priority 1");
+		}
+		await tick();
+		assert.equal(h.tui.hasOverlay(), false);
+		abort.abort(); await prompt;
+		finish();
+		assert.equal(await result, undefined);
+		assert.equal(h.tui.hasOverlay(), false);
+		assert.equal(h.tui.getFocusedComponent(), h.editor);
+	});
+}
+
+test("width resize rejects a stale native picker click before repaint", nativeOptions, async t => {
+	const h = mounted(t);
+	h.mount(new native.Text("status", 0, 0));
+	const result = selectDeviceOverlay(h.ctx, labels, new AbortController().signal, h.tui);
+	const { x, y } = h.locate(labels[1]);
+	h.terminal.columns = 28;
+	h.click(x, y);
+	assert.equal(await result, undefined);
+});
+
+test("priority action menus preserve the underlying native prompt", nativeOptions, async t => {
+	const h = mounted(t);
+	h.mount(new native.Text("status", 0, 0));
+	const prompt = h.mode.showExtensionSelector("Original prompt", ["Keep"]);
+	const fixture = priorityFixture();
+	const result = selectPriorityDeviceOverlay(h.ctx, fixture.options, new AbortController().signal, h.tui);
+	h.clickText("(phone-A)"); await tick();
+	h.clickText("Select (temporary)");
+	assert.equal(await result, "phone-A");
+	assert.equal(h.tui.getFocusedComponent(), h.mode.extensionSelector);
+	h.input("\r"); assert.equal(await prompt, "Keep");
+	assert.equal(h.editor.getText(), "draft 手机");
+});
 
 test("keyboard-only native overlay fallback", async t => {
 	const h = mounted(t);
