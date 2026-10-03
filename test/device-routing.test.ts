@@ -39,4 +39,10 @@ test("relational routing caches heartbeat snapshots and compares local fallback 
 	assert.equal(routing.selected?.priority, 0);
 	assert.equal(routing.winner("local"), "d3");
 	assert.equal(routing.update([device("d2", 2), device("d3")], "d3", "d3"), true);
+	store.place("d3", 0);
+	store.forget("d3");
+	assert.equal(Object.hasOwn(store.snapshot.discovery, "d3"), false);
+	assert.deepEqual(store.snapshot.user_order, ["local"]);
+	routing.update([device("d3", 2)], "local");
+	assert.ok(store.snapshot.discovery.d3, "forget is not a hidden discovery blacklist");
 });

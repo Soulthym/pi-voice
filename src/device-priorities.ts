@@ -97,6 +97,15 @@ export class DevicePriorityStore {
 		return this.#mutate(state => { state.user_order = id === undefined ? [] : state.user_order.filter(item => item !== id); });
 	}
 
+	/** Remove remembered priority data, not a registration or future discovery. Caller owns pin removal. */
+	forget(id: string): DevicePriorityState {
+		if (!validId(id)) throw new Error("Invalid device ID");
+		return this.#mutate(state => {
+			delete state.discovery[id];
+			state.user_order = state.user_order.filter(item => item !== id);
+		});
+	}
+
 	#read(): DevicePriorityState {
 		let value: any;
 		try { value = JSON.parse(fs.readFileSync(this.file, "utf8")); }
