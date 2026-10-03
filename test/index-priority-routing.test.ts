@@ -290,3 +290,65 @@ test("higher arrival bypasses wait only after original scoped cleanup", async t 
 	assert.equal(f.selected().selected, "d2");
 	assert.equal(f.worker.outputs.at(-1), "unix:///fixture/d2");
 });
+
+
+test("pin return adopts route even when F5 supersedes the pending resume", async t => {
+	const f = await fixture(t);
+	picker = async options => {
+		await options.onAction!({ kind: "pin", id: "d2" }, options.snapshot());
+		return undefined;
+	};
+	await f.host.command("devices"); await settle();
+	await f.host.shortcut("f5"); await settle();
+	const proof = Promise.withResolvers<void>();
+	const termination = t.mock.method(f.worker, "terminate", () => proof.promise);
+	await f.event("d2", "d3");
+	const replay = f.host.shortcut("f5"); await settle();
+	proof.resolve(); await replay; await settle(); termination.mock.restore();
+	assert.equal(f.selected().selected, "d2");
+	assert.equal(f.worker.outputs.at(-1), "unix:///fixture/d2");
+});
+
+test("completed history handoff releases its speech lease at EOF", async t => {
+	const f = await fixture(t);
+	await f.host.shortcut("f5"); await settle();
+	await f.event("d2", "d3");
+	const utterance = (f.worker.sent.at(-1) as any).utterance;
+	f.worker.emit({ type: "idle", utterance }); await settle();
+	await assert.rejects(fs.stat(join(f.root, "coordinator", "speech.lock", "lease.json")), { code: "ENOENT" });
+});
+
+test("untracked test speech never resumes unrelated history on handoff", async t => {
+	const f = await fixture(t);
+	await f.host.shortcut("f5"); await settle();
+	await f.host.command("test Unrelated test speech."); await settle();
+	const before = f.worker.sent.length;
+	await f.event("d2", "d3");
+	assert.equal(f.selected().selected, "d2");
+	assert.equal(f.worker.sent.length, before);
+});
+
+test("reconnect retires waiting resume so F8 remains usable", async t => {
+	const f = await fixture(t);
+	await f.host.shortcut("f5"); await settle();
+	await f.event();
+	const proof = Promise.withResolvers<void>();
+	const termination = t.mock.method(f.worker, "terminate", () => proof.promise);
+	await f.event("d3");
+	const reconnect = f.host.command("reconnect"); await settle();
+	proof.resolve(); await reconnect; await settle(); termination.mock.restore();
+	const before = f.worker.sent.length;
+	await f.host.shortcut("f8"); await settle();
+	assert.ok(f.worker.sent.length > before, "F8 resumes after explicit reconnect");
+});
+
+test("picker accepts a lower device added to its live snapshot", async t => {
+	const f = await fixture(t);
+	picker = async options => {
+		await f.event("d3", "d4");
+		assert.ok(options.snapshot().devices.some(row => row.id === "d4"));
+		return "d4";
+	};
+	await f.host.command("devices"); await settle();
+	assert.equal(f.selected().selected, "d4");
+});

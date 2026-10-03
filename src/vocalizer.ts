@@ -59,7 +59,7 @@ export class Vocalizer {
 	#nextSegment = 0;
 	#skipUnits = 0;
 	#onNarrationSegment: ((segment: NarrationSegment) => void) | undefined;
-	#onUtteranceAllocated: ((utterance: number) => void) | undefined;
+	#onUtteranceAllocated: ((utterance: number, tracked: boolean) => void) | undefined;
 	#onUtteranceEnded: ((utterance: number) => void) | undefined;
 	#onSourceOmitted: ((source: SpeakableSourceRange) => void) | undefined;
 	#idleTimer: NodeJS.Timeout | null = null;
@@ -78,7 +78,7 @@ export class Vocalizer {
 		describeCode?: CodeDescriber,
 		onNarrationSegment?: (segment: NarrationSegment) => void,
 		worker: VoiceWorker | undefined = undefined,
-		onUtteranceAllocated?: (utterance: number) => void,
+		onUtteranceAllocated?: (utterance: number, tracked: boolean) => void,
 		onUtteranceEnded?: (utterance: number) => void,
 		onPlaybackPhase?: (phase: PlaybackPhase) => void,
 		onSourceOmitted?: (source: SpeakableSourceRange) => void,
@@ -425,7 +425,7 @@ export class Vocalizer {
 		if (this.#utterance === null) {
 			this.#utterance = ++this.#nextUtterance;
 			this.#phases.set(this.#utterance, { phase: "queued", descriptions: 0, pending: new Set(), deferred: 0, position: 0 });
-			this.#onUtteranceAllocated?.(this.#utterance);
+			this.#onUtteranceAllocated?.(this.#utterance, this.#trackNarration);
 		}
 		return this.#utterance;
 	}

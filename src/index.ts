@@ -1961,10 +1961,12 @@ export default async function (pi: ExtensionAPI) {
 			});
 		},
 		undefined,
-		utterance => {
-			if (liveCaptureOrigin) liveCaptureOrigins.set(utterance, liveCaptureOrigin);
-			playbackUtterances.add(utterance);
-			playbackHistory.bindUtterance(utterance);
+		(utterance, tracked) => {
+			if (tracked) {
+				if (liveCaptureOrigin) liveCaptureOrigins.set(utterance, liveCaptureOrigin);
+				playbackUtterances.add(utterance);
+				playbackHistory.bindUtterance(utterance);
+			}
 			if (!ownsSpeech) return;
 			lastOwnerUtterance = utterance;
 			if (playbackPaused) pausedOwnerUtterance = utterance;
@@ -2582,7 +2584,7 @@ export default async function (pi: ExtensionAPI) {
 		automaticRecoveryTimer.unref();
 	};
 	// Persist only session metadata. Reattachment alone never changes an existing pin.
-	const adoptCurrentConnection = (epoch: number, force = false, origin?: ConnectionDevice, current = () => true, manual?: VoiceDeviceSelection, recover = false): Promise<boolean> => {
+	const adoptCurrentConnection = (epoch: number, force = false, origin?: ConnectionDevice, current = () => true, manual?: VoiceDeviceSelection, recover = false, routingDecision = false): Promise<boolean> => {
 		if (!force && (deviceSelection !== "auto" || (!origin && (activeDeviceId !== undefined || config.output !== "auto")))) {
 			deviceRetryRequired = false;
 			return Promise.resolve(true);
@@ -2595,6 +2597,9 @@ export default async function (pi: ExtensionAPI) {
 			if (playbackPaused) queueIncomingWhilePaused = true;
 		}
 		const ctx = activeContext;
+		// A new playback request retires the resume callback, not the pending route decision.
+		const requestCurrent = () => (routingDecision || epoch === playbackRequestEpoch) &&
+			ctx === activeContext && interactiveVoiceSession && current();
 		const previous = deviceRebind;
 		handoffConnecting = true;
 		refreshProgressWidget();
@@ -2606,7 +2611,7 @@ export default async function (pi: ExtensionAPI) {
 				if (automaticRecoveryFlight) await automaticRecoveryFlight;
 				if (automaticRecoveryWork) throw new Error("Original stop recovery still pending; ownership retained");
 				if (previous) await previous.catch(() => { stopUnconfirmed = unconfirmedDeviceStops.has(previous); });
-				if (epoch !== playbackRequestEpoch || ctx !== activeContext || !interactiveVoiceSession) return false;
+				if (!requestCurrent()) return false;
 				// A retained capture ticket is normal admission, not a failed stop.
 				if (recover && inputInProgress && stopRecovery?.episode("input")?.handles.length && !inputStopPending && !stopResources.input.episode) {
 					try {
@@ -2626,7 +2631,7 @@ export default async function (pi: ExtensionAPI) {
 					await Promise.all([...retiredStops].map(cleanup => cleanup()));
 					stopUnconfirmed = stopsUnresolved();
 				}
-				if (epoch !== playbackRequestEpoch || ctx !== activeContext) return false;
+				if (!requestCurrent()) return false;
 				if (recover && stopRecovery?.episode("output")?.handles.length) {
 					// Retry the original identity before resolving a possibly different/ambiguous attachment.
 					const recovery = stopRecovery;
@@ -2649,7 +2654,7 @@ export default async function (pi: ExtensionAPI) {
 				const resolvedConnection = origin ?? await deviceRouter.resolveCurrentConnection();
 				const pinned = config.output === "auto" ? routing?.rows.find(row => row.pinned && row.available) : undefined;
 				const connection: ConnectionDevice = pinned ? pinned.id === "local" ? { kind: "intentional_local" } : { kind: "device", id: pinned.id } : resolvedConnection;
-				if (!current() || epoch !== playbackRequestEpoch || ctx !== activeContext || !interactiveVoiceSession) return false;
+				if (!requestCurrent()) return false;
 				const selection = connection.kind === "device" ? connection.id : "local";
 				// Retain identity even if its registration is temporarily absent; operations validate their own direction.
 				// A reconnect is metadata adoption, never a readiness claim.
@@ -2681,12 +2686,12 @@ export default async function (pi: ExtensionAPI) {
 					transportStopBarrier = Promise.resolve();
 					transportStopPending = false;
 					transportStops.clear();
-					if (epoch !== playbackRequestEpoch || ctx !== activeContext) return false;
+					if (!requestCurrent()) return false;
 					pausedOwnerUtterance = undefined;
 					lastOwnerUtterance = undefined;
 				}
 				if (!force && selection !== "local") await deviceRouter.route(selection, "output", config.output);
-				if (!current() || epoch !== playbackRequestEpoch || ctx !== activeContext) return false;
+				if (!requestCurrent()) return false;
 				if (manual !== undefined) deviceSelection = manual;
 				else if (force || origin) deviceSelection = "auto";
 				activeDeviceId = selection;
@@ -2745,7 +2750,8 @@ export default async function (pi: ExtensionAPI) {
 	const suspendDevicePlayback = (): void => {
 		if (routeIntent?.request === playbackRequestEpoch && routeIntent.context === contextEpoch) return;
 		const active = playbackPaused || !!pendingReplay || (ownsSpeech &&
-			(lastOwnerUtterance !== undefined || (speechPurpose === "turn" && liveTurnNarrationActive && !ownerTurnEnded)));
+			((lastOwnerUtterance !== undefined && playbackUtterances.has(lastOwnerUtterance)) ||
+				(speechPurpose === "turn" && liveTurnNarrationActive && !ownerTurnEnded)));
 		if (!active) { routeIntent = undefined; return; }
 		const playing = !(pendingReplay?.paused ?? playbackPaused);
 		pendingReplay = undefined;
@@ -2768,7 +2774,7 @@ export default async function (pi: ExtensionAPI) {
 		if (routeIntent) routeIntent = { ...routeIntent, request: epoch };
 		const intent = routeIntent;
 		const origin: ConnectionDevice = id === "local" ? { kind: "intentional_local" } : { kind: "device", id };
-		if (!await adoptCurrentConnection(epoch, true, origin, current, manual ? id : undefined, true) ||
+		if (!await adoptCurrentConnection(epoch, true, origin, current, manual ? id : undefined, true, !manual) ||
 			!current() || epoch !== playbackRequestEpoch || !interactiveVoiceSession) return;
 		playbackUtterances.clear();
 		if (routeIntent !== intent) return;
@@ -2776,6 +2782,7 @@ export default async function (pi: ExtensionAPI) {
 		if (!intent || intent.context !== contextEpoch) return;
 		const target = playbackHistory.resumeTarget();
 		playbackPaused = !intent.playing;
+		queueIncomingWhilePaused = playbackPaused;
 		narration.setPaused(playbackPaused);
 		if (target) await playTarget(target, false, false, true);
 		else refreshStatus();
@@ -2880,7 +2887,6 @@ export default async function (pi: ExtensionAPI) {
 		const current = () => context === contextEpoch && session === activeContext?.sessionManager.getSessionId() &&
 			request === playbackRequestEpoch && setting === deviceSettingEpoch && input === inputEpoch &&
 			framing === framingIntent && settings === config && interactiveVoiceSession;
-		const devices = cache.devices;
 		try {
 			const choice = await selectPriorityDeviceOverlay(ctx, {
 				snapshot: () => cache.snapshot,
@@ -2896,7 +2902,7 @@ export default async function (pi: ExtensionAPI) {
 				request !== playbackRequestEpoch || setting !== deviceSettingEpoch || input !== inputEpoch ||
 				framing !== framingIntent || settings !== config || !interactiveVoiceSession) return;
 			if (choice === undefined) return;
-			const target = devices.find(device => device.id === choice);
+			const target = cache.devices.find(device => device.id === choice);
 			const available = () => choice === "local" || !!target && deviceRouter.connected().some(device => device.id === choice &&
 				device.connectedAt === target.connectedAt && device.audioEndpoint === target.audioEndpoint && device.inputEndpoint === target.inputEndpoint);
 			if (!available()) { notifyVoice(ctx, "Device is no longer available; reopen the picker", "warning"); return; }
@@ -5594,6 +5600,7 @@ export default async function (pi: ExtensionAPI) {
 					return;
 				}
 				case "reconnect": {
+					routeIntent = undefined;
 					const epoch = ++playbackRequestEpoch;
 					const paused = playbackPaused || !!pendingReplay || (ownsSpeech &&
 						(lastOwnerUtterance !== undefined || (speechPurpose === "turn" && liveTurnNarrationActive && !ownerTurnEnded)));
