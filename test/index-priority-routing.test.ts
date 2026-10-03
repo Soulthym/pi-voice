@@ -317,10 +317,32 @@ test("pin return adopts route even when F5 supersedes the pending resume", async
 	assert.equal(f.worker.outputs.at(-1), "unix:///fixture/d2");
 });
 
-test("completed history handoff releases its speech lease at EOF", async t => {
+test("latest pinned arrival fences F5 superseding an in-flight handoff", async t => {
+	const f = await fixture(t);
+	picker = async options => {
+		await options.onAction!({ kind: "pin", id: "d1" }, options.snapshot());
+		return undefined;
+	};
+	await f.host.command("devices"); await settle();
+	await f.host.shortcut("f5"); await settle();
+	const proof = Promise.withResolvers<void>();
+	const termination = t.mock.method(f.worker, "terminate", () => proof.promise);
+	await f.event("d2", "d3");
+	const before = f.worker.outputs.length;
+	const replay = f.host.shortcut("f5"); await settle();
+	await f.event("d1", "d2", "d3");
+	proof.resolve(); await replay; await settle(); termination.mock.restore();
+	assert.equal(f.selected().selected, "d1");
+	assert.ok(f.worker.outputs.length > before);
+	assert.ok(f.worker.outputs.slice(before).every(output => output === "unix:///fixture/d1"));
+});
+
+for (const paused of [false, true]) test(`completed history handoff releases its speech lease at EOF (paused: ${paused})`, async t => {
 	const f = await fixture(t);
 	await f.host.shortcut("f5"); await settle();
+	if (paused) await f.host.shortcut("f8");
 	await f.event("d2", "d3");
+	if (paused) { await f.host.shortcut("f8"); await settle(); }
 	const utterance = (f.worker.sent.at(-1) as any).utterance;
 	f.worker.emit({ type: "idle", utterance }); await settle();
 	await assert.rejects(fs.stat(join(f.root, "coordinator", "speech.lock", "lease.json")), { code: "ENOENT" });
@@ -331,9 +353,15 @@ test("untracked test speech never resumes unrelated history on handoff", async t
 	await f.host.shortcut("f5"); await settle();
 	await f.host.command("test Unrelated test speech."); await settle();
 	const before = f.worker.sent.length;
+	const proof = Promise.withResolvers<void>();
+	const termination = t.mock.method(f.worker, "terminate", () => proof.promise);
 	await f.event("d2", "d3");
+	await fs.stat(join(f.root, "coordinator", "speech.lock", "lease.json"));
+	assert.equal(f.selected().selected, "d3");
+	proof.resolve(); await settle(); termination.mock.restore();
 	assert.equal(f.selected().selected, "d2");
 	assert.equal(f.worker.sent.length, before);
+	await assert.rejects(fs.stat(join(f.root, "coordinator", "speech.lock", "lease.json")), { code: "ENOENT" });
 });
 
 test("reconnect retires waiting resume so F8 remains usable", async t => {

@@ -2779,7 +2779,13 @@ export default async function (pi: ExtensionAPI) {
 		playbackUtterances.clear();
 		if (routeIntent !== intent) return;
 		routeIntent = undefined;
-		if (!intent || intent.context !== contextEpoch) return;
+		if (!intent || intent.context !== contextEpoch) {
+			if (!pendingReplay && lastOwnerUtterance === undefined) {
+				deferredRelease = { input: inputEpoch, lease: speechLeaseEpoch, context: contextEpoch, announceNext: false };
+				flushDeferredRelease();
+			}
+			return;
+		}
 		const target = playbackHistory.resumeTarget();
 		playbackPaused = !intent.playing;
 		queueIncomingWhilePaused = playbackPaused;
@@ -3085,9 +3091,13 @@ export default async function (pi: ExtensionAPI) {
 			return;
 		}
 		try {
+			// A routing flight may schedule a newer decision after its first rebind.
+			// Queued handoff playback is itself inside that flight and must not await it.
+			if (!queued) while (routeFlight) await routeFlight;
 			if (deviceRebind) await deviceRebind;
 			if (transportStopPending) await transportStopBarrier;
 		} catch { return; }
+		if (pendingReplay !== request || request.epoch !== playbackRequestEpoch) return;
 		if (!queued && !request.paused && !await adoptCurrentConnection(request.epoch)) {
 			if (pendingReplay === request) {
 				pendingReplay = undefined;
@@ -5093,6 +5103,7 @@ export default async function (pi: ExtensionAPI) {
 				if (lastPlaybackTick) narration.setPlayback(lastPlaybackTick.utterance, lastPlaybackTick.position, true);
 				if (!await adoptCurrentConnection(requestEpoch) || requestEpoch !== playbackRequestEpoch) return;
 				playbackPaused = false;
+				if (speechPurpose === "replay" && !liveTurnNarrationActive && (!liveSource || liveSource.final)) queueIncomingWhilePaused = false;
 				narration.setPaused(playbackPaused);
 				if (speechPurpose === "notification" && completedOwnerUtterance === pausedOwnerUtterance) {
 					vocalizer.setPlaybackPaused(false);
