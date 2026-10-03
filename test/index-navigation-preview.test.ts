@@ -278,6 +278,8 @@ for (const latest of ["f6", "stop"]) test(`F5 identity wait cannot overwrite new
 	await host.start();
 	const identity = Promise.withResolvers<ConnectionDevice>();
 	const resolve = t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", () => identity.promise);
+	// Cached selection needs no lookup; hold an explicit reconnect's real route barrier.
+	void host.command("reconnect"); await settle();
 	await host.shortcut("f5"); await settle();
 	assert.equal(resolve.mock.callCount(), 1);
 	if (latest === "stop") await host.command("stop");
@@ -487,9 +489,12 @@ for (const finalize of [false, true]) test(`live Tail retains partial source thr
 	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
 	const before = worker.sent.length;
 	const gate = Promise.withResolvers<ConnectionDevice>();
-	t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", () => gate.promise);
+	const resolve = t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", () => gate.promise);
 	await host.shortcut("f10"); await settle();
+	void host.command("reconnect"); await settle();
+	assert.equal(resolve.mock.callCount(), 1, "backward navigation waits on the pending route");
 	const back = host.shortcut("f7"); await settle();
+	assert.equal(worker.sent.length, before, "backward navigation cannot bypass the route barrier");
 	await host.shortcut("f10"); await settle(); // newest intent is Tail, not the pending backward sentence
 	const completed = assistant("First live. Last live. Partial completed. ", finalize ? "stop" : "pending");
 	await host.emit("message_update", { message: completed, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: " completed. " } });
@@ -639,8 +644,10 @@ for (const finalize of [false, true]) test(`live replay refreshes after device w
 	const before = worker.sent.length;
 	const gate = Promise.withResolvers<ConnectionDevice>();
 	const resolve = t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", () => gate.promise);
+	void host.command("reconnect"); await settle();
 	await host.shortcut("f5"); await settle();
-	assert.equal(resolve.mock.callCount(), 1, `explicit live replay repins the connection: ${JSON.stringify(host.notices)} ${host.widgetLines()?.join(" ")}`);
+	assert.equal(resolve.mock.callCount(), 1, "live replay waits on explicit reconnect without another lookup");
+	assert.equal(worker.sent.length, before, "replay cannot bypass the route barrier");
 	partial.content[0].thinking += "More thought. ";
 	await host.emit("message_update", { message: structuredClone(partial), assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "More thought. " } });
 	partial.content.push({ type: "toolCall", id: "tool", name: "read", arguments: {} }, { type: "text", text: "Answer prefix" });
@@ -684,8 +691,11 @@ for (const latest of ["stop", "f6"]) test(`pending live replay yields to ${lates
 	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
 	const before = worker.sent.length;
 	const gate = Promise.withResolvers<ConnectionDevice>();
-	t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", () => gate.promise);
+	const resolve = t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", () => gate.promise);
+	void host.command("reconnect"); await settle();
 	await host.shortcut("f5"); await settle();
+	assert.equal(resolve.mock.callCount(), 1);
+	assert.equal(worker.sent.length, before, "replay cannot bypass the route barrier");
 	if (latest === "stop") await host.command("stop"); else await host.shortcut("f6");
 	gate.resolve({ kind: "intentional_local" }); await settle();
 	const complete = { ...partial, stopReason: "stop", content: [...partial.content, { type: "text", text: "Future sentence. " }] };
@@ -759,8 +769,11 @@ test("replaying an earlier live part continues later blocks finalized during pre
 	const worker = MockedVoiceWorkerClient.instances.at(-1)!;
 	const before = worker.sent.length;
 	const gate = Promise.withResolvers<ConnectionDevice>();
-	t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", () => gate.promise);
+	const resolve = t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", () => gate.promise);
+	void host.command("reconnect"); await settle();
 	await host.shortcut("f5"); await settle();
+	assert.equal(resolve.mock.callCount(), 1);
+	assert.equal(worker.sent.length, before, "replay cannot bypass the route barrier");
 	partial.content[1].text += " sentence. ";
 	await host.emit("message_update", { message: structuredClone(partial), assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: " sentence. " } });
 	partial.content.push({ type: "text", text: "Third part." });
@@ -807,8 +820,11 @@ test("pending live replay keeps its source IDs across the next tool turn", async
 	const worker = MockedVoiceWorkerClient.instances.at(-1)!;
 	const before = worker.sent.length;
 	const gate = Promise.withResolvers<ConnectionDevice>();
-	t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", () => gate.promise);
+	const resolve = t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", () => gate.promise);
+	void host.command("reconnect"); await settle();
 	await host.shortcut("f5"); await settle();
+	assert.equal(resolve.mock.callCount(), 1);
+	assert.equal(worker.sent.length, before, "replay cannot bypass the route barrier");
 	const complete = { ...partial, stopReason: "toolUse", content: [...partial.content, { type: "text", text: "Old final." }] };
 	await host.emit("message_update", { message: complete, assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: "Old final." } });
 	await host.emit("message_end", { message: complete });
@@ -853,6 +869,7 @@ for (const wait of ["device", "history"]) for (const scenario of ["partial", "co
 			await gate.promise;
 			return { kind: "intentional_local" } as ConnectionDevice;
 		});
+		void host.command("reconnect"); await settle();
 	} else {
 		let clock = 0;
 		t.mock.method(performance, "now", () => clock += 9);
@@ -962,8 +979,11 @@ for (const stopReason of ["aborted", "error"]) test(`pending live replay is reti
 	const worker = MockedVoiceWorkerClient.instances.at(-1)!;
 	const before = worker.sent.length;
 	const gate = Promise.withResolvers<ConnectionDevice>();
-	t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", () => gate.promise);
+	const resolve = t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", () => gate.promise);
+	void host.command("reconnect"); await settle();
 	await host.shortcut("f5"); await settle();
+	assert.equal(resolve.mock.callCount(), 1);
+	assert.equal(worker.sent.length, before, "replay cannot bypass the route barrier");
 	const complete = { ...partial, stopReason };
 	await host.emit("message_end", { message: complete });
 	await host.emit("turn_end", { message: complete });

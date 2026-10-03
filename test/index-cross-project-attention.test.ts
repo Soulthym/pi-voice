@@ -93,6 +93,8 @@ for (const newer of ["f8", "stop", "f6", "failure"]) test(`attention retires pen
 		calls++;
 		return calls === 1 ? replay.promise : calls === 2 ? origin.promise : Promise.resolve({ kind: "intentional_local" as const });
 	});
+	// Playback reuses cached selection; an explicit reconnect supplies the pending route decision.
+	void host.command("reconnect"); await settle();
 	await host.shortcut("f5"); await settle();
 	const pending = host.command("attention"); await settle();
 	// Attention waits for the old adoption, whose superseded replay must retire now.
@@ -246,6 +248,8 @@ for (const direction of ["outgoing", "incoming", "incoming cancelled", "incoming
 	const originGate = Promise.withResolvers<{ kind: "intentional_local" }>();
 	let calls = 0;
 	t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", () => ++calls === 1 ? replayGate.promise : originGate.promise);
+	void host.command("reconnect"); await settle();
+	assert.equal(calls, 1, "explicit reconnect holds the route barrier before replay");
 	await host.shortcut("f5"); await settle();
 	const old = { ...partial, stopReason: "toolUse" };
 	host.addMessage("old", "answer", old);
@@ -414,7 +418,8 @@ for (const cancelled of [false, true]) test(`waiting receiver adopts only curren
 	await new Promise(r => setTimeout(r, 350)); await settle();
 	if (cancelled) { await host.command("stop"); acquisition.resolve(); await settle(); }
 	assert.equal(calls, 1);
-	assert.equal(receiver.entries.some(entry => entry.data?.pin === "origin-phone"), !cancelled);
+	assert.equal(receiver.entries.some(entry => entry.data?.selected === "origin-phone"), !cancelled);
+	assert.equal(receiver.entries.some(entry => entry.data?.pin === "origin-phone"), false, "attention selects the origin route without creating a manual pin");
 	if (!cancelled) assert.ok(MockedVoiceWorkerClient.instances.some(worker => worker.sent.some((segment: any) => segment.text === "Waiting answer.")));
 	else assert.equal(waiting.speechOwner(), undefined);
 	await receiver.shutdown();
