@@ -2,6 +2,18 @@
 
 ## Current replay lifecycle validation — host-only, undeployed
 
+Final-review root correction after `e433933` / `bea1612` removes the handoff replay's own-flight bypass. Handoff now completes stop/rebind and publishes state before its returned continuation resumes outside the flight (and outside manual-selection accounting). Every replay drains all current routing/rebind/input/output barriers. The shared gate rejects pending routing events for every request; the routing revision advances on observed events even before their application. Availability is rechecked for event-affected/retained requests, not by unconditionally reranking unchanged manual choices or treating static discovery as a fresh disconnect. All waiting requests preserve their own source, including automatic continuations, rather than replacing it with a history bookmark.
+
+Post-activation disconnect no longer releases a newly acquired but already active lease behind logical ownership. The existing finalizer releases only abandoned unused acquisitions; active WAIT ownership survives attention polling until actual stop/release or legitimate foreign preemption. Return/recovery never creates automatic force-acquisition authority.
+
+Fail-first: the initial four regressions fail on `e433933` (`/tmp/p1-baseline.log`): two cold live F5 acquisition variants lose the lease during WAIT; two dormant automatic B retries dispatch to stale B after higher C arrival or B disconnect. The final six added cases against an isolated original-source copy report **5 failed / 1 passed** (`/tmp/priority-baseline.log`); current-source growth already passed, while legitimate foreign takeover during WAIT fails at premature lease loss. Final tests gate cancel ACK separately from C's termination proof, reject dispatch during cleanup, assert actual `WorkerClient.sendSegment` destinations/text, exercise repeated attention polls and real temporary coordinators, and retain all prior assertions.
+
+Final isolated validation: typecheck passed; routing **63/63**, routing/queue/recovery/preemption focus **192/192**. Full default **1492 passed / 45 skipped**; installed-native **1535 passed / 2 skipped**; **1537 total each, zero failures**. Logs: `/tmp/vroot/{check-final,focus-final,default-final,native-short}.log`. An intermediate default run had 16 failures from an overbroad static-discovery availability check; event-scoped validation restored unchanged tests. The first native run had four UNIX-socket-path failures with a longer private TMPDIR; the unchanged full rerun with `/tmp/vrn` passed. Shared-gate/failure-path self-review and independent scoped static review found no further concrete issue; neither is exhaustive concurrency proof. After documentation updates, typecheck, documentation checks **3/3** and `git diff --check` passed (`/tmp/vroot/{check-docs,docs}.log`).
+
+Runs used `env -i`, private HOME/TMPDIR/XDG/Pi directories, and installed agent/TUI/keybindings test overrides. LSP is unavailable; TypeScript supplies diagnostics. No live operations, providers/models/inference, hardware/probes, settings, restarts, deployment or push. Host-only, undeployed, no helper/protocol changes; later safe host reload remains operator work. Root TODO/HANDOFF, ISSUES and demos remain untouched.
+
+## Historical replay lifecycle validation — source `bea1612`
+
 Source `bea1612` fixes the three request-lifecycle holes reported against `b370350`. The original regression file against archived `b370350` reports **43 passed / 4 failed** (`/tmp/v3holes.oKzp/baseline-full.log`):
 
 - Live F5's cancel ACK admits playback while independent handoff termination proof is still pending. The fake worker rejects attempted dispatch during cleanup; ACK and termination are separately controlled.

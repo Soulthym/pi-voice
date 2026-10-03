@@ -51,9 +51,11 @@ async function fixture(t: TestContext, output = "auto", input = "disabled", conf
 	t.mock.method(DeviceRouter.prototype, "claim", () => undefined);
 	t.mock.method(DeviceRouter.prototype, "resolveCurrentConnection", async () => ({ kind: "device" as const, id: "d3" }));
 	let poll = () => {};
+	let attentionPoll = () => {};
 	const interval = globalThis.setInterval;
 	t.mock.method(globalThis, "setInterval", (callback: () => void, ms: number, ...args: unknown[]) => {
 		if (ms === 1_000) { poll = callback; return interval(() => {}, 100_000); }
+		if (ms === 200) { attentionPoll = callback; return interval(() => {}, 100_000); }
 		return interval(callback, ms, ...args);
 	});
 	const host = new FakeVoiceHost(root, "priority-integration");
@@ -75,7 +77,7 @@ async function fixture(t: TestContext, output = "auto", input = "disabled", conf
 		segments.filter(s => s.utterance === current).forEach((s, i) => worker.emit({ type: "segment-audio", utterance: current, segmentId: s.segmentId, start: i * 2, duration: 2 }));
 		worker.emit({ type: "playback", utterance: current, position });
 	};
-	return { host, worker, store, selected, event, progress, poll: routePoll, root };
+	return { host, worker, store, selected, event, progress, poll: routePoll, attentionPoll, root };
 }
 
 test("lease-free paused Tail changes route without acquiring or preempting another project", async t => {
@@ -292,6 +294,133 @@ for (const cancel of ["none", "stop", "pause"]) test(`cold F5 retains explicit i
 		assert.equal(new Set(replay.map(s => s.utterance)).size, cancel === "none" ? 1 : 0, JSON.stringify(f.worker.sent));
 		assert.ok(f.worker.outputs.every(output => output === "unix:///fixture/d2"));
 	} finally { gate.mock.restore(); now.mock.restore(); release?.(); other.shutdown(); }
+});
+
+for (const foreign of [false, true, "during WAIT"]) test(`cold live F5 retains activated ownership through disconnect and cancel ACK (foreign takeover: ${foreign})`, async t => {
+	const f = await fixture(t);
+	const other = new SessionCoordinator(join(f.root, "other"), "other");
+	other.start();
+	let cancellation: ReturnType<typeof t.mock.method> | undefined;
+	try {
+		const message = assistant("Cold live first sentence. Cold live second sentence. ", "pending");
+		await f.host.emit("message_start", { message });
+		await f.host.emit("message_update", { message, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: message.content[0].text } });
+		await settle();
+		await f.host.command("stop"); await settle();
+		// Keep the selected live source, but retire its original lease before F5.
+		await assert.rejects(fs.stat(join(f.root, "coordinator", "speech.lock", "lease.json")), { code: "ENOENT" });
+		f.worker.sent.length = 0; f.worker.outputs.length = 0;
+		if (foreign === true) assert.equal(other.tryAcquireSpeech(), true);
+		cancellation = t.mock.method(f.worker, "cancel", (() => 1) as unknown as typeof f.worker.cancel);
+		const force = t.mock.method(SessionCoordinator.prototype, "forceAcquireSpeech");
+		await f.host.shortcut("f5"); await settle();
+		if (foreign === true) {
+			assert.equal(force.mock.callCount(), 1);
+			other.releaseSpeech();
+			await new Promise(resolve => setTimeout(resolve, 75)); await settle();
+		}
+		assert.equal(cancellation.mock.callCount(), 1, "activated live replay awaits its own cancellation ACK");
+		assert.equal(f.worker.sent.length, 0, "new ownership has not yet admitted the live replay");
+		const leasePath = join(f.root, "coordinator", "speech.lock", "lease.json");
+		const owner = JSON.parse(await fs.readFile(leasePath, "utf8"));
+		assert.notEqual(owner.instanceId, other.instanceId);
+		await f.event();
+		f.worker.emit({ type: "idle", cancelId: 1 }); await settle();
+		for (let i = 0; i < 10; i++) { f.attentionPoll(); f.poll(); await settle(); }
+		assert.equal(f.worker.sent.length, 0, "attention polling cannot admit disconnected playback");
+		assert.match(f.host.widgetLines()?.join(" ") ?? "", /WAIT/i);
+		const waitingOwner = JSON.parse(await fs.readFile(leasePath, "utf8"));
+		assert.equal(waitingOwner.instanceId, owner.instanceId);
+		assert.equal(waitingOwner.speechGeneration, owner.speechGeneration, "activated ownership survives dormant WAIT");
+		cancellation.mock.restore();
+		if (foreign === "during WAIT") {
+			const takeover = other.forceAcquireSpeech();
+			for (let i = 0; i < 10; i++) {
+				f.attentionPoll(); await settle();
+				await new Promise(resolve => setTimeout(resolve, 10));
+			}
+			assert.equal(await takeover, true, "real preemption must release dormant ownership");
+			assert.equal(other.ownsSpeech(), true);
+			await f.event("d3");
+			for (let i = 0; i < 10; i++) { f.attentionPoll(); f.poll(); await settle(); }
+			assert.equal(force.mock.callCount(), 1, "only the foreign coordinator may request takeover");
+			assert.equal(other.ownsSpeech(), true, "device return cannot steal ownership back");
+			assert.equal(f.worker.sent.length, 0, "preempted replay cannot auto resume");
+			other.releaseSpeech();
+			for (let i = 0; i < 10; i++) { f.attentionPoll(); f.poll(); await settle(); }
+			assert.equal(f.worker.sent.length, 0, "foreign release does not restore superseded intent");
+			assert.equal(force.mock.callCount(), 1);
+			return;
+		}
+		await f.event("d3");
+		assert.deepEqual((f.worker.sent as Array<{ text: string }>).filter(s => !s.text.startsWith("Project ")).map(s => s.text),
+			["Cold live first sentence.", "Cold live second sentence."]);
+		assert.ok(f.worker.outputs.every(output => output === "unix:///fixture/d3"));
+		assert.equal(f.worker.pauses.at(-1), false);
+		assert.equal(force.mock.callCount(), foreign ? 1 : 0, "return must not request a new takeover");
+	} finally { cancellation?.mock.restore(); other.shutdown(); }
+});
+
+for (const change of ["arrival", "disconnect", "source growth"]) test(`dormant automatic live retry rechecks route after its own cancel ACK (${change})`, async t => {
+	const f = await fixture(t);
+	const message = assistant("Dormant live first sentence. Dormant live second sentence. ", "pending");
+	await f.host.emit("message_start", { message });
+	await f.host.emit("message_update", { message, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: message.content[0].text } });
+	await settle();
+	await f.host.command("stop"); await settle();
+	await assert.rejects(fs.stat(join(f.root, "coordinator", "speech.lock", "lease.json")), { code: "ENOENT" });
+	f.worker.sent.length = 0; f.worker.outputs.length = 0;
+	let cancelId = 0;
+	const cancellation = t.mock.method(f.worker, "cancel", (() => ++cancelId <= 3 ? cancelId : undefined) as unknown as typeof f.worker.cancel);
+	const proof = Promise.withResolvers<void>();
+	let termination: ReturnType<typeof t.mock.method> | undefined;
+	try {
+		await f.host.shortcut("f5"); await settle();
+		assert.equal(cancelId, 1);
+		await f.event();
+		f.worker.emit({ type: "idle", cancelId: 1 }); await settle();
+		assert.equal(f.worker.sent.length, 0, "disconnected admission leaves a dormant retained live request");
+		await f.event("d2");
+		assert.equal(f.selected().selected, "d2");
+		assert.equal(cancelId, 3, "adoption shutdown and automatic B retry each cancel the old transport");
+		if (change === "source growth") {
+			const chunk = "During B wait sentence. ";
+			const grown = assistant(message.content[0].text + chunk, "pending");
+			await f.host.emit("message_update", { message: grown, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: chunk } });
+		} else {
+			termination = t.mock.method(f.worker, "terminate", async () => {
+				f.worker.cleanupPending = true;
+				await proof.promise;
+				f.worker.cleanupPending = false;
+			});
+			await f.event(...(change === "disconnect" ? [] : ["d1", "d2"]));
+		}
+		assert.equal(f.worker.sent.length, 0);
+		f.worker.emit({ type: "idle", cancelId: 3 }); await settle();
+		if (change === "arrival") {
+			assert.equal(termination!.mock.callCount(), 1);
+			assert.equal(f.worker.cleanupPending, true, "B cancel ACK is not handoff shutdown proof");
+			assert.equal(f.worker.cleanupDispatches, 0, "ACK alone must not even attempt dispatch");
+			assert.equal(f.worker.sent.length, 0);
+			assert.equal(f.selected().selected, "d2", "C adoption awaits shutdown proof");
+		}
+		proof.resolve(); await settle();
+		cancellation.mock.restore();
+		if (change !== "source growth") assert.ok(!f.worker.outputs.includes("unix:///fixture/d2"), "obsolete B must never receive WorkerClient.sendSegment");
+		if (change === "disconnect") {
+			assert.equal(f.worker.sent.length, 0);
+			assert.match(f.host.widgetLines()?.join(" ") ?? "", /WAIT/i);
+		} else {
+			const destination = change === "source growth" ? "d2" : "d1";
+			assert.equal(f.selected().selected, destination);
+			const expected = ["Dormant live first sentence.", "Dormant live second sentence."];
+			if (change === "source growth") expected.push("During B wait sentence.");
+			assert.deepEqual((f.worker.sent as Array<{ text: string }>).filter(s => !s.text.startsWith("Project ")).map(s => s.text), expected);
+			assert.ok(f.worker.outputs.every(output => output === `unix:///fixture/${destination}`));
+		}
+	} finally {
+		proof.resolve(); cancellation.mock.restore(); await settle(); termination?.mock.restore();
+	}
 });
 
 test("live F5 cancel ACK cannot bypass pending handoff termination or newest routing", async t => {

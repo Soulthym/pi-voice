@@ -1,6 +1,13 @@
 # Pi Voice — implemented agreements and live-validation handoff
 
-## Current delivery — replay lifecycle barriers (UNDEPLOYED)
+## Current delivery — replay admission root correction (UNDEPLOYED)
+
+- Final-review correction after `e433933` removes the own-flight bypass: stop/rebind/state publication finishes before replay resumes outside automatic flights/manual selection. All requests share current-barrier and pending-event checks; observed routing revisions fence deferred events without heartbeat reranking. Automatic waiting requests preserve their source, not a stale history bookmark.
+- Activated ownership survives disconnected WAIT and repeated attention polls; only unused acquisitions release in the admission finalizer. Legitimate foreign takeover still wins; returning devices never authorize automatic force-acquisition.
+- Six added regressions: isolated original-source baseline **5 failed / 1 passed** (source growth already passed). Final routing **63/63**, focus **192/192**, typecheck passed; default **1492 passed / 45 skipped**, installed-native **1535 passed / 2 skipped**, zero failures (**1537 total**). Own-flight bypass is removed, not supplemented with another per-await exception. [Evidence, intermediate failures and limitations](docs/testing.md#current-replay-lifecycle-validation--host-only-undeployed).
+- Host-only; no live operations, helpers/protocol changes, provider/model calls, hardware/probes, settings, restarts, deployment or push. Root TODO/HANDOFF, ISSUES and demos remain untouched. Safe host reload remains later operator work.
+
+## Historical delivery — replay lifecycle barriers (UNDEPLOYED at checkpoint)
 
 - Source `bea1612` revalidates current routing/transport barriers and availability after asynchronous replay steps, without awaiting its own routing flight. Running continuations retire on every exit; retryable disconnected/transport intent preserves source/Tail/pause independently. Recovery emits once; unrelated preparation failure does not authorize automatic retry. Existing disconnected sink leases remain retained, while unused acquisitions release on cancellation/defer. Custom/local endpoints remain authoritative.
 - Against `b370350`, original three-hole regressions: **43 passed / 4 failed**. Final typecheck passed; routing **57/57**, focused lifecycle/budget **114/114**; default **1486 passed / 45 skipped**, installed-native **1529 passed / 2 skipped**, zero failures (**1531 total**). Independent parent review findings were corrected with additional tests; final scoped read-through found no further issue in the last correction. [Evidence and limitations](docs/testing.md#current-replay-lifecycle-validation--host-only-undeployed).

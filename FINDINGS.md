@@ -2,7 +2,15 @@
 
 Updated incrementally. Companion: `PLAN.md`. Reorganize freely while preserving evidence and disposition.
 
-## Current replay lifecycle fixes — UNDEPLOYED
+## Current replay admission root correction — UNDEPLOYED
+
+- Final review of `bea1612` / `e433933` found two remaining P1s: post-activation disconnect released a new lease while logical ownership stayed true (attention then discarded WAIT intent), and dormant automatic replay awaited cancellation inside its own routing flight, bypassing newer pending events.
+- Own-flight bypass removed. Handoff finishes stop/rebind/state publication, then resumes outside flight/manual accounting. The shared gate drains every current barrier and rejects any pending routing event; observed routing revisions include unapplied events. All waiting requests retain their current source, including automatic retries. No unconditional rerank of unchanged manual choices.
+- Unused acquisition cleanup remains in the finalizer; activated WAIT leases stay coherent until actual stop/release or legitimate foreign preemption. No automatic takeover on device return. Six added regressions retain prior assertions, gate ACK versus cleanup proof, check actual dispatch, source growth, repeated attention polls and real temporary coordinator takeover.
+- Original-source baseline **5 failed / 1 passed**; final routing **63/63**, focus **192/192**, typecheck passed; default **1492 passed / 45 skipped**, installed-native **1535 passed / 2 skipped**, zero failures (**1537 total**). [Evidence and intermediate failures](docs/testing.md#current-replay-lifecycle-validation--host-only-undeployed). Self-review plus independent scoped failure-path review found no further concrete issue, not exhaustive proof.
+- Host-only, undeployed; no live operations/providers/models/hardware/probes/settings/restarts/deployment/push. Root TODO/HANDOFF, ISSUES and demos remain untouched.
+
+## Historical replay lifecycle fixes — source `bea1612`
 
 - `bea1612` closes the three `b370350` lifecycle holes: cancel ACK is not handoff termination proof; existing ownership cannot admit a disconnected auto route; a retired continuation cannot stand in for retryable intent. Shared admission checks drain newest barriers after asynchronous steps, retaining the self-flight exception only for handoff replay.
 - Retry preserves source/Tail/pause while retiring actual waits on every exit. Pause clones intent to cancel old coroutines safely. Explicit and nonexplicit source queues drain once; manual routing events after proof or acquisition fence obsolete output. Existing sink leases remain held through WAIT; unused acquisitions release on cancellation/defer. Fresh F5 retains explicit authority, but automatic recovery cannot invent foreign takeover authority or retry unrelated preparation failures.
