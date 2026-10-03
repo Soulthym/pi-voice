@@ -1,10 +1,16 @@
 # Pi Voice — implemented agreements and live-validation handoff
 
-## Current delivery — priority review follow-up (UNDEPLOYED)
+## Current delivery — combinatorial priority fixes (UNDEPLOYED)
+
+- Source `90f056b` preserves current explicit F5 intent throughout cold preparation, rebind and acquisition; automatic events never create takeover authority from expired/completed requests or lease-free paused Tail. Stop and rerouted Pause cancel pending admission. Historical A retries retain their own source identity while independent B drains exactly once after A. Missing selected-device rows retain WAIT, like unavailable rows; explicit endpoints and local fallback retain their existing semantics.
+- Regression-first against `6dd8e19`: **5 failures / 39 passes** in the expanded routing file. Six added cases; previous pause assertions unchanged. Typecheck passed; focused **151/151**; full default **1473 passed / 45 skipped**, installed-native **1516 passed / 2 skipped**, zero failures (**1518 total**). See [testing](docs/testing.md).
+- TODO6 live-tail Pause and the earlier pending-F5 acquisition edge are fixed; checkpoint evidence below is historical. Host-only, no helper/protocol update required for this batch; later safe host reload remains operator work. No live validation, deployment, runtime changes, provider/model calls, restart or push. Independent parent follow-review remains required; root TODO/HANDOFF are parent-maintained.
+
+## Historical delivery — priority review follow-up (UNDEPLOYED at checkpoint)
 
 - Fixed lease-free paused Tail replay/preemption, premanual queued-event selection reversal, and loss of independently streaming response B during historical A handoff. Automatic route replay cannot force-acquire foreign speech. Manual revisions retire old events; events arriving during manual adoption are reconsidered before replay admission. Pause/WAIT and original stop-proof barriers remain intact.
 - Regression-first evidence: three original findings reproduced; review added failing idle-manual event and stale-destination admission cases. Eight new cases, unchanged prior pause assertions. Final focused **51/51**; typecheck passed; default **1460 passed / 45 skipped**, installed-native **1503 passed / 2 skipped**, zero failures (**1505 total**). See [testing](docs/testing.md).
-- Host-only; no clients/helpers, live sessions, hardware, providers, deployment or push touched. Independent review identified one remaining policy edge for parent follow-up: rerouting an explicit F5 takeover already waiting on foreign ownership cancels its acquisition and conservatively pauses rather than issuing automatic preemption. No claim of live validation or exhaustive interleaving coverage. Parent review remains required.
+- Host-only; no clients/helpers, live sessions, hardware, providers, deployment or push touched. At this checkpoint independent review identified a remaining policy edge: rerouting an explicit F5 takeover already waiting on foreign ownership cancelled its acquisition and conservatively paused rather than issuing automatic preemption. That edge and the subsequent combinatorial findings are fixed in the current delivery above. No claim of live validation or exhaustive interleaving coverage. Parent review remains required.
 
 ## Historical delivery — live-tail Pause follow-up (UNDEPLOYED at checkpoint)
 

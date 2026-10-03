@@ -1,6 +1,22 @@
 # Tests
 
-## Explicit takeover across automatic routing — host-only, undeployed
+## Current combinatorial priority validation — host-only, undeployed
+
+Source `90f056b` adds six regression cases without changing existing pause assertions. Against archived unfixed `6dd8e19`, the final routing file reports **5 failures / 39 passes** (`/tmp/vf/baseline-final.log`):
+
+- Gated cold preparation + foreign owner + higher arrival loses explicit F5 authority (**0 takeovers, expected 1**). Rerouted Pause before preparation finishes instead issues an unwanted takeover (**1, expected 0**); Stop already passed.
+- Historical A acquiring + streaming B + arrival + Pause + B completion + Resume loses B (**no segments, expected both sentences after A**).
+- Disconnect + removal of registration and priority metadata while foreign proof is pending dispatches **4 segments, expected 0**, rather than retaining WAIT. Both same-device return and newer explicit selection are covered.
+
+Contracts now exercised: only a current, still-waiting explicit request survives automatic rerouting throughout preparation/rebind/acquisition; completed/expired requests and lease-free paused Tail confer no takeover authority. An undefined retry source means historical identity, never the mutable current live source. A missing selected row is unavailable for auto-route admission, without changing authoritative explicit endpoints or the local fallback row. Original scoped proof still gates replacement IO; A and B each play once, in order.
+
+The new cold fixture initially expected the appended history message instead of the already-selected message; recorded segments demonstrated that mistake, so its content assertion now uses the actual selected source. The missing-registration fixture now restores resolution when simulating return/new selection, rather than incorrectly leaving every returning device unresolvable. Neither correction changes prior pause assertions. The final corrected tests were rerun against the archived baseline and retained all five reported failures.
+
+Final isolated `npm run check` passed; routing/queue/live-tail/navigation focus **151/151**. Full default `npm test`: **1473 passed / 45 skipped / zero failures**. Installed-native: **1516 passed / 2 skipped / zero failures**, **1518 total each**. Logs: `/tmp/vf/{check,focus,default,native}.log`. Tests use `env -i` and private HOME/TMPDIR/XDG/Pi directories; native overrides are `PI_VOICE_TEST_{AGENT,TUI,KEYBINDINGS}_MODULE` pointing to the installed agent modules. LSP is unavailable; TypeScript supplies diagnostics. After status-document synchronization, typecheck, documentation checks **3/3** and `git diff --check` also passed (`/tmp/vf/{check-final,docs}.log`); the full suites above ran on the same source/tests before these documentation-only edits.
+
+TODO6 and the earlier pending-acquisition F5 edge are implemented; evidence below retains their historical status. Independent parent follow-review remains outstanding. No real cache/settings, device probes, providers/models/inference, live sessions, restart, deployment or push. No transport/client/helper changes; no new helper update required, and previous migrations remain applicable. This is host-only synthetic validation, not live phone/hardware confirmation; a safe host reload is later operator work.
+
+## Historical explicit takeover across automatic routing — host-only, undeployed
 
 Seven added real-coordinator/fake-worker regressions cover one pending F5 preemption across a higher arrival, Stop/Pause/session/source cancellation, disconnected-route return, and independent streaming B draining after A. The preemption file must remain identical until owner release; replay uses only the winning route, with one content utterance (the existing project announcement is separate). Existing lease-free paused-Tail zero-acquisition, stale manual-event, source-queue and delayed-handoff paused-preparation assertions remain unchanged.
 
@@ -67,7 +83,7 @@ No worker/transport/client helper changes. Real mpv and SSH were not rerun for
 this host-only guard; synthetic checks do not establish live phone behavior.
 No runtime/provider/inference/hardware operations, deployment or restart.
 
-## TODO6 regression baseline — source `0d898ef` (before fix)
+## Historical TODO6 regression baseline — source `0d898ef` (before fix)
 
 Fixture correction, retaining every original assertion: recorded mock segments
 carry `type: "segment"`; spreading them **after** `type: "segment-audio"`
@@ -125,7 +141,7 @@ cases already pass. Existing pause propagation in Vocalizer → worker-client
 (sticky startup pause) → worker/playback clock is not the failing boundary.
 LSP reports no configured language servers; callers were traced by text.
 
-## Current priority integration — UNDEPLOYED
+## Historical priority integration — UNDEPLOYED at checkpoint
 
 Final source: `bcb185a`, following fixture updates `c8c2c9b` / `f6ea1a6`. The earlier five reviewer findings remain fixed; the second independent review's three findings now have failing-first regressions: latest queued pin supersedes admission, untracked speech releases its lease, and paused historical playback releases its lease at EOF. The final independent focused code reviewer confirmed all three resolved with no remaining actionable defects in scope; that review was **static only**.
 
@@ -135,7 +151,7 @@ Initial full default validation had **26 failures**: 22 obsolete per-replay iden
 
 `test/index-priority-routing.test.ts` covers the exact 3→2/disconnect/return/manual-3/2-return sequence at the current cursor, WAIT versus lower fallback/higher arrival, pause/Stop/new-source/session supersession, growing/finalized live sources, explicit endpoints, pin/order races, forgetting without blacklisting, delayed ASR/manual draft preservation without submission, and picker snapshot freshness. Real temporary StopRecovery scopes test wrong identity and partial cleanup retaining ownership; only matching proof admits replacement. `test/device-priorities.test.ts` and `test/device-routing.test.ts` cover shared order, discovery dates, offline numbering, Local sentinel/manual placement, persistence and heartbeat-stable cached events.
 
-This host-only priority batch changes no transport or client helpers/protocol. Earlier isolated real SSH **12/12** and mpv **0.35.1 / 0.40.0, 14 scenarios each**, remain prior stability evidence, **not freshly rerun**. **TODO6 remains unimplemented and deferred to the parent.** It is **UNDEPLOYED and not live-validated**; no microphone auto-start or draft auto-submit is authorized by routing. Explicit reconnect never resumes playback. Prior helper/protocol migrations still apply if absent. These synthetic checks are not phone/tmux/hardware/inference tests. No live operations or runtime changes were performed for documentation.
+This host-only priority batch changes no transport or client helpers/protocol. Earlier isolated real SSH **12/12** and mpv **0.35.1 / 0.40.0, 14 scenarios each**, remain prior stability evidence, **not freshly rerun**. **At this historical checkpoint TODO6 remained unimplemented and deferred to the parent; it is now fixed, as recorded above.** It is **UNDEPLOYED and not live-validated**; no microphone auto-start or draft auto-submit is authorized by routing. Explicit reconnect never resumes playback. Prior helper/protocol migrations still apply if absent. These synthetic checks are not phone/tmux/hardware/inference tests. No live operations or runtime changes were performed for documentation.
 
 This final documentation-only update also passed `npm run check`, `test/documentation.test.ts` **3/3**, and `git diff --check`, with private HOME/TMPDIR/XDG roots and a sanitized environment. Logs: `/tmp/vdoc.4mAt/{check,docs}.log`. Full suites were not repeated for this docs-only edit; the final source results above replace the prior pending-full status.
 
@@ -817,7 +833,7 @@ Final serial reruns: `npm run check` passed; full checkout `npm test` **956 pass
 
 Review regressions also cover consumed streaming audio with pending versus exhausted work, stale multi-utterance terminal failures, partial prose/fence arrivals without unrelated worker events, silent Markdown tails, partially consumed historical Tail, retained stop warnings and native pointer press→progress update→release.
 
-Current presentation: Idle, Playing, Paused, Synthesizing, Loading, Describing, Connecting, Queued; `● live` replaces time only at the unpaused chronological edge, including caught-up next-output waits. End/Alt+T is viewport-only. `[🎧:device]` is at the right end of the first VoiceUI line, including idle status—not an idle-footer click target. See [usage](usage.md#highlighting-and-status).
+Presentation at this historical checkpoint: Idle, Playing, Paused, Synthesizing, Loading, Describing, Connecting, Queued; `● live` replaces time only at the unpaused chronological edge, including caught-up next-output waits. End/Alt+T is viewport-only. `[🎧:device]` is at the right end of the first VoiceUI line, including idle status—not an idle-footer click target. See [usage](usage.md#highlighting-and-status).
 
 No hardware, provider calls, real inference, live Pi/SSH/client restart or runtime-setting changes. Clients are unchanged in this UI diff; user host `/reload` only, not performed here. Historical counts and evidence below remain checkpoint-specific.
 
