@@ -1,5 +1,42 @@
 # Tests
 
+## TODO6 regression baseline — source `0d898ef` (before fix)
+
+`test/index-live-tail-pause.test.ts`: **12 passed / 4 failed** under private
+HOME/XDG/TMP roots and an `env -i` environment. Command: `node --import tsx
+--test --experimental-test-module-mocks test/index-live-tail-pause.test.ts`.
+Raw local evidence: `/tmp/vp6/baseline-final.log` (not a deployment log).
+Frozen test SHA-256: `715b257a772e46c9511c45eb70ae258484137cba0af195ec37707de36ba81e43`.
+
+Original failure output, with workspace paths omitted:
+
+```text
+canonical before: true, bottom: true, turn ended: true, audio started: true/false
+AssertionError: Pause must not restart the message by sending replacement segments from zero
+5 !== 3
+canonical before: false, bottom: true, turn ended: true, audio started: true/false
+AssertionError: Pause must pause the existing autoplay sink
+actual: undefined; expected: true
+```
+
+The first four cases (no explicit bottom framing) passed on current source and
+in an isolated `git archive c02bd7e^` temporary source copy; logs
+`/tmp/vp6/{baseline,parent}.log`. No history or runtime was changed. Additional
+bottom-framing cases reproduced the defect on current source (6/8 passed in
+`baseline-bottom.log`); adding canonical-before-pause cases proved actual
+replacement segments, not merely a missing pause or invalid replay fixture.
+No assertions were relaxed or replaced. The final 16-case matrix is frozen
+before source changes. It includes ongoing streaming versus ended turns,
+started versus pending audio, and provisional versus canonical source IDs.
+
+Root trace: F8's transcript-tail shortcut uses **model turn completion** to
+choose Replay even while the same audio owner/sink remains active. Canonical
+history supplies a zero-offset replay; without it, Replay is unavailable and
+Pause still never reaches the worker. Ordinary non-tail and ongoing-streaming
+cases already pass. Existing pause propagation in Vocalizer → worker-client
+(sticky startup pause) → worker/playback clock is not the failing boundary.
+LSP reports no configured language servers; callers were traced by text.
+
 ## Current priority integration — UNDEPLOYED
 
 Final source: `bcb185a`, following fixture updates `c8c2c9b` / `f6ea1a6`. The earlier five reviewer findings remain fixed; the second independent review's three findings now have failing-first regressions: latest queued pin supersedes admission, untracked speech releases its lease, and paused historical playback releases its lease at EOF. The final independent focused code reviewer confirmed all three resolved with no remaining actionable defects in scope; that review was **static only**.
