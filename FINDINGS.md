@@ -2,7 +2,24 @@
 
 Updated incrementally. Companion: `PLAN.md`. Reorganize freely while preserving evidence and disposition.
 
-## TODO 8 integrated attention/Tail lifecycle — UNDEPLOYED
+## Current CHECKPOINT — eight independent review findings after a836a9c
+
+Source **`4774c97`**, UNDEPLOYED. Shared intent/proof corrections, not caller-only cosmetic guards:
+
+1. New navigation retires the previous announcement Resume checkpoint before preparation or a new notice yields to F8.
+2. Cancelled notification loans join stop proof and defer release of only the captured owner/epoch/generation; reconnect's shared release path is also generation-fenced. Failed termination and wrong receipts cannot release active or replacement ownership.
+3. Stop completion clears its stale playback queue, not transcript or newer explicit/submission intent.
+4. Output origin caches only a previously verified selection/config/session; registration loss cannot erase that origin or move an existing generation to another device.
+5. Final-source updates invalidate/remap checkpoints through history, before slicing and before session insertion. In-flight Resume revalidates after barriers; removed blocks retire while remaining/newer queues survive. Append-only offsets remain valid; cached full PCM is unchanged.
+6. Completed narration is not a markerless anchor for untracked notices; native Tail/manual framing survive notice playback.
+7. Streaming catch-up depends on actual available audio/work, independently of logical EOF. Pause preserves true catch-up; last-word highlight alone cannot manufacture it or disable real forward targets.
+8. Accepted feedback is validated before history, extension watermark, narration and Vocalizer mutation. Invalid/reordered/out-of-range ticks cannot skip units or hide later valid audio. Shared boundaries retain actual unit metadata; ULP tolerance covers sample-count arithmetic, not sample-sized gaps.
+
+Original grouped failing-first logs cover every finding; subsequent review exposed delayed/removed/in-flight source, upstream-event, generation-release, paused/last-word Tail and fractional-EOF gaps, all regression-tested and corrected. Final scoped disposition review found no remaining issue in those contracts; this is not exhaustive interleaving or live-hardware proof. [Detailed evidence and intermediate fixture corrections](docs/testing.md#current-checkpoint--eight-review-findings-after-a836a9c-undeployed).
+
+Final typecheck passed; source-frozen sequential full default **1646 passed / 45 skipped**, installed-native **1689 passed / 2 skipped** (**1691 total**, zero failures). No worker, worker-client, PCM transport, helper or protocol change; earlier actual mpv 0.35.1/0.40.0 **16 scenarios each** and synthetic real SSH **12/12** were not rerun. No deployment, push, live operation/restart, runtime-setting or user-cache/state change. No live Android claim. Root TODO/HANDOFF, ISSUES and removed demos preserved.
+
+## Historical TODO 8 integrated attention/Tail lifecycle — a836a9c, UNDEPLOYED
 
 - Natural completion formerly drained local backlog before announcing, failed to distinguish logical message completion from per-block EOF, and did not pass original output identity into generation-scoped waiting APIs. Pause/Stop/navigation had no safe offer point. Integration now keeps one independent announcement continuation and waits for original cancellation **and every matching receipt**, including late receipts after ACK. Successful scoped EOF alone acknowledges the exact live waiting generation; replacement/failed/unscoped EOF does not.
 - Pause captures before cancellation and retains every unheard block. Explicit Resume passes device-confirmed position plus decoded-cache identity to the existing conservative PCM backend; estimated clocks/fresh synthesis never authorize trimming. Notifications leave source/counter/pause/draft/focus alone. Local arrivals use the existing queue; navigation captures its target and drops only obsolete backlog before awaiting. Idle prompts drain subsequent local work, whereas Stop prompts deliberately do not restart it.

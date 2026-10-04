@@ -1,6 +1,14 @@
 # Pi Voice — implemented agreements and live-validation handoff
 
-## TODO 8 integration — UNDEPLOYED, parent review/live confirmation pending
+## Current CHECKPOINT — eight review findings fixed, UNDEPLOYED
+
+- Source **`4774c97`**, after `a836a9c`: new navigation retires old Resume intent; Stop discards stale playback continuations without losing transcript/newer intent; notification-only loans release only their own generation after scoped proof; waiting origins survive registry loss without cross-device rebinding.
+- History owns source/checkpoint validation before slicing and before any tick updates history, narration, watermark or Vocalizer state. Destructive/delayed finalization and removed blocks cannot replay obsolete text, including an already-resuming request. Append-only offsets and full PCM cache remain intact.
+- OPEN-stream navigation catch-up is independent of whole-message completion and survives Pause; last-word highlighting alone is not catch-up. Untracked completion notices cannot pull native Tail back to a completed source. Later real targets and manual viewport overrides remain supported.
+- Failing-first regressions and scoped independent review completed; final typecheck passed. Default **1646 passed / 45 skipped**, installed-native **1689 passed / 2 skipped**, **1691 total**, zero failures. [Baseline failures, review dispositions, fixture corrections and limits](docs/testing.md#current-checkpoint--eight-review-findings-after-a836a9c-undeployed).
+- No worker/transport/helper/protocol changes; prior real mpv 0.35.1/0.40.0 cached-offset and synthetic SSH evidence remains applicable, not rerun. No live validation/deployment/push/runtime changes/restarts or user-cache/state access. Root TODO/HANDOFF, ISSUES and deleted demos remain untouched. Safe host reload and live Android confirmation remain operator work.
+
+## Historical TODO 8 integration — a836a9c, UNDEPLOYED
 
 - Existing waiting generations/verified output identity now reach one safe announcement boundary after logical message final + physical EOF, before local backlog, or after Pause/Stop/navigation's original-scope stop proof. Cancel ACK without every receipt retains the same boundary. Exact successful generation ACK only; no new queue, foreign autoplay/takeover or focus transfer.
 - Notifications are untracked and independent of the main source/counters. Pause retains its checkpoint and remaining blocks (including yield mode), stays paused, and explicitly resumes identical cached PCM at a confirmed offset; unknown/estimated/changed audio repeats its sentence/code unit. Concurrent arrivals survive; Stop remains stopped. New actions/routes/sessions fence old continuations.
