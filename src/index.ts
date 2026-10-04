@@ -1843,7 +1843,7 @@ export default async function (pi: ExtensionAPI) {
 	};
 	const playbackUtterances = new Set<number>();
 	let lastPlaybackTick: { utterance: number; position: number } | undefined;
-	const handleWorkerEvent = (event: WorkerEvent): void => {
+	const handleWorkerEvent = (event: WorkerEvent): void | boolean => {
 		if (event.type === "remote-handle") {
 			try {
 				retainRecoveryHandle("output", event.output, event.id, event.bootId, event.rebootSafe, event.deviceId, undefined, undefined, event.nativeWatchdog);
@@ -1929,10 +1929,11 @@ export default async function (pi: ExtensionAPI) {
 				refreshProgressWidget();
 				return;
 			case "playback":
-				if (!playbackUtterances.has(event.utterance) || event.utterance < (lastPlaybackTick?.utterance ?? 0) || pendingReplay?.waiting || playbackPaused) return;
+				if (!playbackUtterances.has(event.utterance)) return; // Untracked prompts have no history checkpoint.
+				if (event.utterance < (lastPlaybackTick?.utterance ?? 0) || pendingReplay?.waiting || playbackPaused) return false;
+				if (!playbackHistory.setPlayback(event.utterance, event.position, event.estimated === true)) return false;
 				lastPlaybackTick = event;
 				narration.setPlayback(event.utterance, event.position);
-				playbackHistory.setPlayback(event.utterance, event.position, event.estimated === true);
 				requestPlaybackTimeline();
 				return;
 			case "alignment-error":

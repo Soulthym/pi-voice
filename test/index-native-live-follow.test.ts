@@ -136,7 +136,7 @@ for (const start of ["offscreen", "visible"] as const) for (const timing of ["no
 		frame();
 		assert.equal(transcript.scrollTop, manualTop, "enabling the setting does not cancel intentional manual framing");
 		if (timing === "timed") {
-			audible = "Audible";
+			// The late 0.1 tick cannot rewind the confirmed paragraph-10 checkpoint.
 			await host.shortcut("alt+v");
 			assertVisible("explicit jump rearms Voice follow");
 			await host.shortcut("f8");
@@ -150,6 +150,7 @@ for (const start of ["offscreen", "visible"] as const) for (const timing of ["no
 			await host.shortcut("alt+v");
 			assertVisible("paused jump back to the audible source");
 			assert.equal(transcript.isFollowingEnd, false);
+			audible = "Audible"; // Explicit replay, unlike reordered feedback, really restarts.
 			await host.shortcut("f5"); await settle();
 			assertVisible("historical replay starts");
 			await host.emit("before_agent_start", {});

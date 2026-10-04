@@ -675,24 +675,43 @@ export class PlaybackHistory {
 		}
 	}
 
-	/** Old callers are estimated until they explicitly forward non-estimated device feedback. */
-	setPlayback(utterance: number, position: number, estimated = true): void {
+	/** Accept a validated tick; legacy callers remain estimated without explicit device feedback. */
+	setPlayback(utterance: number, position: number, estimated = true): boolean {
 		const capture = this.#utterances.get(utterance);
-		if (!capture?.valid || capture.epoch !== this.#playbackEpoch || this.#finishedUtterances.has(utterance) || !Number.isFinite(position) ||
-			(this.#activeUtterance !== undefined && utterance < this.#activeUtterance)) return;
-		// Utterance ids follow playback order, not asynchronous registration order.
+		if (!capture?.valid || capture.epoch !== this.#playbackEpoch || this.#finishedUtterances.has(utterance) || !Number.isFinite(position) || position < 0 ||
+			!Number.isFinite(capture.baseTime + position) || capture.baseTime < 0 ||
+			(this.#activeUtterance !== undefined && utterance < this.#activeUtterance)) return false;
+		const record = capture.record;
+		const confirmedPosition = record.confirmed && record.confirmed.time + record.confirmed.seconds;
+		if (this.#activeUtterance === utterance && capture.baseTime + position <
+			(estimated ? record.position : confirmedPosition ?? 0)) return false;
+		// Sample-count clocks and sums of unit durations can differ by a ULP.
+		// This is relative roundoff tolerance, not permission to cross a sample-sized gap.
+		const atBoundary = (boundary: number): boolean => Number.isFinite(boundary) && Math.abs(position - boundary) <=
+			Number.EPSILON * Math.max(Math.abs(position), Math.abs(boundary));
+		const matches = capture.segments.filter(segment => segment.utterance === utterance && segment.audioStart !== undefined &&
+			segment.audioDuration !== undefined && (segment.audioStart <= position || atBoundary(segment.audioStart)) &&
+			(position <= segment.audioStart + segment.audioDuration || atBoundary(segment.audioStart + segment.audioDuration)));
+		// A shared boundary belongs to the next known unit; a lone EOF repeats its unit.
+		// Overlapping interiors (or ambiguous ends) cannot establish a checkpoint.
+		const interiors = matches.filter(segment => position < segment.audioStart! + segment.audioDuration! &&
+			!atBoundary(segment.audioStart! + segment.audioDuration!));
+		const candidates = interiors.length ? interiors : matches;
+		const segment = candidates[0];
+		if (!segment || candidates.length !== 1 ||
+			!Number.isInteger(segment.sourceOffset) || segment.sourceOffset < 0 || segment.sourceOffset >= record.text.length ||
+			!Number.isInteger(segment.skipUnits) || segment.skipUnits < 0) return false;
+		if (atBoundary(segment.audioStart!)) position = segment.audioStart!;
+		else if (atBoundary(segment.audioStart! + segment.audioDuration!)) position = segment.audioStart! + segment.audioDuration!;
+		// Validation precedes selection too: a bad queued tick cannot retire the audible utterance.
 		this.#activeUtterance = utterance;
-		this.#selectedId = capture.record.id;
-		capture.record.position = Math.max(0, capture.baseTime + position);
-		const segment = capture.segments.findLast(segment => segment.utterance === utterance && segment.audioStart !== undefined && segment.audioStart <= position);
-		if (segment) {
-			capture.record.cursor = { sourceOffset: segment.sourceOffset, skipUnits: segment.skipUnits };
-			const seconds = position - segment.audioStart!;
-			if (!estimated && seconds >= 0 && seconds < (segment.audioDuration ?? 0)) {
-				capture.record.confirmed = { unit: { ...capture.record.cursor }, time: capture.baseTime + segment.audioStart!,
-					seconds, audioIdentity: segment.audioIdentity };
-			}
-		}
+		this.#selectedId = record.id;
+		record.position = capture.baseTime + position;
+		record.cursor = { sourceOffset: segment.sourceOffset, skipUnits: segment.skipUnits };
+		const seconds = position - segment.audioStart!;
+		if (!estimated) record.confirmed = { unit: { ...record.cursor }, time: capture.baseTime + segment.audioStart!,
+			seconds, audioIdentity: position < segment.audioStart! + segment.audioDuration! ? segment.audioIdentity : undefined };
+		return true;
 	}
 
 	/** Follow the foreground capture without inventing a playback tick or resetting its cursor. */
@@ -810,14 +829,17 @@ export class PlaybackHistory {
 	}
 
 	/** Save before cancellation/announcement; never rewinds the paused cursor as resumeTarget does. */
-	resumeSnapshot(paused = false): PlaybackResumeSnapshot | undefined {
-		const record = this.#selectedId ? this.#records.get(this.#selectedId) : undefined;
+	resumeSnapshot(paused = false, messageId = this.#selectedId): PlaybackResumeSnapshot | undefined {
+		const record = messageId ? this.#records.get(messageId) : undefined;
 		if (!record) return;
 		const confirmed = record.confirmed;
 		const unit = confirmed?.unit ?? record.cursor ?? { sourceOffset: 0, skipUnits: 0 };
 		const checkpoint = record.checkpoints.filter(point => point.duration > 0 && point.sourceOffset === unit.sourceOffset)[unit.skipUnits];
-		return { ...this.selected(true)!, time: confirmed?.audioIdentity ? confirmed.time : checkpoint?.time ?? 0,
-			sourceOffset: unit.sourceOffset, skipUnits: unit.skipUnits, position: this.status()!.position, paused,
+		return { id: record.id, text: record.text, renderKey: record.renderKey,
+			...(record.messageType ? { messageType: record.messageType, contentIndex: record.contentIndex, displayOffset: record.displayOffset } : {}),
+			time: confirmed?.audioIdentity ? confirmed.time : record.cursor ? checkpoint?.time ?? 0 : 0,
+			sourceOffset: unit.sourceOffset, skipUnits: unit.skipUnits,
+			position: Math.max(0, record.timingsComplete ? Math.min(record.duration, record.position) : record.position), paused,
 			...(confirmed?.audioIdentity ? { confirmedPosition: confirmed.time + confirmed.seconds,
 				audioOffset: { seconds: confirmed.seconds, audioIdentity: confirmed.audioIdentity } } : {}) };
 	}

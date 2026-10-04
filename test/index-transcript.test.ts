@@ -274,7 +274,9 @@ for (const persistedBeforeEnd of [true, false]) test(`canonical batch preserves 
 			type: block.type === "thinking" ? "thinking_delta" : "text_delta", contentIndex, delta: block.text ?? block.thinking,
 		} });
 	}
-	const middle = (worker.sent as Array<{ text: string; utterance: number }>).find(segment => segment.text === "Identical middle.")!;
+	const middle = (worker.sent as Array<{ text: string; utterance: number; segmentId: number }>).find(segment => segment.text === "Identical middle.")!;
+	// Physical feedback needs the real unit's timing context before it can select a queued source.
+	worker.emit({ type: "segment-audio", utterance: middle.utterance, segmentId: middle.segmentId, start: 0, duration: 1 });
 	worker.emit({ type: "playback", utterance: middle.utterance, position: 0 });
 	await host.shortcut("f8");
 	const selected = history!.selected()!.id;

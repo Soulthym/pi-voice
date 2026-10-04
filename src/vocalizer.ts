@@ -75,7 +75,7 @@ export class Vocalizer {
 
 	constructor(
 		getConfig: () => VoiceConfig,
-		private readonly onEvent: (event: WorkerEvent) => void,
+		private readonly onEvent: (event: WorkerEvent) => void | boolean,
 		describeCode?: CodeDescriber,
 		onNarrationSegment?: (segment: NarrationSegment) => void,
 		worker: VoiceWorker | undefined = undefined,
@@ -89,8 +89,11 @@ export class Vocalizer {
 		this.#onPlaybackPhase = onPlaybackPhase;
 		this.#onSourceOmitted = onSourceOmitted;
 		this.#worker = worker ?? new VoiceWorkerClient(event => {
+			// Tracked playback must pass source/timing validation before changing phase
+			// or foreground position; non-playback events still publish metadata first.
+			if (event.type === "playback" && onEvent(event) === false) return;
 			this.handleWorkerEvent(event);
-			onEvent(event);
+			if (event.type !== "playback") onEvent(event);
 		});
 		this.#describeCode = describeCode;
 		this.#onNarrationSegment = onNarrationSegment;

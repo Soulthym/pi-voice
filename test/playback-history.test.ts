@@ -155,7 +155,8 @@ test("quality includes estimated suffix units after seeking beyond a refined pre
 	assert.equal(target.sourceOffset, offset);
 	history.beginCapture(target.id, text, target.time, false, offset);
 	history.registerSegment(segment(2, 2, 0));
-	history.setSegmentAudio(2, 0, 4);
+	// The suffix is longer than the known prefix; position 6 must be inside its audio.
+	history.setSegmentAudio(2, 0, 8);
 	const before = history.status()!;
 	assert.equal(before.timingsComplete, false);
 	assert.equal(before.timingQuality, "mixed", "relative suffix estimates must not be reported as CTC");
@@ -364,8 +365,12 @@ test("audible transitions ignore delayed earlier registrations and ticks", () =>
 		history.setSegmentAudio(utterance, 0, 4);
 	}
 	history.setPlayback(1, 1);
-	history.setPlayback(2, Number.NaN);
-	assert.equal(history.selected()?.id, "one");
+	for (const position of [Number.NaN, -1, 30]) {
+		history.setPlayback(2, position, false);
+		assert.equal(history.selected()?.id, "one", "invalid queued feedback cannot select or fence the current utterance");
+	}
+	history.setPlayback(1, 1.5, false);
+	assert.equal(history.status()?.position, 1.5);
 	history.setPlayback(2, 2);
 	history.registerSegment(segment(3, 1, text.indexOf("Second")));
 	history.setSegmentAudio(3, 4, 4);
