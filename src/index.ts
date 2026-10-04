@@ -3538,6 +3538,13 @@ export default async function (pi: ExtensionAPI) {
 				target = { ...target, ...block, ...(checkpoint ? { ...checkpoint, audioOffset: checkpoint.audioOffset } : {}) };
 			}
 		}
+		// Publish the validated source as one checkpoint, including Tail's parser
+		// seed. A destructive rewrite cannot retain any prefix from the old text.
+		request.target = target;
+		if (target.tailPrefix !== undefined && !target.text.startsWith(target.tailPrefix)) {
+			delete target.tailPrefix;
+			request.closedPrefix = false;
+		}
 		sourceOffset = target.sourceOffset;
 		suffix = target.text.slice(sourceOffset);
 		if (replaySource) {
@@ -3613,8 +3620,8 @@ export default async function (pi: ExtensionAPI) {
 			// Closure belongs to the navigation intent, not a later message_end.
 			const prefix = request.target.tailPrefix ?? target.text.slice(0, sourceOffset);
 			// A closed block has no unfinished unit to retain at Tail.
-			if (closedPrefix) vocalizer.setNarrationSourceOffset(prefix.length);
-			vocalizer.seedLivePrefix(closedPrefix ? "" : prefix);
+			if (request.closedPrefix) vocalizer.setNarrationSourceOffset(prefix.length);
+			vocalizer.seedLivePrefix(request.closedPrefix ? "" : prefix);
 			vocalizer.pushDelta(target.text.slice(prefix.length));
 			// Later content blocks can arrive while a dirty/paused live target is
 			// retained. Catch up from the source snapshot before accepting deltas.

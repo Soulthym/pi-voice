@@ -11,7 +11,7 @@ mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: Mock
 const settle = async () => { for (let i = 0; i < 24; i++) await new Promise(resolve => setImmediate(resolve)); };
 const segments = (worker: MockedVoiceWorkerClient) => worker.sent as Array<{ text: string; utterance: number; segmentId: number }>;
 
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, text = "First sentence. Old second sentence. ") {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "source-life-"));
 	const env = { PI_VOICE_CONFIG: path.join(root, "config"), PI_VOICE_COORDINATOR_DIR: path.join(root, "coordinator"), PI_VOICE_DEVICE_DIR: path.join(root, "devices") };
 	const old = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
@@ -25,7 +25,7 @@ async function fixture(t: TestContext) {
 	});
 	host.addMessage("older", null, assistant("Earlier history."));
 	await host.start();
-	const message = assistant("First sentence. Old second sentence. ", "pending");
+	const message = assistant(text, "pending");
 	await host.emit("message_start", { message });
 	await host.emit("message_update", { message, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: message.content[0].text } });
 	await settle();
@@ -65,6 +65,36 @@ for (const change of ["shortened", "replacement", "append"] as const) test(`F9 v
 		assert.equal(captures.mock.calls.at(-1)!.arguments[4], change === "append" ? 16 : 0);
 		assert.equal(host.modelRequests.length, 0);
 	} finally { now.mock.restore(); gate.mock.restore(); release?.(); }
+});
+
+for (const barrier of ["preparation", "cancellation"] as const) for (const change of ["replacement", "append"] as const) test(`Tail prefix validation after ${barrier}: ${change}`, async t => {
+	const { host, worker, message } = await fixture(t, "First sentence. Old unfinished");
+	const immediate = globalThis.setImmediate;
+	let release: (() => void) | undefined;
+	let clock = 0;
+	const now = barrier === "preparation" ? t.mock.method(performance, "now", () => clock += 9) : undefined;
+	const gate = barrier === "preparation" ? t.mock.method(globalThis, "setImmediate", ((callback: () => void, ...args: unknown[]) => {
+		if (new Error().stack?.includes("preparePlaybackMessages")) { release = callback; return immediate(() => {}); }
+		return immediate(() => Reflect.apply(callback, undefined, args));
+	}) as typeof setImmediate) : undefined;
+	const cancel = barrier === "cancellation" ? t.mock.method(worker, "cancel", () => 903 as never) : undefined;
+	try {
+		const before = worker.sent.length;
+		await host.shortcut("f10"); await settle();
+		if (barrier === "preparation") assert.ok(release);
+		else assert.equal(cancel!.mock.callCount(), 1);
+		assert.equal(worker.sent.length, before);
+		const final = assistant(change === "replacement" ? "New first." : message.content[0].text + " becomes complete.");
+		host.addMessage("canonical", "older", final);
+		await host.emit("message_end", { message: final });
+		await host.emit("turn_end", { message: final });
+		now?.mock.restore(); gate?.mock.restore(); cancel?.mock.restore();
+		if (barrier === "preparation") release!();
+		else worker.emit({ type: "idle", cancelId: 903 });
+		await settle();
+		assert.deepEqual(segments(worker).slice(before).map(s => s.text), change === "replacement" ? ["New first."] : ["Old unfinished becomes complete."], "Tail cannot seed removed source or discard replacement text");
+		assert.equal(host.modelRequests.length, 0);
+	} finally { now?.mock.restore(); gate?.mock.restore(); cancel?.mock.restore(); release?.(); }
 });
 
 for (const continuation of ["allocated", "queued", "pause", "stop", "session"] as const) test(`ordinary F5 retires removed A but preserves B: ${continuation}`, async t => {
