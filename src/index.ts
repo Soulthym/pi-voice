@@ -807,7 +807,7 @@ export default async function (pi: ExtensionAPI) {
 			if (saved) aliases.set(id, saved.id);
 		}
 		const timeline = [...new Set([...completed.map(message => message.id), ...liveIds.map(id => aliases.get(id) ?? id)])];
-		return { completed, timeline, aliases, hasLiveContent: sourceBlocks.length > 0 };
+		return { completed, timeline, aliases, sourceBlocks, hasLiveContent: sourceBlocks.length > 0 };
 	};
 
 	// Audio can catch up before the model finishes or the session saves its source.
@@ -825,9 +825,14 @@ export default async function (pi: ExtensionAPI) {
 		// An OPEN stream can have no later navigation target without whole-message EOF.
 		// Require no remaining audio/work independently of highlighting or Pause.
 		// This preserves catch-up across Pause, never completion, attention, or transport stop proof.
+		const selected = playbackHistory.selected();
+		const liveBlock = snapshot.sourceBlocks.find(block => liveBlockIds.get(block.contentIndex) === selected?.id);
+		// Paused notice cancellation empties the worker, not the retained audio cursor.
+		// Buffered source growth may not have reached narration or acquired block IDs yet.
 		const streamingTail = liveTurnNarrationActive && !ownerTurnEnded && vocalizer.playbackUtterance === undefined &&
-			latest !== undefined && canonical(playbackHistory.selected()?.id) === latest &&
-			narration.sourceEnd > 0 && narration.consumedSourceEnd >= narration.sourceEnd;
+			latest !== undefined && canonical(selected?.id) === latest && !!selected &&
+			(!snapshot.hasLiveContent || (!!liveBlock && liveBlock === snapshot.sourceBlocks.at(-1))) &&
+			playbackHistory.hasConfirmedTextTail(liveBlock?.text ?? selected.text);
 		const waiting = !speechBlocked && !pausedForAttention && !pendingReplay && !attentionSuppressed &&
 			(drained || streamingTail || (explicit && playbackTailIntent && (lastOwnerUtterance === undefined || announcedBoundary) &&
 				(!liveTurnNarrationActive || playbackTailSourceEnd >= narration.sourceEnd)));

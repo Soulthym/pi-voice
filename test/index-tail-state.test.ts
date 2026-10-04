@@ -284,6 +284,74 @@ for (const caughtUp of [false, true]) for (const key of ["f9", "f10"]) test(`pau
 	assert.equal(host.modelRequests.length, 0);
 });
 
+for (const scenario of ["unheard", "estimated", "caught-up", "same-during", "same-after", "block-during", "block-after", "markup", "silent-block"] as const) for (const key of ["f9", "f10"]) test(`paused notice retains streaming catch-up: ${scenario}, ${key}`, async t => {
+	const host = await startHost(t);
+	const text = "Final audible word\n";
+	const message = assistant(text, "pending");
+	await host.emit("message_start", { message });
+	await host.emit("message_update", { message, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: text } });
+	await settle();
+	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
+	const clip = worker.sent.at(-1) as { utterance: number; segmentId: number; text: string };
+	for (const utterance of new Set((worker.sent as Array<typeof clip>).filter(s => s.utterance < clip.utterance).map(s => s.utterance))) worker.emit({ type: "idle", utterance });
+	worker.emit({ ...clip, type: "segment-audio", start: 0, duration: 3 });
+	worker.emit({ type: "alignment", segmentId: clip.segmentId, quality: "ctc-refined", words: [
+		{ text: "Final", start: 0, end: 1 }, { text: "audible", start: 1, end: 2 }, { text: "word", start: 2, end: 3 },
+	] });
+	const statuses = t.mock.method(PlaybackHistory.prototype, "status");
+	worker.emit({ type: "playback", utterance: clip.utterance, position: scenario === "unheard" ? 2.2 : 3, estimated: scenario === "estimated" }); await settle();
+	const history = statuses.mock.calls.at(-1)!.this as PlaybackHistory;
+	const waiting = new SessionCoordinator(path.join(host.cwd, "waiting"), "waiting");
+	waiting.start(); waiting.markWaiting({ kind: "intentional_local" });
+	t.after(() => waiting.shutdown());
+	const ended = t.mock.method(worker, "endUtterance");
+	await host.shortcut("f8"); await settle();
+	const notice = worker.sent.at(-1) as typeof clip;
+	assert.match(notice.text, /requires attention next/);
+	assert.match(host.widgetLines()![0], /Paused/);
+	const append = async () => {
+		const delta = scenario === "markup" || scenario === "silent-block" ? "\n---\n***\n" : "Buffered B sentence. ";
+		const updated = assistant(text + delta, "pending");
+		const contentIndex = scenario.startsWith("block") || scenario === "silent-block" ? 1 : 0;
+		if (contentIndex) { updated.content[0].text = text; updated.content.push({ type: "text", text: delta }); }
+		await host.emit("message_update", { message: updated, assistantMessageEvent: { type: "text_delta", contentIndex, delta } });
+		await settle();
+	};
+	const growth = scenario.includes("during") || scenario.includes("after") || scenario === "markup" || scenario === "silent-block";
+	if (growth && !scenario.endsWith("after")) await append();
+	worker.emit({ type: "idle", utterance: notice.utterance }); await settle();
+	if (scenario.endsWith("after")) await append();
+	assert.equal(waiting.waitingSessions()[0]?.announced, true);
+	assert.equal(ended.mock.calls.some(call => (call.arguments as unknown[])[0] === clip.utterance), false,
+		"Pause, notice completion and buffered source growth are not whole-message EOF");
+	const cursor = history.resumeSnapshot(true);
+	const cancels = t.mock.method(worker, "cancel");
+	const captures = t.mock.method(PlaybackHistory.prototype, "beginCapture");
+	const releases = t.mock.method(SessionCoordinator.prototype, "releaseSpeech");
+	const acquisitions = t.mock.method(SessionCoordinator.prototype, "tryAcquireSpeech");
+	const sent = worker.sent.length;
+	const pauses = [...worker.pauses];
+	const lines = host.widgetLines();
+	await host.shortcut(key); await settle();
+	const caughtUp = scenario === "caught-up" || scenario === "markup" || scenario === "silent-block";
+	if (caughtUp) {
+		assert.equal(cancels.mock.callCount(), 0, "truly caught-up navigation stays inert after an untracked notice");
+		assert.equal(captures.mock.callCount(), 0);
+		assert.equal(releases.mock.callCount(), 0);
+		assert.equal(acquisitions.mock.callCount(), 0);
+		assert.equal(worker.sent.length, sent);
+		assert.deepEqual(history.resumeSnapshot(true), cursor);
+		assert.deepEqual(worker.pauses, pauses);
+		assert.deepEqual(host.widgetLines(), lines);
+	} else {
+		assert.ok(cancels.mock.callCount() > 0, "unheard audio or buffered eligible text must unfreeze forward navigation");
+		if (scenario.startsWith("block") || (scenario.startsWith("same") && key === "f9")) {
+			assert.equal((worker.sent[sent] as typeof clip)?.text, "Buffered B sentence.");
+		}
+	}
+	assert.equal(host.modelRequests.length, 0);
+});
+
 test("empty streaming header reserves identity, not an eligible counter entry", async t => {
 	const host = await startHost(t);
 	await host.shortcut("f10"); await settle();

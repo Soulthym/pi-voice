@@ -65,7 +65,7 @@ type MessageRecord = PlaybackMessage & {
 	timingsComplete: boolean;
 	cursor?: PlaybackUnit;
 	/** Ephemeral device feedback, never persisted as reusable timing metadata. */
-	confirmed?: { unit: PlaybackUnit; time: number; seconds: number; audioIdentity?: string };
+	confirmed?: { unit: PlaybackUnit; time: number; seconds: number; completedSourceEnd?: number; audioIdentity?: string };
 	/** Relative checkpoints for compatible units, including suffixes without a known absolute start. */
 	units?: Map<string, TimingCheckpoint[]>;
 	/** Full source-array counts, never reconstructed from sparse navigation checkpoints. */
@@ -84,7 +84,7 @@ type Capture = {
 };
 
 type CapturedSegment = {
-	capture: Capture; utterance: number; sourceOffset: number; skipUnits: number;
+	capture: Capture; utterance: number; sourceOffset: number; sourceEnd: number; skipUnits: number;
 	audioStart?: number; audioDuration?: number; audioIdentity?: string;
 	wordOffsets: Set<number>; sourceBase: number; code: boolean;
 	timingSuperseded?: boolean;
@@ -382,7 +382,7 @@ export class PlaybackHistory {
 		const skipUnits = previous?.sourceOffset === sourceOffset ? previous.skipUnits + 1
 			: capture.origin.sourceOffset === sourceOffset ? capture.origin.skipUnits : 0;
 		const tracked: CapturedSegment = {
-			capture, utterance: segment.utterance, sourceOffset, skipUnits, wordOffsets: new Set(),
+			capture, utterance: segment.utterance, sourceOffset, sourceEnd: segment.source.end + capture.origin.sourceOffset, skipUnits, wordOffsets: new Set(),
 			sourceBase: segment.sourceBase ?? 0, code: Boolean(segment.code || segment.codeDescription),
 		};
 		this.#segments.set(segment.id, tracked);
@@ -400,6 +400,7 @@ export class PlaybackHistory {
 			const confirmed = tracked.capture.record.confirmed;
 			if (confirmed?.unit.sourceOffset === tracked.sourceOffset && confirmed.unit.skipUnits === tracked.skipUnits) {
 				confirmed.audioIdentity = undefined;
+				confirmed.completedSourceEnd = undefined;
 			}
 		}
 		tracked.audioStart = normalizedStart;
@@ -723,8 +724,20 @@ export class PlaybackHistory {
 		record.cursor = { sourceOffset: segment.sourceOffset, skipUnits: segment.skipUnits };
 		const seconds = position - segment.audioStart!;
 		if (!estimated) record.confirmed = { unit: { ...record.cursor }, time: capture.baseTime + segment.audioStart!,
-			seconds, audioIdentity: position < segment.audioStart! + segment.audioDuration! ? segment.audioIdentity : undefined };
+			seconds, completedSourceEnd: position >= segment.audioStart! + segment.audioDuration! ? segment.sourceEnd : undefined,
+			audioIdentity: position < segment.audioStart! + segment.audioDuration! ? segment.audioIdentity : undefined };
 		return position;
+	}
+
+	/** Confirmed audio catch-up survives an untracked notice; it is not whole-message EOF. */
+	hasConfirmedTextTail(text: string): boolean {
+		const record = this.#selectedId ? this.#records.get(this.#selectedId) : undefined;
+		const confirmed = record?.confirmed;
+		if (confirmed?.completedSourceEnd === undefined) return false;
+		const stream = new SpeakableStream();
+		const last = [...stream.push(text), ...stream.flush()].at(-1);
+		return last?.kind === "speech" && last.source.start === confirmed.unit.sourceOffset &&
+			last.source.end <= confirmed.completedSourceEnd;
 	}
 
 	/** Follow the foreground capture without inventing a playback tick or resetting its cursor. */
