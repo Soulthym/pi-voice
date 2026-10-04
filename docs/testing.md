@@ -1,6 +1,25 @@
 # Tests
 
-## Current CHECKPOINT — four parent-review roots after f2d418c (undeployed; parent clearance pending)
+## Current CHECKPOINT — two composition fixes after 7ad7417 (undeployed; parent review pending)
+
+Source/test checkpoint **`a4e0453`**: atomic fixes plus regressions in `afffce6` (pending-source retention) and `a4e0453` (silent capture selection). Scope is the remaining compositions of roots 2/3 only; root 1's validated offsets and root 4's accepted clock are unchanged. No worker, transport, protocol, dependency or runtime-setting changes.
+
+**Failing first:** the final eight added cases against archived **`7ad7417`** report **5 failed / 3 passed** (`/tmp/vc2/baseline-final.log`):
+
+| Composition | Exact failure and authoritative state after correction |
+| --- | --- |
+| Live F5 A/B already allocated; original cancel pending; finalization removes A before session insertion; another coordinator waits; F8 starts a paused notice | Explicit Resume emitted **`[]` instead of `["Remaining B block."]`**. `retainSourceContinuation` uses the pending request's source/content index **before clearing `pendingReplay`**, independently of A's missing checkpoint. Current eligible source blocks and their IDs own the remaining queue; neither a removed target's snapshot nor its abandoned async continuation owns B. Notice completion stays paused; explicit Resume plays B once. Wrong cancellation ACK, newer Stop/session/F5 guards remain intact (the latter three already passed the baseline). |
+| Consumed A; separate markup-only B allocated before Pause; real A block EOF; actual waiting-project notice; repeated F9/F10 | Both `---` and empty-heading `# ` cases cancelled **5 times instead of 0**, for each key. `selectCapture` cannot let a silent reservation displace retained **confirmed final-unit consumption**, validated against the selected source's actual logical tail. Pending/unknown code remains eligible; real later text/code unfreezes navigation. Empty captures add no counter entry; paused cursor, manual viewport, lease and unannounced next waiting generation remain unchanged. |
+
+The fixtures assert actual `endUtterance` before relevant EOF: switching to B flushes A; neither an open utterance nor model completion is fabricated as final audio EOF. Initial failing-first run was **5 failed / 0 passed** before adding the three supersession guards (`/tmp/vc2/baseline.log`); these overlapping baselines are not additive.
+
+**Validation correction:** an initially overbroad silent-selection guard broke the unchanged mounted-playbar case in `index-live-progress.test.ts`: an unconfirmed A EOF exposed **`Queued … 0:03 · 3/3`** instead of B's **`Queued … --:-- … current response`**. The guard now preserves only validated consumed context; without that proof, the queued placeholder cannot borrow A's clock. No existing assertion was weakened. That intermediate default run (**1 failure**) is superseded by the frozen runs below.
+
+**Final source-frozen validation:** typecheck passed; focused source/tail/notice/history/clock/viewport **207/207** (`/tmp/vc2/{check-final2,focus-final2}.log`). Full default **1,732 passed / 45 skipped**; installed-native **1,775 passed / 2 skipped**; **1,777 total each, zero failures** (`/tmp/vc2/{default-final2,native-final2}.log`). Full suites ran sequentially under `env -i`, private HOME/TMP/XDG/Pi roots; native overrides select the globally installed agent/TUI/keybinding modules, not repository dependencies. The two native skips are opt-in mpv containers. LSP is unavailable; TypeScript supplies diagnostics. Scoped static reviews, including the final narrowed guard, reported no concrete findings; this is not exhaustive concurrency or parent-clearance proof.
+
+**Limits:** no real inference/provider calls, user cache/state/settings, devices/hardware, network probes, deployment, push or live Pi/SSH/client restart. Root notes, untracked `ISSUES.md` and demos remain untouched. Historical mpv/SSH evidence below was not rerun; these are host-only synthetic fixes. Safe reload and live confirmation remain operator work.
+
+## Historical CHECKPOINT — four parent-review roots after f2d418c (undeployed; clearance pending at that checkpoint)
 
 Source/test checkpoint **`548cc44`**. Nine atomic commits (each below 400 changed lines): `354d4c8`, `0722df7`, `61b955a`, `7ec7256`, `12a25df`, `569c25d`, `c548a7e`, `c907760`, `548cc44`. No worker, worker-client, PCM/cache transport, helper or protocol changes. These corrections supersede the prior scoped review's completion assessment; **parent final review remains pending**.
 
