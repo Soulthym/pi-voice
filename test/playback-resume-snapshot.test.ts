@@ -159,23 +159,30 @@ test("exact boundaries use the next known unit or conservatively repeat a lone E
 	}
 });
 
-for (const estimated of [false, true]) test(`PCM sample-clock EOF tolerates only floating-point roundoff (estimated=${estimated})`, () => {
+for (const samples of [[2400, 16800], [4800, 2400]]) for (const estimated of [false, true])
+test(`PCM sample-clock EOF returns normalized seconds (${samples.join("+")}, estimated=${estimated})`, () => {
 	const { history } = fixture();
 	const rate = 24_000;
-	history.setSegmentAudio(1, 0, 2400 / rate, "estimated", "pcm-1");
-	history.setSegmentAudio(2, 2400 / rate, 16800 / rate, "estimated", "pcm-2");
-	assert.equal(history.setPlayback(1, 0.05, estimated), true);
+	const [first, second] = samples;
+	const raw = (first + second) / rate, normalized = first / rate + second / rate;
+	history.setSegmentAudio(1, 0, first / rate, "estimated", "pcm-1");
+	history.setSegmentAudio(2, first / rate, second / rate, "estimated", "pcm-2");
+	assert.equal(history.setPlayback(1, 0, estimated), 0);
+	assert.equal(history.setPlayback(1, 0.05, estimated), 0.05);
+	assert.equal(history.resumeSnapshot()?.confirmedPosition, estimated ? undefined : 0.05);
 	const before = history.resumeSnapshot();
-	for (const position of [19201 / rate, 0.800000001]) {
+	for (const position of [raw + 1 / rate, raw + 1e-9]) {
 		assert.equal(history.setPlayback(1, position, estimated), false);
 		assert.deepEqual(history.resumeSnapshot(), before);
 	}
-	assert.equal(history.setPlayback(1, (2400 + 16800) / rate, estimated), true);
+	assert.equal(history.setPlayback(1, raw, estimated), normalized);
+	assert.equal(history.setPlayback(1, raw, estimated), normalized, "normalize before rejecting reordered feedback");
 	assert.equal(history.resumeSnapshot()?.sourceOffset, 16);
 	assert.equal(history.resumeSnapshot()?.audioOffset, undefined, "EOF conservatively repeats the unit");
-	assert.equal(history.resumeSnapshot()?.position, 2400 / rate + 16800 / rate);
+	assert.equal(history.resumeSnapshot()?.position, normalized);
+	assert.equal(history.resumeSnapshot()?.confirmedPosition, undefined, "EOF has no reusable audio offset");
 	const eof = history.resumeSnapshot();
-	assert.equal(history.setPlayback(1, 0.4, estimated), false);
+	assert.equal(history.setPlayback(1, 0.1, estimated), false);
 	assert.deepEqual(history.resumeSnapshot(), eof);
 });
 
@@ -184,7 +191,7 @@ test("sample-sized gaps remain invalid while rounded shared boundaries select th
 	const end = 2400 / 24_000 + 16800 / 24_000;
 	history.setSegmentAudio(1, 0, end, "estimated", "pcm-1");
 	history.setSegmentAudio(2, 0.8, 0.1, "estimated", "pcm-2");
-	assert.equal(history.setPlayback(1, end, false), true);
+	assert.equal(history.setPlayback(1, end, false), 0.8);
 	assert.equal(history.resumeSnapshot()?.sourceOffset, 16);
 	assert.deepEqual(history.resumeSnapshot()?.audioOffset, { seconds: 0, audioIdentity: "pcm-2" });
 	history.registerSegment({ id: 3, utterance: 1, text: "Third", source: { start: 20, end: message.text.length } });
@@ -192,6 +199,19 @@ test("sample-sized gaps remain invalid while rounded shared boundaries select th
 	const before = history.resumeSnapshot();
 	assert.equal(history.setPlayback(1, 0.9 + 1 / 24_000, false), false);
 	assert.deepEqual(history.resumeSnapshot(), before);
+});
+
+test("normalizing estimated EOF preserves the earlier confirmed audio offset", () => {
+	const { history } = fixture();
+	history.setSegmentAudio(1, 0, 0.2, "estimated", "pcm-1");
+	history.setSegmentAudio(2, 0.2, 0.1, "estimated", "pcm-2");
+	assert.equal(history.setPlayback(1, 0.05, false), 0.05);
+	const confirmed = history.resumeSnapshot();
+	assert.equal(history.setPlayback(1, 0.3, true), 0.2 + 0.1);
+	assert.equal(history.resumeSnapshot()?.position, 0.2 + 0.1);
+	assert.equal(history.resumeSnapshot()?.confirmedPosition, confirmed?.confirmedPosition);
+	assert.deepEqual(history.resumeSnapshot()?.audioOffset, confirmed?.audioOffset);
+	assert.equal(history.resumeSnapshot()?.sourceOffset, 0);
 });
 
 test("canonicalization can snapshot a specific paused record without selecting it", () => {

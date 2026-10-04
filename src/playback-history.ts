@@ -687,16 +687,14 @@ export class PlaybackHistory {
 		}
 	}
 
-	/** Accept a validated tick; legacy callers remain estimated without explicit device feedback. */
-	setPlayback(utterance: number, position: number, estimated = true): boolean {
+	/** Return normalized utterance seconds (including zero), or false without mutation.
+	 * Legacy callers remain estimated without explicit device feedback. */
+	setPlayback(utterance: number, position: number, estimated = true): number | false {
 		const capture = this.#utterances.get(utterance);
 		if (!capture?.valid || capture.epoch !== this.#playbackEpoch || this.#finishedUtterances.has(utterance) || !Number.isFinite(position) || position < 0 ||
 			!Number.isFinite(capture.baseTime + position) || capture.baseTime < 0 ||
 			(this.#activeUtterance !== undefined && utterance < this.#activeUtterance)) return false;
 		const record = capture.record;
-		const confirmedPosition = record.confirmed && record.confirmed.time + record.confirmed.seconds;
-		if (this.#activeUtterance === utterance && capture.baseTime + position <
-			(estimated ? record.position : confirmedPosition ?? 0)) return false;
 		// Sample-count clocks and sums of unit durations can differ by a ULP.
 		// This is relative roundoff tolerance, not permission to cross a sample-sized gap.
 		const atBoundary = (boundary: number): boolean => Number.isFinite(boundary) && Math.abs(position - boundary) <=
@@ -715,6 +713,9 @@ export class PlaybackHistory {
 			!Number.isInteger(segment.skipUnits) || segment.skipUnits < 0) return false;
 		if (atBoundary(segment.audioStart!)) position = segment.audioStart!;
 		else if (atBoundary(segment.audioStart! + segment.audioDuration!)) position = segment.audioStart! + segment.audioDuration!;
+		const confirmedPosition = record.confirmed && record.confirmed.time + record.confirmed.seconds;
+		if (!Number.isFinite(capture.baseTime + position) || (this.#activeUtterance === utterance && capture.baseTime + position <
+			(estimated ? record.position : confirmedPosition ?? 0))) return false;
 		// Validation precedes selection too: a bad queued tick cannot retire the audible utterance.
 		this.#activeUtterance = utterance;
 		this.#selectedId = record.id;
@@ -723,7 +724,7 @@ export class PlaybackHistory {
 		const seconds = position - segment.audioStart!;
 		if (!estimated) record.confirmed = { unit: { ...record.cursor }, time: capture.baseTime + segment.audioStart!,
 			seconds, audioIdentity: position < segment.audioStart! + segment.audioDuration! ? segment.audioIdentity : undefined };
-		return true;
+		return position;
 	}
 
 	/** Follow the foreground capture without inventing a playback tick or resetting its cursor. */

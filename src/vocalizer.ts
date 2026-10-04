@@ -75,7 +75,7 @@ export class Vocalizer {
 
 	constructor(
 		getConfig: () => VoiceConfig,
-		private readonly onEvent: (event: WorkerEvent) => void | boolean,
+		private readonly onEvent: (event: WorkerEvent) => void | boolean | number,
 		describeCode?: CodeDescriber,
 		onNarrationSegment?: (segment: NarrationSegment) => void,
 		worker: VoiceWorker | undefined = undefined,
@@ -91,9 +91,15 @@ export class Vocalizer {
 		this.#worker = worker ?? new VoiceWorkerClient(event => {
 			// Tracked playback must pass source/timing validation before changing phase
 			// or foreground position; non-playback events still publish metadata first.
-			if (event.type === "playback" && onEvent(event) === false) return;
-			this.handleWorkerEvent(event);
-			if (event.type !== "playback") onEvent(event);
+			if (event.type === "playback") {
+				const position = onEvent(event);
+				if (position === false) return;
+				// Tracked callbacks return history's normalized clock; untracked prompts keep theirs.
+				this.handleWorkerEvent(typeof position === "number" ? { ...event, position } : event);
+			} else {
+				this.handleWorkerEvent(event);
+				onEvent(event);
+			}
 		});
 		this.#describeCode = describeCode;
 		this.#onNarrationSegment = onNarrationSegment;

@@ -1861,7 +1861,7 @@ export default async function (pi: ExtensionAPI) {
 	};
 	const playbackUtterances = new Set<number>();
 	let lastPlaybackTick: { utterance: number; position: number } | undefined;
-	const handleWorkerEvent = (event: WorkerEvent): void | boolean => {
+	const handleWorkerEvent = (event: WorkerEvent): void | boolean | number => {
 		if (event.type === "remote-handle") {
 			try {
 				retainRecoveryHandle("output", event.output, event.id, event.bootId, event.rebootSafe, event.deviceId, undefined, undefined, event.nativeWatchdog);
@@ -1949,11 +1949,12 @@ export default async function (pi: ExtensionAPI) {
 			case "playback":
 				if (!playbackUtterances.has(event.utterance)) return; // Untracked prompts have no history checkpoint.
 				if (event.utterance < (lastPlaybackTick?.utterance ?? 0) || pendingReplay?.waiting || playbackPaused) return false;
-				if (!playbackHistory.setPlayback(event.utterance, event.position, event.estimated === true)) return false;
-				lastPlaybackTick = event;
-				narration.setPlayback(event.utterance, event.position);
+				const position = playbackHistory.setPlayback(event.utterance, event.position, event.estimated === true);
+				if (position === false) return false;
+				lastPlaybackTick = { ...event, position };
+				narration.setPlayback(event.utterance, position);
 				requestPlaybackTimeline();
-				return;
+				return position;
 			case "alignment-error":
 				// Overload/failure leaves duration-weighted estimates, not promised refinement.
 				playbackHistory.setTimingQuality(event.segmentId, event.quality ?? "estimated");
