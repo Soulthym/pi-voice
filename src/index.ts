@@ -832,7 +832,13 @@ export default async function (pi: ExtensionAPI) {
 		const streamingTail = liveTurnNarrationActive && !ownerTurnEnded && vocalizer.playbackUtterance === undefined &&
 			latest !== undefined && canonical(selected?.id) === latest && !!selected &&
 			(!snapshot.hasLiveContent || (!!liveBlock && liveBlock === snapshot.sourceBlocks.at(-1))) &&
-			playbackHistory.hasConfirmedTextTail(liveBlock?.text ?? selected.text);
+			playbackHistory.hasConfirmedTextTail(liveBlock?.text ?? selected.text, (block, sourceEnd) => {
+				const messages = config.codeDescriptionContext === "conversation" && liveSource && liveBlock
+					? assistantCodeContext(liveSource.before, liveSource.assistant, liveBlock.contentIndex, sourceEnd) ?? [] : [];
+				const key = descriptionCacheKey(ctx, block, structuredContextIdentity(messages));
+				const plan = codeDescriptionCache.get(key) ?? codeDescriptionFallbacks.get(key);
+				return !!(plan?.omitted || (!plan && codeDescriptionOmissions.has(key)));
+			});
 		const waiting = !speechBlocked && !pausedForAttention && !pendingReplay && !attentionSuppressed &&
 			(drained || streamingTail || (explicit && playbackTailIntent && (lastOwnerUtterance === undefined || announcedBoundary) &&
 				(!liveTurnNarrationActive || playbackTailSourceEnd >= narration.sourceEnd)));

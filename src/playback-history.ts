@@ -1,4 +1,4 @@
-import { SpeakableStream } from "./speakable.js";
+import { SpeakableStream, type FencedCodeBlock } from "./speakable.js";
 import type { NarrationSegment, TimingQuality } from "./narration-progress.js";
 
 export interface PlaybackMessage {
@@ -381,8 +381,13 @@ export class PlaybackHistory {
 		const previous = capture.segments.at(-1);
 		const skipUnits = previous?.sourceOffset === sourceOffset ? previous.skipUnits + 1
 			: capture.origin.sourceOffset === sourceOffset ? capture.origin.skipUnits : 0;
+		// Description chunks have zero-width source ranges. Only their final chunk
+		// can confirm consumption through the code block, never an earlier chunk.
+		const description = segment.codeDescription;
+		const sourceEnd = description && description.offset + segment.text.length === description.text.length
+			? description.blockSource.end : segment.source.end;
 		const tracked: CapturedSegment = {
-			capture, utterance: segment.utterance, sourceOffset, sourceEnd: segment.source.end + capture.origin.sourceOffset, skipUnits, wordOffsets: new Set(),
+			capture, utterance: segment.utterance, sourceOffset, sourceEnd: sourceEnd + capture.origin.sourceOffset, skipUnits, wordOffsets: new Set(),
 			sourceBase: segment.sourceBase ?? 0, code: Boolean(segment.code || segment.codeDescription),
 		};
 		this.#segments.set(segment.id, tracked);
@@ -730,13 +735,14 @@ export class PlaybackHistory {
 	}
 
 	/** Confirmed audio catch-up survives an untracked notice; it is not whole-message EOF. */
-	hasConfirmedTextTail(text: string): boolean {
+	hasConfirmedTextTail(text: string, isCodeOmitted?: (block: FencedCodeBlock, sourceEnd: number) => boolean): boolean {
 		const record = this.#selectedId ? this.#records.get(this.#selectedId) : undefined;
 		const confirmed = record?.confirmed;
 		if (confirmed?.completedSourceEnd === undefined) return false;
 		const stream = new SpeakableStream();
-		const last = [...stream.push(text), ...stream.flush()].at(-1);
-		return last?.kind === "speech" && last.source.start === confirmed.unit.sourceOffset &&
+		const last = [...stream.push(text), ...stream.flush()].findLast(item =>
+			item.kind === "speech" || !isCodeOmitted?.(item.block, item.source.end));
+		return !!last && last.source.start === confirmed.unit.sourceOffset &&
 			last.source.end <= confirmed.completedSourceEnd;
 	}
 

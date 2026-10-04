@@ -11,13 +11,13 @@ import { assistant, FakeVoiceHost, MockedVoiceWorkerClient } from "./helpers/fak
 mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: MockedVoiceWorkerClient } });
 const settle = async () => { for (let i = 0; i < 16; i++) await new Promise(resolve => setImmediate(resolve)); await new Promise(resolve => setTimeout(resolve, 120)); };
 
-async function startHost(t: TestContext) {
+async function startHost(t: TestContext, completeModel?: FakeVoiceHost["completeModel"]) {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "tail-state-"));
 	const env = { PI_VOICE_CONFIG: path.join(root, "voice.json"), PI_VOICE_COORDINATOR_DIR: path.join(root, "coordinator"), PI_VOICE_DEVICE_DIR: path.join(root, "devices") };
 	const old = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
 	Object.assign(process.env, env);
-	await fs.writeFile(env.PI_VOICE_CONFIG, JSON.stringify({ enabled: true, mode: "assistant", input: "disabled", output: "local", audioCache: false, codeDescriptionPreprocessConcurrency: 0, timingPreprocessConcurrency: 0 }));
-	const host = new FakeVoiceHost(root, "tail-state");
+	await fs.writeFile(env.PI_VOICE_CONFIG, JSON.stringify({ enabled: true, mode: "assistant", input: "disabled", output: "local", audioCache: false, codeDescriptionPreprocessConcurrency: 0, timingPreprocessConcurrency: 0, ...(completeModel ? { codeNarration: "summary" } : {}) }));
+	const host = new FakeVoiceHost(root, "tail-state", completeModel);
 	t.after(async () => {
 		await host.shutdown();
 		for (const [key, value] of Object.entries(old)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
@@ -363,4 +363,74 @@ test("empty streaming header reserves identity, not an eligible counter entry", 
 	await host.emit("message_update", { message, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: message.content[0].text } });
 	await settle();
 	assert.match(host.widgetLines()![0], / · 2\/2(?: ·|\s)/, "first eligible content creates exactly one real entry");
+});
+
+for (const scenario of ["consumed", "estimated", "partial", "first-chunk", "new-prose", "new-code", "omitted-after-prose", "omitted-after-code"] as const) for (const key of ["f9", "f10"]) test(`paused notice retains actual code-description catch-up: ${scenario}, ${key}`, async t => {
+	const host = await startHost(t, async request => ({ role: "assistant", stopReason: "stop", content: [{ type: "text",
+		text: JSON.stringify(request.context.messages).includes("omitMe") ? "" : "Defines a value. Uses that value." }] }));
+	const code = "```ts\nconst value = 1;\n```\n";
+	const omitted = "```ts\nomitMe();\n```\n";
+	const text = scenario === "omitted-after-prose" ? "Final prose.\n" + omitted
+		: code + (scenario === "omitted-after-code" ? omitted : "");
+	const registered = t.mock.method(PlaybackHistory.prototype, "registerSegment");
+	const ended = t.mock.method(MockedVoiceWorkerClient.prototype, "endUtterance");
+	const message = assistant(text, "pending");
+	await host.emit("message_start", { message });
+	await host.emit("message_update", { message, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: text } });
+	await settle();
+	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
+	type Clip = { utterance: number; segmentId: number; text: string };
+	const last = worker.sent.at(-1) as Clip;
+	const clips = (worker.sent as Clip[]).filter(clip => clip.utterance === last.utterance);
+	assert.deepEqual(clips.map(clip => clip.text), scenario === "omitted-after-prose" ? ["Final prose."] : ["Defines a value.", "Uses that value."]);
+	if (scenario !== "omitted-after-prose") {
+		const segment = registered.mock.calls.at(-1)!.arguments[0];
+		assert.equal(segment.source.start, segment.source.end, "real code-description segments have zero-width source ranges");
+		assert.ok(segment.codeDescription && segment.codeDescription.offset > 0, "the final description chunk carries provenance");
+	}
+	for (const utterance of new Set((worker.sent as Clip[]).filter(clip => clip.utterance < last.utterance).map(clip => clip.utterance))) worker.emit({ type: "idle", utterance });
+	for (const [i, clip] of clips.entries()) {
+		if (scenario !== "first-chunk" || i === 0) worker.emit({ ...clip, type: "segment-audio", start: i * 2, duration: 2 });
+	}
+	const history = registered.mock.calls.at(-1)!.this as PlaybackHistory;
+	worker.emit({ type: "playback", utterance: last.utterance,
+		position: scenario === "first-chunk" ? 2 : clips.length * 2 - (scenario === "partial" ? 0.2 : 0), estimated: scenario === "estimated" });
+	await settle();
+	const waiting = new SessionCoordinator(path.join(host.cwd, "waiting"), "waiting");
+	waiting.start(); waiting.markWaiting({ kind: "intentional_local" });
+	t.after(() => waiting.shutdown());
+	await host.shortcut("f8"); await settle();
+	const notice = worker.sent.at(-1) as Clip;
+	assert.match(notice.text, /requires attention next/);
+	worker.emit({ type: "idle", utterance: notice.utterance }); await settle();
+	if (scenario.startsWith("new-")) {
+		const delta = scenario === "new-prose" ? "New available prose.\n" : "```ts\nnewCode();\n```\n";
+		await host.emit("message_update", { message: assistant(text + delta, "pending"), assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta } });
+		await settle();
+	}
+	assert.equal(ended.mock.calls.some(call => (call.arguments as unknown[])[0] === last.utterance), false, "description source stream remains OPEN");
+	assert.match(host.widgetLines()![0], /Paused/);
+	const cursor = history.resumeSnapshot(true);
+	const lines = host.widgetLines();
+	const pauses = [...worker.pauses];
+	const sent = worker.sent.length;
+	const requests = host.modelRequests.length;
+	const cancels = t.mock.method(worker, "cancel");
+	const captures = t.mock.method(PlaybackHistory.prototype, "beginCapture");
+	const releases = t.mock.method(SessionCoordinator.prototype, "releaseSpeech");
+	const acquisitions = t.mock.method(SessionCoordinator.prototype, "tryAcquireSpeech");
+	await host.shortcut(key); await settle();
+	if (scenario === "consumed" || scenario.startsWith("omitted-")) {
+		assert.equal(cancels.mock.callCount(), 0, "confirmed final description/prose with no eligible suffix stays inert after the notice");
+		assert.equal(captures.mock.callCount(), 0);
+		assert.equal(releases.mock.callCount(), 0);
+		assert.equal(acquisitions.mock.callCount(), 0);
+		assert.equal(worker.sent.length, sent);
+		assert.deepEqual(history.resumeSnapshot(true), cursor);
+		assert.deepEqual(host.widgetLines(), lines);
+		assert.deepEqual(worker.pauses, pauses);
+	} else assert.ok(cancels.mock.callCount() > 0, "estimated, unconsumed chunks and new available source cannot prove catch-up");
+	assert.equal(host.modelRequests.length, requests + (scenario === "new-code" && key === "f9" ? 1 : 0),
+		"only navigating into new code may request a mocked description");
+	assert.ok(requests > 0, "fixture exercised mocked description generation, not fabricated history segments");
 });
