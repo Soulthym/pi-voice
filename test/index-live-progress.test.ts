@@ -262,9 +262,9 @@ test("mounted playbar keeps a queued live target through background preparation 
 	streaming.content.push({ type: "text", text: "```\n" });
 	await host.emit("message_update", { message: streaming, assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: streaming.content[1].text } });
 	await settle();
-	assert.match(host.widgetLines()![0]!, /Playing.*0:01.*3\/4/, "preparing B cannot borrow A's phase or replace its audible context");
+	assert.match(host.widgetLines()![0]!, /Playing.*0:01.*3\/3/, "an empty code fence is not yet eligible; preparing B cannot replace A's audible context");
 	worker.emit({ type: "idle", utterance: first.utterance }); await settle();
-	assert.match(host.widgetLines()![0]!, /Queued.*\[━+\] --:--.*4\/4/);
+	assert.match(host.widgetLines()![0]!, /Queued.*\[━+\] --:--.*current response/, "B has no ordinal until it contains eligible content");
 	assert.doesNotMatch(host.widgetLines()![0]!, /0:03/, "B never borrows A's completed clock");
 	assertFrame("source-block handoff without a B utterance");
 	const suffix = "```\nSecond block sentence. ";

@@ -1,5 +1,11 @@
 # Pi Voice — implemented agreements and live-validation handoff
 
+## Tail follow-up — pending integration/review (UNDEPLOYED)
+
+- Shared navigation/display policy distinguishes drained latest audio from playback and viewport position; caught-up F9/F10 preserve transport/lease/cursor intent. Tail boundaries survive canonical identity adoption but do not hide later eligible entries. Empty reservations no longer increment totals.
+- Corrected event-sequence regressions against `1e229fc`: **9 failed / 4 passed**, now **13/13**. Typecheck passed; broad focus **292 passed / 4 skipped**, installed-native focus **327/327**. No new full suites; prior full-suite figures below remain checkpoint-specific. [Evidence and fixture correction](docs/testing.md#tail-follow-up--pending-integration-and-independent-review).
+- Literal backward-one-message behavior and the exact intermittent live counter path remain unconfirmed; no claim of live resolution. Independent review and integrated full validation remain parent work. No attention/admission/transport/helper changes, live operations or root checklist edits.
+
 ## Current delivery — replay admission root correction (UNDEPLOYED)
 
 - Final-review correction after `e433933` removes the own-flight bypass: stop/rebind/state publication finishes before replay resumes outside automatic flights/manual selection. All requests share current-barrier and pending-event checks; observed routing revisions fence deferred events without heartbeat reranking. Automatic waiting requests preserve their source, not a stale history bookmark.

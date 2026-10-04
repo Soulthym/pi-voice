@@ -2,6 +2,13 @@
 
 Updated incrementally. Companion: `PLAN.md`. Reorganize freely while preserving evidence and disposition.
 
+## Tail follow-up — pending integration/review, UNDEPLOYED
+
+- A flushed latest utterance can finish before `turn_end`. The old display showed live N/N while navigation still ran forward actions; finalized Tail also let F10 cancel transport unnecessarily. Shared explicit/drained Tail state now gates forward actions and display. Boundary identity is canonicalized and compared with the full eligible timeline, not the viewport or selected history prefix.
+- Empty streaming headers and markup-only reservations were counted before becoming eligible. Count uses the same speakable eligibility as completed entries. Two old empty-code-fence counter expectations changed intentionally; existing audible source/clock/pause and 49/50 assertions remain.
+- Final regression baseline against `1e229fc`: **9 failures / 4 passes**; current **13/13**. Removed invalid exploratory EOF-before-`endUtterance` fixtures and reran the corrected suite against baseline. Exact live backward-one-message jump and intermittent 56/56 path remain unknown; do not mark the user's report resolved from these results alone.
+- Typecheck passed; broad focus **292 passed / 4 skipped**, installed-native focus **327/327**. Full suites, independent review and live confirmation remain outstanding for integration. [Detailed evidence](docs/testing.md#tail-follow-up--pending-integration-and-independent-review). No attention/admission/transport changes or live operations; root TODO/HANDOFF, ISSUES and demos untouched.
+
 ## Current replay admission root correction — UNDEPLOYED
 
 - Final review of `bea1612` / `e433933` found two remaining P1s: post-activation disconnect released a new lease while logical ownership stayed true (attention then discarded WAIT intent), and dormant automatic replay awaited cancellation inside its own routing flight, bypassing newer pending events.

@@ -757,36 +757,58 @@ export default async function (pi: ExtensionAPI) {
 	let displayedCodeProgress: PreprocessingProgress | undefined;
 	let displayedTimingProgress: PreprocessingProgress | undefined;
 	let preprocessingPaint: ReturnType<typeof setTimeout> | undefined;
+	const playbackTimeline = (ctx: ExtensionContext) => {
+		// Count raw eligible sources, never the timing/identity-hydrated selection prefix.
+		const completed = completedAssistantMessages(ctx, config.mode);
+		const sourceBlocks = liveSource ? eligibleAssistantBlocks(liveSource.assistant, config.mode).filter(block => hasSpeakableAudio(block.text)) : [];
+		const sourceIds = new Map([...liveBlockIds].filter(([index]) => sourceBlocks.some(block => block.contentIndex === index)));
+		const provisional = livePlaybackId ?? playbackHistory.status(vocalizer.playbackUtterance)?.messageId;
+		if (!sourceIds.size && sourceBlocks.length && provisional?.startsWith("live:")) {
+			sourceIds.set(sourceBlocks[0].contentIndex, provisional);
+		}
+		const liveIds = (liveSource && !liveSource.final) || pendingCanonicalizations.size ? [...sourceIds.values()] : [];
+		// Session insertion can precede canonicalization. Resolve aliases for counting
+		// without preparing render identities or disturbing the audible capture.
+		const aliases = new Map<string, string>();
+		if (liveSource) for (const [index, id] of sourceIds) {
+			const saved = completed.findLast(message => message.contentIndex === index &&
+				!liveSource!.existingEntries.has(message.entryId) &&
+				message.text === sourceBlocks.find(block => block.contentIndex === index)?.text);
+			if (saved) aliases.set(id, saved.id);
+		}
+		const timeline = [...new Set([...completed.map(message => message.id), ...liveIds.map(id => aliases.get(id) ?? id)])];
+		return { completed, timeline, aliases, hasLiveContent: sourceBlocks.length > 0 };
+	};
+
+	// Audio can catch up before the model finishes or the session saves its source.
+	// Keep forward navigation and the waiting counter on the same chronology.
+	const playbackTailState = (ctx: ExtensionContext, snapshot = playbackTimeline(ctx)) => {
+		const latest = snapshot.timeline.at(-1);
+		const canonical = (id: string | undefined) => id === undefined ? undefined : snapshot.aliases.get(id) ?? id;
+		const explicit = navigationTail !== undefined && canonical(navigationTail.id) === latest;
+		const drained = liveTurnNarrationActive && playbackPhase === "idle" &&
+			((!snapshot.hasLiveContent && lastOwnerUtterance === undefined && narration.sourceEnd === 0) ||
+				(canonical(playbackHistory.selected()?.id) === latest && lastOwnerUtterance !== undefined &&
+					completedOwnerUtterance === lastOwnerUtterance && narration.consumedSourceEnd >= narration.sourceEnd));
+		const waiting = !speechBlocked && !pausedForAttention && !pendingReplay && !attentionSuppressed &&
+			(drained || (explicit && playbackTailIntent && lastOwnerUtterance === undefined &&
+				(!liveTurnNarrationActive || playbackTailSourceEnd >= narration.sourceEnd)));
+		return { atTail: explicit || drained, waiting };
+	};
+
 	const refreshProgressWidget = (paintPreprocessing = false): void => {
 		const ctx = activeContext;
 		if (!ctx) return;
 		try {
-			// Count raw eligible sources, never the timing/identity-hydrated selection prefix.
-			const completed = completedAssistantMessages(ctx, config.mode);
-			const sourceIds = new Map(liveBlockIds);
-			const provisional = livePlaybackId ?? playbackHistory.status(vocalizer.playbackUtterance)?.messageId;
-			if (!sourceIds.size && liveSource && provisional?.startsWith("live:")) {
-				sourceIds.set(eligibleAssistantBlocks(liveSource.assistant, config.mode)[0]?.contentIndex ?? 0, provisional);
-			}
-			const liveIds = (liveSource && !liveSource.final) || pendingCanonicalizations.size ? [...sourceIds.values()] : [];
-			// Session insertion can precede canonicalization. Resolve aliases for counting
-			// without preparing render identities or disturbing the audible capture.
-			const aliases = new Map<string, string>();
-			const sourceBlocks = liveSource ? eligibleAssistantBlocks(liveSource.assistant, config.mode) : [];
-			if (liveSource) for (const [index, id] of sourceIds) {
-				const saved = completed.findLast(message => message.contentIndex === index &&
-					!liveSource!.existingEntries.has(message.entryId) &&
-					message.text === sourceBlocks.find(block => block.contentIndex === index)?.text);
-				if (saved) aliases.set(id, saved.id);
-			}
-			const timeline = [...new Set([...completed.map(message => message.id), ...liveIds.map(id => aliases.get(id) ?? id)])];
+			const snapshot = playbackTimeline(ctx);
+			const { completed, timeline, aliases } = snapshot;
 			const unreadWaiting = (speechBlocked && blockedMessageHasSpeech) || (pausedForAttention && !!waitingSource);
 			const activePlayback = handoffConnecting || playbackPaused || (!inputInProgress && !attentionSuppressed && (unreadWaiting || !!pendingReplay || playbackTailIntent ||
 				(ownsSpeech && (speechPurpose === "turn" || speechPurpose === "replay") &&
 					(!ownerTurnEnded || (lastOwnerUtterance !== undefined && completedOwnerUtterance !== lastOwnerUtterance)))));
-			const waitingAtTail = playbackTailIntent && !speechBlocked && !unreadWaiting && !liveTurnNarrationActive && lastOwnerUtterance === undefined && !pendingReplay;
+			const waitingAtTail = playbackTailState(ctx, snapshot).waiting;
 			const tailMessages = waitingAtTail ? completed : [];
-			const tailId = waitingAtTail && pendingCanonicalizations.size > 0 ? [...liveBlockIds.values()].at(-1) : tailMessages.at(-1)?.id;
+			const tailId = waitingAtTail ? timeline.at(-1) : undefined;
 			const blockedUnread = unreadWaiting && vocalizer.playbackUtterance === undefined && !playbackPaused && !pendingReplay && !inputInProgress;
 			if (liveTurnNarrationActive && !playbackPaused && !pendingReplay && !blockedUnread) {
 				playbackHistory.selectCapture(vocalizer.playbackUtterance);
@@ -808,7 +830,7 @@ export default async function (pi: ExtensionAPI) {
 					: completed.at(-1)?.id;
 				// Playback chronology, never the transcript viewport or Alt+T follow setting.
 				const live = activePlayback && !handoffConnecting && !speechBlocked && !unreadWaiting && !playbackPaused && !pendingReplay?.paused &&
-					(!latest || playback.messageId === latest || !playback.messageId || (pendingCanonicalizations.size > 0 && [...liveBlockIds.values()].at(-1) === playback.messageId)) &&
+					(waitingAtTail || !latest || playback.messageId === latest || !playback.messageId || (pendingCanonicalizations.size > 0 && [...liveBlockIds.values()].at(-1) === playback.messageId)) &&
 					!pendingReplay && playbackPhase === "idle" && (waitingAtTail || ((playbackTailIntent || (liveTurnNarrationActive && !ownerTurnEnded)) &&
 						Math.max(narration.consumedSourceEnd, playbackTailIntent ? playbackTailSourceEnd : 0) >= narration.sourceEnd)) && playback.position >= playback.duration;
 				const known = playback.hasTimings && playback.timingsComplete && playback.duration > 0 &&
@@ -1364,7 +1386,7 @@ export default async function (pi: ExtensionAPI) {
 	let bottomPinned = false;
 	let atTranscriptTail = false;
 	// The chronological cursor's Tail is distinct from the viewport following its end.
-	let navigationAtTail = false;
+	let navigationTail: { id?: string } | undefined;
 	let followHintVisible = false;
 	const markdownLineCache = new Map<string, number>();
 	let belowCacheKey = "";
@@ -2226,7 +2248,7 @@ export default async function (pi: ExtensionAPI) {
 			const pendingLiveEnd = liveTurnNarrationActive && pendingCanonicalizations.size > 0 && selected !== undefined &&
 				selected === [...liveBlockIds.values()].at(-1);
 			if ((latest && (speechPurpose === "turn" || speechPurpose === "replay") && latest.id === selected) || pendingLiveEnd) {
-				navigationAtTail = true;
+				navigationTail = { id: selected };
 				playbackTailIntent = true;
 			}
 			releaseSpeechOwnership(true);
@@ -2990,7 +3012,7 @@ export default async function (pi: ExtensionAPI) {
 
 	const previewPlaybackTarget = (target: PlaybackTarget, explicit = true): void => {
 		playbackTailIntent = false;
-		navigationAtTail = false;
+		navigationTail = undefined;
 		playbackUtterances.clear();
 		lastPlaybackTick = undefined;
 		narration.setCompletedText(target.text, target.messageType, target.contentIndex, target.displayOffset);
@@ -3466,6 +3488,7 @@ export default async function (pi: ExtensionAPI) {
 				if (!completed) continue;
 				playbackHistory.rename(target.id, completed);
 				if (livePlaybackId === target.id) livePlaybackId = completed.id;
+				if (navigationTail?.id === target.id) navigationTail.id = completed.id;
 				if (pendingReplay?.target.id === target.id) Object.assign(pendingReplay.target, completed);
 				if (blockIds.get(target.contentIndex) === target.id) blockIds.set(target.contentIndex, completed.id);
 				const queued = queuedPausedMessages.find(message => message.id === target.id);
@@ -4532,7 +4555,7 @@ export default async function (pi: ExtensionAPI) {
 				refreshStatus();
 				return;
 			}
-			navigationAtTail = false;
+			navigationTail = undefined;
 			liveCaptureOrigin = 0;
 			ownerTurnEnded = false;
 			completedOwnerUtterance = undefined;
@@ -4732,7 +4755,7 @@ export default async function (pi: ExtensionAPI) {
 		if (config.enabled && !attentionSuppressed && config.mode === "yield" && completedTurn) {
 			const text = assistantText(event.message);
 			if (text && stopReason !== "toolUse" && acquireSpeech("turn")) {
-				navigationAtTail = false;
+				navigationTail = undefined;
 				const messages = syncPlaybackMessages(ctx);
 				narration.begin();
 				let firstBlock = true;
@@ -4848,9 +4871,10 @@ export default async function (pi: ExtensionAPI) {
 
 	// Preview raw source before contextual identities yield or device acquisition waits.
 	const previewHistoricalTarget = (ctx: ExtensionContext, movement: -1 | 0 | 1, automatic = false): PlaybackTarget | undefined => {
-		if (navigationAtTail && movement === 1) return;
+		const { atTail } = playbackTailState(ctx);
+		if (atTail && movement === 1) return;
 		const branch = completedBranch(ctx);
-		const fromTail = movement === -1 && navigationAtTail;
+		const fromTail = movement === -1 && atTail;
 		const selected = fromTail || (movement === 0 && pausedForAttention) ? undefined : playbackHistory.selected();
 		const liveMessages = liveNavigationMessages();
 		const liveIndex = liveMessages.findIndex(message => message.id === selected?.id);
@@ -5000,11 +5024,9 @@ export default async function (pi: ExtensionAPI) {
 
 	const stepSentence = async (ctx: ExtensionContext, direction: -1 | 1, fromPrevious = false, navigation?: PlaybackHistory): Promise<void> => {
 		if (!requireEnabledVoice(ctx)) return;
-		if (navigationAtTail && direction > 0) {
-			if (liveSource && !liveSource.final) followTranscriptTail(ctx);
-			else scrollToBottom(ctx);
-			return;
-		}
+		const { atTail, waiting } = playbackTailState(ctx);
+		if (direction > 0 && waiting) return;
+		if (direction > 0 && atTail) { followTranscriptTail(ctx); return; }
 		const liveMessages = liveNavigationMessages();
 		const messages = [...completedAssistantMessages(ctx, config.mode, false), ...liveMessages];
 		const history = navigation ?? new PlaybackHistory();
@@ -5012,7 +5034,7 @@ export default async function (pi: ExtensionAPI) {
 			history.sync(messages);
 			const cursor = playbackHistory.resumeTarget();
 			const current = messages.find(message => message.id === cursor?.id);
-			if (!navigationAtTail && cursor && current && (current.text === cursor.text || liveMessages.some(live => live.id === cursor.id))) {
+			if (!atTail && cursor && current && (current.text === cursor.text || liveMessages.some(live => live.id === cursor.id))) {
 				history.beginCapture(cursor.id, current.text, cursor.time, false, cursor.sourceOffset, cursor.skipUnits ?? 0);
 			}
 		}
@@ -5043,7 +5065,7 @@ export default async function (pi: ExtensionAPI) {
 			for (let skipUnits = 0; skipUnits < count; skipUnits++) units.push({ sourceOffset: item.source.start, skipUnits });
 		}
 		const cursor = history.resumeTarget();
-		if (direction < 0 && (!navigationAtTail || !units.length) && complete &&
+		if (direction < 0 && (!atTail || !units.length) && complete &&
 			(!units.length || (!fromPrevious && (cursor?.sourceOffset ?? 0) <= units[0].sourceOffset && !cursor?.skipUnits)) &&
 			(history.status()?.messageIndex ?? 0) > 0) {
 			history.move(-1);
@@ -5051,7 +5073,7 @@ export default async function (pi: ExtensionAPI) {
 		}
 		const target = fromPrevious && direction > 0
 			? units[0] && { ...selected, time: 0, ...units[0] }
-			: history.sentenceTarget(direction, units, navigationAtTail || fromPrevious);
+			: history.sentenceTarget(direction, units, atTail || fromPrevious);
 		if (target) {
 			const fullCapture = target.sourceOffset === units[0]?.sourceOffset && !target.skipUnits;
 			await playTarget(target, fullCapture, true, false, false, false, ctx);
@@ -5101,13 +5123,13 @@ export default async function (pi: ExtensionAPI) {
 			? { id: livePlaybackId ??= `live:${++nextLivePlaybackId}`, text: "" } : undefined);
 		if (latest) {
 			void playTarget({ ...latest, time: 0, sourceOffset: 0, tailPrefix: latest.text }, false, false, false, true, false, ctx);
-			navigationAtTail = true;
+			navigationTail = { id: latest.id };
 			playbackTailIntent = true;
 			refreshPlaybackTimeline();
 			scrollToBottom(ctx);
 			return;
 		}
-		navigationAtTail = true;
+		navigationTail = { id: playbackTimeline(ctx).timeline.at(-1) };
 		// Tail retires historical audio/preparation, not the user's play/pause intent.
 		const paused = playbackPaused;
 		const cancelId = clearPlaybackTransport();
@@ -5258,7 +5280,7 @@ export default async function (pi: ExtensionAPI) {
 	pi.registerShortcut("f10", {
 		description: "⏭ Next message; follow tail after the last",
 		handler: async ctx => {
-			if (!requireEnabledVoice(ctx)) return;
+			if (!requireEnabledVoice(ctx) || playbackTailState(ctx).waiting) return;
 			const target = previewHistoricalTarget(ctx, 1);
 			if (target) void playTarget(target, true, true, false, true, false, ctx);
 			else {

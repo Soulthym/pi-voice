@@ -1,5 +1,21 @@
 # Tests
 
+## Tail follow-up — pending integration and independent review
+
+`test/index-tail-state.test.ts` exercises real extension events with inert worker/coordinator fixtures. Against archived `1e229fc`, the final **13 cases report 9 failures / 4 passes**; current source passes all 13. Proven baseline failures:
+
+- `message_end` flushes the utterance, then matching audio EOF arrives before `turn_end`: the counter remains **2/2 instead of 3/2**, and F9/F10 cancel transport instead of doing nothing. EOF injection asserts that the extension actually sent `endUtterance` first.
+- After completed autoplay (both provisional and persisted identity), F10 still cancels transport at Tail. F9 already passed these two variants.
+- Forward entry into Tail followed by Pause/Resume and further forward keys still cancels transport. Explicit streaming Tail reports the old existing-message ordinal instead of the waiting ordinal. An empty streaming header incorrectly increments the denominator.
+
+The shared Tail policy now distinguishes an explicit boundary, drained latest audio and pending/playing content. The boundary carries canonical identity so a later real entry remains navigable. Waiting F9/F10 return before source/transport/lease mutation. Full-branch eligible sources remain the counter authority; empty reservations and markup-only blocks do not count. Existing 50/50 → 49/50 → 48/50 assertions are unchanged. The older live-progress test's two empty-code-fence ordinal expectations were updated to this eligibility contract; its audible source/clock/pause assertions remain intact.
+
+Fixture correction: initial exploratory cases injected EOF into an **open** streaming utterance. Worker EOF follows `endUtterance`, so those cases were removed, not credited as reproductions. Streaming is now tested via explicit Tail, inert repeated forward keys, future delta delivery and persisted completion. The corrected final suite was rerun against the archived baseline. The user's literal one-message backward jump and exact intermittent 56/56 path remain **unconfirmed**; these synthetic failures establish related state/no-op defects, not live resolution of that report.
+
+Isolated validation: typecheck passed; broad navigation/counter/live-pause/history/render/routing focus **292 passed / 4 compatibility skips / zero failures (296 total)**; installed-native Tail/counter/scroll/highlight/marker focus **327 passed / zero skips or failures**. Logs: `/tmp/pi-tail-{baseline-verified,broad-final,native-focus,typecheck-final}.log`. **No new full default or full installed-native run**; the full-suite counts below belong to the previous checkpoint. Parent decides integrated final validation after attention work. LSP is unavailable; TypeScript supplies diagnostics.
+
+Final runs used `env -i` and private HOME/TMPDIR/XDG/Pi directories. No attention policy, play-target admission, transport/helper code, live operations, providers/models/inference, hardware, user cache/settings, deployment, restarts or root TODO/HANDOFF changes. Independent review and live confirmation remain outstanding.
+
 ## Current replay lifecycle validation — host-only, undeployed
 
 Final-review root correction after `e433933` / `bea1612` removes the handoff replay's own-flight bypass. Handoff now completes stop/rebind and publishes state before its returned continuation resumes outside the flight (and outside manual-selection accounting). Every replay drains all current routing/rebind/input/output barriers. The shared gate rejects pending routing events for every request; the routing revision advances on observed events even before their application. Availability is rechecked for event-affected/retained requests, not by unconditionally reranking unchanged manual choices or treating static discovery as a fresh disconnect. All waiting requests preserve their own source, including automatic continuations, rather than replacing it with a history bookmark.
