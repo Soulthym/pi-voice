@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { mock, test, type TestContext } from "node:test";
 import { PlaybackHistory } from "../src/playback-history.js";
+import { SessionCoordinator } from "../src/session-coordinator.js";
 import { FakeVoiceHost, MockedVoiceWorkerClient, assistant } from "./helpers/fake-voice-host.js";
 
 mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: MockedVoiceWorkerClient } });
@@ -64,4 +65,53 @@ for (const change of ["shortened", "replacement", "append"] as const) test(`F9 v
 		assert.equal(captures.mock.calls.at(-1)!.arguments[4], change === "append" ? 16 : 0);
 		assert.equal(host.modelRequests.length, 0);
 	} finally { now.mock.restore(); gate.mock.restore(); release?.(); }
+});
+
+for (const continuation of ["allocated", "queued", "pause", "stop", "session"] as const) test(`ordinary F5 retires removed A but preserves B: ${continuation}`, async t => {
+	const { host, worker, message } = await fixture(t);
+	const observer = new SessionCoordinator(host.cwd, "observer");
+	const b = "Remaining B block.";
+	if (continuation !== "queued") {
+		const updated = structuredClone(message);
+		updated.content.push({ type: "text", text: b + " " });
+		await host.emit("message_update", { message: updated, assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: b + " " } });
+		await settle();
+		assert.ok(segments(worker).some(s => s.text === b), "B already has a worker block and live ID");
+	}
+	const a = segments(worker).find(s => s.text === "First sentence.")!;
+	worker.emit({ type: "playback", utterance: a.utterance, position: 2 });
+	const before = worker.sent.length;
+	const cancel = t.mock.method(worker, "cancel", () => 902 as never);
+	await host.shortcut("f5"); await settle();
+	assert.equal(cancel.mock.callCount(), 1, "ordinary live F5 is waiting for cancellation without a paused notice");
+	assert.equal(worker.sent.length, before);
+	const final = { ...assistant(""), content: [
+		{ type: "toolCall", id: "call", name: "read", arguments: {} }, { type: "text", text: b },
+	] };
+	await host.emit("message_end", { message: final });
+	await host.emit("turn_end", { message: final }); await settle();
+	assert.equal(worker.sent.length, before, "finalization cannot dispatch before stop proof");
+	let replaced: Promise<void> | undefined;
+	if (continuation === "pause") await host.shortcut("f8");
+	if (continuation === "stop") await host.command("stop");
+	if (continuation === "session") replaced = host.emit("session_start", {});
+	cancel.mock.restore();
+	worker.emit({ type: "idle", cancelId: 902 }); await replaced; await settle();
+	if (continuation === "stop" || continuation === "session") {
+		assert.equal(worker.sent.length, before, "newer user/session intent fences the old continuation");
+	} else {
+		if (continuation === "pause") {
+			assert.equal(worker.sent.length, before);
+			assert.match(host.widgetLines()!.join(" "), /Paused/);
+			await host.shortcut("f8"); await settle();
+		}
+		assert.deepEqual(segments(worker).slice(before).map(s => s.text), [b], "remaining eligible audio plays exactly once, not removed A");
+		assert.ok(observer.speechOwner(), "B retains ownership until its own completion");
+		worker.emit({ type: "idle", utterance: a.utterance }); await settle();
+		assert.ok(observer.speechOwner(), "old A completion cannot release B's lease");
+		worker.emit({ type: "idle", utterance: segments(worker).at(-1)!.utterance }); await settle();
+		assert.deepEqual(segments(worker).slice(before).map(s => s.text), [b]);
+	}
+	assert.equal(observer.speechOwner(), undefined, "completion/supersession leaves no leaked speech lease");
+	assert.equal(host.modelRequests.length, 0);
 });

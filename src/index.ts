@@ -2294,6 +2294,25 @@ export default async function (pi: ExtensionAPI) {
 			waiting?.instanceId === pending.waiting.instanceId && waiting?.generation === pending.waiting.generation;
 	};
 
+	// Cancelling a source retires all its worker blocks, even those with allocated
+	// IDs that message_end will not enqueue again. Rebuild only its unheard suffix
+	// from current eligible text, ahead of newer sources and without duplicates.
+	const retainSourceRemainder = (source: typeof liveSource, after: number): void => {
+		if (!source) return;
+		const remaining = eligibleAssistantBlocks(source.assistant, config.mode)
+			.filter(block => block.contentIndex > after && hasSpeakableAudio(block.text));
+		const targets = remaining.map(block => {
+			const id = source.blockIds.get(block.contentIndex) ?? queuedPausedMessages.find(message =>
+				message.source === source && message.contentIndex === block.contentIndex)?.id ?? `live:${++nextLivePlaybackId}`;
+			source.blockIds.set(block.contentIndex, id);
+			return { ...block, id, time: 0, sourceOffset: 0, source };
+		});
+		for (let i = queuedPausedMessages.length - 1; i >= 0; i--) {
+			if (queuedPausedMessages[i].source === source && (queuedPausedMessages[i].contentIndex ?? 0) > after) queuedPausedMessages.splice(i, 1);
+		}
+		queuedPausedMessages.unshift(...targets);
+	};
+
 	// One existing waiting record per safe boundary. No notification queue or mutable-state restore.
 	const announceWaiting = (stopOriginal = false, allowSuppressed = false, retainPaused = false): Promise<boolean> | undefined => {
 		if (!coordinator || !ownsSpeech || pendingNotification || !config.enabled ||
@@ -2313,15 +2332,7 @@ export default async function (pi: ExtensionAPI) {
 			const snapshot = playbackHistory.resumeSnapshot(true);
 			if (snapshot) {
 				pausedAnnouncementResume = { ...snapshot, source: playingSource };
-				// Cancellation retires every worker block, not just the selected unit.
-				const remaining = playingSource ? eligibleAssistantBlocks(playingSource.assistant, config.mode)
-					.filter(block => block.contentIndex > (snapshot.contentIndex ?? 0) && hasSpeakableAudio(block.text)) : [];
-				const unheard = remaining.flatMap(block => {
-					const id = playingSource!.blockIds.get(block.contentIndex);
-					return id && !queuedPausedMessages.some(message => message.id === id)
-						? [{ ...block, id, time: 0, sourceOffset: 0, source: playingSource }] : [];
-				});
-				queuedPausedMessages.unshift(...unheard);
+				retainSourceRemainder(playingSource, snapshot.contentIndex ?? 0);
 			}
 		}
 		if (stopOriginal) queueIncomingWhilePaused = true;
@@ -3501,6 +3512,7 @@ export default async function (pi: ExtensionAPI) {
 			if (requestedLiveSource.final && (!block || !hasSpeakableAudio(block.text))) {
 				// Retire only this request. Remaining blocks and newer responses still
 				// belong to the queue, and a later F8 may have changed its pause intent.
+				retainSourceRemainder(requestedLiveSource, liveTargetIndex ?? -1);
 				pendingReplay = undefined;
 				playbackPaused = request.paused;
 				narration.finish();
