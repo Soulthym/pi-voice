@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { mock, test, type TestContext } from "node:test";
+import { NarrationProgress } from "../src/narration-progress.js";
 import { PlaybackHistory } from "../src/playback-history.js";
 import { SessionCoordinator } from "../src/session-coordinator.js";
 import { assistant, FakeVoiceHost, MockedVoiceWorkerClient } from "./helpers/fake-voice-host.js";
@@ -139,6 +140,148 @@ test("explicit streaming Tail is inert and retains future deltas through canonic
 	worker.emit({ ...clip, type: "segment-audio", start: 0, duration: 2 });
 	worker.emit({ type: "idle", utterance: clip.utterance }); await settle();
 	assert.match(host.widgetLines()![0], /● live · 3\/2(?: ·|\s)/);
+});
+
+for (const explicit of [false, true]) for (const paused of [false, true]) for (const key of ["f9", "f10"]) test(`open streaming catch-up uses playback progress, not EOF: explicit=${explicit}, paused=${paused}, ${key}`, async t => {
+	const host = await startHost(t);
+	const ended = t.mock.method(MockedVoiceWorkerClient.prototype, "endUtterance");
+	const prefix = "Initial sentence. ";
+	const message = assistant(prefix, "pending");
+	await host.emit("message_start", { message });
+	await host.emit("message_update", { message, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: prefix } });
+	await settle();
+	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
+	if (explicit) { await host.shortcut("f10"); await settle(); }
+	const text = prefix + "Latest audible sentence. ";
+	const updated = assistant(text, "pending");
+	await host.emit("message_update", { message: updated, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Latest audible sentence. " } });
+	await settle();
+	const clip = worker.sent.at(-1) as { utterance: number; segmentId: number; text: string };
+	assert.equal(clip.text, "Latest audible sentence.");
+	const clips = (worker.sent as Array<typeof clip>).filter(s => s.utterance === clip.utterance);
+	for (const [i, segment] of clips.entries()) worker.emit({ ...segment, type: "segment-audio", start: i * 2, duration: 2 });
+	// Only closed project prefixes get EOF; the current streaming utterance stays OPEN.
+	for (const utterance of new Set((worker.sent as Array<typeof clip>).filter(s => s.utterance < clip.utterance).map(s => s.utterance))) {
+		if (!explicit) {
+			assert.ok(ended.mock.calls.some(call => (call.arguments as unknown[])[0] === utterance));
+			worker.emit({ type: "idle", utterance });
+		}
+	}
+	const statuses = t.mock.method(PlaybackHistory.prototype, "status");
+	worker.emit({ type: "playback", utterance: clip.utterance, position: clips.length * 2 }); await settle();
+	if (paused) {
+		await host.shortcut("f8"); await settle();
+		assert.match(host.widgetLines()![0], /Paused/);
+	}
+	// Arrive after Pause: F8 is a valid attention boundary, caught-up navigation is not.
+	const waiting = new SessionCoordinator(path.join(host.cwd, "waiting"), "waiting");
+	waiting.start(); waiting.markWaiting({ kind: "intentional_local" });
+	t.after(() => waiting.shutdown());
+	assert.equal(ended.mock.calls.some(call => (call.arguments as unknown[])[0] === clip.utterance), false, "no invented streaming EOF");
+	const history = statuses.mock.calls.at(-1)!.this as PlaybackHistory;
+	const cursor = history.resumeSnapshot(paused);
+	assert.ok(cursor && cursor.position >= 2, "fixture has a real caught-up cursor, not position zero");
+	const captures = t.mock.method(PlaybackHistory.prototype, "beginCapture");
+	const cancels = t.mock.method(MockedVoiceWorkerClient.prototype, "cancel");
+	const releases = t.mock.method(SessionCoordinator.prototype, "releaseSpeech");
+	const acquisitions = t.mock.method(SessionCoordinator.prototype, "tryAcquireSpeech");
+	const sent = worker.sent.length;
+	const pauses = [...worker.pauses];
+	const lines = host.widgetLines();
+	const rendered = host.render(text);
+	await host.shortcut(key); await settle();
+	assert.deepEqual(history.resumeSnapshot(paused), cursor, "caught-up navigation must preserve position and source cursor");
+	assert.equal(cancels.mock.callCount(), 0, "caught-up navigation must not cancel an OPEN transport");
+	assert.equal(captures.mock.callCount(), 0, "no new playback request/cursor");
+	assert.equal(releases.mock.callCount(), 0);
+	assert.equal(acquisitions.mock.callCount(), 0);
+	assert.equal(worker.sent.length, sent, "no narration or attention announcement");
+	assert.deepEqual(worker.pauses, pauses);
+	assert.deepEqual(host.widgetLines(), lines);
+	assert.equal(host.render(text), rendered);
+	assert.equal(waiting.waitingSessions()[0]?.announced, false, "catch-up is not an attention completion boundary");
+	assert.equal(ended.mock.calls.some(call => (call.arguments as unknown[])[0] === clip.utterance), false);
+	waiting.clearWaiting();
+	// New real units unfreeze forward navigation, including while still paused.
+	const delta = "Current new sentence. Later real sentence. ";
+	await host.emit("message_update", { message: assistant(text + delta, "pending"), assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta } }); await settle();
+	const current = worker.sent[sent] as typeof clip;
+	assert.equal(current.text, "Current new sentence.");
+	if (!paused) {
+		worker.emit({ ...current, type: "segment-audio", start: clips.length * 2, duration: 2 });
+		worker.emit({ type: "playback", utterance: current.utterance, position: clips.length * 2 + 0.2 }); await settle();
+	}
+	if (key === "f10") {
+		const later = assistant(text + delta, "pending");
+		later.content.push({ type: "text", text: "Later real message. " });
+		await host.emit("message_update", { message: later, assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: "Later real message. " } }); await settle();
+	}
+	const before = worker.sent.length;
+	const cancel = t.mock.method(worker, "cancel", () => 701 as never);
+	const next = host.shortcut(key); await settle();
+	assert.equal(cancel.mock.callCount(), 1, "a real later target still cancels the old transport");
+	assert.equal(worker.sent.length, before, "catch-up is not stop proof for a later target");
+	worker.emit({ type: "idle", cancelId: 700 }); await settle();
+	assert.equal(worker.sent.length, before, "an unrelated ACK cannot admit the later target");
+	worker.emit({ type: "idle", cancelId: 701 }); await next; await settle();
+	cancel.mock.restore();
+	assert.equal((worker.sent[before] as typeof clip)?.text,
+		key === "f10" ? "Later real message." : paused ? "Current new sentence." : "Later real sentence.",
+		`${key} must still reach a real later target (paused=${paused})`);
+	assert.equal(host.modelRequests.length, 0);
+});
+
+for (const caughtUp of [false, true]) for (const key of ["f9", "f10"]) test(`paused final streaming word is not audio completion: caughtUp=${caughtUp}, ${key}`, async t => {
+	const host = await startHost(t);
+	const ended = t.mock.method(MockedVoiceWorkerClient.prototype, "endUtterance");
+	const text = "Final audible word\n";
+	const message = assistant(text, "pending");
+	await host.emit("message_start", { message });
+	await host.emit("message_update", { message, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: text } });
+	await settle();
+	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
+	const clip = worker.sent.at(-1) as { utterance: number; segmentId: number; text: string };
+	assert.equal(clip.text, text.trim());
+	for (const utterance of new Set((worker.sent as Array<typeof clip>).filter(s => s.utterance < clip.utterance).map(s => s.utterance))) {
+		assert.ok(ended.mock.calls.some(call => (call.arguments as unknown[])[0] === utterance));
+		worker.emit({ type: "idle", utterance });
+	}
+	worker.emit({ ...clip, type: "segment-audio", start: 0, duration: 3 });
+	worker.emit({ type: "alignment", segmentId: clip.segmentId, quality: "ctc-refined", words: [
+		{ text: "Final", start: 0, end: 1 }, { text: "audible", start: 1, end: 2 }, { text: "word", start: 2, end: 3 },
+	] });
+	const progress = t.mock.method(NarrationProgress.prototype, "setPlayback");
+	const statuses = t.mock.method(PlaybackHistory.prototype, "status");
+	worker.emit({ type: "playback", utterance: clip.utterance, position: caughtUp ? 3 : 2.2 }); await settle();
+	const narration = progress.mock.calls.at(-1)!.this as NarrationProgress;
+	assert.equal(narration.sourceEnd, text.trim().length);
+	assert.equal(narration.consumedSourceEnd, narration.sourceEnd, "last-word highlighting reaches source end before audio ends");
+	const history = statuses.mock.calls.at(-1)!.this as PlaybackHistory;
+	assert.equal(history.status()!.position, caughtUp ? 3 : 2.2);
+	assert.equal(history.status()!.duration, 3);
+	await host.shortcut("f8"); await settle();
+	assert.match(host.widgetLines()![0], /Paused/);
+	assert.equal(ended.mock.calls.some(call => (call.arguments as unknown[])[0] === clip.utterance), false, "stream remains open");
+	const cancels = t.mock.method(worker, "cancel", () => 702 as never);
+	const captures = t.mock.method(PlaybackHistory.prototype, "beginCapture");
+	const cursor = history.resumeSnapshot(true);
+	const pauses = [...worker.pauses];
+	const lines = host.widgetLines();
+	const sent = worker.sent.length;
+	const next = host.shortcut(key); await settle();
+	assert.equal(cancels.mock.callCount(), caughtUp ? 0 : 1, "only real audio catch-up makes forward navigation inert");
+	assert.equal(worker.sent.length, sent, "no synthesis before stop proof or at caught-up Tail");
+	if (caughtUp) {
+		assert.equal(captures.mock.callCount(), 0);
+		assert.deepEqual(history.resumeSnapshot(true), cursor);
+		assert.deepEqual(worker.pauses, pauses);
+		assert.deepEqual(host.widgetLines(), lines);
+	} else {
+		worker.emit({ type: "idle", cancelId: 702 });
+	}
+	await next; await settle();
+	cancels.mock.restore();
+	assert.equal(host.modelRequests.length, 0);
 });
 
 test("empty streaming header reserves identity, not an eligible counter entry", async t => {

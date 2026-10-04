@@ -815,16 +815,23 @@ export default async function (pi: ExtensionAPI) {
 	const playbackTailState = (ctx: ExtensionContext, snapshot = playbackTimeline(ctx)) => {
 		const latest = snapshot.timeline.at(-1);
 		const canonical = (id: string | undefined) => id === undefined ? undefined : snapshot.aliases.get(id) ?? id;
-		const explicit = navigationTail !== undefined && canonical(navigationTail.id) === latest;
+		const explicit = navigationTail !== undefined && canonical(navigationTail.id) === latest &&
+			(!liveTurnNarrationActive || playbackTailSourceEnd >= narration.sourceEnd);
 		const announcedBoundary = !!pendingNotification && ownerTurnEnded && lastOwnerUtterance !== undefined && completedOwnerUtterance === lastOwnerUtterance;
 		const drained = liveTurnNarrationActive && (playbackPhase === "idle" || announcedBoundary) &&
 			((!snapshot.hasLiveContent && lastOwnerUtterance === undefined && narration.sourceEnd === 0) ||
 				(canonical(playbackHistory.selected()?.id) === latest && lastOwnerUtterance !== undefined &&
 					completedOwnerUtterance === lastOwnerUtterance && narration.consumedSourceEnd >= narration.sourceEnd));
+		// An OPEN stream can have no later navigation target without whole-message EOF.
+		// Require no remaining audio/work independently of highlighting or Pause.
+		// This preserves catch-up across Pause, never completion, attention, or transport stop proof.
+		const streamingTail = liveTurnNarrationActive && !ownerTurnEnded && vocalizer.playbackUtterance === undefined &&
+			latest !== undefined && canonical(playbackHistory.selected()?.id) === latest &&
+			narration.sourceEnd > 0 && narration.consumedSourceEnd >= narration.sourceEnd;
 		const waiting = !speechBlocked && !pausedForAttention && !pendingReplay && !attentionSuppressed &&
-			(drained || (explicit && playbackTailIntent && (lastOwnerUtterance === undefined || announcedBoundary) &&
+			(drained || streamingTail || (explicit && playbackTailIntent && (lastOwnerUtterance === undefined || announcedBoundary) &&
 				(!liveTurnNarrationActive || playbackTailSourceEnd >= narration.sourceEnd)));
-		return { atTail: explicit || drained, waiting };
+		return { atTail: explicit || drained || streamingTail, waiting };
 	};
 
 	const refreshProgressWidget = (paintPreprocessing = false): void => {
