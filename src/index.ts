@@ -3216,7 +3216,7 @@ export default async function (pi: ExtensionAPI) {
 		if (!interactiveVoiceSession) return;
 		routeIntent = undefined;
 		if (!queued) restoreBottomAfterSpeech = restoreTail;
-		const sourceOffset = Math.max(0, Math.min(target.text.length, target.sourceOffset));
+		let sourceOffset = Math.max(0, Math.min(target.text.length, target.sourceOffset));
 		let suffix = target.text.slice(sourceOffset);
 		const retry = pendingReplay?.target.id === target.id ? pendingReplay : undefined;
 		const replayBlockIds = retry?.blockIds ?? liveBlockIds;
@@ -3430,13 +3430,36 @@ export default async function (pi: ExtensionAPI) {
 		if (!admissionCurrent()) return;
 		// Preparation, microphone shutdown, device adoption and acquisition can all
 		// outlive the prefix or even message_end. Replay the latest source once.
-		if (replaySource) {
-			target = request.target;
-			const blocks = eligibleAssistantBlocks(replaySource.assistant, config.mode);
-			liveTargetIndex ??= blocks[0]?.contentIndex;
+		target = request.target;
+		if (requestedLiveSource) {
+			const blocks = eligibleAssistantBlocks(requestedLiveSource.assistant, config.mode);
+			liveTargetIndex ??= target.contentIndex ?? blocks[0]?.contentIndex;
 			const block = blocks.find(block => block.contentIndex === liveTargetIndex);
-			if (block) target = { ...target, ...block };
-			suffix = target.text.slice(sourceOffset);
+			if (requestedLiveSource.final && (!block || !hasSpeakableAudio(block.text))) {
+				// Retire only this request. Remaining blocks and newer responses still
+				// belong to the queue, and a later F8 may have changed its pause intent.
+				pendingReplay = undefined;
+				playbackPaused = request.paused;
+				narration.finish();
+				narration.setPaused(playbackPaused);
+				ownerContentExpected = false;
+				ownerTurnEnded = true;
+				speechPurpose = undefined;
+				completedOwnerUtterance = lastOwnerUtterance;
+				if (liveSource?.final) queueIncomingWhilePaused = false;
+				refreshPlaybackTimeline();
+				completeOwnerSpeech(false);
+				return;
+			}
+			if (block) {
+				const retained = playbackHistory.updateText(target.id, block.text, block);
+				const checkpoint = retained ? undefined : playbackHistory.resumeSnapshot(request.paused, target.id);
+				target = { ...target, ...block, ...(checkpoint ? { ...checkpoint, audioOffset: checkpoint.audioOffset } : {}) };
+			}
+		}
+		sourceOffset = target.sourceOffset;
+		suffix = target.text.slice(sourceOffset);
+		if (replaySource) {
 			speechConversationMessages = replaySource.before;
 			speechAssistantMessage = replaySource.assistant;
 			if (request.previewTarget) previewPlaybackTarget({ ...target, sourceOffset }, !queued);
@@ -3633,8 +3656,39 @@ export default async function (pi: ExtensionAPI) {
 		existingEntries: Set<string>,
 		blockIds = liveBlockIds,
 	): void => {
+		targets = targets.filter(target => hasSpeakableAudio(target.text));
+		for (const target of targets) {
+			const retained = playbackHistory.updateText(target.id, target.text);
+			if (pendingReplay?.target.id === target.id && !retained) {
+				const checkpoint = playbackHistory.resumeSnapshot(pendingReplay.paused, target.id);
+				if (checkpoint) Object.assign(pendingReplay.target, checkpoint, { audioOffset: checkpoint.audioOffset });
+			}
+			const queued = queuedPausedMessages.find(message => message.id === target.id);
+			if (queued) Object.assign(queued, target);
+			// The final source is authoritative even before its session entry exists.
+			if (pausedAnnouncementResume?.id === target.id) {
+				const snapshot = playbackHistory.resumeSnapshot(true, target.id);
+				pausedAnnouncementResume = snapshot && { ...snapshot, source: pausedAnnouncementResume.source };
+			}
+		}
+		for (const [contentIndex, id] of blockIds) {
+			if (targets.some(target => target.id === id)) continue;
+			playbackHistory.remove(id);
+			blockIds.delete(contentIndex);
+			for (let i = queuedPausedMessages.length - 1; i >= 0; i--) {
+				if (queuedPausedMessages[i].id === id) queuedPausedMessages.splice(i, 1);
+			}
+			if (pausedAnnouncementResume?.id === id) {
+				// The announcement already cancelled this transport. Resume may drain
+				// remaining blocks, but must never recreate the disappeared source.
+				pausedAnnouncementResume = undefined;
+				pausedOwnerUtterance = undefined;
+				completedOwnerUtterance = lastOwnerUtterance;
+				lastPlaybackTick = undefined;
+				narration.finish();
+			}
+		}
 		if (targets.length === 0) return;
-		for (const target of targets) playbackHistory.updateText(target.id, target.text);
 		const epoch = contextEpoch;
 		const canonicalize = (messages: PlaybackMessage[]): boolean => {
 			if (epoch !== contextEpoch || !isCurrentContext(ctx)) return true;
@@ -3644,8 +3698,11 @@ export default async function (pi: ExtensionAPI) {
 			for (const target of targets) {
 				const completed = messages.find(message => message.id === (target.contentIndex === 0 ? entry.id : `${entry.id}:${target.contentIndex}`));
 				if (!completed) continue;
+				// updateText has already discarded offsets invalidated by destructive final text.
+				const pausedResume = pausedAnnouncementResume?.id === target.id
+					? playbackHistory.resumeSnapshot(true, target.id) : undefined;
 				playbackHistory.rename(target.id, completed);
-				if (pausedAnnouncementResume?.id === target.id) Object.assign(pausedAnnouncementResume, completed);
+				if (pausedResume) pausedAnnouncementResume = { ...pausedResume, ...completed, source: pausedAnnouncementResume?.source };
 				if (livePlaybackId === target.id) livePlaybackId = completed.id;
 				if (navigationTail?.id === target.id) navigationTail.id = completed.id;
 				if (pendingReplay?.target.id === target.id) Object.assign(pendingReplay.target, completed);

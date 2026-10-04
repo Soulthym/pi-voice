@@ -306,9 +306,10 @@ export class PlaybackHistory {
 			recordTimings: recordTimings && baseTime === 0 && sourceOffset === 0 && skipUnits === 0, origin: record.cursor, segments: [] };
 	}
 
-	updateText(id: string, text: string, source?: Pick<PlaybackMessage, "messageType" | "contentIndex" | "displayOffset">): void {
+	/** Return whether the source checkpoint survives this update. */
+	updateText(id: string, text: string, source?: Pick<PlaybackMessage, "messageType" | "contentIndex" | "displayOffset">): boolean {
 		const record = this.#records.get(id);
-		if (!record) return;
+		if (!record) return false;
 		if (!text.startsWith(record.text)) {
 			this.invalidateCaptures(id);
 			record.confirmed = undefined;
@@ -321,6 +322,17 @@ export class PlaybackHistory {
 			record.contentIndex = source.contentIndex;
 			record.displayOffset = source.displayOffset;
 		}
+		return record.cursor !== undefined;
+	}
+
+	/** Retire a source block omitted by the final assistant message. */
+	remove(id: string): void {
+		this.invalidateCaptures(id);
+		this.#records.delete(id);
+		this.#versions.delete(id);
+		this.#snapshots.delete(id);
+		this.#order = this.#order.filter(current => current !== id);
+		if (this.#selectedId === id) this.#selectedId = undefined;
 	}
 
 	rename(fromId: string, message: PlaybackMessage): void {
