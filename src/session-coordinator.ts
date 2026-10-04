@@ -403,7 +403,8 @@ export class SessionCoordinator {
 	}
 
 	#withWaitingMutation<T>(operation: () => T): T {
-		void this.recovery;
+		// Waiting-file cleanup must also work when durable audio initialization failed.
+		fs.mkdirSync(this.root, { recursive: true });
 		// One inode serializes mark, clear, cleanup and ACK across processes.
 		const fd = fs.openSync(path.join(this.root, ".waiting-mutation.lock"), "a", 0o600);
 		try {

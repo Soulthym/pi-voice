@@ -219,7 +219,7 @@ test("TTS changes during microphone-only ownership do not sticky-pause the submi
 for (const idleBeforeResume of [true, false]) test(`resuming paused attention drains queued response (idle before resume: ${idleBeforeResume})`, async t => {
 	const { host, observer, worker } = await lifecycleHost(t);
 	await host.shortcut("f5"); await settle();
-	observer.markWaiting();
+	observer.markWaiting({ kind: "intentional_local" });
 	worker.emit({ type: "idle", utterance: (worker.sent.at(-1) as { utterance: number }).utterance }); await settle();
 	assert.match(JSON.stringify(worker.sent.at(-1)), /requires attention/);
 	const notification = (worker.sent.at(-1) as { utterance: number }).utterance;
@@ -260,7 +260,7 @@ test("retired worker callbacks after shutdown cannot append timings or mutate UI
 
 test("resuming completed paused announcement before incoming message_end keeps its continuation lease", async t => {
 	const { host, observer, worker } = await lifecycleHost(t);
-	await host.shortcut("f5"); await settle(); observer.markWaiting();
+	await host.shortcut("f5"); await settle(); observer.markWaiting({ kind: "intentional_local" });
 	worker.emit({ type: "idle", utterance: (worker.sent.at(-1) as { utterance: number }).utterance }); await settle();
 	const notification = (worker.sent.at(-1) as { utterance: number }).utterance;
 	await host.shortcut("f8");

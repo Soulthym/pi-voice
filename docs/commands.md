@@ -19,7 +19,7 @@ Action commands (`on`, `off`, `toggle`, `stop`, `setup`, `test`, `talk`, `attent
 | `/voice on` | Enables spoken output. |
 | `/voice off` | Disables and stops spoken output; dictation remains available. |
 | `/voice toggle` | Toggles spoken output. |
-| `/voice stop` | Hard-cancels speech, dictation processing and queued attention; retains ownership until device stop is confirmed. |
+| `/voice stop` | Hard-cancels speech and dictation; retains ownership until device stop is confirmed. One same-output waiting-project announcement may follow proven stop; it never resumes local/foreign responses or capture. |
 | `/voice setup` | Explicitly warms Kokoro and Wav2Vec2 alignment. Whisper still loads on first transcription. |
 | `/voice test [text]` | Speaks test text or a default readiness phrase. |
 | `/voice talk` | Starts/stops microphone dictation. |

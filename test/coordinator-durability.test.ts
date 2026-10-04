@@ -158,7 +158,7 @@ for (const failure of ["flock", "fsync"]) test(`waiting announcement timer catch
 	const workerIndex = MockedVoiceWorkerClient.instances.length;
 	await host.start();
 	waiter.start();
-	waiter.markWaiting();
+	waiter.markWaiting({ kind: "intentional_local" });
 	if (failure === "flock") missingFlock = true;
 	else linkHook = () => {
 		syncHook = fd => {

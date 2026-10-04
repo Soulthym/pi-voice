@@ -25,7 +25,7 @@ async function setup(t: TestContext) {
 	host.addMessage("answer", null, assistant("Origin answer."));
 	const waiting = new SessionCoordinator(path.join(root, "other"), "waiting");
 	await host.start();
-	waiting.start(); waiting.markWaiting(); waiting.markAnnounced(waiting.instanceId);
+	waiting.start(); waiting.markAnnounced(waiting.markWaiting());
 	t.after(async () => {
 		await host.shutdown(); waiting.shutdown();
 		names.forEach((name, i) => { if (previous[i] === undefined) delete process.env[name]; else process.env[name] = previous[i]; });

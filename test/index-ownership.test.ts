@@ -56,7 +56,7 @@ test("sticky pause queues new responses; settings preserve ownership and dirty a
 	await host.shortcut("f8");
 	assert.equal(worker.pauses.at(-1), true);
 	const before = segments.length;
-	observer.markWaiting();
+	observer.markWaiting({ kind: "intentional_local" });
 	await streamCompletedResponse(host, "second", "first", "Queued response.");
 	assert.equal(segments.length, before, "incoming response stays silent while paused");
 	assert.equal(worker.pauses.at(-1), true);
@@ -65,10 +65,11 @@ test("sticky pause queues new responses; settings preserve ownership and dirty a
 	await host.shortcut("f8");
 	assert.equal(worker.pauses.at(-1), false);
 	worker.emit({ type: "idle", utterance: first.utterance }); await settle();
-	assert.equal(segments.at(-1)?.text, "Queued response.", "resume drains queued project responses before announcements");
-	assert.equal(segments.some(segment => segment.text.includes("requires attention next")), false);
-	worker.emit({ type: "idle", utterance: segments.at(-1)!.utterance }); await settle();
+	// Approved policy: current-message EOF offers one waiting announcement BEFORE local backlog.
 	assert.ok(segments.at(-1)?.text.includes("requires attention next"));
+	assert.equal(segments.some(segment => segment.text === "Queued response."), false);
+	worker.emit({ type: "idle", utterance: segments.at(-1)!.utterance }); await settle();
+	assert.equal(segments.at(-1)?.text, "Queued response.");
 
 	await host.shortcut("f5"); await settle();
 	for (const command of ["voice af_bella", "speed 1.2", "tts-model test/tts", "tts-dtype fp32"]) {

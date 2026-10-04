@@ -60,6 +60,7 @@ import {
 	PlaybackHistory,
 	type PlaybackMessage,
 	type PlaybackTarget,
+	type PlaybackResumeSnapshot,
 	type PlaybackTimingSnapshot,
 } from "./playback-history.js";
 import { PhoneInputClient } from "./phone-input.js";
@@ -81,7 +82,7 @@ import { VoiceWorkerClient, type WorkerEvent, type TimingRetryResult } from "./w
 type VoiceState = "downloading" | "error" | "idle" | "listening" | "loading" | "speaking";
 type InputPhase = "idle" | "acquiring" | "recording" | "transcribing";
 type PreprocessingProgress = ReadyProgress;
-type SpeechPurpose = "turn" | "replay" | "notification";
+type SpeechPurpose = "turn" | "replay";
 
 const PLAYBACK_TIMING_ENTRY = "pi-voice.playback-timing";
 const CODE_DESCRIPTION_CACHE_ENTRY = "pi-voice.code-description";
@@ -349,7 +350,16 @@ export default async function (pi: ExtensionAPI) {
 	let ownerContentExpected = false;
 	let speechReservedForInput = false;
 	let projectAnnouncementPending = false;
-	let pendingNotification: WaitingSession | undefined;
+	type PendingNotification = { waiting: WaitingSession; utterance?: number; epoch: number; context: number;
+		endpoint: string; generation?: number; finish: (current: boolean) => void; admit?: () => void };
+	let pendingNotification: PendingNotification | undefined;
+	let pausedAnnouncementResume: (PlaybackResumeSnapshot & { source?: typeof liveSource }) | undefined;
+	const cancelWaitingAnnouncement = (): void => {
+		const pending = pendingNotification;
+		pendingNotification = undefined;
+		pending?.finish(false);
+	};
+	let playingSource: typeof liveSource;
 	let pausedForAttention = false;
 	let attentionSuppressed = false;
 	let deviceRetryRequired = false;
@@ -363,7 +373,7 @@ export default async function (pi: ExtensionAPI) {
 	let speechAssistantMessage: unknown;
 	let speechContentIndex = 0;
 	let liveDisplayOffset = 0;
-	let liveSource: { assistant: unknown; final: boolean; before: Message[]; existingEntries: Set<string>; waiters: Set<() => void> } | undefined;
+	let liveSource: { assistant: unknown; final: boolean; before: Message[]; existingEntries: Set<string>; waiters: Set<() => void>; blockIds: Map<number, string> } | undefined;
 	let liveBlockIndex: number | undefined;
 	let liveBlockIds = new Map<number, string>();
 	let waitingSource: typeof liveSource;
@@ -391,7 +401,6 @@ export default async function (pi: ExtensionAPI) {
 			});
 		});
 	};
-	let completingOwnerSpeech = false;
 	let attentionPollTimer: NodeJS.Timeout | null = null;
 	let attentionPreparation: { epoch: number } | undefined;
 	let voiceWorkerIdleTimer: NodeJS.Timeout | null = null;
@@ -517,6 +526,9 @@ export default async function (pi: ExtensionAPI) {
 		if (!coordinator?.ownsSpeech() || stopRecovery !== coordinator.recovery) {
 			throw new Error("Physical voice IO requires the current durable owner");
 		}
+		if (direction === "output" && pendingNotification && !notificationIsCurrent()) {
+			throw new Error("Waiting announcement superseded before output admission");
+		}
 		stopRecovery.beforeIO(direction, direction === "output" && /^(tcp|unix):\/\//.test(routedVoiceConfig().output), direction === "input");
 	};
 	const stopRecoveryAdvice = "preserve original device receipts; /voice reconnect can retry available stop proof, but cannot reconstruct missing same-boot guardian wait proof; see docs/troubleshooting.md#unconfirmed-stop";
@@ -622,7 +634,7 @@ export default async function (pi: ExtensionAPI) {
 	let pendingReplay:
 		| {
 				epoch: number;
-				target: PlaybackTarget & { tailPrefix?: string };
+				target: PlaybackTarget & { tailPrefix?: string; audioOffset?: PlaybackResumeSnapshot["audioOffset"] };
 				recordTimings: boolean;
 				previewTarget: boolean;
 				restoreTail: boolean;
@@ -734,6 +746,14 @@ export default async function (pi: ExtensionAPI) {
 		input: config.input === "auto" ? (activeInputEndpoint ?? "disabled") : config.input,
 	});
 
+	const outputConnection = (): ConnectionDevice | undefined => {
+		try {
+			const route = deviceRouter.routeMetadata(activeDeviceId ?? deviceSelection, "output", config.output);
+			return route.kind === "intentional_local" ? { kind: "intentional_local" }
+				: route.kind === "device" ? { kind: "device", id: route.device.id } : undefined;
+		} catch { return undefined; }
+	};
+
 	const claimOutputDevice = (): VoiceConfig => {
 		const selection = activeDeviceId ?? deviceSelection;
 		const route = deviceRouter.routeMetadata(selection, "output", config.output);
@@ -786,12 +806,13 @@ export default async function (pi: ExtensionAPI) {
 		const latest = snapshot.timeline.at(-1);
 		const canonical = (id: string | undefined) => id === undefined ? undefined : snapshot.aliases.get(id) ?? id;
 		const explicit = navigationTail !== undefined && canonical(navigationTail.id) === latest;
-		const drained = liveTurnNarrationActive && playbackPhase === "idle" &&
+		const announcedBoundary = !!pendingNotification && ownerTurnEnded && lastOwnerUtterance !== undefined && completedOwnerUtterance === lastOwnerUtterance;
+		const drained = liveTurnNarrationActive && (playbackPhase === "idle" || announcedBoundary) &&
 			((!snapshot.hasLiveContent && lastOwnerUtterance === undefined && narration.sourceEnd === 0) ||
 				(canonical(playbackHistory.selected()?.id) === latest && lastOwnerUtterance !== undefined &&
 					completedOwnerUtterance === lastOwnerUtterance && narration.consumedSourceEnd >= narration.sourceEnd));
 		const waiting = !speechBlocked && !pausedForAttention && !pendingReplay && !attentionSuppressed &&
-			(drained || (explicit && playbackTailIntent && lastOwnerUtterance === undefined &&
+			(drained || (explicit && playbackTailIntent && (lastOwnerUtterance === undefined || announcedBoundary) &&
 				(!liveTurnNarrationActive || playbackTailSourceEnd >= narration.sourceEnd)));
 		return { atTail: explicit || drained, waiting };
 	};
@@ -803,7 +824,7 @@ export default async function (pi: ExtensionAPI) {
 			const snapshot = playbackTimeline(ctx);
 			const { completed, timeline, aliases } = snapshot;
 			const unreadWaiting = (speechBlocked && blockedMessageHasSpeech) || (pausedForAttention && !!waitingSource);
-			const activePlayback = handoffConnecting || playbackPaused || (!inputInProgress && !attentionSuppressed && (unreadWaiting || !!pendingReplay || playbackTailIntent ||
+			const activePlayback = handoffConnecting || playbackPaused || (!inputInProgress && !attentionSuppressed && (unreadWaiting || !!pendingReplay || !!pendingNotification || playbackTailIntent ||
 				(ownsSpeech && (speechPurpose === "turn" || speechPurpose === "replay") &&
 					(!ownerTurnEnded || (lastOwnerUtterance !== undefined && completedOwnerUtterance !== lastOwnerUtterance)))));
 			const waitingAtTail = playbackTailState(ctx, snapshot).waiting;
@@ -813,7 +834,7 @@ export default async function (pi: ExtensionAPI) {
 			if (liveTurnNarrationActive && !playbackPaused && !pendingReplay && !blockedUnread) {
 				playbackHistory.selectCapture(vocalizer.playbackUtterance);
 			}
-			const historyStatus = blockedUnread ? undefined : playbackHistory.status(playbackPaused || pendingReplay ? undefined : vocalizer.playbackUtterance);
+			const historyStatus = blockedUnread ? undefined : playbackHistory.status(playbackPaused || pendingReplay || pendingNotification ? undefined : vocalizer.playbackUtterance);
 			const playback = config.enabled ? (waitingAtTail && historyStatus && ((!playbackPaused && historyStatus.messageId !== tailId) || historyStatus.position < historyStatus.duration) ? undefined : historyStatus) ?? (activePlayback ? {
 				messageId: blockedUnread ? livePlaybackId ?? (liveSource?.final ? completed.at(-1)?.id : undefined) ?? "" : waitingAtTail ? tailId ?? "" : pendingReplay?.target.id ?? playbackHistory.selected()?.id ?? livePlaybackId ?? "", position: 0, duration: 0,
 				messageIndex: tailId?.startsWith("live:") ? -1 : tailMessages.length - 1, messageCount: tailMessages.length, hasTimings: false, timingsComplete: false, wordTimingCoverage: undefined,
@@ -831,7 +852,7 @@ export default async function (pi: ExtensionAPI) {
 				// Playback chronology, never the transcript viewport or Alt+T follow setting.
 				const live = activePlayback && !handoffConnecting && !speechBlocked && !unreadWaiting && !playbackPaused && !pendingReplay?.paused &&
 					(waitingAtTail || !latest || playback.messageId === latest || !playback.messageId || (pendingCanonicalizations.size > 0 && [...liveBlockIds.values()].at(-1) === playback.messageId)) &&
-					!pendingReplay && playbackPhase === "idle" && (waitingAtTail || ((playbackTailIntent || (liveTurnNarrationActive && !ownerTurnEnded)) &&
+					!pendingReplay && (playbackPhase === "idle" || (pendingNotification && waitingAtTail)) && (waitingAtTail || ((playbackTailIntent || (liveTurnNarrationActive && !ownerTurnEnded)) &&
 						Math.max(narration.consumedSourceEnd, playbackTailIntent ? playbackTailSourceEnd : 0) >= narration.sourceEnd)) && playback.position >= playback.duration;
 				const known = playback.hasTimings && playback.timingsComplete && playback.duration > 0 &&
 					!(liveSource && !liveSource.final && [...liveBlockIds.values()].includes(playback.messageId));
@@ -1842,6 +1863,21 @@ export default async function (pi: ExtensionAPI) {
 			return;
 		}
 		if (!interactiveVoiceSession || !activeContext) return;
+		let failedNotification: PendingNotification | undefined;
+		if (pendingNotification && ((event.type === "idle" && event.utterance !== undefined && event.utterance === pendingNotification.utterance) ||
+			(event.type === "error" && !event.preview && (event.utterance === undefined || event.utterance === pendingNotification.utterance)))) {
+			if (event.type === "idle") {
+				const pending = pendingNotification;
+				try { if (notificationIsCurrent()) coordinator?.markAnnounced(pending.waiting); }
+				catch (error) { notifyVoice(activeContext, `Attention acknowledgement failed: ${String(error)}`, "error"); }
+				pendingNotification = undefined;
+				vocalizer.setPlaybackPaused(playbackPaused);
+				pending.finish(pending.epoch === playbackRequestEpoch && pending.context === contextEpoch);
+				return;
+			}
+			failedNotification = pendingNotification;
+			pendingNotification = undefined;
+		}
 		switch (event.type) {
 			case "loading":
 				state = "loading";
@@ -1880,7 +1916,7 @@ export default async function (pi: ExtensionAPI) {
 				break;
 			case "segment-audio":
 				narration.setSegmentAudio(event.segmentId, event.start, event.duration, event.timingQuality);
-				playbackHistory.setSegmentAudio(event.segmentId, event.start, event.duration, event.timingQuality);
+				playbackHistory.setSegmentAudio(event.segmentId, event.start, event.duration, event.timingQuality, event.audioIdentity);
 				playbackHistory.setWordTimings(event.segmentId, narration.sourceWordTimings(event.segmentId));
 				persistSegmentTiming(event.segmentId);
 				requestPlaybackTimeline();
@@ -1896,7 +1932,7 @@ export default async function (pi: ExtensionAPI) {
 				if (!playbackUtterances.has(event.utterance) || event.utterance < (lastPlaybackTick?.utterance ?? 0) || pendingReplay?.waiting || playbackPaused) return;
 				lastPlaybackTick = event;
 				narration.setPlayback(event.utterance, event.position);
-				playbackHistory.setPlayback(event.utterance, event.position);
+				playbackHistory.setPlayback(event.utterance, event.position, event.estimated === true);
 				requestPlaybackTimeline();
 				return;
 			case "alignment-error":
@@ -1920,6 +1956,27 @@ export default async function (pi: ExtensionAPI) {
 					}
 					deviceRetryRequired = true;
 					notifyStopFailure(event.message, output.episode);
+				}
+				if (failedNotification) {
+					const pending = failedNotification;
+					const cancelId = vocalizer.clear();
+					state = "error";
+					notifyVoice(activeContext, `Attention announcement failed: ${event.message}`, "error");
+					pendingNotification = pending;
+					pending.utterance = undefined; // Failed EOF can never become delivery proof.
+					void waitForTransportCancellation(cancelId).then(() => {
+						pending.admit = () => {
+							if (pendingNotification !== pending || stopsUnresolved() || transportStopPending || inputStopPending ||
+								stopRecovery?.episode("output")?.handles.length || stopRecovery?.episode("input")?.handles.length) return;
+							pendingNotification = undefined;
+							const current = pending.epoch === playbackRequestEpoch && pending.context === contextEpoch;
+							if (current) vocalizer.setPlaybackPaused(playbackPaused);
+							pending.finish(current);
+						};
+						pending.admit();
+					}, error => { if (pendingNotification === pending) cancelWaitingAnnouncement(); notifyStopFailure(error); });
+					refreshStatus();
+					return;
 				}
 				const currentUtterance = event.utterance !== undefined &&
 					(playbackUtterances.has(event.utterance) || event.utterance === lastOwnerUtterance ||
@@ -2014,6 +2071,7 @@ export default async function (pi: ExtensionAPI) {
 				playbackUtterances.add(utterance);
 				playbackHistory.bindUtterance(utterance);
 			}
+			if (pendingNotification && !tracked) { pendingNotification.utterance = utterance; return; }
 			if (!ownsSpeech) return;
 			lastOwnerUtterance = utterance;
 			if (playbackPaused) pausedOwnerUtterance = utterance;
@@ -2025,6 +2083,8 @@ export default async function (pi: ExtensionAPI) {
 		() => beforePhysicalIO("output"),
 	);
 	const clearPlaybackTransport = (): number | undefined => {
+		cancelWaitingAnnouncement();
+		pausedAnnouncementResume = undefined;
 		devicePicker?.abort();
 		routeIntent = undefined;
 		playbackTailIntent = false;
@@ -2050,7 +2110,7 @@ export default async function (pi: ExtensionAPI) {
 	let transportStopBarrier = Promise.resolve();
 	const transportStops = new Map<number, Promise<void>>();
 	const waitForTransportCancellation = (cancelId: number | undefined): Promise<void> => {
-		if (cancelId === undefined && !ownsSpeech) return transportStopBarrier;
+		if (cancelId === undefined && !ownsSpeech && !stopResources.output.episode) return transportStopBarrier;
 		const existing = cancelId === undefined ? undefined : transportStops.get(cancelId);
 		if (existing) return existing;
 		transportStopPending = true;
@@ -2080,15 +2140,25 @@ export default async function (pi: ExtensionAPI) {
 		return barrier;
 	};
 
-	const releaseAfterTransportCancellation = (cancelId: number | undefined, announceNext = false, inputCancelled = Promise.resolve()): void => {
+	const releaseAfterTransportCancellation = (cancelId: number | undefined, announceNext = false, inputCancelled = Promise.resolve(), stopBoundary = false): void => {
 		const leaseEpoch = speechLeaseEpoch;
+		const boundaryEpoch = playbackRequestEpoch;
 		void Promise.all([waitForTransportCancellation(cancelId), inputCancelled, inputStopBarrier]).then(() => {
 			const release = (): void => {
 				// A superseding Stop must survive the routing continuation as well as
 				// its physical rebind, without releasing a replacement playback lease.
 				if (routeFlight) { void routeFlight.then(release).catch(notifyStopFailure); return; }
-				if (Object.values(stopResources).some(resource => resource.episode || resource.cleanup)) return;
-				if (ownsSpeech && speechLeaseEpoch === leaseEpoch) releaseSpeechOwnership(announceNext);
+				if (ownsSpeech && speechLeaseEpoch === leaseEpoch) {
+					const announcement = stopBoundary && boundaryEpoch === playbackRequestEpoch ? announceWaiting(false, true) : undefined;
+					if (announcement) void announcement.then(current => {
+						if (!current) return;
+						// The one permitted prompt must not undo Stop, even if a model finishes meanwhile.
+						attentionSuppressed = true;
+						coordinator?.setAttentionEnabled(false);
+						releaseSpeechOwnership(false);
+					});
+					else releaseSpeechOwnership(announceNext);
+				}
 			};
 			const rebind = deviceRebind;
 			if (rebind) return rebind.catch(error => { if (unconfirmedDeviceStops.has(rebind)) throw error; }).then(release);
@@ -2181,8 +2251,7 @@ export default async function (pi: ExtensionAPI) {
 		ownerContentExpected = false;
 		speechReservedForInput = false;
 		projectAnnouncementPending = false;
-		pendingNotification = undefined;
-		completingOwnerSpeech = false;
+		cancelWaitingAnnouncement();
 		if (!inputInProgress) state = "idle";
 		refreshStatus();
 		scheduleVoiceWorkerIdleStop();
@@ -2190,19 +2259,78 @@ export default async function (pi: ExtensionAPI) {
 		return true;
 	};
 
-	const speakAttentionNotification = (waiting: WaitingSession): void => {
-		if (!coordinator || attentionSuppressed || !config.enabled || waiting.instanceId === coordinator.instanceId) return;
-		speechPurpose = "notification";
-		ownerTurnEnded = true;
-		pendingNotification = waiting;
-		lastOwnerUtterance = undefined;
-		projectPrefixUtterance = undefined;
-		completedOwnerUtterance = undefined;
-		ownerContentExpected = true;
-		narration.finish();
-		lastOwnerUtterance = vocalizer.speakUntracked(
-			`Project ${coordinator.projectLabel(waiting.cwd, waiting.sessionId, waiting.sessionName)} requires attention next.`,
-		);
+	const notificationIsCurrent = (): boolean => {
+		const pending = pendingNotification;
+		const waiting = pending && coordinator?.nextUnannouncedWaiting(outputConnection());
+		return !!pending && pending.epoch === playbackRequestEpoch && pending.context === contextEpoch &&
+			pending.endpoint === outputEndpoint && pending.generation === outputGeneration &&
+			waiting?.instanceId === pending.waiting.instanceId && waiting?.generation === pending.waiting.generation;
+	};
+
+	// One existing waiting record per safe boundary. No notification queue or mutable-state restore.
+	const announceWaiting = (stopOriginal = false, allowSuppressed = false, retainPaused = false): Promise<boolean> | undefined => {
+		if (!coordinator || !ownsSpeech || pendingNotification || !config.enabled ||
+			(attentionSuppressed && !allowSuppressed) || deviceRebind || routeFlight || inputInProgress || pendingSpeechPreemption) return;
+		const waiting = coordinator.nextUnannouncedWaiting(outputConnection());
+		if (!waiting) return;
+		if (stopOriginal) {
+			++playbackRequestEpoch;
+			coordinator.cancelSpeechAcquisition();
+			pendingReplay = undefined;
+		}
+		const result = Promise.withResolvers<boolean>();
+		const pending: PendingNotification = { waiting, epoch: playbackRequestEpoch, context: contextEpoch,
+			endpoint: outputEndpoint, generation: outputGeneration, finish: result.resolve };
+		pendingNotification = pending;
+		if (retainPaused && playbackPaused) {
+			const snapshot = playbackHistory.resumeSnapshot(true);
+			if (snapshot) {
+				pausedAnnouncementResume = { ...snapshot, source: playingSource };
+				// Cancellation retires every worker block, not just the selected unit.
+				const remaining = playingSource ? eligibleAssistantBlocks(playingSource.assistant, config.mode)
+					.filter(block => block.contentIndex > (snapshot.contentIndex ?? 0) && hasSpeakableAudio(block.text)) : [];
+				const unheard = remaining.flatMap(block => {
+					const id = playingSource!.blockIds.get(block.contentIndex);
+					return id && !queuedPausedMessages.some(message => message.id === id)
+						? [{ ...block, id, time: 0, sourceOffset: 0, source: playingSource }] : [];
+				});
+				queuedPausedMessages.unshift(...unheard);
+			}
+		}
+		if (stopOriginal) queueIncomingWhilePaused = true;
+		const cancelId = stopOriginal ? vocalizer.clear() : undefined;
+		if (stopOriginal) { playbackUtterances.clear(); pausedOwnerUtterance = undefined; }
+		const failed = (error: unknown): void => {
+			if (pendingNotification === pending) pendingNotification = undefined;
+			pending.finish(false);
+			notifyStopFailure(error);
+		};
+		void (async () => {
+			if (stopOriginal) await waitForTransportCancellation(cancelId);
+			if (transportStopPending) await transportStopBarrier;
+			if (inputStopPending) await inputStopBarrier;
+			// An ACK can precede individual receipts. Keep this same boundary, not a new request.
+			pending.admit = () => {
+				if (pendingNotification !== pending) return;
+				try {
+					if (!notificationIsCurrent()) {
+						pendingNotification = undefined;
+						pending.finish(pending.epoch === playbackRequestEpoch && pending.context === contextEpoch);
+						return;
+					}
+					if (stopsUnresolved() || deviceRebind || routeFlight || transportStopPending || inputStopPending ||
+						stopRecovery?.episode("output")?.handles.length || stopRecovery?.episode("input")?.handles.length) return;
+					pending.admit = undefined;
+					vocalizer.setPlaybackPaused(false);
+					pending.utterance = vocalizer.speakUntracked(
+						`Project ${coordinator!.projectLabel(waiting.cwd, waiting.sessionId, waiting.sessionName)} requires attention next.`,
+					);
+					if (pending.utterance === undefined) { pendingNotification = undefined; pending.finish(false); }
+				} catch (error) { failed(error); }
+			};
+			pending.admit();
+		})().catch(failed);
+		return result.promise;
 	};
 
 	flushDeferredRelease = (): void => {
@@ -2232,51 +2360,45 @@ export default async function (pi: ExtensionAPI) {
 			return;
 		}
 		restoreFollowAfterSpeech();
-		if (announceNext && !automaticRecoveryFlight && config.enabled && !attentionSuppressed && !playbackPaused) {
-			const waiting = coordinator.nextUnannouncedWaiting();
-			if (waiting) {
-				speakAttentionNotification(waiting);
-				return;
-			}
+		if (pendingNotification) return;
+		if (announceNext && !automaticRecoveryFlight) {
+			const announcement = announceWaiting();
+			if (announcement) { void announcement.then(current => { if (current) releaseSpeechOwnership(false); }); return; }
 		}
 		relinquishSpeech();
 	};
 
-	const completeOwnerSpeech = (): void => {
+	const completeOwnerSpeech = (announce = true): void => {
 		const expectedUtterance = ownerContentExpected ? lastOwnerUtterance : projectPrefixUtterance;
-		if (!ownsSpeech || !ownerTurnEnded || completingOwnerSpeech || pendingReplay || playbackPaused || deviceRebind || transportStopPending || inputStopPending || attentionPreparation?.epoch === playbackRequestEpoch) return;
+		if (!ownsSpeech || !ownerTurnEnded || pendingNotification || pendingReplay || playbackPaused || deviceRebind || transportStopPending || inputStopPending || attentionPreparation?.epoch === playbackRequestEpoch) return;
 		if (expectedUtterance === undefined) projectAnnouncementPending = false;
 		else if (completedOwnerUtterance !== expectedUtterance) return;
-		completingOwnerSpeech = true;
-		if (speechPurpose === "notification") {
-			if (pendingNotification) coordinator?.markAnnounced(pendingNotification.instanceId);
-			if (queuedPausedMessages.length === 0 && !queueIncomingWhilePaused) {
-				relinquishSpeech();
-				return;
+		if (!queuedPausedMessages.length && !queueIncomingWhilePaused) {
+			// Whole-message audio completion advances Tail even while an untracked prompt plays.
+			const latest = activeContext && completedAssistantMessages(activeContext, config.mode, false).at(-1);
+			const selected = playbackHistory.selected()?.id;
+			const pendingLiveEnd = liveTurnNarrationActive && pendingCanonicalizations.size > 0 && selected !== undefined &&
+				selected === [...liveBlockIds.values()].at(-1);
+			if ((latest && latest.id === selected) || pendingLiveEnd) {
+				navigationTail = { id: selected };
+				playbackTailIntent = true;
 			}
+			restoreFollowAfterSpeech();
 		}
-		completingOwnerSpeech = false;
+		if (announce && expectedUtterance !== undefined && (!queuedPausedMessages[0] || queuedPausedMessages[0].source !== playingSource)) {
+			const announcement = announceWaiting();
+			if (announcement) { void announcement.then(current => { if (current) completeOwnerSpeech(false); }); return; }
+		}
 		const queued = queuedPausedMessages.shift();
 		if (queued) {
 			void playTarget(queued, !playbackHistory.hasCompleteTimingFor(queued.id), false, true);
 			return;
 		}
-		if (!queueIncomingWhilePaused) {
-			// Completion advances chronology, not the viewport; waiting never retains the audio lease.
-			const latest = activeContext && completedAssistantMessages(activeContext, config.mode, false).at(-1);
-			const selected = playbackHistory.selected()?.id;
-			const pendingLiveEnd = liveTurnNarrationActive && pendingCanonicalizations.size > 0 && selected !== undefined &&
-				selected === [...liveBlockIds.values()].at(-1);
-			if ((latest && (speechPurpose === "turn" || speechPurpose === "replay") && latest.id === selected) || pendingLiveEnd) {
-				navigationTail = { id: selected };
-				playbackTailIntent = true;
-			}
-			releaseSpeechOwnership(true);
-		}
+		if (!queueIncomingWhilePaused) releaseSpeechOwnership(false);
 	};
 
 	handleCoordinatedIdle = utterance => {
-		if (!ownsSpeech || utterance === undefined) return;
+		if (!ownsSpeech || utterance === undefined || (utterance !== lastOwnerUtterance && utterance !== projectPrefixUtterance)) return;
 		completedOwnerUtterance = utterance;
 		completeOwnerSpeech();
 	};
@@ -2313,8 +2435,7 @@ export default async function (pi: ExtensionAPI) {
 		speechReservedForInput = false;
 		projectAnnouncementPending = shouldAnnounce;
 		ownedSpeechText = "";
-		pendingNotification = undefined;
-		completingOwnerSpeech = false;
+		cancelWaitingAnnouncement();
 		if (!waitingSource || waitingSource === handledSource) {
 			pausedForAttention = false;
 			waitingSource = undefined;
@@ -2391,7 +2512,7 @@ export default async function (pi: ExtensionAPI) {
 				blockedMessageHasSpeech = hasSpeakableAudio(interrupted.spokenText);
 			} else {
 				waitingSource = liveSource;
-				coordinator?.markWaiting();
+				coordinator?.markWaiting(outputConnection());
 			}
 			refreshStatus();
 		}
@@ -2446,6 +2567,7 @@ export default async function (pi: ExtensionAPI) {
 				// Session replacement will create a fresh coordinator and discard this request.
 			}
 		}
+		if (pendingNotification?.admit) { pendingNotification.admit(); return; }
 		if (deviceRetryRequired) return;
 		const owner = coordinator.speechOwner();
 		if (ownsSpeech && owner?.instanceId !== coordinator.instanceId) handleSpeechPreemption();
@@ -2456,7 +2578,7 @@ export default async function (pi: ExtensionAPI) {
 		if ((!owner || (ownsSpeech && playbackPaused)) && activeContext && !timingPreprocessing) scheduleMissingTimings(activeContext, false);
 		if (!config.enabled || attentionSuppressed || ownsSpeech) return;
 		// Announcements never interrupt a transport or announce our own response.
-		const waiting = coordinator.tryAcquireWaitingAnnouncement();
+		const waiting = coordinator.tryAcquireWaitingAnnouncement(outputConnection());
 		if (!waiting) return;
 		try { claimOutputDevice(); } catch (error) {
 			coordinator.releaseSpeech();
@@ -2469,8 +2591,11 @@ export default async function (pi: ExtensionAPI) {
 		voiceWorkerIdleTimer = null;
 		cancelTimingWorkers();
 		ownsSpeech = true;
-		completingOwnerSpeech = false;
-		speakAttentionNotification(waiting);
+		speechLeaseEpoch += 1;
+		ownerTurnEnded = true;
+		const announcement = announceWaiting();
+		if (announcement) void announcement.then(current => { if (current) completeOwnerSpeech(false); });
+		else releaseSpeechOwnership(false);
 	};
 
 	const refreshDeviceLabel = (): void => {
@@ -2719,10 +2844,12 @@ export default async function (pi: ExtensionAPI) {
 					changed ||= inputInProgress && (inputRoute.endpoint !== inputEndpoint ||
 						(inputRoute.kind === "device" ? inputRoute.device.connectedAt : undefined) !== inputGeneration);
 				} catch (error) { if ((!identityChanged && inputInProgress) || (manual !== undefined && manual !== "auto")) throw error; }
-				if (manual !== undefined || previous || stopsUnresolved() || pendingSpeechPreemption || transportStopPending || inputStopPending || (force && (deviceRetryRequired || inputInProgress || playbackPaused)) || (changed && (ownsSpeech || inputInProgress))) {
+				if (manual !== undefined || previous || stopsUnresolved() || pendingSpeechPreemption || transportStopPending || inputStopPending || (force && (deviceRetryRequired || inputInProgress || playbackPaused || !!pendingNotification)) || (changed && (ownsSpeech || inputInProgress))) {
 					// Termination, not a TCP accept or a cancellation timeout, proves the old sink is gone.
 					stopUnconfirmed = true;
 					if (force && inputInProgress) await finishInputForPlayback();
+					cancelWaitingAnnouncement();
+					pausedAnnouncementResume = undefined;
 					await Promise.all([trackStop("output", vocalizer.shutdown()), cancelActiveInput()]);
 					if (stopsUnresolved()) throw new Error("Retained transport scopes remain unconfirmed");
 					liveTurnNarrationActive = false;
@@ -3075,7 +3202,7 @@ export default async function (pi: ExtensionAPI) {
 	};
 
 	const playTarget = async (
-		target: PlaybackTarget & { source?: typeof liveSource; tailPrefix?: string },
+		target: PlaybackTarget & { source?: typeof liveSource; tailPrefix?: string; audioOffset?: PlaybackResumeSnapshot["audioOffset"] },
 		recordTimings: boolean,
 		previewTarget = false,
 		queued = false,
@@ -3112,6 +3239,15 @@ export default async function (pi: ExtensionAPI) {
 		if (!queued && !retry) {
 			queuedPausedMessages.length = 0;
 			queueIncomingWhilePaused = false;
+		}
+		if (!queued) {
+			if (pendingNotification) {
+				const paused = playbackPaused;
+				clearPlaybackTransport();
+				playbackPaused = paused;
+			}
+			const announcement = announceWaiting(true);
+			if (announcement && !await announcement) return;
 		}
 		attentionSuppressed = false;
 		coordinator?.setAttentionEnabled(config.enabled);
@@ -3321,6 +3457,7 @@ export default async function (pi: ExtensionAPI) {
 		const currentLiveSource = replaySource === liveSource;
 		speechPurpose = continueLiveTurn && currentLiveSource && !replaySource?.final ? "turn" : "replay";
 		pendingReplay = undefined;
+		playingSource = requestedLiveSource;
 		liveTurnNarrationActive = continueLiveTurn && currentLiveSource;
 		if (continueLiveTurn && currentLiveSource) {
 			queueIncomingWhilePaused = false;
@@ -3367,7 +3504,7 @@ export default async function (pi: ExtensionAPI) {
 		if (ownerContentExpected) announceProjectForSpeech();
 		if (continueLiveTurn) {
 			liveCaptureOrigin = sourceOffset;
-			vocalizer.setNarrationSourceOffset(0, target.skipUnits ?? 0);
+			vocalizer.setNarrationSourceOffset(0, target.skipUnits ?? 0, target.audioOffset);
 			// Closure belongs to the navigation intent, not a later message_end.
 			const prefix = request.target.tailPrefix ?? target.text.slice(0, sourceOffset);
 			// A closed block has no unfinished unit to retain at Tail.
@@ -3405,7 +3542,7 @@ export default async function (pi: ExtensionAPI) {
 					}), replaySource.assistant, replaySource.existingEntries, replayBlockIds);
 				if (currentLiveSource) livePlaybackId = undefined;
 			}
-		} else vocalizer.speakFrom(suffix, sourceOffset, target.skipUnits ?? 0);
+		} else vocalizer.speakFrom(suffix, sourceOffset, target.skipUnits ?? 0, target.audioOffset);
 		ownerTurnEnded = !continueLiveTurn || !!replaySource?.final;
 		completeOwnerSpeech();
 		} finally {
@@ -3507,6 +3644,7 @@ export default async function (pi: ExtensionAPI) {
 				const completed = messages.find(message => message.id === (target.contentIndex === 0 ? entry.id : `${entry.id}:${target.contentIndex}`));
 				if (!completed) continue;
 				playbackHistory.rename(target.id, completed);
+				if (pausedAnnouncementResume?.id === target.id) Object.assign(pausedAnnouncementResume, completed);
 				if (livePlaybackId === target.id) livePlaybackId = completed.id;
 				if (navigationTail?.id === target.id) navigationTail.id = completed.id;
 				if (pendingReplay?.target.id === target.id) Object.assign(pendingReplay.target, completed);
@@ -3926,7 +4064,7 @@ export default async function (pi: ExtensionAPI) {
 		}
 		if (!wasEnabled && config.enabled && !attentionSuppressed) {
 			coordinator?.setAttentionEnabled(true);
-			if (disabledAttentionPending) coordinator?.markWaiting();
+			if (disabledAttentionPending) coordinator?.markWaiting(outputConnection());
 			disabledAttentionPending = false;
 		}
 		refreshStatus();
@@ -4533,7 +4671,7 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	pi.on("before_agent_start", async () => {
-		if (!interactiveVoiceSession || playbackPaused || (ownsSpeech && speechPurpose === "replay") || (playbackTailIntent && !ownsSpeech)) return;
+		if (!interactiveVoiceSession || playbackPaused || pendingNotification || (ownsSpeech && (speechPurpose === "replay" || lastOwnerUtterance !== completedOwnerUtterance)) || (playbackTailIntent && !ownsSpeech)) return;
 		speechBlocked = false;
 		blockedMessageHasSpeech = false;
 		blockedWarningIssued = false;
@@ -4554,12 +4692,12 @@ export default async function (pi: ExtensionAPI) {
 			coordinator?.setAttentionEnabled(config.enabled);
 			// A running replay owns its source/cursor just like a paused one. Model
 			// output queues behind it; reacquiring "turn" would erase paint while audio plays.
-			const replaying = ownsSpeech && speechPurpose === "replay";
+			const replaying = !!pendingNotification || (ownsSpeech && (speechPurpose === "replay" || ownerTurnEnded));
 			queueIncomingWhilePaused = config.enabled && (playbackPaused || !!pendingReplay || replaying);
 			liveBlockIndex = undefined;
 			liveBlockIds = new Map();
 			if (pendingReplay || replaying) livePlaybackId = undefined;
-			liveSource = { assistant: event.message, final: false,
+			liveSource = { assistant: event.message, final: false, blockIds: liveBlockIds,
 				existingEntries: new Set(activeContext?.sessionManager.getBranch().filter(entry => entry.type !== "message" || entry.message !== event.message).map(entry => entry.id)), before: activeContext && config.codeDescriptionContext === "conversation"
 				? liveConversationBefore(activeContext).messages : [], waiters: new Set() };
 			if (queueIncomingWhilePaused) return;
@@ -4587,6 +4725,7 @@ export default async function (pi: ExtensionAPI) {
 				refreshStatus();
 				return;
 			}
+			playingSource = liveSource;
 			navigationTail = undefined;
 			liveCaptureOrigin = 0;
 			ownerTurnEnded = false;
@@ -4767,6 +4906,8 @@ export default async function (pi: ExtensionAPI) {
 			ownerContentExpected = ownerContentExpected || hasSpeakableAudio(completedText);
 			if (ownerContentExpected) announceProjectForSpeech();
 			vocalizer.flush();
+			ownerTurnEnded = true;
+			completeOwnerSpeech();
 		}
 	});
 
@@ -4789,6 +4930,7 @@ export default async function (pi: ExtensionAPI) {
 			if (text && stopReason !== "toolUse" && acquireSpeech("turn")) {
 				navigationTail = undefined;
 				const messages = syncPlaybackMessages(ctx);
+				playingSource = liveSource;
 				narration.begin();
 				let firstBlock = true;
 				for (const block of eligibleAssistantBlocks(event.message, config.mode)) {
@@ -4796,7 +4938,10 @@ export default async function (pi: ExtensionAPI) {
 					const contextual = completedAssistantMessages(ctx, config.mode, config.codeDescriptionContext === "conversation")
 						.findLast(message => message.text === block.text && message.contentIndex === block.contentIndex);
 					const completed = messages.find(message => message.id === contextual?.id);
-					if (completed) playbackHistory.beginCapture(completed.id, completed.text, 0, true, 0, 0, firstBlock);
+					if (completed) {
+						playingSource?.blockIds.set(block.contentIndex, completed.id);
+						playbackHistory.beginCapture(completed.id, completed.text, 0, true, 0, 0, firstBlock);
+					}
 					firstBlock = false;
 					speechConversationMessages = contextual?.conversationMessages ?? liveSource?.before ?? [];
 					speechAssistantMessage = event.message;
@@ -4821,7 +4966,7 @@ export default async function (pi: ExtensionAPI) {
 				completeOwnerSpeech();
 			} else if (blockedMessageHasSpeech) {
 				waitingSource = liveSource;
-				coordinator?.markWaiting();
+				coordinator?.markWaiting(outputConnection());
 				pausedForAttention = true;
 				speechBlocked = false;
 				blockedMessageHasSpeech = false;
@@ -4955,12 +5100,12 @@ export default async function (pi: ExtensionAPI) {
 		}
 		const restoreTail = atTranscriptTail && transcriptIsFollowingEnd();
 		const target = previewHistoricalTarget(ctx, 0, automatic);
-		const request = prepared ? playbackRequestEpoch : await preparePlaybackAction(ctx, false, true);
-		if (request === undefined || request !== playbackRequestEpoch) return;
 		if (!target) {
 			notifyVoice(ctx, "Replay unavailable · no completed assistant message yet", "warning");
 			return;
 		}
+		const request = prepared ? playbackRequestEpoch : await preparePlaybackAction(ctx, false, true);
+		if (request === undefined || request !== playbackRequestEpoch) return;
 		playbackPaused = false;
 		narration.setPaused(playbackPaused);
 		// Select now; canonical timing/history catch-up yields inside playTarget.
@@ -5147,6 +5292,13 @@ export default async function (pi: ExtensionAPI) {
 		refreshStatus();
 		refreshPlaybackTimeline();
 		if (preserveViewport) preserveNarrationViewport(pausedScrollTop);
+		if (!pendingNotification) {
+			const announcement = announceWaiting(true, false, true);
+			if (announcement) {
+				queueIncomingWhilePaused = true;
+				void announcement.then(current => { if (current) { refreshStatus(); refreshPlaybackTimeline(); } });
+			}
+		}
 		return true;
 	};
 
@@ -5171,13 +5323,43 @@ export default async function (pi: ExtensionAPI) {
 		queuedPausedMessages.length = 0;
 		queueIncomingWhilePaused = false;
 		scrollToBottom(ctx);
-		releaseAfterTransportCancellation(cancelId, false);
+		releaseAfterTransportCancellation(cancelId, true);
 	};
 
 	pi.registerShortcut("f8", {
 		description: "⏯ Pause or resume playback",
 		handler: async ctx => {
 			if (!requireEnabledVoice(ctx)) return;
+			if (pendingNotification && pausedAnnouncementResume && playbackPaused) {
+				const target = pausedAnnouncementResume;
+				clearPlaybackTransport();
+				playbackPaused = false;
+				void playTarget(target, false, false, true);
+				return;
+			}
+			if (pendingNotification) {
+				playbackPaused = !playbackPaused;
+				narration.setPaused(playbackPaused);
+				vocalizer.setPlaybackPaused(playbackPaused);
+				refreshStatus(); refreshPlaybackTimeline();
+				return;
+			}
+			if (pausedAnnouncementResume && playbackPaused) {
+				const target = pausedAnnouncementResume;
+				pausedAnnouncementResume = undefined;
+				playbackPaused = false;
+				void playTarget(target, false, false, true);
+				return;
+			}
+			if (playbackPaused && ownerTurnEnded && (lastOwnerUtterance === undefined
+				? ownsSpeech && speechPurpose === undefined && !speechReservedForInput
+				: completedOwnerUtterance === lastOwnerUtterance)) {
+				playbackPaused = false;
+				narration.setPaused(false);
+				vocalizer.setPlaybackPaused(false);
+				completeOwnerSpeech(false);
+				return;
+			}
 			if (routeIntent) {
 				// Explicit pause supersedes saved playing intent without admitting a sink.
 				routeIntent = undefined;
@@ -5244,6 +5426,13 @@ export default async function (pi: ExtensionAPI) {
 				playbackPaused = request.paused;
 				narration.setPaused(playbackPaused);
 				vocalizer.setPlaybackPaused(request.paused);
+				if (request.paused) {
+					const announcement = announceWaiting(true, false, true);
+					if (announcement) {
+						queueIncomingWhilePaused = true;
+						void announcement.then(current => { if (current) { refreshStatus(); refreshPlaybackTimeline(); } });
+					}
+				}
 				refreshStatus();
 				refreshPlaybackTimeline();
 				if (!request.waiting && !request.paused) {
@@ -5263,11 +5452,6 @@ export default async function (pi: ExtensionAPI) {
 				playbackPaused = false;
 				if (speechPurpose === "replay" && !liveTurnNarrationActive && (!liveSource || liveSource.final)) queueIncomingWhilePaused = false;
 				narration.setPaused(playbackPaused);
-				if (speechPurpose === "notification" && completedOwnerUtterance === pausedOwnerUtterance) {
-					vocalizer.setPlaybackPaused(false);
-					completeOwnerSpeech();
-					return;
-				}
 				if (liveTurnNarrationActive && ownsSpeech && speechPurpose === "turn" && !ownerTurnEnded && !queueIncomingWhilePaused) {
 					vocalizer.setPlaybackPaused(false);
 					pausedOwnerUtterance = undefined;
@@ -5706,7 +5890,7 @@ export default async function (pi: ExtensionAPI) {
 					narration.finish();
 					const inputCancelled = cancelActiveInput();
 					// Return promptly, but retain the lease until both devices acknowledge stop.
-					releaseAfterTransportCancellation(cancelId, false, inputCancelled);
+					releaseAfterTransportCancellation(cancelId, false, inputCancelled, true);
 					state = "idle";
 					refreshStatus();
 					refreshPlaybackTimeline();
@@ -5769,6 +5953,7 @@ export default async function (pi: ExtensionAPI) {
 					return;
 				}
 				case "reconnect": {
+					const notificationOnly = !!pendingNotification && lastOwnerUtterance === undefined && !pendingReplay;
 					routeIntent = undefined;
 					const epoch = ++playbackRequestEpoch;
 					const paused = playbackPaused || !!pendingReplay || (ownsSpeech &&
@@ -5783,6 +5968,7 @@ export default async function (pi: ExtensionAPI) {
 						playbackPaused = paused;
 						narration.setPaused(playbackPaused);
 						vocalizer.setPlaybackPaused(playbackPaused);
+						if (notificationOnly && !paused) releaseSpeechOwnership(false);
 						refreshStatus();
 					}
 					return;
