@@ -242,6 +242,7 @@ test("Stop notice remains stopped while preserving newly completed text for expl
 	await a.command("stop"); await settle();
 	const notice = notices(worker)[0]!;
 	await streamCompletedResponse(a, "new", "a1", "Preserved after Stop."); await settle();
+	assert.match(a.widgetLines()!.join(" "), /Idle/, "new output during the notice cannot clear Stop suppression");
 	worker.emit({ type: "idle", utterance: notice.utterance }); await settle();
 	assert.equal(segments(worker).at(-1)!.utterance, notice.utterance, "Stop cannot automatically play newly queued work");
 	await a.shortcut("f10"); await settle();

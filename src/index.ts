@@ -4688,8 +4688,10 @@ export default async function (pi: ExtensionAPI) {
 
 	pi.on("message_start", event => {
 		if (interactiveVoiceSession && (event.message as { role?: string })?.role === "assistant") {
-			attentionSuppressed = false;
-			coordinator?.setAttentionEnabled(config.enabled);
+			if (!pendingNotification) {
+				attentionSuppressed = false;
+				coordinator?.setAttentionEnabled(config.enabled);
+			}
 			// A running replay owns its source/cursor just like a paused one. Model
 			// output queues behind it; reacquiring "turn" would erase paint while audio plays.
 			const replaying = !!pendingNotification || (ownsSpeech && (speechPurpose === "replay" || ownerTurnEnded));
