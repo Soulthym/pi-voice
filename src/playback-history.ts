@@ -21,6 +21,14 @@ export interface PlaybackTarget extends PlaybackMessage {
 	skipUnits?: number;
 }
 
+/** Detached checkpoint: `time` is the unit start; `position` is the unchanged display cursor. */
+export interface PlaybackResumeSnapshot extends PlaybackTarget {
+	position: number;
+	paused: boolean;
+	confirmedPosition?: number;
+	audioOffset?: { seconds: number; audioIdentity: string };
+}
+
 export interface PlaybackStatus {
 	messageId: string;
 	position: number;
@@ -56,6 +64,8 @@ type MessageRecord = PlaybackMessage & {
 	position: number;
 	timingsComplete: boolean;
 	cursor?: PlaybackUnit;
+	/** Ephemeral device feedback, never persisted as reusable timing metadata. */
+	confirmed?: { unit: PlaybackUnit; time: number; seconds: number; audioIdentity?: string };
 	/** Relative checkpoints for compatible units, including suffixes without a known absolute start. */
 	units?: Map<string, TimingCheckpoint[]>;
 	/** Full source-array counts, never reconstructed from sparse navigation checkpoints. */
@@ -75,11 +85,12 @@ type Capture = {
 
 type CapturedSegment = {
 	capture: Capture; utterance: number; sourceOffset: number; skipUnits: number;
-	audioStart?: number; wordOffsets: Set<number>; sourceBase: number; code: boolean;
+	audioStart?: number; audioDuration?: number; audioIdentity?: string;
+	wordOffsets: Set<number>; sourceBase: number; code: boolean;
 	timingSuperseded?: boolean;
 };
 
-/** Keeps only text-source timing metadata; replayed audio is always regenerated. */
+/** Keeps source timing metadata and ephemeral confirmed playheads, never PCM. */
 export class PlaybackHistory {
 	#records = new Map<string, MessageRecord>();
 	#versions = new Map<string, Map<string, MessageRecord>>();
@@ -139,7 +150,8 @@ export class PlaybackHistory {
 				const version = message.renderKey ? this.#versions.get(message.id)?.get(message.renderKey) : undefined;
 				const compatible = version?.text === message.text ? version : undefined;
 				existing = { ...message, checkpoints: [], duration: 0, position: existing.position,
-					cursor: existing.text === message.text ? existing.cursor : undefined, timingsComplete: false,
+					cursor: existing.text === message.text ? existing.cursor : undefined,
+					confirmed: existing.text === message.text ? existing.confirmed : undefined, timingsComplete: false,
 					...(compatible ? { checkpoints: compatible.checkpoints.map(point => ({ ...point })),
 						duration: compatible.duration, timingsComplete: compatible.timingsComplete, units: compatible.units,
 						wordTimingCoverage: compatible.wordTimingCoverage && new Map(compatible.wordTimingCoverage) } : {}) };
@@ -228,6 +240,7 @@ export class PlaybackHistory {
 		const record = this.#records.get(id);
 		if (!record || record.renderKey !== previous) return;
 		record.renderKey = resolved;
+		if (record.confirmed) record.confirmed.audioIdentity = undefined;
 		for (const capture of new Set([this.#capture, ...this.#utterances.values()])) {
 			if (capture?.valid && capture.record === record && capture.renderKey === previous) capture.renderKey = resolved;
 		}
@@ -247,6 +260,9 @@ export class PlaybackHistory {
 
 	/** Freeze metadata before cancelling a dirty transport; late callbacks cannot relabel it. */
 	invalidateCaptures(id?: string): void {
+		for (const record of id === undefined ? this.#records.values() : [this.#records.get(id)]) {
+			if (record?.confirmed) record.confirmed.audioIdentity = undefined;
+		}
 		for (const capture of new Set([this.#capture, ...this.#utterances.values()])) {
 			if (capture && (id === undefined || capture.record.id === id)) capture.valid = false;
 		}
@@ -284,6 +300,7 @@ export class PlaybackHistory {
 			this.#playbackEpoch++;
 			this.#activeUtterance = undefined;
 		}
+		record.confirmed = undefined;
 		record.cursor = { sourceOffset, skipUnits };
 		this.#capture = { valid: true, renderKey: record.renderKey, epoch: this.#playbackEpoch, record, baseTime,
 			recordTimings: recordTimings && baseTime === 0 && sourceOffset === 0 && skipUnits === 0, origin: record.cursor, segments: [] };
@@ -294,6 +311,8 @@ export class PlaybackHistory {
 		if (!record) return;
 		if (!text.startsWith(record.text)) {
 			this.invalidateCaptures(id);
+			record.confirmed = undefined;
+			record.cursor = undefined;
 			record.wordTimingCoverage = undefined;
 		}
 		record.text = text;
@@ -311,6 +330,10 @@ export class PlaybackHistory {
 		if (record.text !== message.text || (record.renderKey && record.renderKey !== message.renderKey)) {
 			record.wordTimingCoverage = undefined;
 		}
+		if (record.text !== message.text) {
+			record.confirmed = undefined;
+			record.cursor = undefined;
+		} else if (record.confirmed) record.confirmed.audioIdentity = undefined;
 		this.#records.delete(fromId);
 		record.messageType = message.messageType;
 		record.contentIndex = message.contentIndex;
@@ -357,11 +380,19 @@ export class PlaybackHistory {
 		this.#utterances.set(segment.utterance, capture);
 	}
 
-	setSegmentAudio(segmentId: number, start: number, duration: number, quality: TimingQuality = "estimated"): void {
+	setSegmentAudio(segmentId: number, start: number, duration: number, quality: TimingQuality = "estimated", audioIdentity?: string): void {
 		const tracked = this.#segments.get(segmentId);
 		if (!tracked?.capture.valid || !Number.isFinite(start) || !Number.isFinite(duration) || duration <= 0) return;
 		const normalizedStart = Math.max(0, start);
+		if (tracked.audioIdentity !== audioIdentity || tracked.audioDuration !== duration || tracked.audioStart !== normalizedStart) {
+			const confirmed = tracked.capture.record.confirmed;
+			if (confirmed?.unit.sourceOffset === tracked.sourceOffset && confirmed.unit.skipUnits === tracked.skipUnits) {
+				confirmed.audioIdentity = undefined;
+			}
+		}
 		tracked.audioStart = normalizedStart;
+		tracked.audioDuration = duration;
+		tracked.audioIdentity = audioIdentity;
 		if (tracked.timingSuperseded) return;
 		const absoluteTime = tracked.capture.baseTime + normalizedStart;
 		const record = tracked.capture.record;
@@ -626,6 +657,7 @@ export class PlaybackHistory {
 		const capture = this.#utterances.get(utterance);
 		if (!advanceCursor || !capture?.valid || capture.epoch !== this.#playbackEpoch ||
 			(this.#activeUtterance !== undefined && utterance !== this.#activeUtterance)) return;
+		capture.record.confirmed = undefined;
 		const last = capture.segments.at(-1);
 		if (last) capture.record.cursor = { sourceOffset: last.sourceOffset, skipUnits: last.skipUnits };
 		if (capture.record.timingsComplete) capture.record.position = capture.record.duration;
@@ -643,7 +675,8 @@ export class PlaybackHistory {
 		}
 	}
 
-	setPlayback(utterance: number, position: number): void {
+	/** Old callers are estimated until they explicitly forward non-estimated device feedback. */
+	setPlayback(utterance: number, position: number, estimated = true): void {
 		const capture = this.#utterances.get(utterance);
 		if (!capture?.valid || capture.epoch !== this.#playbackEpoch || this.#finishedUtterances.has(utterance) || !Number.isFinite(position) ||
 			(this.#activeUtterance !== undefined && utterance < this.#activeUtterance)) return;
@@ -651,8 +684,15 @@ export class PlaybackHistory {
 		this.#activeUtterance = utterance;
 		this.#selectedId = capture.record.id;
 		capture.record.position = Math.max(0, capture.baseTime + position);
-		const segment = capture.segments.findLast(segment => segment.audioStart !== undefined && segment.audioStart <= position);
-		if (segment) capture.record.cursor = { sourceOffset: segment.sourceOffset, skipUnits: segment.skipUnits };
+		const segment = capture.segments.findLast(segment => segment.utterance === utterance && segment.audioStart !== undefined && segment.audioStart <= position);
+		if (segment) {
+			capture.record.cursor = { sourceOffset: segment.sourceOffset, skipUnits: segment.skipUnits };
+			const seconds = position - segment.audioStart!;
+			if (!estimated && seconds >= 0 && seconds < (segment.audioDuration ?? 0)) {
+				capture.record.confirmed = { unit: { ...capture.record.cursor }, time: capture.baseTime + segment.audioStart!,
+					seconds, audioIdentity: segment.audioIdentity };
+			}
+		}
 	}
 
 	/** Follow the foreground capture without inventing a playback tick or resetting its cursor. */
@@ -763,9 +803,23 @@ export class PlaybackHistory {
 	#unitTarget(record: MessageRecord, unit: PlaybackUnit): PlaybackTarget {
 		const checkpoint = record.checkpoints.filter(point => point.duration > 0 && point.sourceOffset === unit.sourceOffset)[unit.skipUnits];
 		const time = checkpoint?.time ?? 0;
+		record.confirmed = undefined;
 		record.cursor = unit;
 		record.position = time;
 		return { ...this.selected()!, time, sourceOffset: unit.sourceOffset, skipUnits: unit.skipUnits };
+	}
+
+	/** Save before cancellation/announcement; never rewinds the paused cursor as resumeTarget does. */
+	resumeSnapshot(paused = false): PlaybackResumeSnapshot | undefined {
+		const record = this.#selectedId ? this.#records.get(this.#selectedId) : undefined;
+		if (!record) return;
+		const confirmed = record.confirmed;
+		const unit = confirmed?.unit ?? record.cursor ?? { sourceOffset: 0, skipUnits: 0 };
+		const checkpoint = record.checkpoints.filter(point => point.duration > 0 && point.sourceOffset === unit.sourceOffset)[unit.skipUnits];
+		return { ...this.selected(true)!, time: confirmed?.audioIdentity ? confirmed.time : checkpoint?.time ?? 0,
+			sourceOffset: unit.sourceOffset, skipUnits: unit.skipUnits, position: this.status()!.position, paused,
+			...(confirmed?.audioIdentity ? { confirmedPosition: confirmed.time + confirmed.seconds,
+				audioOffset: { seconds: confirmed.seconds, audioIdentity: confirmed.audioIdentity } } : {}) };
 	}
 
 	resumeTarget(): PlaybackTarget | undefined {
