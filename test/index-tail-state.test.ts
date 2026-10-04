@@ -448,6 +448,67 @@ for (const key of ["f9", "f10"]) test(`separate silent tail: ${kind}, ${timing},
 	await next;
 });
 
+for (const silent of ["---", "# "]) for (const key of ["f9", "f10"]) test(`preallocated silent block before paused notice: ${JSON.stringify(silent)}, ${key}`, async t => {
+	const host = await startHost(t);
+	const ended = t.mock.method(MockedVoiceWorkerClient.prototype, "endUtterance");
+	const message = assistant("Final audible word\n", "pending");
+	await host.emit("message_start", { message });
+	await host.emit("message_update", { message, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: message.content[0].text } });
+	await settle();
+	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
+	type Clip = { utterance: number; segmentId: number; text: string };
+	const clip = worker.sent.at(-1) as Clip;
+	for (const utterance of new Set((worker.sent as Clip[]).filter(s => s.utterance < clip.utterance).map(s => s.utterance))) {
+		assert.ok(ended.mock.calls.some(call => (call.arguments as unknown[])[0] === utterance));
+		worker.emit({ type: "idle", utterance });
+	}
+	worker.emit({ ...clip, type: "segment-audio", start: 0, duration: 3 });
+	worker.emit({ type: "playback", utterance: clip.utterance, position: 3 }); await settle();
+	const captures = t.mock.method(PlaybackHistory.prototype, "beginCapture");
+	const updated = structuredClone(message);
+	updated.content.push({ type: "text", text: silent });
+	await host.emit("message_update", { message: updated, assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: silent } });
+	await settle();
+	assert.equal(captures.mock.callCount(), 1, "B is already allocated, not buffered during the notice");
+	assert.ok(ended.mock.calls.some(call => (call.arguments as unknown[])[0] === clip.utterance), "block switch flushed A before real EOF");
+	worker.emit({ type: "idle", utterance: clip.utterance }); await settle();
+	const waiting = new SessionCoordinator(path.join(host.cwd, "waiting"), "waiting");
+	waiting.start(); waiting.markWaiting({ kind: "intentional_local" });
+	t.after(() => waiting.shutdown());
+	await host.shortcut("f8"); await settle();
+	const notice = worker.sent.at(-1) as Clip;
+	assert.match(notice.text, /requires attention next/);
+	assert.ok(ended.mock.calls.some(call => (call.arguments as unknown[])[0] === notice.utterance));
+	worker.emit({ type: "idle", utterance: notice.utterance }); await settle();
+	assert.equal(waiting.waitingSessions()[0]?.announced, true);
+	waiting.clearWaiting(); waiting.markWaiting({ kind: "intentional_local" });
+	host.scrollView.setDocument(Array.from({ length: 100 }, (_, i) => i === 90 ? () => host.render(message.content[0].text) : `History ${i}`), 10);
+	host.scrollView.manualScrollTo(7);
+	const history = captures.mock.calls[0]!.this as PlaybackHistory;
+	const cursor = history.resumeSnapshot(true);
+	const lines = host.widgetLines();
+	const sent = worker.sent.length;
+	const pauses = [...worker.pauses];
+	captures.mock.resetCalls();
+	const cancels = t.mock.method(worker, "cancel");
+	const releases = t.mock.method(SessionCoordinator.prototype, "releaseSpeech");
+	const acquisitions = t.mock.method(SessionCoordinator.prototype, "tryAcquireSpeech");
+	for (let i = 0; i < 2; i++) { await host.shortcut(key); await settle(); }
+	assert.equal(cancels.mock.callCount(), 0, "allocated markup cannot displace confirmed audible catch-up");
+	assert.equal(captures.mock.callCount(), 0);
+	assert.equal(releases.mock.callCount(), 0);
+	assert.equal(acquisitions.mock.callCount(), 0);
+	assert.equal(worker.sent.length, sent);
+	assert.deepEqual(history.resumeSnapshot(true), cursor);
+	assert.deepEqual(host.widgetLines(), lines);
+	assert.match(lines![0], /Paused.* · 2\/2(?: ·|\s)/, "silent B adds no eligible counter entry");
+	assert.equal(host.scrollView.scrollTop, 7, "caught-up navigation preserves manual viewport override");
+	assert.equal(host.scrollView.isFollowingEnd, false);
+	assert.deepEqual(worker.pauses, pauses);
+	assert.equal(waiting.waitingSessions()[0]?.announced, false);
+	assert.equal(host.modelRequests.length, 0);
+});
+
 test("empty streaming header reserves identity, not an eligible counter entry", async t => {
 	const host = await startHost(t);
 	await host.shortcut("f10"); await settle();

@@ -1,4 +1,5 @@
 import { SpeakableStream, type FencedCodeBlock } from "./speakable.js";
+import { hasSpeakableAudio } from "./attention.js";
 import type { NarrationSegment, TimingQuality } from "./narration-progress.js";
 
 export interface PlaybackMessage {
@@ -763,7 +764,14 @@ export class PlaybackHistory {
 	/** Follow the foreground capture without inventing a playback tick or resetting its cursor. */
 	selectCapture(utterance?: number): void {
 		const capture = utterance === undefined ? this.#capture : this.#utterances.get(utterance);
-		if (capture?.valid) this.#selectedId = capture.record.id;
+		if (!capture?.valid) return;
+		// A silent reservation cannot displace confirmed audible catch-up. Without
+		// that proof, preserve the queued placeholder rather than borrowing an old clock.
+		// Pending code remains eligible before its description emits a segment.
+		const selected = this.#selectedId ? this.#records.get(this.#selectedId) : undefined;
+		if (selected?.confirmed?.completedSourceEnd !== undefined && !capture.segments.length &&
+			!hasSpeakableAudio(capture.record.text) && this.hasConfirmedTextTail([selected])) return;
+		this.#selectedId = capture.record.id;
 	}
 
 	selected(includeIdentity = false): PlaybackMessage | undefined {
