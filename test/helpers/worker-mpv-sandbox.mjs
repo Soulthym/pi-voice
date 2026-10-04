@@ -1,5 +1,6 @@
 // Only run inside worker-mpv-sandbox.test.ts's networkless, audio-null container.
 import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
 import {spawn, spawnSync} from 'node:child_process';
 import {once} from 'node:events';
 import fs from 'node:fs';
@@ -54,12 +55,13 @@ async function property(ipc, name) {
   throw Error('IPC closed without response');
  } finally {socket.destroy();}
 }
-for (const mode of ['cancel','resume','delayed-startup','namespace-failure','eof-renewal']) {
+for (const mode of ['cancel','resume','delayed-startup','namespace-failure','eof-renewal','resume-offset']) {
  const events=[], replies=[], commands=[], children=[], sockets=[], delayed=[];
  const started=performance.now();
  let commitAt, pendingComplete;
  let renewalClosedBeforeComplete=false;
  let pcm=0, sessionPcm;
+ const pcmChunks=[];
  const server=net.createServer({allowHalfOpen:true},socket=>{
   sockets.push(socket); socket.on('error',()=>{});
   const child=spawn('bash',['/work/fixture/pi-voice-audio-session'], {
@@ -70,13 +72,13 @@ for (const mode of ['cancel','resume','delayed-startup','namespace-failure','eof
   let header='', streaming=false, output='', errors='', renewal=false;
   child.stderr.on('data',b=>errors+=b);
   socket.on('data',b=>{
-   if(streaming) { pcm+=b.length; return; }
+   if(streaming) { pcm+=b.length; pcmChunks.push(b); return; }
    header+=b.toString('latin1');
    let end;
    while((end=header.indexOf('\n'))>=0) {
     const line=header.slice(0,end); header=header.slice(end+1); commands.push(line);
     if(line.startsWith('PI_VOICE_CONTROLrenew ')) renewal=true;
-    if(line.startsWith('PI_VOICE_COMMIT ')) {commitAt=performance.now(); streaming=true; pcm+=Buffer.byteLength(header,'latin1'); header=''; break;}
+    if(line.startsWith('PI_VOICE_COMMIT ')) {commitAt=performance.now(); streaming=true; pcm+=Buffer.byteLength(header,'latin1'); pcmChunks.push(Buffer.from(header,'latin1')); header=''; break;}
    }
   });
   child.stdout.on('data',b=>{
@@ -111,6 +113,25 @@ for (const mode of ['cancel','resume','delayed-startup','namespace-failure','eof
  });
  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
  const output=`tcp://127.0.0.1:${server.address().port}`;
+ process.env.PI_VOICE_TEST_RESUME_OFFSET = mode==='resume-offset' ? '1' : '0';
+ process.env.PI_VOICE_AUDIO_CACHE_DIR='/work/cache/pcm-offset';
+ const config={...DEFAULT_VOICE_CONFIG,output,audioCache:mode==='resume-offset'};
+ const text='Synthetic transport fixture only.';
+ let audioIdentity, decoded;
+ if(mode==='resume-offset') {
+  const key=createHash('sha256').update(JSON.stringify([2,config.ttsModel,config.ttsDtype,config.voice,config.speed,config.audioCacheBitrate,text])).digest('hex');
+  const directory=`${process.env.PI_VOICE_AUDIO_CACHE_DIR}/${key.slice(0,2)}`;
+  fs.mkdirSync(directory,{recursive:true});
+  const file=`${directory}/${key}.opus`;
+  const pcm=Float32Array.from({length:48000},(_,i)=>Math.sin(i*0.1)*0.1);
+  const encoded=spawnSync('ffmpeg',['-v','error','-f','f32le','-ar','24000','-ac','1','-i','pipe:0','-c:a','libopus','-b:a',`${config.audioCacheBitrate}k`,file],{input:Buffer.from(pcm.buffer)});
+  assert.equal(encoded.status,0,String(encoded.stderr));
+  const decode=spawnSync('ffmpeg',['-v','error','-i',file,'-f','f32le','-ar','24000','-ac','1','pipe:1']);
+  assert.equal(decode.status,0,String(decode.stderr));
+  decoded=decode.stdout;
+  assert.equal(decoded.length,48000*4);
+  audioIdentity=`${key}:${createHash('sha256').update(decoded).digest('hex')}`;
+ }
  const worker=new VoiceWorkerClient(event=>{
   events.push(event);
   if(event.type==='remote-handle') {
@@ -122,7 +143,7 @@ for (const mode of ['cancel','resume','delayed-startup','namespace-failure','eof
  });
  try {
   worker.setPlaybackPaused(true);
-  worker.sendSegment(1,1,'Synthetic transport fixture only.',{...DEFAULT_VOICE_CONFIG,output,audioCache:false});
+  worker.sendSegment(1,1,text,config,mode==='resume-offset' ? {seconds:0.5,audioIdentity} : undefined);
   worker.endUtterance(1);
   if(mode==='namespace-failure') {
    await until(()=>events.some(e=>e.type==='error'),'native namespace failure reaches VoiceWorkerClient');
@@ -174,6 +195,18 @@ for (const mode of ['cancel','resume','delayed-startup','namespace-failure','eof
    await until(()=>events.some(e=>e.type==='idle'),'resume completes through native EOF');
    assert.ok(pcm>0,'resume delivers synthetic PCM');
    assert.ok(replies.some(e=>e.type==='complete'),`real native EOF confirms completion: ${JSON.stringify({events,replies})}`);
+  }
+  if(mode==='resume-offset') {
+   // Actual Opus cache decode, trimming, TCP clocks and native null playback; no synthesis.
+   assert.equal(pcm,(36000+24000)*4,'retained 1.5-second suffix plus the existing one-second EOF silence');
+   const received=Buffer.concat(pcmChunks);
+   assert.deepEqual(received.subarray(0,36000*4),decoded.subarray(12000*4));
+   assert.ok(received.subarray(36000*4).every(byte=>byte===0));
+   const audio=events.find(e=>e.type==='segment-audio');
+   assert.deepEqual([audio.start,audio.duration,audio.resumeOffset],[0,2,0.5]);
+   const positions=events.filter(e=>e.type==='playback').map(e=>e.position);
+   assert.ok(positions.length>0 && positions.every(position=>position>=0.5));
+   assert.ok(positions.at(-1)>=1.9,'device clocks map back to the untrimmed two-second source');
   }
   if(mode==='eof-renewal') {
    assert.equal(renewalClosedBeforeComplete,true);

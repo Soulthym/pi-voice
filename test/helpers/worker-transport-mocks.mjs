@@ -17,7 +17,8 @@ mock.module("node:child_process", { namedExports: { ...children,
 		return child;
 	},
 	spawn: (command, args, options) => {
-		if (!args[0].endsWith("/tcp-playback.mjs")) throw Error("No alignment allowed");
+		if (!(process.env.PI_VOICE_TEST_RESUME_OFFSET === "1" && command === "ffmpeg") &&
+			!args[0].endsWith("/tcp-playback.mjs")) throw Error("No alignment allowed");
 		return children.spawn(command, args, options);
 	},
 } });
