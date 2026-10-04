@@ -393,8 +393,13 @@ for (const key of ["f9", "f10"]) test(`separate silent tail: ${kind}, ${timing},
 		await settle();
 	};
 	const beforeAppend = worker.sent.length;
+	const ended = t.mock.method(worker, "endUtterance");
 	if (timing === "before") {
 		await append();
+		if (kind === "omitted" && progress === "confirmed") {
+			assert.ok(ended.mock.calls.some(call => (call.arguments as unknown[])[0] === clip.utterance), "switching blocks flushed the audible block");
+			worker.emit({ type: "idle", utterance: clip.utterance }); await settle();
+		}
 		assert.equal(worker.sent.length, beforeAppend, "silent/pending block has no manufactured audio to discard or confirm");
 		if (progress !== "unheard") assert.notEqual(history.selected()!.id, proseId, "silent trailing capture changes selection");
 	}

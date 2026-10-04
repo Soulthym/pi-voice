@@ -675,8 +675,13 @@ export class PlaybackHistory {
 		const capture = this.#utterances.get(utterance);
 		if (!advanceCursor || !capture?.valid || capture.epoch !== this.#playbackEpoch ||
 			(this.#activeUtterance !== undefined && utterance !== this.#activeUtterance)) return;
-		capture.record.confirmed = undefined;
 		const last = capture.segments.at(-1);
+		const confirmed = capture.record.confirmed;
+		// Block EOF retires resumable PCM, not an already confirmed final unit.
+		// Keep logical catch-up across later silent blocks without inventing progress.
+		capture.record.confirmed = confirmed?.completedSourceEnd !== undefined && last &&
+			confirmed.unit.sourceOffset === last.sourceOffset && confirmed.unit.skipUnits === last.skipUnits
+			? { ...confirmed, audioIdentity: undefined } : undefined;
 		if (last) capture.record.cursor = { sourceOffset: last.sourceOffset, skipUnits: last.skipUnits };
 		if (capture.record.timingsComplete) capture.record.position = capture.record.duration;
 	}
