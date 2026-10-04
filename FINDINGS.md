@@ -2,7 +2,15 @@
 
 Updated incrementally. Companion: `PLAN.md`. Reorganize freely while preserving evidence and disposition.
 
-## Current CHECKPOINT — eight independent review findings after a836a9c
+## Current delivery — source 4a486cf (UNDEPLOYED)
+
+The attention/resume/Tail follow-ups are implemented and independently reviewed. Live waiting records no longer expire merely because the original snapshot aged; exact-generation/device-bound notifications use confirmed audio boundaries. Paused checkpoints use verified cached-audio offsets, with conservative fallback. Tail navigation, counters and actual native viewport cycles preserve manual overrides.
+
+Later review fixed preparation-time source rewrites, removed-source remainder retention, paused-notice Resume both before and after EOF, terminal code omissions in silent capture selection, and shared normalized clock acceptance. Each documented failing-first case was retained through correction. Final independent focused review of `4a486cf` found no actionable issues in the last two composition fixes; this is not exhaustive interleaving or live-device proof.
+
+Typecheck and **296 focused checks** passed; default **1746 passed / 45 skipped**, installed-native **1789 passed / 2 skipped**, zero failures. [Testing evidence and limitations](docs/testing.md) distinguishes these host-only runs from earlier real audio-null mpv/SSH checks. No client helper/protocol update, deployment, push, live phone validation or runtime settings change was performed.
+
+## Historical CHECKPOINT — eight independent review findings after a836a9c
 
 Source **`4774c97`**, UNDEPLOYED. Shared intent/proof corrections, not caller-only cosmetic guards:
 
@@ -15,7 +23,7 @@ Source **`4774c97`**, UNDEPLOYED. Shared intent/proof corrections, not caller-on
 7. Streaming catch-up depends on actual available audio/work, independently of logical EOF. Pause preserves true catch-up; last-word highlight alone cannot manufacture it or disable real forward targets.
 8. Accepted feedback is validated before history, extension watermark, narration and Vocalizer mutation. Invalid/reordered/out-of-range ticks cannot skip units or hide later valid audio. Shared boundaries retain actual unit metadata; ULP tolerance covers sample-count arithmetic, not sample-sized gaps.
 
-Original grouped failing-first logs cover every finding; subsequent review exposed delayed/removed/in-flight source, upstream-event, generation-release, paused/last-word Tail and fractional-EOF gaps, all regression-tested and corrected. Final scoped disposition review found no remaining issue in those contracts; this is not exhaustive interleaving or live-hardware proof. [Detailed evidence and intermediate fixture corrections](docs/testing.md#current-checkpoint--eight-review-findings-after-a836a9c-undeployed).
+Original grouped failing-first logs cover every finding; subsequent review exposed delayed/removed/in-flight source, upstream-event, generation-release, paused/last-word Tail and fractional-EOF gaps, all regression-tested and corrected. Final scoped disposition review found no remaining issue in those contracts; this is not exhaustive interleaving or live-hardware proof. [Detailed evidence and intermediate fixture corrections](docs/testing.md#historical-checkpoint--eight-review-findings-after-a836a9c-undeployed).
 
 Final typecheck passed; source-frozen sequential full default **1646 passed / 45 skipped**, installed-native **1689 passed / 2 skipped** (**1691 total**, zero failures). No worker, worker-client, PCM transport, helper or protocol change; earlier actual mpv 0.35.1/0.40.0 **16 scenarios each** and synthetic real SSH **12/12** were not rerun. No deployment, push, live operation/restart, runtime-setting or user-cache/state change. No live Android claim. Root TODO/HANDOFF, ISSUES and removed demos preserved.
 

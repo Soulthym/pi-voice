@@ -1,6 +1,8 @@
 # Tests
 
-## Current CHECKPOINT — final two compositions after eeef04e (undeployed; parent review pending)
+## Current CHECKPOINT — final two compositions after eeef04e (undeployed; reviewed)
+
+Final independent parent review of source `4a486cf` found no actionable issues in the proof-gated queue-only Resume and omission-aware silent-selection fixes. This closes the implementation/review checkpoint, not live-device validation.
 
 Host-only code/tests correct the remaining paused-notice compositions without changing prior source-offset validation, canonical/prefix handling, accepted clocks, worker/transport/protocol or settings.
 
@@ -115,7 +117,7 @@ PI_VOICE_TEST_MPV_IMAGE=localhost/pi-voice-test-mpv \
 
 **Limits:** no live phone/desktop/tmux validation, hardware clock/sample-exact claim, inference/provider call, user configuration/cache access, deployment, push or live Pi/SSH/client restart. Native tests prove rendered behavior, not the exact intermittent live backward-jump report. Original-scope uncertainty and the pre-existing local-output durable-recovery gap remain fail-closed. This change is host-only for already-compatible helpers; older coordinated helper requirements still apply. Root TODO/HANDOFF, untracked ISSUES and removed demos are untouched. Safe host reload/live confirmation remain operator work.
 
-## Tail follow-up — pending integration and independent review
+## Historical Tail follow-up — pending integration and independent review at that checkpoint
 
 `test/index-tail-state.test.ts` exercises real extension events with inert worker/coordinator fixtures. Against archived `1e229fc`, the final **13 cases report 9 failures / 4 passes**; current source passes all 13. Proven baseline failures:
 

@@ -1,11 +1,19 @@
 # Pi Voice — implemented agreements and live-validation handoff
 
-## Current CHECKPOINT — eight review findings fixed, UNDEPLOYED
+## Current delivery — attention, resume and Tail follow-ups (UNDEPLOYED)
+
+- Source **`4a486cf`** completes the requested follow-ups: pending attention survives live-session contention and is announced on the correct device at a proof-confirmed boundary; paused state and verified cached-audio position survive notification playback.
+- Caught-up F9/F10 are inert, waiting Tail uses N+1/N, and native follow tracks the speaking message before returning to Tail. Manual scrolling remains authoritative across completion and later messages.
+- Review-driven regressions also cover destructive finalization during preparation/cancellation, removed blocks, Resume during a notice, silent/omitted blocks and normalized clocks. Unknown timing/audio identity falls back conservatively; unknown stop proof remains fenced.
+- Final typecheck and **296 focused checks** passed; default **1746 passed / 45 skipped**, installed-native **1789 passed / 2 skipped**, zero failures. Final independent scoped review found no actionable issues. [Current testing evidence](docs/testing.md).
+- This delivery changes host code, not client helpers or the wire protocol. Already-compatible clients need only a later safe host reload. No deployment, push or live phone confirmation is claimed; prior real null-output mpv and isolated SSH validation are explicitly separated from later host-only checks.
+
+## Historical CHECKPOINT — eight review findings fixed, UNDEPLOYED
 
 - Source **`4774c97`**, after `a836a9c`: new navigation retires old Resume intent; Stop discards stale playback continuations without losing transcript/newer intent; notification-only loans release only their own generation after scoped proof; waiting origins survive registry loss without cross-device rebinding.
 - History owns source/checkpoint validation before slicing and before any tick updates history, narration, watermark or Vocalizer state. Destructive/delayed finalization and removed blocks cannot replay obsolete text, including an already-resuming request. Append-only offsets and full PCM cache remain intact.
 - OPEN-stream navigation catch-up is independent of whole-message completion and survives Pause; last-word highlighting alone is not catch-up. Untracked completion notices cannot pull native Tail back to a completed source. Later real targets and manual viewport overrides remain supported.
-- Failing-first regressions and scoped independent review completed; final typecheck passed. Default **1646 passed / 45 skipped**, installed-native **1689 passed / 2 skipped**, **1691 total**, zero failures. [Baseline failures, review dispositions, fixture corrections and limits](docs/testing.md#current-checkpoint--eight-review-findings-after-a836a9c-undeployed).
+- Failing-first regressions and scoped independent review completed; final typecheck passed. Default **1646 passed / 45 skipped**, installed-native **1689 passed / 2 skipped**, **1691 total**, zero failures. [Baseline failures, review dispositions, fixture corrections and limits](docs/testing.md#historical-checkpoint--eight-review-findings-after-a836a9c-undeployed).
 - No worker/transport/helper/protocol changes; prior real mpv 0.35.1/0.40.0 cached-offset and synthetic SSH evidence remains applicable, not rerun. No live validation/deployment/push/runtime changes/restarts or user-cache/state access. Root TODO/HANDOFF, ISSUES and deleted demos remain untouched. Safe host reload and live Android confirmation remain operator work.
 
 ## Historical TODO 8 integration — a836a9c, UNDEPLOYED
@@ -16,10 +24,10 @@
 - Focused final **157/157** (including docs), typecheck passed. Final full default **1572 passed / 45 skipped**, installed-native **1615 passed / 2 skipped** (**1617 total**, zero failures), run sequentially on frozen source. [Testing evidence](docs/testing.md#todo-8-integrated-follow-up--undeployed) records intermediate failures and limitations. Actual isolated mpv **0.35.1 / 0.40.0: 16 scenarios each**, including real Opus-cache offset/suffix/clock checks; synthetic real SSH **12/12**. Supplemental reviews yielded failing-first fixes; parent independent review is still required.
 - Host-only, no helper protocol change, deployment/push/live restart, provider/inference/hardware call or user settings/cache access. Previous helper upgrade requirements remain; later safe host reload and live validation are operator work. Root TODO/HANDOFF, ISSUES and demos remain untouched. Earlier checkpoints below retain their historical evidence.
 
-## Tail follow-up — pending integration/review (UNDEPLOYED)
+## Historical Tail follow-up — pending integration/review at that checkpoint
 
 - Shared navigation/display policy distinguishes drained latest audio from playback and viewport position; caught-up F9/F10 preserve transport/lease/cursor intent. Tail boundaries survive canonical identity adoption but do not hide later eligible entries. Empty reservations no longer increment totals.
-- Corrected event-sequence regressions against `1e229fc`: **9 failed / 4 passed**, now **13/13**. Typecheck passed; broad focus **292 passed / 4 skipped**, installed-native focus **327/327**. No new full suites; prior full-suite figures below remain checkpoint-specific. [Evidence and fixture correction](docs/testing.md#tail-follow-up--pending-integration-and-independent-review).
+- Corrected event-sequence regressions against `1e229fc`: **9 failed / 4 passed**, now **13/13**. Typecheck passed; broad focus **292 passed / 4 skipped**, installed-native focus **327/327**. No new full suites; prior full-suite figures below remain checkpoint-specific. [Evidence and fixture correction](docs/testing.md#historical-tail-follow-up--pending-integration-and-independent-review-at-that-checkpoint).
 - Literal backward-one-message behavior and the exact intermittent live counter path remain unconfirmed; no claim of live resolution. Independent review and integrated full validation remain parent work. No attention/admission/transport/helper changes, live operations or root checklist edits.
 
 ## Current delivery — replay admission root correction (UNDEPLOYED)
