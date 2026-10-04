@@ -30,12 +30,13 @@ test("grants speech to only the first session and records waiting attention", as
 		assert.equal(second.ownsSpeech(), true);
 		second.releaseSpeech();
 		assert.equal(first.tryAcquireSpeech(), true);
-		const waiting = second.markWaiting();
+		const connection = { kind: "intentional_local" } as const;
+		const waiting = second.markWaiting(connection);
 		assert.equal(second.isWaiting(), true);
 		assert.equal(first.isWaiting(second.instanceId), true);
-		assert.equal(first.nextUnannouncedWaiting()?.instanceId, waiting.instanceId);
-		first.markAnnounced(waiting.instanceId);
-		assert.equal(first.nextUnannouncedWaiting(), undefined);
+		assert.equal(first.nextUnannouncedWaiting(connection)?.instanceId, waiting.instanceId);
+		first.markAnnounced(waiting);
+		assert.equal(first.nextUnannouncedWaiting(connection), undefined);
 		first.releaseSpeech();
 		assert.equal(second.tryAcquireSpeech(), true);
 		second.clearWaiting();
@@ -153,11 +154,12 @@ test("only another session announces a waiting project after the previous owner 
 	const { root, first, second } = coordinators();
 	try {
 		assert.equal(first.tryAcquireSpeech(), true);
-		second.markWaiting();
-		assert.equal(second.tryAcquireWaitingAnnouncement(), undefined);
+		const connection = { kind: "intentional_local" } as const;
+		second.markWaiting(connection);
+		assert.equal(second.tryAcquireWaitingAnnouncement(connection), undefined);
 		first.releaseSpeech();
-		assert.equal(second.tryAcquireWaitingAnnouncement(), undefined);
-		assert.equal(first.tryAcquireWaitingAnnouncement()?.instanceId, second.instanceId);
+		assert.equal(second.tryAcquireWaitingAnnouncement(connection), undefined);
+		assert.equal(first.tryAcquireWaitingAnnouncement(connection)?.instanceId, second.instanceId);
 		assert.equal(first.ownsSpeech(), true);
 	} finally {
 		first.shutdown();

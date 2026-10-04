@@ -24,8 +24,12 @@ export interface SessionPresence {
 }
 
 export interface WaitingSession extends SessionPresence {
+	/** Immutable for one pending batch; clearWaiting starts a new generation. */
+	readonly generation: string;
 	waitingSince: number;
 	announced: boolean;
+	/** Proven origin output, never inferred from registered-device order. */
+	connection?: ConnectionDevice;
 }
 
 export interface AttentionRequest {
@@ -377,20 +381,44 @@ export class SessionCoordinator {
 		return changed;
 	}
 
-	markWaiting(): WaitingSession {
-		const file = this.#waitingFile(this.instanceId);
-		const existing = readJson<WaitingSession>(file);
-		const waiting: WaitingSession = {
-			...this.#presence(),
-			waitingSince: existing?.waitingSince ?? Date.now(),
-			announced: existing?.announced ?? false,
-		};
-		if (!this.#stopped && this.#attentionEnabled) writeJson(file, waiting);
-		return waiting;
+	markWaiting(connection?: ConnectionDevice): WaitingSession {
+		return this.#withWaitingMutation(() => {
+			const file = this.#waitingFile(this.instanceId);
+			const existing = readJson<WaitingSession>(file);
+			const waiting: WaitingSession = {
+				...this.#presence(),
+				generation: existing?.generation ?? randomUUID(),
+				waitingSince: existing?.waitingSince ?? Date.now(),
+				announced: existing?.announced ?? false,
+				connection: existing ? existing.connection : connection,
+			};
+			if (!this.#stopped && this.#attentionEnabled) writeJson(file, waiting);
+			return waiting;
+		});
 	}
 
 	clearWaiting(): void {
-		remove(this.#waitingFile(this.instanceId));
+		if (!fs.existsSync(this.root)) return;
+		this.#withWaitingMutation(() => remove(this.#waitingFile(this.instanceId)));
+	}
+
+	#withWaitingMutation<T>(operation: () => T): T {
+		void this.recovery;
+		// One inode serializes mark, clear, cleanup and ACK across processes.
+		const fd = fs.openSync(path.join(this.root, ".waiting-mutation.lock"), "a", 0o600);
+		try {
+			if (process.platform !== "linux" && process.platform !== "android") throw new Error("Waiting coordination requires Linux flock");
+			const lock = spawnSync("flock", ["3"], { stdio: ["ignore", "ignore", "pipe", fd] });
+			if (lock.error || lock.status !== 0) throw new Error("Waiting coordination requires working Linux flock", { cause: lock.error });
+			return operation();
+		} finally { fs.closeSync(fd); }
+	}
+
+	#waitingPresence(waiting: WaitingSession): SessionPresence | undefined {
+		const live = readJson<SessionPresence>(this.#presenceFile(waiting.instanceId));
+		return live && live.instanceId === waiting.instanceId && live.pid === waiting.pid &&
+			live.cwd === waiting.cwd && live.sessionId === waiting.sessionId && live.attentionEnabled !== false &&
+			this.#isLive(live) ? live : undefined;
 	}
 
 	isWaiting(instanceId = this.instanceId): boolean {
@@ -400,27 +428,42 @@ export class SessionCoordinator {
 	waitingSessions(): WaitingSession[] {
 		this.#cleanStaleFiles();
 		return this.#jsonFiles<WaitingSession>(this.#waitingDir())
-			.filter(waiting => this.#isLive(waiting) && readJson<SessionPresence>(this.#presenceFile(waiting.instanceId))?.attentionEnabled !== false)
+			.flatMap(waiting => {
+				const live = this.#waitingPresence(waiting);
+				return live ? [{ ...waiting, ...live }] : [];
+			})
 			.sort((left, right) => left.waitingSince - right.waitingSince || left.instanceId.localeCompare(right.instanceId));
 	}
 
-	nextUnannouncedWaiting(): WaitingSession | undefined {
+	nextUnannouncedWaiting(connection?: ConnectionDevice): WaitingSession | undefined {
 		const outgoing = this.#outgoingAttention && readJson<AttentionRequest>(this.#outgoingAttention);
 		if (outgoing && Date.now() - outgoing.requestedAt < STALE_MS) return;
-		return this.waitingSessions().find(waiting => waiting.instanceId !== this.instanceId && !waiting.announced);
+		return this.waitingSessions().find(waiting => waiting.instanceId !== this.instanceId && !waiting.announced &&
+			Boolean(waiting.generation) && (connection?.kind === "intentional_local"
+				? waiting.connection?.kind === "intentional_local"
+				: connection?.kind === "device" && /^[a-zA-Z0-9._-]{1,128}$/.test(connection.id) &&
+					waiting.connection?.kind === "device" && waiting.connection.id === connection.id));
 	}
 
 	/** Claims the free speech channel to announce another project's wait. */
-	tryAcquireWaitingAnnouncement(): WaitingSession | undefined {
-		const waiting = this.nextUnannouncedWaiting();
+	tryAcquireWaitingAnnouncement(connection?: ConnectionDevice): WaitingSession | undefined {
+		const waiting = this.nextUnannouncedWaiting(connection);
 		if (!waiting || !this.tryAcquireSpeech()) return undefined;
 		return waiting;
 	}
 
-	markAnnounced(instanceId: string): void {
-		const file = this.#waitingFile(instanceId);
-		const waiting = readJson<WaitingSession>(file);
-		if (waiting) writeJson(file, { ...waiting, announced: true, updatedAt: Date.now() });
+	/** Unscoped legacy callers compile during integration but cannot acknowledge delivery. */
+	markAnnounced(expected: WaitingSession | string, generation?: string): boolean {
+		const instanceId = typeof expected === "string" ? expected : expected.instanceId;
+		generation = typeof expected === "string" ? generation : expected.generation;
+		if (!generation) return false;
+		return this.#withWaitingMutation(() => {
+			const file = this.#waitingFile(instanceId);
+			const waiting = readJson<WaitingSession>(file);
+			if (!waiting || waiting.generation !== generation || !this.#waitingPresence(waiting)) return false;
+			writeJson(file, { ...waiting, announced: true });
+			return true;
+		});
 	}
 
 	requestAttention(instanceId: string, connection?: AttentionRequest["connection"]): void {
@@ -627,11 +670,16 @@ export class SessionCoordinator {
 
 	#cleanStaleFiles(): void {
 		this.#removeStaleLease(this.#speechPath());
-		for (const directory of [this.#presenceDir(), this.#waitingDir()]) {
-			for (const item of this.#jsonFiles<SessionPresence>(directory)) {
-				if (!this.#isLive(item)) remove(path.join(directory, `${item.instanceId}.json`));
-			}
+		for (const item of this.#jsonFiles<SessionPresence>(this.#presenceDir())) {
+			if (!this.#isLive(item)) remove(this.#presenceFile(item.instanceId));
 		}
+		const stale = this.#jsonFiles<WaitingSession>(this.#waitingDir()).filter(waiting => !this.#waitingPresence(waiting));
+		if (stale.length) this.#withWaitingMutation(() => {
+			for (const candidate of stale) {
+				const waiting = readJson<WaitingSession>(this.#waitingFile(candidate.instanceId));
+				if (waiting && !this.#waitingPresence(waiting)) remove(this.#waitingFile(candidate.instanceId));
+			}
+		});
 		try {
 			for (const name of fs.readdirSync(this.#resourceDir())) {
 				if (name.endsWith(".lock")) this.#removeStaleLease(path.join(this.#resourceDir(), name));
