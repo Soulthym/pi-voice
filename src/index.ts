@@ -748,17 +748,25 @@ export default async function (pi: ExtensionAPI) {
 		input: config.input === "auto" ? (activeInputEndpoint ?? "disabled") : config.input,
 	});
 
-	const outputConnection = (): ConnectionDevice | undefined => {
+	let verifiedOutputOrigin: { selection: string; configured: string; context: number; connection: ConnectionDevice } | undefined;
+	const outputConnection = (route?: ReturnType<DeviceRouter["routeMetadata"]>): ConnectionDevice | undefined => {
+		const selection = activeDeviceId ?? deviceSelection;
+		if (verifiedOutputOrigin?.selection !== selection || verifiedOutputOrigin.configured !== config.output || verifiedOutputOrigin.context !== contextEpoch) {
+			verifiedOutputOrigin = undefined;
+		}
 		try {
-			const route = deviceRouter.routeMetadata(activeDeviceId ?? deviceSelection, "output", config.output);
-			return route.kind === "intentional_local" ? { kind: "intentional_local" }
+			route ??= deviceRouter.routeMetadata(selection, "output", config.output);
+			const connection: ConnectionDevice | undefined = route.kind === "intentional_local" ? { kind: "intentional_local" }
 				: route.kind === "device" ? { kind: "device", id: route.device.id } : undefined;
-		} catch { return undefined; }
+			verifiedOutputOrigin = connection ? { selection, configured: config.output, context: contextEpoch, connection } : undefined;
+		} catch { /* Registry loss does not erase a verified origin for this selection/configuration. */ }
+		return verifiedOutputOrigin?.connection;
 	};
 
 	const claimOutputDevice = (): VoiceConfig => {
 		const selection = activeDeviceId ?? deviceSelection;
 		const route = deviceRouter.routeMetadata(selection, "output", config.output);
+		outputConnection(route);
 		captureRecoveryRoute("output", route);
 		outputEndpoint = route.endpoint;
 		outputGeneration = route.kind === "device" ? route.device.connectedAt : undefined;
@@ -2907,6 +2915,7 @@ export default async function (pi: ExtensionAPI) {
 				deviceRouter.setEnvironmentDevice(connection.kind === "device" ? connection.id : undefined);
 				routing?.select(selection);
 				persistDevice();
+				outputConnection(outputRoute);
 				if (outputRoute) {
 					outputEndpoint = outputRoute.endpoint;
 					outputGeneration = outputRoute.kind === "device" ? outputRoute.device.connectedAt : undefined;
@@ -4479,6 +4488,7 @@ export default async function (pi: ExtensionAPI) {
 			// after startup stop proof; later endpoint/generation changes still require handoff.
 			try {
 				const route = deviceRouter.routeMetadata(activeDeviceId ?? deviceSelection, "output", config.output);
+				outputConnection(route);
 				outputEndpoint = route.endpoint;
 				outputGeneration = route.kind === "device" ? route.device.connectedAt : undefined;
 			} catch { /* Unknown routes cannot match a later available endpoint. */ }
