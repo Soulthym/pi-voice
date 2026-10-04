@@ -249,6 +249,60 @@ test("Stop notice remains stopped while preserving newly completed text for expl
 	assert.equal(segments(worker).at(-1)!.text, "Preserved after Stop.");
 });
 
+for (const nextNotice of [false, true]) test(`new navigation retires the completed paused announcement snapshot (notice=${nextNotice})`, async t => {
+	const { a, worker, waiting } = await fixture(t);
+	await a.shortcut("f8"); await settle();
+	worker.emit({ type: "idle", utterance: notices(worker)[0]!.utterance }); await settle();
+	assert.match(a.widgetLines()!.join(" "), /Paused/);
+	a.addMessage("new-target", "a1", assistant("New navigation target."));
+	if (nextNotice) { waiting.clearWaiting(); waiting.markWaiting({ kind: "intentional_local" }); }
+	const immediate = globalThis.setImmediate;
+	let release: (() => void) | undefined;
+	let clock = 0;
+	const now = t.mock.method(performance, "now", () => clock += 9);
+	const gate = t.mock.method(globalThis, "setImmediate", ((callback: () => void, ...args: unknown[]) => {
+		if (new Error().stack?.includes("preparePlaybackMessages")) { release = callback; return immediate(() => {}); }
+		return immediate(() => Reflect.apply(callback, undefined, args));
+	}) as typeof setImmediate);
+	try {
+		const before = worker.sent.length;
+		await a.shortcut("f10"); await settle();
+		if (!nextNotice) assert.ok(release, "new target preparation is actually gated");
+		else assert.equal(notices(worker).length, 2, "new navigation's notice is pending");
+		await a.shortcut("f8"); await settle();
+		if (nextNotice) { worker.emit({ type: "idle", utterance: notices(worker).at(-1)!.utterance }); await settle(); }
+		now.mock.restore(); gate.mock.restore(); release?.(); await settle();
+		const resumed = segments(worker).slice(before).filter(segment => !segment.text.includes("requires attention next"));
+		assert.ok(resumed.length > 0, "new navigation completes");
+		assert.deepEqual(resumed.map(segment => segment.text), ["New navigation target."], "F8 must not revive the previous paused source");
+	} finally { now.mock.restore(); gate.mock.restore(); release?.(); }
+});
+
+for (const newerIntent of ["response", "play", "submission"] as const) test(`Stop notice discards stale continuations but preserves newer ${newerIntent}`, async t => {
+	const { a, worker, waiting } = await fixture(t);
+	await a.command("stop"); await settle();
+	const notice = notices(worker)[0]!;
+	await streamCompletedResponse(a, "stopped", "a1", "Stopped queued response."); await settle();
+	if (newerIntent !== "response") waiting.clearWaiting(); // No second legitimate notice hides the new intent.
+	if (newerIntent === "play") {
+		a.addMessage("chosen", "stopped", assistant("New explicit target."));
+		await a.shortcut("f10"); await settle();
+		await a.shortcut("f10"); await settle();
+	} else if (newerIntent === "submission") {
+		await a.emit("input", { text: "New user intent", source: "interactive" });
+		await settle();
+	}
+	worker.emit({ type: "idle", utterance: notice.utterance }); await settle();
+	const before = worker.sent.length;
+	if (newerIntent !== "play") await streamCompletedResponse(a, "fresh", "stopped", "Truly new response.");
+	await settle();
+	const current = segments(worker).at(-1)!;
+	assert.equal(current.text, newerIntent === "play" ? "New explicit target." : "Truly new response.");
+	worker.emit({ type: "idle", utterance: current.utterance }); await settle();
+	assert.ok(!segments(worker).slice(before).some(segment => segment.text === "Stopped queued response."), "later EOF cannot drain stopped responses");
+	assert.equal(segments(worker).at(-1)!.utterance, current.utterance, "stale notice completion cannot revive or replace newer intent");
+});
+
 test("failed announcement waits through cancel ACK for its own original receipt", async t => {
 	const { a, worker, waiting } = await fixture(t, true);
 	await streamCompletedResponse(a, "queued", "a1", "After failed notification."); await settle();

@@ -2153,7 +2153,9 @@ export default async function (pi: ExtensionAPI) {
 					const announcement = stopBoundary && boundaryEpoch === playbackRequestEpoch ? announceWaiting(false, true) : undefined;
 					if (announcement) void announcement.then(current => {
 						if (!current) return;
-						// The one permitted prompt must not undo Stop, even if a model finishes meanwhile.
+						// This epoch still belongs to Stop: arrivals remain transcript, not autoplay continuations.
+						queuedPausedMessages.length = 0;
+						queueIncomingWhilePaused = false;
 						attentionSuppressed = true;
 						coordinator?.setAttentionEnabled(false);
 						releaseSpeechOwnership(false);
@@ -3242,6 +3244,9 @@ export default async function (pi: ExtensionAPI) {
 			queueIncomingWhilePaused = false;
 		}
 		if (!queued) {
+			// Accepting a new navigation intent retires the old detached Resume checkpoint,
+			// before either preparation or another announcement can yield to F8.
+			pausedAnnouncementResume = undefined;
 			if (pendingNotification) {
 				const paused = playbackPaused;
 				clearPlaybackTransport();
