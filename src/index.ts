@@ -3390,6 +3390,9 @@ export default async function (pi: ExtensionAPI) {
 			if (!await preparePlaybackMessages(prepareContext, request.epoch) || pendingReplay !== request) return;
 			const messages = syncPlaybackMessages(prepareContext, false, true);
 			target = request.target;
+			// Finalization may have invalidated the requested unit during preparation.
+			// Never reconstruct its capture using the pre-await offset.
+			sourceOffset = target.sourceOffset;
 			if (!replaySource && !messages.some(message => message.id === target.id && message.text === target.text)) {
 				pendingReplay = undefined;
 				return;
