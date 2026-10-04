@@ -367,8 +367,9 @@ test("TUI follows exact words, respects manual browsing, and explicit controls r
 	host.scrollView.manualScrollTo(90);
 	await host.shortcut("f9");
 	assert.equal(worker!.pauses.at(-1), false, "F9 at Tail preserves playing intent");
-	assert.equal(host.scrollView.scrollTop, 260);
-	assert.equal(host.scrollView.isFollowingEnd, true);
+	// Caught-up Tail navigation is a true no-op, including manual viewport intent.
+	assert.equal(host.scrollView.scrollTop, 90);
+	assert.equal(host.scrollView.isFollowingEnd, false);
 	assert.equal(worker!.sent.length, tailStart);
 	await host.command("stop");
 
@@ -385,8 +386,8 @@ test("TUI follows exact words, respects manual browsing, and explicit controls r
 	assert.equal(host.scrollView.isFollowingEnd, false);
 	const completedCount = worker!.sent.length;
 	await host.shortcut("f10");
-	assert.equal(host.scrollView.scrollTop, 260, "F10 after genuine idle completion follows the transcript tail");
-	assert.equal(host.scrollView.isFollowingEnd, true);
+	assert.equal(host.scrollView.scrollTop, 72, "F10 at caught-up Tail does not re-enable viewport follow");
+	assert.equal(host.scrollView.isFollowingEnd, false);
 	assert.equal(worker!.sent.length, completedCount, "tail-follow must not regenerate completed audio");
 	await host.shortcut("f5");
 	worker!.emit({ type: "idle", utterance: (worker!.sent.at(-1) as { utterance: number }).utterance } as never);
