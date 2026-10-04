@@ -342,6 +342,7 @@ export default async function (pi: ExtensionAPI) {
 	const persistDevice = () => pi.appendEntry(DEVICE_SELECTION_ENTRY, { version: 2, selection: deviceSelection, selected: activeDeviceId, pin: devicePin });
 	let ownsSpeech = false;
 	let speechLeaseEpoch = 0;
+	let speechLeaseGeneration: string | undefined;
 	let speechPurpose: SpeechPurpose | undefined;
 	let ownerTurnEnded = false;
 	let lastOwnerUtterance: number | undefined;
@@ -407,7 +408,8 @@ export default async function (pi: ExtensionAPI) {
 	let handleCoordinatedIdle: (utterance: number | undefined) => void = () => {};
 	let playRequestedAttention: (ctx: ExtensionContext, request: AttentionRequest) => void = () => {};
 	let releaseSpeechOwnership: (announceNext?: boolean) => void = () => {};
-	let deferredRelease: { input: number; lease: number; context: number; announceNext: boolean } | undefined;
+	let deferredRelease: { input: number; lease: number; context: number; announceNext: boolean;
+		loan?: { owner: SessionCoordinator; generation: string | undefined; stopping: boolean } } | undefined;
 	let flushDeferredRelease = (): void => {};
 	let pendingSpeechPreemption:
 		| { purpose: SpeechPurpose | undefined; wasComplete: boolean; spokenText: string; cancelId?: number; request: number; context: number; input: number }
@@ -2343,6 +2345,17 @@ export default async function (pi: ExtensionAPI) {
 			deferredRelease = undefined;
 			return;
 		}
+		if (pending.loan) {
+			const owner = coordinator?.speechOwner();
+			if (coordinator !== pending.loan.owner || owner?.instanceId !== coordinator?.instanceId ||
+				!pending.loan.generation || owner?.speechGeneration !== pending.loan.generation) {
+				deferredRelease = undefined;
+				return;
+			}
+			// Shutdown/ACK alone cannot retire the original remote scopes.
+			if (pending.loan.stopping || pendingReplay || pendingNotification || stopRecovery?.episode("output")?.handles.length || stopRecovery?.episode("input")?.handles.length) return;
+			if (!stopsUnresolved() && deviceRebind && unconfirmedDeviceStops.has(deviceRebind)) deviceRebind = undefined;
+		}
 		if (inputInProgress || speechReservedForInput || routeIntent || routeFlight || deviceRebind || transportStopPending || inputStopPending || stopsUnresolved()) return;
 		deferredRelease = undefined;
 		releaseSpeechOwnership(pending.announceNext);
@@ -2350,6 +2363,8 @@ export default async function (pi: ExtensionAPI) {
 
 	releaseSpeechOwnership = (announceNext = true): void => {
 		if (!ownsSpeech || !coordinator) return;
+		// Every release continuation owns this durable generation, not a same-owner replacement.
+		if (!speechLeaseGeneration || coordinator.speechOwner()?.speechGeneration !== speechLeaseGeneration) return;
 		// A finished input's release survives every barrier, not only retained-handle recovery.
 		if (speechReservedForInput && lastOwnerUtterance === undefined) {
 			deferredRelease = { input: inputEpoch, lease: speechLeaseEpoch, context: contextEpoch, announceNext };
@@ -2429,6 +2444,7 @@ export default async function (pi: ExtensionAPI) {
 		const shouldAnnounce = announceProject && (!coordinator.attentionIsCurrent() || projectAnnouncementPending);
 		ownsSpeech = true;
 		speechLeaseEpoch += 1;
+		speechLeaseGeneration = coordinator.speechOwner()?.speechGeneration;
 		speechPurpose = purpose;
 		ownerTurnEnded = false;
 		lastOwnerUtterance = undefined;
@@ -2595,9 +2611,25 @@ export default async function (pi: ExtensionAPI) {
 		cancelTimingWorkers();
 		ownsSpeech = true;
 		speechLeaseEpoch += 1;
+		speechLeaseGeneration = coordinator.speechOwner()?.speechGeneration;
 		ownerTurnEnded = true;
+		const loan = { owner: coordinator, generation: speechLeaseGeneration, stopping: true };
+		const lease = speechLeaseEpoch;
+		const context = contextEpoch;
 		const announcement = announceWaiting();
-		if (announcement) void announcement.then(current => { if (current) completeOwnerSpeech(false); });
+		if (announcement) void announcement.then(current => {
+			const owner = loan.owner.speechOwner();
+			if (!ownsSpeech || lease !== speechLeaseEpoch || context !== contextEpoch || coordinator !== loan.owner ||
+				owner?.instanceId !== loan.owner.instanceId || !loan.generation || owner.speechGeneration !== loan.generation) return;
+			if (current) { completeOwnerSpeech(false); return; }
+			// Every cancellation retires the prompt, not its borrowed lease's stop obligation.
+			const release = deferredRelease = { input: inputEpoch, lease, context, announceNext: false, loan };
+			flushDeferredRelease();
+			if (deferredRelease !== release) return;
+			// Join the caller's stop; state-only cancellation still needs physical proof.
+			const stopped = deviceRebind ?? (transportStopPending ? transportStopBarrier : waitForTransportCancellation(undefined));
+			void stopped.catch(notifyStopFailure).then(() => { loan.stopping = false; flushDeferredRelease(); });
+		});
 		else releaseSpeechOwnership(false);
 	};
 
