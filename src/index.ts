@@ -1630,7 +1630,8 @@ export default async function (pi: ExtensionAPI) {
 		let anchor: number | undefined;
 		if (frame) {
 			const markedLine = frame.box.scrollContentLines?.findIndex(line => line.includes(narration.activeMarker)) ?? -1;
-			const sourceLine = markedLine < 0 ? narrationSourceLine(frame.box, text) : undefined;
+			// An untracked notice owns speech, but not the completed narration's source.
+			const sourceLine = markedLine < 0 && !pendingNotification ? narrationSourceLine(frame.box, text) : undefined;
 			anchor = markedLine >= 0 ? markedLine : sourceLine;
 			// An absent/collapsed source is not permission to follow unrelated tail text.
 			if (anchor === undefined) return;
