@@ -101,4 +101,29 @@ test("estimated clock excludes starvation, including feedback fallback, and pres
 	tick();
 	assert.equal(latest().position, 0.125, "new sink starts at zero after seek/replacement");
 	pausedSink.stopPlaybackClock();
+
+	const resumed = attachPlaybackClock({}, 24000, 9, true, 0.25);
+	resumed.noteAudio(42000); // .75s remainder + 1s next canonical segment.
+	assert.equal(resumed.lastConfirmedPosition, undefined, "no synthetic confirmation at startup");
+	resumed.reportPlayback(0);
+	assert.equal(latest().position, 0.25);
+	assert.equal(resumed.lastConfirmedPosition, 0.25);
+	resumed.reportPlayback(0.9);
+	assert.equal(latest().position, 1.15, "later segments retain cumulative canonical coordinates");
+	assert.equal(resumed.lastConfirmedPosition, 1.15);
+	now += 1000;
+	tick();
+	assert.equal(latest().estimated, true);
+	assert.equal(resumed.lastConfirmedPosition, 1.15, "fallback does not promote estimates to device confirmation");
+	resumed.setPlaybackClockPaused(true);
+	const pausedPosition = latest().position;
+	now += 9000; tick();
+	assert.equal(latest().position, pausedPosition);
+	assert.equal(resumed.lastConfirmedPosition, 1.15);
+	resumed.reportPlayback(0.5);
+	assert.equal(latest().position, 0.75, "physical correction may move backwards even while paused");
+	now += 9000; tick();
+	assert.equal(latest().position, 0.75);
+	assert.equal(resumed.lastConfirmedPosition, 0.75);
+	resumed.stopPlaybackClock();
 });

@@ -11,6 +11,9 @@ export type RemoteOutputStop = (scope: { output: string; id: string; bootId?: st
 
 export type MeasurementPhase = "cache-decode" | "synthesis";
 
+/** Finite, nonnegative canonical seconds in the first retained unit. Mismatches repeat that unit. */
+export type ResumeAudioOffset = { seconds: number; audioIdentity: string };
+
 export type TimingRetryResult =
 	| { status: "cache-miss" }
 	| { status: "timing"; duration: number; words: AlignmentWord[]; quality: TimingQuality };
@@ -28,12 +31,13 @@ export type WorkerEvent =
 	| { type: "ready"; requestId?: string }
 	| { type: "preload-ready"; requestId: string }
 	| { type: "speaking" }
-	| { type: "segment-audio"; utterance: number; segmentId: number; start: number; duration: number; timingQuality?: TimingQuality }
+	| { type: "segment-audio"; utterance: number; segmentId: number; start: number; duration: number; timingQuality?: TimingQuality; audioIdentity?: string; resumeOffset?: number }
 	| { type: "timing-retry"; requestId: string; result: TimingRetryResult }
 	| { type: "timing-retry-error"; requestId: string; message: string }
 	| { type: "measurement"; requestId: string; duration: number }
 	| { type: "measurement-progress"; requestId: string; phase: MeasurementPhase }
 	| { type: "alignment"; segmentId: number; words: AlignmentWord[]; quality?: TimingQuality }
+	// Canonical utterance seconds. Only estimated !== true is physical device confirmation.
 	| { type: "playback"; utterance: number; position: number; estimated?: boolean }
 	| { type: "alignment-error"; segmentId: number; message: string; quality?: "estimated" }
 	| { type: "alignment-ready"; requestId: string }
@@ -92,7 +96,7 @@ export class VoiceWorkerClient {
 		this.#retryConfig = retryConfig;
 	}
 
-	sendSegment(utterance: number, segmentId: number, text: string, config: VoiceConfig): void {
+	sendSegment(utterance: number, segmentId: number, text: string, config: VoiceConfig, resumeAudioOffset?: ResumeAudioOffset): void {
 		if (this.#termination || this.#retiring.size) throw new Error("Voice worker transport cleanup is in progress");
 		this.setTtsWorkers(config.ttsWorkers);
 		this.#activeUtterance = utterance;
@@ -112,6 +116,7 @@ export class VoiceWorkerClient {
 			audioCache: config.audioCache,
 			audioCacheBitrate: config.audioCacheBitrate,
 			output: config.output,
+			...(resumeAudioOffset ? { resumeAudioOffset } : {}),
 		});
 		if (/^(tcp|unix):\/\//.test(config.output)) {
 			this.#remoteUnconfirmed = true;

@@ -26,10 +26,11 @@ test("cold/restarted workers receive pause intent before audio, while cancellati
 	t.after(async () => { await worker.terminate(); mock.reset(); });
 	worker.setPlaybackPaused(true);
 	assert.equal(children.length, 0, "pause alone should not launch a worker");
-	worker.sendSegment(1, 1, "First sentence.", DEFAULT_VOICE_CONFIG);
+	worker.sendSegment(1, 1, "First sentence.", DEFAULT_VOICE_CONFIG, { seconds: 0.25, audioIdentity: "cached-pcm" });
 	assert.deepEqual(children[0]!.messages[0], { type: "pause", paused: true });
 	assert.deepEqual(children[0]!.messages[1], { type: "tts-workers", workers: 3 });
 	assert.equal(children[0]!.messages[2].type, "segment");
+	assert.deepEqual(children[0]!.messages[2].resumeAudioOffset, { seconds: 0.25, audioIdentity: "cached-pcm" });
 	for (const workers of [0, 9, 1.5, NaN]) assert.throws(() => worker.setTtsWorkers(workers), RangeError);
 	worker.setTtsWorkers(1);
 	assert.deepEqual(children[0]!.messages.slice(3), [{ type: "tts-workers", workers: 1 }], "resize must not resume paused playback");
@@ -37,6 +38,7 @@ test("cold/restarted workers receive pause intent before audio, while cancellati
 	worker.sendSegment(2, 2, "Still paused.", { ...DEFAULT_VOICE_CONFIG, ttsWorkers: 1 });
 	assert.deepEqual(children[1]!.messages[0], { type: "pause", paused: true });
 	assert.deepEqual(children[1]!.messages[1], { type: "tts-workers", workers: 1 });
+	assert.equal(children[1]!.messages[2].resumeAudioOffset, undefined);
 	worker.cancel();
 	await worker.terminate();
 	worker.sendSegment(3, 3, "After cancellation.", DEFAULT_VOICE_CONFIG);

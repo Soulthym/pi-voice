@@ -218,7 +218,7 @@ async function readCachedAudio(file, onDecode, options) {
 		if (bytes.length === 0 || bytes.length % Float32Array.BYTES_PER_ELEMENT !== 0) throw new Error("Empty audio cache entry");
 		const array = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 		const pcm = new Float32Array(array);
-		if (options && !pcm.every(Number.isFinite)) throw new Error("Invalid cached PCM");
+		if (!pcm.every(Number.isFinite)) throw new Error("Invalid cached PCM");
 		return pcm;
 	} catch {
 		if (!options) await fs.promises.rm(file, { force: true }).catch(() => {});
@@ -333,6 +333,11 @@ function reportPlaybackPhase(operation, phase) {
 	send({ type: "playback-phase", utterance: operation.utterance, segmentId: operation.segmentId, phase });
 }
 
+function cachedAudioIdentity(file, pcm) {
+	// The cache key identifies synthesis settings; the digest rejects replaced/rebuilt assets.
+	return `${path.basename(file, ".opus")}:${createHash("sha256").update(Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength)).digest("hex")}`;
+}
+
 async function audioForOperation(operation) {
 	const report = phase => {
 		if (operation.type === "segment") reportPlaybackPhase(operation, phase === "cache-decode" ? "loading" : phase);
@@ -344,17 +349,19 @@ async function audioForOperation(operation) {
 	const file = audioCachePath(operation);
 	if (file) {
 		const cached = await readCachedAudio(file, () => report("cache-decode"));
-		if (cached) return { pcm: cached, sampleRate: DEFAULT_SAMPLE_RATE };
+		if (cached) return { pcm: cached, sampleRate: DEFAULT_SAMPLE_RATE, audioIdentity: cachedAudioIdentity(file, cached), cacheHit: true };
 	}
 	if (operation.type === "segment" && !synthesisChild) {
 		if (operation.epoch !== epoch) throw new Error("Sentence generation cancelled");
 		const { audioPromise, ...input } = operation;
 		reportPlaybackPhase(operation, "queued");
-		return sentencePool.generate(input, event => {
+		const audio = await sentencePool.generate(input, event => {
 			if (operation.epoch !== epoch) return;
 			if (event.type === "synthesis-phase") reportPlaybackPhase(operation, event.phase);
 			else sentencePool.onEvent(event); // Preserve legacy model download events.
 		});
+		// A cache miss here cannot acquire resume provenance by synthesizing in a child.
+		return { ...audio, cacheHit: false };
 	}
 	if (operation.type === "measure") report("synthesis");
 	const operationEpoch = epoch;
@@ -367,7 +374,7 @@ async function audioForOperation(operation) {
 	if (file && pcm instanceof Float32Array && sampleRate === DEFAULT_SAMPLE_RATE) {
 		await writeCachedAudio(file, pcm, Number(operation.audioCacheBitrate));
 		const cached = await readCachedAudio(file, () => report("cache-decode"));
-		if (cached) return { pcm: cached, sampleRate: DEFAULT_SAMPLE_RATE };
+		if (cached) return { pcm: cached, sampleRate: DEFAULT_SAMPLE_RATE, audioIdentity: cachedAudioIdentity(file, cached), cacheHit: false };
 	}
 	return { pcm, sampleRate };
 }
@@ -561,7 +568,7 @@ function playerCommand(sampleRate) {
 	throw new Error("No audio player found. Install PipeWire (pw-play), mpv, or ffmpeg (ffplay).");
 }
 
-export function attachPlaybackClock(sink, sampleRate, utterance, expectFeedback = false) {
+export function attachPlaybackClock(sink, sampleRate, utterance, expectFeedback = false, resumeOffset = 0) {
 	let updatedAt = null;
 	let position = 0;
 	let paused = false;
@@ -584,8 +591,9 @@ export function attachPlaybackClock(sink, sampleRate, utterance, expectFeedback 
 		if (!estimated) {
 			updatedAt = lastFeedbackAt = performance.now();
 			position = reportedPosition;
+			sink.lastConfirmedPosition = resumeOffset + reportedPosition;
 		}
-		send({ type: "playback", utterance, position: reportedPosition, ...(estimated ? { estimated: true } : {}) });
+		send({ type: "playback", utterance, position: resumeOffset + reportedPosition, ...(estimated ? { estimated: true } : {}) });
 	};
 	const timer = setInterval(() => {
 		if (sink.samplesWritten === 0 || performance.now() - lastFeedbackAt < 750) return;
@@ -601,7 +609,7 @@ export function attachPlaybackClock(sink, sampleRate, utterance, expectFeedback 
 	return sink;
 }
 
-function createLocalSink(sampleRate, utterance) {
+function createLocalSink(sampleRate, utterance, resumeOffset) {
 	const { command, args } = playerCommand(sampleRate);
 	const child = spawn(command, args, { stdio: ["pipe", "ignore", "pipe"] });
 	let stderr = "";
@@ -640,7 +648,7 @@ function createLocalSink(sampleRate, utterance) {
 			this.setPlaybackClockPaused(paused);
 			child.kill(paused ? "SIGSTOP" : "SIGCONT");
 		},
-	}, sampleRate, utterance);
+	}, sampleRate, utterance, false, resumeOffset);
 	child.stdin.on("error", error => {
 		if (playback.currentPlayer === sink && !shuttingDown) send({ type: "error", message: error.message, utterance });
 	});
@@ -681,10 +689,10 @@ function waitForDrainOrClose(writable) {
 	});
 }
 
-function createNetworkSink(output, sampleRate, utterance) {
+function createNetworkSink(output, sampleRate, utterance, resumeOffset) {
 	validateNetworkEndpoint(output);
 	const helperPath = fileURLToPath(new URL("./tcp-playback.mjs", import.meta.url));
-	const child = spawn(process.execPath, [helperPath, output, String(sampleRate), String(utterance)], {
+	const child = spawn(process.execPath, [helperPath, output, String(sampleRate), String(utterance), String(resumeOffset)], {
 		// The helper inherits stdout so playback events bypass blocked Kokoro
 		// inference and flow directly into VoiceWorkerClient's JSON event stream.
 		stdio: ["pipe", "inherit", "pipe", "pipe"],
@@ -813,12 +821,14 @@ function clearCurrentPlayer() {
 	playback.clearCurrentPlayer();
 }
 
-function startPlayer(sampleRate, utterance, output) {
-	return playback.startPlayer(sampleRate, utterance, output, (sinkOutput, sinkRate, sinkUtterance) =>
-		sinkOutput.startsWith("tcp://") || sinkOutput.startsWith("unix://")
-			? createNetworkSink(sinkOutput, sinkRate, sinkUtterance)
-			: createLocalSink(sinkRate, sinkUtterance),
-	);
+function startPlayer(sampleRate, utterance, output, resumeOffset) {
+	return playback.startPlayer(sampleRate, utterance, output, (sinkOutput, sinkRate, sinkUtterance) => {
+		const sink = sinkOutput.startsWith("tcp://") || sinkOutput.startsWith("unix://")
+			? createNetworkSink(sinkOutput, sinkRate, sinkUtterance, resumeOffset)
+			: createLocalSink(sinkRate, sinkUtterance, resumeOffset);
+		sink.resumeOffset = resumeOffset;
+		return sink;
+	});
 }
 
 function setPlayerPaused(paused) {
@@ -914,14 +924,21 @@ async function runOperation(operation) {
 	const pcm = audio.pcm;
 	if (!(pcm instanceof Float32Array) || pcm.length === 0) return;
 	reportPlaybackPhase(operation, "connecting");
-	const sink = startPlayer(sampleRate, operation.utterance, operation.output);
+	const resume = operation.resumeAudioOffset;
+	const skipSamples = audio.cacheHit && resume?.audioIdentity === audio.audioIdentity &&
+		Number.isFinite(resume?.seconds) && resume.seconds >= 0 && resume.seconds < pcm.length / sampleRate
+		? Math.floor(resume.seconds * sampleRate) : 0;
+	const sink = startPlayer(sampleRate, operation.utterance, operation.output, skipSamples / sampleRate);
 	await sink.ready;
 	if (operation.epoch !== epoch || sink.stopped) return;
 	reportPlaybackPhase(operation, "playing");
-	const start = sink.samplesWritten / sampleRate;
+	const first = sink.samplesWritten === 0;
+	const start = first ? 0 : sink.samplesWritten / sampleRate + (sink.resumeOffset ?? 0);
 	const duration = pcm.length / sampleRate;
-	send({ type: "segment-audio", utterance: operation.utterance, segmentId: operation.segmentId, start, duration, timingQuality: "estimated" });
-	const writing = writeAudio(sink, pcm);
+	const resumeOffset = first ? sink.resumeOffset ?? 0 : 0;
+	send({ type: "segment-audio", utterance: operation.utterance, segmentId: operation.segmentId, start, duration,
+		timingQuality: "estimated", ...(audio.audioIdentity ? { audioIdentity: audio.audioIdentity } : {}), resumeOffset });
+	const writing = writeAudio(sink, pcm.subarray(Math.round(resumeOffset * sampleRate)));
 	// Let playback submit PCM before spending CPU on optional alignment encoding.
 	await Promise.resolve();
 	if (operation.epoch === epoch && !sink.stopped) requestAlignment(operation, pcm, sampleRate);
@@ -1067,6 +1084,7 @@ lines.on("line", line => {
 				type: "segment",
 				utterance: message.utterance,
 				segmentId: message.segmentId,
+				resumeAudioOffset: message.resumeAudioOffset,
 				text: message.text,
 				voice: message.voice,
 				speed: message.speed,

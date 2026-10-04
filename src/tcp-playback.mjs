@@ -1,12 +1,14 @@
 import * as net from "node:net";
 import { stopRemotePlayback, validStreamId, validBootId, RemotePlaybackUnconfirmedError } from "./remote-playback.mjs";
 
-const [output, rate, utteranceValue] = process.argv.slice(2);
+const [output, rate, utteranceValue, offsetValue = "0"] = process.argv.slice(2);
 const utterance = Number(utteranceValue);
+const resumeOffset = Number(offsetValue);
 const endpoint = new URL(output);
 if (!((endpoint.protocol === "tcp:" && endpoint.hostname && endpoint.port) ||
 	(endpoint.protocol === "unix:" && !endpoint.hostname && endpoint.pathname.startsWith("/"))) ||
-	!Number.isFinite(Number(rate)) || Number(rate) <= 0 || !Number.isInteger(utterance)) throw new Error("Invalid playback parameters");
+	!Number.isFinite(Number(rate)) || Number(rate) <= 0 || !Number.isInteger(utterance) ||
+	!Number.isFinite(resumeOffset) || resumeOffset < 0) throw new Error("Invalid playback parameters");
 const control = new net.Socket({ fd: 3, readable: true, writable: true });
 const input = control;
 control.on("error", fail);
@@ -241,7 +243,7 @@ socket.on("data", chunk => {
 			complete = true;
 			stopRenewal();
 		} else if (session && event.type === "playback" && Number.isFinite(event.position) && event.position >= 0) {
-			process.stdout.write(`${JSON.stringify({ type: "playback", position: event.position, utterance })}\n`);
+			process.stdout.write(`${JSON.stringify({ type: "playback", position: resumeOffset + event.position, utterance })}\n`);
 		}
 	}
 });

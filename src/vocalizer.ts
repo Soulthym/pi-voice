@@ -8,7 +8,7 @@ import {
 } from "./code-narration.js";
 import type { NarrationSegment } from "./narration-progress.js";
 import { SpeakableStream, type FencedCodeBlock, type SpeakableItem, type SpeakableSourceRange } from "./speakable.js";
-import { VoiceWorkerClient, type WorkerEvent, type PlaybackPhase } from "./worker-client.js";
+import { VoiceWorkerClient, type WorkerEvent, type PlaybackPhase, type ResumeAudioOffset } from "./worker-client.js";
 export type { PlaybackPhase } from "./worker-client.js";
 
 const IDLE_FLUSH_MS = 1_000;
@@ -47,7 +47,7 @@ type VoiceWorker = Pick<
 
 export class Vocalizer {
 	#worker: VoiceWorker;
-	#phases = new Map<number, { phase: PlaybackPhase; descriptions: number; pending: Set<number>; deferred: number; audioEnd?: number; position: number }>();
+	#phases = new Map<number, { phase: PlaybackPhase; descriptions: number; pending: Set<number>; deferred: number; audioEnd?: number; position: number; resumeAudioOffset?: ResumeAudioOffset }>();
 	#paused = false;
 	#reportedPhase: PlaybackPhase = "idle";
 	#onPlaybackPhase: ((phase: PlaybackPhase) => void) | undefined;
@@ -58,6 +58,7 @@ export class Vocalizer {
 	#nextUtterance = 0;
 	#nextSegment = 0;
 	#skipUnits = 0;
+	#nextResumeAudioOffset: ResumeAudioOffset | undefined;
 	#onNarrationSegment: ((segment: NarrationSegment) => void) | undefined;
 	#onUtteranceAllocated: ((utterance: number, tracked: boolean) => void) | undefined;
 	#onUtteranceEnded: ((utterance: number) => void) | undefined;
@@ -145,7 +146,8 @@ export class Vocalizer {
 		this.#onPlaybackPhase?.(phase);
 	}
 
-	setNarrationSourceOffset(offset: number, skipUnits = 0): void {
+	setNarrationSourceOffset(offset: number, skipUnits = 0, resumeAudioOffset?: ResumeAudioOffset): void {
+		this.#nextResumeAudioOffset = resumeAudioOffset;
 		this.#nextSourceOffset = Math.max(0, offset);
 		this.#skipUnits = Math.max(0, Math.floor(skipUnits));
 	}
@@ -219,8 +221,9 @@ export class Vocalizer {
 		return this.#nextUtterance > before ? this.#nextUtterance : undefined;
 	}
 
-	speakFrom(text: string, sourceOffset: number, skipUnits = 0): void {
+	speakFrom(text: string, sourceOffset: number, skipUnits = 0, resumeAudioOffset?: ResumeAudioOffset): void {
 		if (!this.#getConfig().enabled) return;
+		this.#nextResumeAudioOffset = resumeAudioOffset;
 		this.#skipUnits = Math.max(0, Math.floor(skipUnits));
 		this.#speakable = new SpeakableStream();
 		this.#sourceText = text;
@@ -228,6 +231,7 @@ export class Vocalizer {
 		this.#nextSourceOffset = this.#sourceOffset;
 		this.#pushItems(this.#speakable.push(text));
 		this.flush();
+		this.#nextResumeAudioOffset = undefined;
 	}
 
 	setTtsWorkers(workers: number): void {
@@ -257,6 +261,7 @@ export class Vocalizer {
 		this.#sourceOffset = 0;
 		this.#nextSourceOffset = 0;
 		this.#skipUnits = 0;
+		this.#nextResumeAudioOffset = undefined;
 		this.#sourceText = "";
 		this.#codeDescriptionMessages = undefined;
 		for (const controller of this.#descriptionControllers) controller.abort();
@@ -424,7 +429,8 @@ export class Vocalizer {
 	#ensureUtterance(): number {
 		if (this.#utterance === null) {
 			this.#utterance = ++this.#nextUtterance;
-			this.#phases.set(this.#utterance, { phase: "queued", descriptions: 0, pending: new Set(), deferred: 0, position: 0 });
+			this.#phases.set(this.#utterance, { phase: "queued", descriptions: 0, pending: new Set(), deferred: 0, position: 0, resumeAudioOffset: this.#nextResumeAudioOffset });
+			this.#nextResumeAudioOffset = undefined;
 			this.#onUtteranceAllocated?.(this.#utterance, this.#trackNarration);
 		}
 		return this.#utterance;
@@ -477,7 +483,9 @@ export class Vocalizer {
 				this.onEvent(event);
 				return;
 			}
-			this.#worker.sendSegment(utterance, id, text, config);
+			const resumeAudioOffset = foreground?.resumeAudioOffset;
+			if (foreground) delete foreground.resumeAudioOffset;
+			this.#worker.sendSegment(utterance, id, text, config, resumeAudioOffset);
 		}
 	}
 
