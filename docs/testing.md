@@ -1,5 +1,38 @@
 # Tests
 
+## TODO 8 integrated follow-up — undeployed
+
+Current integration includes the existing generation/device-scoped coordinator, cached-PCM offset backend, shared Tail policy and native viewport fix. `index.ts` now wires them into one proof-fenced announcement boundary before local backlog. No notification queue, foreign automatic takeover, client protocol or runtime setting was added. Source/test commits: `57acd57` (boundary integration), `9518bd7` (native cycles), `722fa8a` (real cached-PCM mpv fixture), `6832d34` (Stop suppression).
+
+**Regression evidence.** Against the original checkout (`5b28b22`), the initial targeted baseline reported **15 passed / 5 failed** (`/tmp/v8/baseline.log`); the first five new waiting-boundary cases also failed before integration. The final waiting suite uses two actual temporary-host coordinators and inert worker events: a real **8.5-second** heartbeat wait, logical-final versus block/model/physical EOF, exact/replaced generations, same-output eligibility, wrong/unscoped ACKs, late original receipts after ACK, paused UI/checkpoint/remaining blocks, explicit confirmed-offset Resume, estimated-clock fallback, failure cleanup/retry, Stop/navigation supersession, idle fallback and concurrent source arrivals. No fixture may treat a pause ACK as native exit proof.
+
+Review-driven checks exposed additional defects before correction: an unscoped idle prematurely acknowledged delivery (**1 failed**, `/tmp/v8/unscoped-before.log`); Pause/Stop dropped their boundary when ACK preceded physical receipts (**2 failed**, `late-receipt-before.log`); queue/remaining-block/counter failures (**6 failed / 1 passed**, `review-before.log`); yield blocks, idle-only Pause/no-op/reconnect and failed-notification late receipts (**5 failed / 1 passed**, `review2-before.log`). The already-passing reconnect case is not credited as a new reproduction. A too-broad idle-only F8 correction broke five existing routing/progress cases; narrowing it to notification-only ownership restored their original assertions. A final Stop-arrival check reproduced premature suppression removal (**1 failed**, `stop-suppressed-before.log`); incoming output now preserves suppression throughout the notice, not just afterward. Final focused routing/stop/progress/waiting/documentation run: **157/157**, typecheck passed (`check-stop-final.log`, `focus-stop-final.log`). Supplemental scoped reviews informed these corrections; parent independent review remains required.
+
+The Stop-arrival review suggestion was deliberately **not** implemented as automatic queue draining: the requested contract says Stop remains Stop. A regression verifies new text stays available for explicit navigation without autoplay. The failure-retry fixture now proves the failed idle lease is released, then uses explicit F5 to create the next real Stop boundary; an idle Stop must not acquire a lease just to satisfy a test. Existing policy fixtures now supply intentional-local identity and exact waiting generations. Waiting cleanup no longer requires successful durable-audio initialization; audio admission still does. The older F9/F10 scroll assertions now enforce genuine Tail no-ops rather than rearming follow after manual browsing.
+
+`test/index-native-tail-cycle.test.ts` adds **four actual native-frame cycles**: initially offscreen/visible speaking position × manual/no manual scrolling. They exercise model completion without audio EOF, canonical IDs, exact visible anchors, whole-message return to Tail, counters and later-message manual override. They complement, rather than replace, the long-stream/layout coverage and six failing-first native cases from `4c16084` and the 13 shared Tail cases from `13273a3`. Project-prefix EOF is emitted separately before content EOF; neither synthesis nor model end is invented as physical completion.
+
+**Final full validation:** typecheck passed; **1617 total** in each suite, default **1572 passed / 45 skipped**, installed-native **1615 passed / 2 skipped**, **zero failures**. Source-frozen sequential logs: `/tmp/v8/{check-release,default-release,native-release}.log`. An earlier parallel full run produced an explicit fixed-port `EADDRINUSE` in an SSH wrapper fixture and a second wrapper timeout. An in-flight serial run crossed the final Stop regression edit and retained the preceding implementation. Additional read-only PID/network namespace trials were aborted after process-proof fixtures failed; a network-only probe also failed two such fixtures. Those attempts are not counted as passing runs, no assertions were relaxed, and final source-frozen runs use the established private-directory environment sequentially. Default skips are installed-native compatibility/opt-in checks; the two installed-native skips are opt-in mpv containers, run separately below. LSP is unavailable; `tsc --noEmit` supplies diagnostics.
+
+**Actual isolated transports:** mpv **0.35.1** (Debian bookworm) and **0.40.0** (trixie) each passed **16 scenarios: 10 native watchdog + 6 host Socket→worker→mpv** (`/tmp/v8/mpv{35,40}-cache.log`). Containers use `--ao=null`, no runtime network or host mounts. The new Resume case generates synthetic PCM, writes/decodes a real Opus cache, verifies its hash, requests offset 0.5s, compares the exact 1.5s transmitted suffix plus existing one-second EOF silence, checks full canonical duration/resume offset and non-rewinding device clocks. It does not synthesize speech. Initial container setup needed the current Node binary and `libatomic1`; an initial fake cache-hit fixture correctly failed because fresh synthesis is never trusted for trimming. The final case uses actual cache decode/identity instead of weakening that guard. Isolated `scripts/test-ssh-desktop.sh`: **12/12**, including cancellation, receipt mismatch/delay and startup failure, with no speaker/player invocation (`/tmp/v8/ssh.log`). This corrects an interim 15-scenario summary: the mpv logs contain 16 each.
+
+All runs use `env -i`, private HOME/TMPDIR/XDG/Pi roots, and installed module overrides only for native tests. Reproduction commands inside such an isolated environment:
+
+```sh
+npm run check
+npm test
+# Set PI_VOICE_TEST_AGENT_MODULE / PI_VOICE_TEST_TUI_MODULE /
+# PI_VOICE_TEST_KEYBINDINGS_MODULE to installed dist entry points, then repeat npm test.
+node --import tsx --test --experimental-test-module-mocks test/index-waiting-boundaries.test.ts
+# Prebuilt public, audio-null image containing Node >=24, mpv, ffmpeg, Python, socat:
+PI_VOICE_TEST_MPV_IMAGE=localhost/pi-voice-test-mpv \
+  node --import tsx --test --experimental-test-module-mocks --test-concurrency=1 \
+  test/audio-mpv-sandbox.test.ts test/worker-mpv-sandbox.test.ts
+./scripts/test-ssh-desktop.sh
+```
+
+**Limits:** no live phone/desktop/tmux validation, hardware clock/sample-exact claim, inference/provider call, user configuration/cache access, deployment, push or live Pi/SSH/client restart. Native tests prove rendered behavior, not the exact intermittent live backward-jump report. Original-scope uncertainty and the pre-existing local-output durable-recovery gap remain fail-closed. This change is host-only for already-compatible helpers; older coordinated helper requirements still apply. Root TODO/HANDOFF, untracked ISSUES and removed demos are untouched. Safe host reload/live confirmation remain operator work.
+
 ## Tail follow-up — pending integration and independent review
 
 `test/index-tail-state.test.ts` exercises real extension events with inert worker/coordinator fixtures. Against archived `1e229fc`, the final **13 cases report 9 failures / 4 passes**; current source passes all 13. Proven baseline failures:

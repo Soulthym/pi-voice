@@ -1,5 +1,13 @@
 # Pi Voice — implemented agreements and live-validation handoff
 
+## TODO 8 integration — UNDEPLOYED, parent review/live confirmation pending
+
+- Existing waiting generations/verified output identity now reach one safe announcement boundary after logical message final + physical EOF, before local backlog, or after Pause/Stop/navigation's original-scope stop proof. Cancel ACK without every receipt retains the same boundary. Exact successful generation ACK only; no new queue, foreign autoplay/takeover or focus transfer.
+- Notifications are untracked and independent of the main source/counters. Pause retains its checkpoint and remaining blocks (including yield mode), stays paused, and explicitly resumes identical cached PCM at a confirmed offset; unknown/estimated/changed audio repeats its sentence/code unit. Concurrent arrivals survive; Stop remains stopped. New actions/routes/sessions fence old continuations.
+- Integrated existing Tail no-ops/counter and viewport fixes; four added native full-cycle checks cover offscreen/visible starts, actual audio completion, canonicalization and persistent manual override. Empty reservations/announcements never increase totals. The exact intermittent live backward jump remains unconfirmed.
+- Focused final **157/157** (including docs), typecheck passed. Final full default **1572 passed / 45 skipped**, installed-native **1615 passed / 2 skipped** (**1617 total**, zero failures), run sequentially on frozen source. [Testing evidence](docs/testing.md#todo-8-integrated-follow-up--undeployed) records intermediate failures and limitations. Actual isolated mpv **0.35.1 / 0.40.0: 16 scenarios each**, including real Opus-cache offset/suffix/clock checks; synthetic real SSH **12/12**. Supplemental reviews yielded failing-first fixes; parent independent review is still required.
+- Host-only, no helper protocol change, deployment/push/live restart, provider/inference/hardware call or user settings/cache access. Previous helper upgrade requirements remain; later safe host reload and live validation are operator work. Root TODO/HANDOFF, ISSUES and demos remain untouched. Earlier checkpoints below retain their historical evidence.
+
 ## Tail follow-up — pending integration/review (UNDEPLOYED)
 
 - Shared navigation/display policy distinguishes drained latest audio from playback and viewport position; caught-up F9/F10 preserve transport/lease/cursor intent. Tail boundaries survive canonical identity adoption but do not hide later eligible entries. Empty reservations no longer increment totals.
