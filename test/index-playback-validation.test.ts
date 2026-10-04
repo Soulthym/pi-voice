@@ -12,7 +12,7 @@ mock.module("../src/worker-client.js", { namedExports: { VoiceWorkerClient: Mock
 const { Vocalizer } = await import("../src/vocalizer.js");
 const settle = async () => { for (let i = 0; i < 24; i++) await new Promise(resolve => setImmediate(resolve)); };
 
-for (const samples of [[2400, 16800], [4800, 2400]]) for (const estimated of [false, true])
+for (const samples of [[2400, 16800], [4800, 2400], [3000, 4200]]) for (const estimated of [false, true])
 test(`sample-count EOF shares one normalized clock (${samples.join("+")}, estimated=${estimated})`, async t => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "voice-playback-pcm-"));
 	for (const [key, value] of Object.entries({ PI_VOICE_CONFIG: path.join(root, "config"), PI_VOICE_COORDINATOR_DIR: path.join(root, "coordinator"), PI_VOICE_DEVICE_DIR: path.join(root, "devices") })) {
@@ -42,10 +42,12 @@ test(`sample-count EOF shares one normalized clock (${samples.join("+")}, estima
 	assert.ok(first && second && first.utterance === second.utterance);
 	const [firstSamples, secondSamples] = samples;
 	const start = firstSamples / 24_000, duration = secondSamples / 24_000;
-	const position = (firstSamples + secondSamples) / 24_000, normalized = start + duration;
+	// The last case has canonical EOF 0.3 and an upstream tick rounded to 0.1 + 0.2.
+	const position = firstSamples === 3000 ? 0.1 + 0.2 : (firstSamples + secondSamples) / 24_000, normalized = start + duration;
 	assert.notEqual(position, normalized, "real sample-count arithmetic must exercise roundoff");
 	worker.emit({ ...first, type: "segment-audio", start: 0, duration: start, audioIdentity: "pcm-1" });
 	worker.emit({ ...second, type: "segment-audio", start, duration, audioIdentity: "pcm-2" });
+	for (const segment of segments.filter(segment => segment.utterance !== second.utterance)) worker.emit({ type: "idle", utterance: segment.utterance });
 	worker.emit({ type: "playback", utterance: second.utterance, position: 0, estimated });
 	assert.deepEqual(narration.mock.calls.at(-1)?.arguments, [second.utterance, 0], "zero is accepted");
 	assert.equal(vocalizer?.playbackPhase, "playing");
@@ -55,7 +57,7 @@ test(`sample-count EOF shares one normalized clock (${samples.join("+")}, estima
 	assert.deepEqual(narration.mock.calls.at(-1)?.arguments, [second.utterance, normalized]);
 	assert.deepEqual(handled.mock.calls.at(-1)?.arguments, [{ ...event, position: normalized }]);
 	assert.equal(event.position, position, "the worker event is not mutated");
-	assert.equal(vocalizer?.playbackPhase, "queued", "EOF exposes the pending project prompt, not phantom playing audio");
+	assert.equal(vocalizer?.playbackPhase, "idle", "normalized EOF cannot retain phantom playing audio");
 	assert.notEqual(vocalizer?.playbackUtterance, second.utterance);
 	const eof = history!.resumeSnapshot();
 	assert.equal(eof?.position, normalized);
@@ -71,6 +73,14 @@ test(`sample-count EOF shares one normalized clock (${samples.join("+")}, estima
 		worker.emit({ ...event, position: invalid });
 		assert.equal(narration.mock.callCount(), before);
 		assert.equal(handled.mock.callCount(), handledBefore, "rejected ticks cannot mutate foreground state");
+		assert.deepEqual(history!.resumeSnapshot(), eof);
+	}
+	if (!estimated) {
+		const cancel = t.mock.method(worker, "cancel");
+		const sent = worker.sent.length;
+		await host.shortcut("f9"); await host.shortcut("f10"); await settle();
+		assert.equal(cancel.mock.callCount(), 0, "rounded confirmed OPEN-stream EOF makes forward navigation inert");
+		assert.equal(worker.sent.length, sent);
 		assert.deepEqual(history!.resumeSnapshot(), eof);
 	}
 	assert.equal(host.modelRequests.length, 0);
