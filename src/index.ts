@@ -2321,12 +2321,36 @@ export default async function (pi: ExtensionAPI) {
 		queuedPausedMessages.unshift(...targets);
 	};
 
+	// Retain the source's remaining work even when finalization removed its cursor.
+	// Both replay retirement and a paused notification loan use this before dropping the request.
+	const retainSourceContinuation = (source: typeof liveSource, target: Pick<PlaybackTarget, "id" | "contentIndex">, paused: boolean): PlaybackResumeSnapshot | undefined => {
+		const contentIndex = target.contentIndex ?? 0;
+		const eligible = !source?.final || eligibleAssistantBlocks(source.assistant, config.mode)
+			.some(block => block.contentIndex === contentIndex && hasSpeakableAudio(block.text));
+		const snapshot = eligible ? playbackHistory.resumeSnapshot(paused, target.id) : undefined;
+		retainSourceRemainder(source, contentIndex);
+		if (!snapshot) {
+			narration.finish();
+			ownerContentExpected = false;
+			ownerTurnEnded = true;
+			speechPurpose = undefined;
+			completedOwnerUtterance = lastOwnerUtterance;
+		}
+		return snapshot;
+	};
+
 	// One existing waiting record per safe boundary. No notification queue or mutable-state restore.
 	const announceWaiting = (stopOriginal = false, allowSuppressed = false, retainPaused = false): Promise<boolean> | undefined => {
 		if (!coordinator || !ownsSpeech || pendingNotification || !config.enabled ||
 			(attentionSuppressed && !allowSuppressed) || deviceRebind || routeFlight || inputInProgress || pendingSpeechPreemption) return;
 		const waiting = coordinator.nextUnannouncedWaiting(outputConnection());
 		if (!waiting) return;
+		if (retainPaused && playbackPaused) {
+			const target = pendingReplay?.target ?? playbackHistory.selected();
+			const source = pendingReplay ? pendingReplay.source : playingSource;
+			const snapshot = target && retainSourceContinuation(source, target, true);
+			pausedAnnouncementResume = snapshot ? { ...snapshot, source } : undefined;
+		}
 		if (stopOriginal) {
 			++playbackRequestEpoch;
 			coordinator.cancelSpeechAcquisition();
@@ -2336,13 +2360,6 @@ export default async function (pi: ExtensionAPI) {
 		const pending: PendingNotification = { waiting, epoch: playbackRequestEpoch, context: contextEpoch,
 			endpoint: outputEndpoint, generation: outputGeneration, finish: result.resolve };
 		pendingNotification = pending;
-		if (retainPaused && playbackPaused) {
-			const snapshot = playbackHistory.resumeSnapshot(true);
-			if (snapshot) {
-				pausedAnnouncementResume = { ...snapshot, source: playingSource };
-				retainSourceRemainder(playingSource, snapshot.contentIndex ?? 0);
-			}
-		}
 		if (stopOriginal) queueIncomingWhilePaused = true;
 		const cancelId = stopOriginal ? vocalizer.clear() : undefined;
 		if (stopOriginal) { playbackUtterances.clear(); pausedOwnerUtterance = undefined; }
@@ -3520,15 +3537,10 @@ export default async function (pi: ExtensionAPI) {
 			if (requestedLiveSource.final && (!block || !hasSpeakableAudio(block.text))) {
 				// Retire only this request. Remaining blocks and newer responses still
 				// belong to the queue, and a later F8 may have changed its pause intent.
-				retainSourceRemainder(requestedLiveSource, liveTargetIndex ?? -1);
+				retainSourceContinuation(requestedLiveSource, { id: target.id, contentIndex: liveTargetIndex ?? -1 }, request.paused);
 				pendingReplay = undefined;
 				playbackPaused = request.paused;
-				narration.finish();
 				narration.setPaused(playbackPaused);
-				ownerContentExpected = false;
-				ownerTurnEnded = true;
-				speechPurpose = undefined;
-				completedOwnerUtterance = lastOwnerUtterance;
 				if (liveSource?.final) queueIncomingWhilePaused = false;
 				refreshPlaybackTimeline();
 				completeOwnerSpeech(false);
