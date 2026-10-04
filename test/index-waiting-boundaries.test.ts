@@ -92,6 +92,29 @@ for (const action of ["pause", "stop", "navigate"] as const) test(`${action} wai
 	if (action === "stop") assert.ok(!a.widgetLines()?.join(" ").includes("Playing"));
 });
 
+test("Resume during a paused notice with a checkpoint waits for that notice's scoped stop proof", async t => {
+	const { a, worker, waiting } = await fixture(t);
+	const first = segments(worker).find(segment => segment.text === "First sentence.")!;
+	worker.emit({ ...first, type: "segment-audio", start: 0, duration: 6, audioIdentity: "cached-pcm" });
+	worker.emit({ type: "playback", utterance: first.utterance, position: 2.5 });
+	await a.shortcut("f8"); await settle();
+	const notice = notices(worker).at(-1)!;
+	const before = worker.sent.length;
+	const cancel = t.mock.method(worker, "cancel", () => 909 as never);
+	const send = t.mock.method(worker, "sendSegment");
+	await a.shortcut("f8"); await settle();
+	assert.ok(cancel.mock.callCount() > 0, "checkpoint Resume requests physical notice cancellation");
+	worker.emit({ type: "idle", cancelId: 908 }); await settle();
+	assert.equal(worker.sent.length, before);
+	assert.equal(waiting.waitingSessions()[0]?.announced, false, "cancelling a notice is not delivery");
+	cancel.mock.restore();
+	worker.emit({ type: "idle", cancelId: 909 }); await settle();
+	assert.deepEqual(segments(worker).slice(before).map(s => s.text), ["First sentence.", "Second sentence."]);
+	assert.deepEqual((send.mock.calls[0]!.arguments as unknown[])[4], { seconds: 2.5, audioIdentity: "cached-pcm" });
+	worker.emit({ type: "idle", utterance: notice.utterance }); await settle();
+	assert.deepEqual(segments(worker).slice(before).map(s => s.text), ["First sentence.", "Second sentence."], "late notice EOF cannot resume twice");
+});
+
 for (const action of ["pause", "stop"] as const) test(`${action} keeps its boundary pending across cancel ACK until every original receipt arrives`, async t => {
 	const { a, worker, waiting } = await fixture(t, true);
 	const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";

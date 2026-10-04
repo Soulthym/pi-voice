@@ -352,7 +352,7 @@ export default async function (pi: ExtensionAPI) {
 	let speechReservedForInput = false;
 	let projectAnnouncementPending = false;
 	type PendingNotification = { waiting: WaitingSession; utterance?: number; epoch: number; context: number;
-		endpoint: string; generation?: number; finish: (current: boolean) => void; admit?: () => void };
+		endpoint: string; generation?: number; finish: (current: boolean) => void; admit?: () => void; resume?: boolean };
 	let pendingNotification: PendingNotification | undefined;
 	let pausedAnnouncementResume: (PlaybackResumeSnapshot & { source?: typeof liveSource }) | undefined;
 	const cancelWaitingAnnouncement = (): void => {
@@ -810,6 +810,14 @@ export default async function (pi: ExtensionAPI) {
 		return { completed, timeline, aliases, sourceBlocks, hasLiveContent: sourceBlocks.length > 0 };
 	};
 
+	const tailCodeOmission = (ctx: ExtensionContext) => (block: FencedCodeBlock, sourceEnd: number, contentIndex?: number): boolean => {
+		const messages = config.codeDescriptionContext === "conversation" && liveSource && contentIndex !== undefined
+			? assistantCodeContext(liveSource.before, liveSource.assistant, contentIndex, sourceEnd) ?? [] : [];
+		const key = descriptionCacheKey(ctx, block, structuredContextIdentity(messages));
+		const plan = codeDescriptionCache.get(key) ?? codeDescriptionFallbacks.get(key);
+		return !!(plan?.omitted || (!plan && codeDescriptionOmissions.has(key)));
+	};
+
 	// Audio can catch up before the model finishes or the session saves its source.
 	// Keep forward navigation and the waiting counter on the same chronology.
 	const playbackTailState = (ctx: ExtensionContext, snapshot = playbackTimeline(ctx)) => {
@@ -834,13 +842,7 @@ export default async function (pi: ExtensionAPI) {
 		// Inspect logical units across blocks, even if a silent capture changed selection.
 		const streamingTail = liveTurnNarrationActive && !ownerTurnEnded && vocalizer.playbackUtterance === undefined &&
 			latest !== undefined && canonical(tailSources.findLast(block => block.id !== undefined)?.id) === latest &&
-			playbackHistory.hasConfirmedTextTail(tailSources, (block, sourceEnd, contentIndex) => {
-				const messages = config.codeDescriptionContext === "conversation" && liveSource && contentIndex !== undefined
-					? assistantCodeContext(liveSource.before, liveSource.assistant, contentIndex, sourceEnd) ?? [] : [];
-				const key = descriptionCacheKey(ctx, block, structuredContextIdentity(messages));
-				const plan = codeDescriptionCache.get(key) ?? codeDescriptionFallbacks.get(key);
-				return !!(plan?.omitted || (!plan && codeDescriptionOmissions.has(key)));
-			});
+			playbackHistory.hasConfirmedTextTail(tailSources, tailCodeOmission(ctx));
 		const waiting = !speechBlocked && !pausedForAttention && !pendingReplay && !attentionSuppressed &&
 			(drained || streamingTail || (explicit && playbackTailIntent && (lastOwnerUtterance === undefined || announcedBoundary) &&
 				(!liveTurnNarrationActive || playbackTailSourceEnd >= narration.sourceEnd)));
@@ -862,7 +864,7 @@ export default async function (pi: ExtensionAPI) {
 			const tailId = waitingAtTail ? timeline.at(-1) : undefined;
 			const blockedUnread = unreadWaiting && vocalizer.playbackUtterance === undefined && !playbackPaused && !pendingReplay && !inputInProgress;
 			if (liveTurnNarrationActive && !playbackPaused && !pendingReplay && !blockedUnread) {
-				playbackHistory.selectCapture(vocalizer.playbackUtterance);
+				playbackHistory.selectCapture(vocalizer.playbackUtterance, tailCodeOmission(ctx));
 			}
 			const historyStatus = blockedUnread ? undefined : playbackHistory.status(playbackPaused || pendingReplay || pendingNotification ? undefined : vocalizer.playbackUtterance);
 			const playback = config.enabled ? (waitingAtTail && historyStatus && ((!playbackPaused && historyStatus.messageId !== tailId) || historyStatus.position < historyStatus.duration) ? undefined : historyStatus) ?? (activePlayback ? {
@@ -2358,7 +2360,13 @@ export default async function (pi: ExtensionAPI) {
 		}
 		const result = Promise.withResolvers<boolean>();
 		const pending: PendingNotification = { waiting, epoch: playbackRequestEpoch, context: contextEpoch,
-			endpoint: outputEndpoint, generation: outputGeneration, finish: result.resolve };
+			endpoint: outputEndpoint, generation: outputGeneration, resume: retainPaused ? false : undefined,
+			finish: current => {
+				// A removed checkpoint leaves only the queue. Its retired request cannot
+				// resume it; explicit current intent may, after notice EOF/stop proof.
+				if (current && pending.resume && !playbackPaused) completeOwnerSpeech(false);
+				result.resolve(current);
+			} };
 		pendingNotification = pending;
 		if (stopOriginal) queueIncomingWhilePaused = true;
 		const cancelId = stopOriginal ? vocalizer.clear() : undefined;
@@ -5441,7 +5449,7 @@ export default async function (pi: ExtensionAPI) {
 		const pausedScrollTop = preserveViewport ? activeScrollView()?.scrollTop : undefined;
 		pausedOwnerUtterance = lastOwnerUtterance;
 		if (!liveTurnNarrationActive && speechPurpose === "turn" && !pendingReplay && vocalizer.playbackUtterance !== undefined) {
-			playbackHistory.selectCapture(vocalizer.playbackUtterance);
+			playbackHistory.selectCapture(vocalizer.playbackUtterance, activeContext ? tailCodeOmission(activeContext) : undefined);
 		}
 		vocalizer.setPlaybackPaused(true);
 		playbackPaused = true;
@@ -5503,7 +5511,8 @@ export default async function (pi: ExtensionAPI) {
 			if (pendingNotification) {
 				playbackPaused = !playbackPaused;
 				narration.setPaused(playbackPaused);
-				vocalizer.setPlaybackPaused(playbackPaused);
+				if (pendingNotification.resume !== undefined) pendingNotification.resume = !playbackPaused;
+				else vocalizer.setPlaybackPaused(playbackPaused);
 				refreshStatus(); refreshPlaybackTimeline();
 				return;
 			}

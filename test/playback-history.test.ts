@@ -86,6 +86,31 @@ test("first resolved dependencies label existing capture timing but cannot relab
 	assert.equal(history.snapshotForUtterance(1), undefined);
 });
 
+test("silent selection and Tail share omission eligibility without masking unknown, pending or retried code", () => {
+	const history = new PlaybackHistory();
+	const prose = "Consumed prose.\n";
+	const a = { id: "a", text: prose + "```ts\nrun();\n```\n", messageType: "assistant" as const, contentIndex: 0 };
+	history.sync([a]); history.beginCapture(a.id, a.text);
+	history.registerSegment({ id: 1, utterance: 1, text: prose.trim(), source: { start: 0, end: prose.length } });
+	history.setSegmentAudio(1, 0, 2);
+	assert.equal(history.setPlayback(1, 2, false), 2);
+	history.beginCapture("b", "---", 0, true, 0, 0, false);
+	let state = "omitted";
+	const omitted = (_block: unknown, end: number, index?: number) => {
+		assert.equal(end, a.text.length);
+		assert.equal(index, 0, "selection supplies the same source identity as Tail");
+		return state === "omitted";
+	};
+	assert.equal(history.hasConfirmedTextTail([a], omitted), true);
+	history.selectCapture(undefined, omitted);
+	assert.equal(history.selected()?.id, a.id);
+	for (state of ["unknown", "pending", "retried"]) {
+		assert.equal(history.hasConfirmedTextTail([a], omitted), false, `${state} code remains eligible after confirmed prose`);
+	}
+	history.selectCapture(undefined, omitted);
+	assert.equal(history.selected()?.id, "b", "a later real description invalidates the consumed-tail preservation rule");
+});
+
 test("maps playback time to approximate source checkpoints without audio storage", () => {
 	const history = new PlaybackHistory();
 	history.sync([{ id: "message", text: "x".repeat(120), renderKey: "render-a" }], true);

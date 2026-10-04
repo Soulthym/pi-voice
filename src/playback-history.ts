@@ -762,7 +762,7 @@ export class PlaybackHistory {
 	}
 
 	/** Follow the foreground capture without inventing a playback tick or resetting its cursor. */
-	selectCapture(utterance?: number): void {
+	selectCapture(utterance?: number, isCodeOmitted?: (block: FencedCodeBlock, sourceEnd: number, contentIndex?: number) => boolean): void {
 		const capture = utterance === undefined ? this.#capture : this.#utterances.get(utterance);
 		if (!capture?.valid) return;
 		// A silent reservation cannot displace confirmed audible catch-up. Without
@@ -770,7 +770,7 @@ export class PlaybackHistory {
 		// Pending code remains eligible before its description emits a segment.
 		const selected = this.#selectedId ? this.#records.get(this.#selectedId) : undefined;
 		if (selected?.confirmed?.completedSourceEnd !== undefined && !capture.segments.length &&
-			!hasSpeakableAudio(capture.record.text) && this.hasConfirmedTextTail([selected])) return;
+			!hasSpeakableAudio(capture.record.text) && this.hasConfirmedTextTail([selected], isCodeOmitted)) return;
 		this.#selectedId = capture.record.id;
 	}
 

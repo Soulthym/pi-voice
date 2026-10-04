@@ -1,6 +1,23 @@
 # Tests
 
-## Current CHECKPOINT — two composition fixes after 7ad7417 (undeployed; parent review pending)
+## Current CHECKPOINT — final two compositions after eeef04e (undeployed; parent review pending)
+
+Host-only code/tests correct the remaining paused-notice compositions without changing prior source-offset validation, canonical/prefix handling, accepted clocks, worker/transport/protocol or settings.
+
+**Failing first:** the final focused cases against archived **`eeef04e`** report **9 failed / 18 passed (27 total)** (`/tmp/vp2/baseline-final.log`). The initial smaller overlapping baseline was **5 failed / 17 passed**, not an additional count (`/tmp/vp2/baseline.log`).
+
+| Composition | Failure and authoritative contract |
+| --- | --- |
+| Live F5 removes A while retaining B; F8 Resume occurs **during** the paused attention notice | Notice EOF (or failure followed by matching cancellation proof) emitted **`[]` instead of B**. Resume intent now belongs to the existing epoch-fenced pending notification, not its retired playback request. Queue-only Resume drains current retained work once after proof; a second F8 revokes that intent without physically pausing the notice. With an actual checkpoint, the existing Resume path cancels the notice and waits for scoped stop proof. No Resume means no autoplay. Stop, navigation, session replacement and route adoption fence the old continuation; independent source text/queue order survives, and completed or superseded work releases its lease. |
+| Confirmed consumed A ends in terminally omitted code; markup-only B is allocated before Pause | Repeated F9/F10 cancelled **5 times instead of 0** for both `---` and `# `. `selectCapture` now receives the **same index-owned omission resolver as Tail**, preserving confirmed audible selection through a silent reservation. History gains no cache/global policy. Unknown/pending descriptions stay eligible; a real retried description breaks catch-up without autoplay. |
+
+Tests use real private coordinator records with another project waiting, inert worker events, valid segment metadata/confirmed clocks, and scoped cancellation/EOF. They verify actual `endUtterance` before injected notice/block EOF, never complete an open FIFO, compare exact full queue text/order, and retain prior canonical/prefix controls. The second F8 fixture now also checks that the notice can physically finish. The omission regression exercises a real mocked failure/cache/retry path, repeated forward keys, unchanged cursor/viewport/pause/lease, no new notice or I/O at catch-up, and subsequent real code eligibility.
+
+**Validation:** typecheck and focused source/tail/notice/history/clock/viewport tests **296/296** passed. Full default **1,746 passed / 45 skipped**; installed-native **1,789 passed / 2 skipped**; **1,791 total each, zero failures**. Final source-frozen logs: `/tmp/vp2/{check-final2,focus-final2,default-final2,native-final2}.log`. Full suites run sequentially under `env -i`, private HOME/TMP/XDG/Pi roots; native overrides select the installed global agent/TUI/keybinding modules. The two native skips are opt-in mpv containers. LSP is unavailable; TypeScript supplies diagnostics. An intermediate test-only metadata typo (`messageType: text` instead of `assistant`) was caught by typecheck and corrected; an over-specific route fixture assertion was corrected to check the actual notification-only lease release, not a nonexistent paused content row. No production assertion was weakened.
+
+**Limits:** no real inference/provider calls, hardware, network probes, user cache/state/settings mutation, deployment, push or live Pi/SSH/client restart. Root TODO/HANDOFF, untracked `ISSUES.md` and demos remain untouched. Prior mpv/SSH evidence below is retained, **not freshly rerun**. This is source-host-only validation, not parent clearance or live device confirmation; safe host reload remains operator work.
+
+## Historical CHECKPOINT — two composition fixes after 7ad7417 (undeployed; parent review pending at that checkpoint)
 
 Source/test checkpoint **`a4e0453`**: atomic fixes plus regressions in `afffce6` (pending-source retention) and `a4e0453` (silent capture selection). Scope is the remaining compositions of roots 2/3 only; root 1's validated offsets and root 4's accepted clock are unchanged. No worker, transport, protocol, dependency or runtime-setting changes.
 

@@ -448,10 +448,13 @@ for (const key of ["f9", "f10"]) test(`separate silent tail: ${kind}, ${timing},
 	await next;
 });
 
-for (const silent of ["---", "# "]) for (const key of ["f9", "f10"]) test(`preallocated silent block before paused notice: ${JSON.stringify(silent)}, ${key}`, async t => {
-	const host = await startHost(t);
+for (const omittedTail of [false, true]) for (const silent of ["---", "# "]) for (const key of ["f9", "f10"]) test(`preallocated silent block before paused notice: omitted=${omittedTail}, ${JSON.stringify(silent)}, ${key}`, async t => {
+	let retry = false;
+	const host = await startHost(t, omittedTail ? async () => ({ role: "assistant", stopReason: "stop", content: [{ type: "text", text: retry ? "Invokes the operation." : "" }] }) : undefined);
 	const ended = t.mock.method(MockedVoiceWorkerClient.prototype, "endUtterance");
-	const message = assistant("Final audible word\n", "pending");
+	const message = assistant("Final audible word\n" + (omittedTail ? "```ts\nomitMe();\n```\n" : ""), "pending");
+	// A prior occurrence lets the real retry command replace this same block-only cache key.
+	if (omittedTail) host.addMessage("retry-reference", "older", assistant(message.content[0].text));
 	await host.emit("message_start", { message });
 	await host.emit("message_update", { message, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: message.content[0].text } });
 	await settle();
@@ -488,6 +491,8 @@ for (const silent of ["---", "# "]) for (const key of ["f9", "f10"]) test(`preal
 	const cursor = history.resumeSnapshot(true);
 	const lines = host.widgetLines();
 	const sent = worker.sent.length;
+	const requests = host.modelRequests.length;
+	assert.equal(requests > 0, omittedTail, "terminal omission uses actual mocked description failure");
 	const pauses = [...worker.pauses];
 	captures.mock.resetCalls();
 	const cancels = t.mock.method(worker, "cancel");
@@ -501,12 +506,23 @@ for (const silent of ["---", "# "]) for (const key of ["f9", "f10"]) test(`preal
 	assert.equal(worker.sent.length, sent);
 	assert.deepEqual(history.resumeSnapshot(true), cursor);
 	assert.deepEqual(host.widgetLines(), lines);
-	assert.match(lines![0], /Paused.* · 2\/2(?: ·|\s)/, "silent B adds no eligible counter entry");
+	assert.match(lines![0], omittedTail ? /Paused.* · 3\/3(?: ·|\s)/ : /Paused.* · 2\/2(?: ·|\s)/, "silent B adds no eligible counter entry");
 	assert.equal(host.scrollView.scrollTop, 7, "caught-up navigation preserves manual viewport override");
 	assert.equal(host.scrollView.isFollowingEnd, false);
 	assert.deepEqual(worker.pauses, pauses);
 	assert.equal(waiting.waitingSessions()[0]?.announced, false);
-	assert.equal(host.modelRequests.length, 0);
+	assert.equal(host.modelRequests.length, requests);
+	if (omittedTail) {
+		waiting.clearWaiting();
+		retry = true;
+		await host.command("code-retry historical all"); await settle();
+		assert.equal(host.modelRequests.length, requests + 1);
+		assert.equal(worker.sent.length, sent, "description recovery cannot autoplay a paused source");
+		assert.match(host.render(message.content[0].text), /Invokes the operation/);
+		await host.shortcut(key); await settle();
+		assert.ok(cancels.mock.callCount() > 0, "a retried real code unit breaks caught-up Tail");
+		if (key === "f9") assert.deepEqual((worker.sent.slice(sent) as Clip[]).map(s => s.text), ["Invokes the operation."]);
+	}
 });
 
 test("empty streaming header reserves identity, not an eligible counter entry", async t => {
