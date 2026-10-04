@@ -27,6 +27,52 @@ export function computeAutoScrollTop(viewport: ScrollViewportLike, anchorLine: n
 	return Math.max(0, Math.min(maxScrollTop, target));
 }
 
+/** The native frame already contains wrapped glyph rows and their absolute boxes. */
+export interface NarrationLayoutBox {
+	component?: NarrationComponent;
+	rect: { width: number };
+	children: NarrationLayoutBox[];
+	scrollView?: object;
+	scrollContentLines?: string[];
+}
+
+export function narrationScrollBox(box: NarrationLayoutBox, view: object): NarrationLayoutBox | undefined {
+	if (box.scrollView === view) return box;
+	// Do not walk the entire history inside unrelated scroll views.
+	if (box.scrollView) return undefined;
+	for (const child of box.children) {
+		const found = narrationScrollBox(child, view);
+		if (found) return found;
+	}
+	return undefined;
+}
+
+type NarrationComponent = { text?: string; cachedLines?: string[]; children?: NarrationComponent[]; child?: NarrationComponent };
+
+/** Missing timing/projection: use the mounted source's current native rows, not a guessed fraction. */
+export function narrationSourceLine(box: NarrationLayoutBox, text: string): number | undefined {
+	text = text.trim();
+	const pending = box.component ? [box.component] : [];
+	const visited = new Set<NarrationComponent>();
+	while (pending.length) {
+		const component = pending.pop()!;
+		if (visited.has(component)) continue;
+		visited.add(component);
+		if (text && component.text?.trim() === text && component.cachedLines?.length) {
+			const rows = component.cachedLines;
+			const lines = box.scrollContentLines ?? [];
+			// ponytail: markerless fallback scans rows; native source maps would remove this conservative lookup.
+			const matches = (at: number) => rows.every((row, i) => lines[at + i]?.includes(row));
+			const at = lines.findIndex((_, i) => matches(i));
+			// Identical repeated sources are ambiguous without the exact word marker.
+			if (at >= 0 && !lines.some((_, i) => i > at && matches(i))) return at;
+		}
+		if (component.children) pending.push(...component.children);
+		if (component.child) pending.push(component.child);
+	}
+	return undefined;
+}
+
 /** True when the viewport moved independently from the last automatic anchor. */
 export function isManualScrollAway(viewport: ScrollViewportLike, lastAnchoredScrollTop: number): boolean {
 	return viewport.scrollTop !== lastAnchoredScrollTop;

@@ -433,7 +433,7 @@ for (const action of ["auto tail start", "auto tail small", "auto tail resize", 
 		if (action === "auto tail resize") {
 			terminal.rows = 10;
 			tui.doRender();
-			assert.equal(view.scrollTop, 304, "native shrink initially puts word 299 offscreen");
+			assert.equal(view.scrollTop, 297, "post-layout follow keeps word 299 visible in the resized frame");
 			await tick();
 			assert.equal(view.scrollTop, 297, "automatic tail adoption must reframe after viewport shrink");
 			assert.equal(view.isFollowingEnd, false);
@@ -469,6 +469,8 @@ for (const action of ["auto tail start", "auto tail small", "auto tail resize", 
 			tui.doRender();
 			tui.handleTerminalInput("\x1b[<0;5;1m");
 		} else {
+			// Suspend Voice with genuine browsing before staging a bottom gesture.
+			tui.handleTerminalInput("\x1b[<64;1;1M");
 			view.scrollTo(259, { disableFollow: true });
 			tui.doRender();
 			if (action === "PageDown bottom") tui.handleTerminalInput("\x1b[6~");
