@@ -352,6 +352,97 @@ for (const scenario of ["unheard", "estimated", "caught-up", "same-during", "sam
 	assert.equal(host.modelRequests.length, 0);
 });
 
+for (const kind of ["omitted", "unknown", "pending"] as const)
+for (const timing of kind === "omitted" ? ["before", "during", "after"] : kind === "pending" ? ["before"] : ["during", "after"])
+for (const progress of kind === "omitted" ? ["confirmed", "unheard", "estimated"] : ["confirmed"])
+for (const key of ["f9", "f10"]) test(`separate silent tail: ${kind}, ${timing}, ${progress}, ${key}`, async t => {
+	let finishDescription: (() => void) | undefined;
+	t.after(() => finishDescription?.());
+	const host = await startHost(t, async request => {
+		if (JSON.stringify(request.context.messages).includes("pendingCode")) await new Promise<void>(resolve => { finishDescription = resolve; });
+		return { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "" }] };
+	});
+	// Resolve a real terminal omission before the prose, without synthesizing fake content.
+	const omitted = "```ts\nomitMe();\n```\n";
+	const text = omitted + "Final audible word\n";
+	const message = assistant(text, "pending");
+	await host.emit("message_start", { message });
+	await host.emit("message_update", { message, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: text } });
+	await settle();
+	const worker = MockedVoiceWorkerClient.instances.findLast(worker => worker.sent.length)!;
+	type Clip = { utterance: number; segmentId: number; text: string };
+	const clip = worker.sent.at(-1) as Clip;
+	assert.equal(clip.text, "Final audible word");
+	for (const utterance of new Set((worker.sent as Clip[]).filter(s => s.utterance < clip.utterance).map(s => s.utterance))) worker.emit({ type: "idle", utterance });
+	worker.emit({ ...clip, type: "segment-audio", start: 0, duration: 3 });
+	worker.emit({ type: "alignment", segmentId: clip.segmentId, quality: "ctc-refined", words: [
+		{ text: "Final", start: 0, end: 1 }, { text: "audible", start: 1, end: 2 }, { text: "word", start: 2, end: 3 },
+	] });
+	const statuses = t.mock.method(PlaybackHistory.prototype, "status");
+	worker.emit({ type: "playback", utterance: clip.utterance, position: progress === "unheard" ? 2.2 : 3, estimated: progress === "estimated" });
+	await settle();
+	const history = statuses.mock.calls.at(-1)!.this as PlaybackHistory;
+	const proseId = history.selected()!.id;
+	const requests = host.modelRequests.length;
+	assert.ok(requests > 0, "omission came from the real mocked description failure path");
+	const append = async () => {
+		const delta = kind === "omitted" ? omitted : `\`\`\`ts\n${kind}Code();\n\`\`\`\n`;
+		const updated = assistant(text, "pending");
+		updated.content.push({ type: "text", text: delta });
+		await host.emit("message_update", { message: updated, assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta } });
+		await settle();
+	};
+	const beforeAppend = worker.sent.length;
+	if (timing === "before") {
+		await append();
+		assert.equal(worker.sent.length, beforeAppend, "silent/pending block has no manufactured audio to discard or confirm");
+		if (progress !== "unheard") assert.notEqual(history.selected()!.id, proseId, "silent trailing capture changes selection");
+	}
+	const waiting = new SessionCoordinator(path.join(host.cwd, "waiting"), "waiting");
+	waiting.start(); waiting.markWaiting({ kind: "intentional_local" });
+	t.after(() => waiting.shutdown());
+	await host.shortcut("f8"); await settle();
+	const notice = worker.sent.at(-1) as Clip;
+	assert.match(notice.text, /requires attention next/);
+	const duringNotice = worker.sent.length;
+	if (timing === "during") await append();
+	worker.emit({ type: "idle", utterance: notice.utterance }); await settle();
+	if (timing === "after") await append();
+	assert.equal(worker.sent.length, duringNotice, "buffered terminal blocks cannot manufacture a confirmed checkpoint");
+	assert.equal(host.modelRequests.length, requests + (kind === "pending" ? 1 : 0));
+	assert.equal(!!finishDescription, kind === "pending", "pending case really started an unresolved description");
+	// A second project arrives AFTER Pause and its notice, not at an attention boundary.
+	waiting.clearWaiting();
+	if (kind === "omitted" && progress === "confirmed") {
+		waiting.markWaiting({ kind: "intentional_local" });
+		assert.equal(waiting.waitingSessions()[0]?.announced, false);
+	}
+	assert.match(host.widgetLines()![0], /Paused/);
+	const cursor = history.resumeSnapshot(true);
+	const lines = host.widgetLines();
+	const pauses = [...worker.pauses];
+	const cancels = t.mock.method(worker, "cancel");
+	const captures = t.mock.method(PlaybackHistory.prototype, "beginCapture");
+	const releases = t.mock.method(SessionCoordinator.prototype, "releaseSpeech");
+	const acquisitions = t.mock.method(SessionCoordinator.prototype, "tryAcquireSpeech");
+	const next = host.shortcut(key); await settle();
+	if (kind === "omitted" && progress === "confirmed") {
+		assert.equal(cancels.mock.callCount(), 0, "terminal silent blocks must retain earlier confirmed catch-up");
+		assert.equal(captures.mock.callCount(), 0);
+		assert.equal(releases.mock.callCount(), 0);
+		assert.equal(acquisitions.mock.callCount(), 0);
+		assert.equal(worker.sent.length, duringNotice, "no new synthesis or attention announcement");
+		assert.equal(host.modelRequests.length, requests);
+		assert.deepEqual(history.resumeSnapshot(true), cursor);
+		assert.deepEqual(host.widgetLines(), lines);
+		assert.deepEqual(worker.pauses, pauses);
+		assert.equal(waiting.waitingSessions()[0]?.announced, false, "caught-up F9/F10 is not an attention boundary");
+	} else assert.ok(cancels.mock.callCount() > 0 || (kind === "pending" && host.notices.some(notice => /Waiting for code-description/.test(notice.message))),
+		"no worker is not proof: unheard prose and unknown/pending code remain available");
+	finishDescription?.();
+	await next;
+});
+
 test("empty streaming header reserves identity, not an eligible counter entry", async t => {
 	const host = await startHost(t);
 	await host.shortcut("f10"); await settle();

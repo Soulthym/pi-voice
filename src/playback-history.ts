@@ -734,16 +734,25 @@ export class PlaybackHistory {
 		return position;
 	}
 
-	/** Confirmed audio catch-up survives an untracked notice; it is not whole-message EOF. */
-	hasConfirmedTextTail(text: string, isCodeOmitted?: (block: FencedCodeBlock, sourceEnd: number) => boolean): boolean {
-		const record = this.#selectedId ? this.#records.get(this.#selectedId) : undefined;
-		const confirmed = record?.confirmed;
-		if (confirmed?.completedSourceEnd === undefined) return false;
-		const stream = new SpeakableStream();
-		const last = [...stream.push(text), ...stream.flush()].findLast(item =>
-			item.kind === "speech" || !isCodeOmitted?.(item.block, item.source.end));
-		return !!last && last.source.start === confirmed.unit.sourceOffset &&
-			last.source.end <= confirmed.completedSourceEnd;
+	/** Confirmed audio catch-up survives an untracked notice and trailing silent blocks, not EOF. */
+	hasConfirmedTextTail(
+		messages: readonly { id: string | undefined; text: string; contentIndex?: number }[],
+		isCodeOmitted?: (block: FencedCodeBlock, sourceEnd: number, contentIndex?: number) => boolean,
+	): boolean {
+		const selected = messages.findIndex(message => message.id !== undefined && message.id === this.#selectedId);
+		if (selected < 0) return false;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const message = messages[i];
+			const stream = new SpeakableStream();
+			const last = [...stream.push(message.text), ...stream.flush()].findLast(item =>
+				item.kind === "speech" || !isCodeOmitted?.(item.block, item.source.end, message.contentIndex));
+			// Terminal omissions need no checkpoint; unknown/pending code still does.
+			if (!last) continue;
+			const confirmed = message.id === undefined ? undefined : this.#records.get(message.id)?.confirmed;
+			return i <= selected && confirmed?.completedSourceEnd !== undefined &&
+				last.source.start === confirmed.unit.sourceOffset && last.source.end <= confirmed.completedSourceEnd;
+		}
+		return true;
 	}
 
 	/** Follow the foreground capture without inventing a playback tick or resetting its cursor. */

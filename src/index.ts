@@ -826,15 +826,17 @@ export default async function (pi: ExtensionAPI) {
 		// Require no remaining audio/work independently of highlighting or Pause.
 		// This preserves catch-up across Pause, never completion, attention, or transport stop proof.
 		const selected = playbackHistory.selected();
-		const liveBlock = snapshot.sourceBlocks.find(block => liveBlockIds.get(block.contentIndex) === selected?.id);
+		const tailSources = snapshot.hasLiveContent
+			? snapshot.sourceBlocks.map(block => ({ ...block, id: liveBlockIds.get(block.contentIndex) }))
+			: selected ? [selected] : [];
 		// Paused notice cancellation empties the worker, not the retained audio cursor.
 		// Buffered source growth may not have reached narration or acquired block IDs yet.
+		// Inspect logical units across blocks, even if a silent capture changed selection.
 		const streamingTail = liveTurnNarrationActive && !ownerTurnEnded && vocalizer.playbackUtterance === undefined &&
-			latest !== undefined && canonical(selected?.id) === latest && !!selected &&
-			(!snapshot.hasLiveContent || (!!liveBlock && liveBlock === snapshot.sourceBlocks.at(-1))) &&
-			playbackHistory.hasConfirmedTextTail(liveBlock?.text ?? selected.text, (block, sourceEnd) => {
-				const messages = config.codeDescriptionContext === "conversation" && liveSource && liveBlock
-					? assistantCodeContext(liveSource.before, liveSource.assistant, liveBlock.contentIndex, sourceEnd) ?? [] : [];
+			latest !== undefined && canonical(tailSources.findLast(block => block.id !== undefined)?.id) === latest &&
+			playbackHistory.hasConfirmedTextTail(tailSources, (block, sourceEnd, contentIndex) => {
+				const messages = config.codeDescriptionContext === "conversation" && liveSource && contentIndex !== undefined
+					? assistantCodeContext(liveSource.before, liveSource.assistant, contentIndex, sourceEnd) ?? [] : [];
 				const key = descriptionCacheKey(ctx, block, structuredContextIdentity(messages));
 				const plan = codeDescriptionCache.get(key) ?? codeDescriptionFallbacks.get(key);
 				return !!(plan?.omitted || (!plan && codeDescriptionOmissions.has(key)));
